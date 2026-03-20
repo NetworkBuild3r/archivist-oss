@@ -28,7 +28,7 @@ Archivist provides long-term memory for AI agent fleets. It combines vector sear
 ### 1. Clone and configure
 
 ```bash
-git clone https://github.com/your-org/archivist.git
+git clone https://github.com/AHEAD-Labs/ai-archivist-oss.git
 cd archivist
 cp .env.example .env
 # Edit .env with your LLM/embedding API details
@@ -181,7 +181,7 @@ git init
 git add -A
 git commit -m "Archivist OSS v0.3.0"
 git branch -M main
-git remote add origin https://github.com/YOUR_ORG/archivist.git
+git remote add origin git@github.com:AHEAD-Labs/ai-archivist-oss.git
 git tag -a v0.3.0 -m "Fleet multi-agent search, dedupe, wide vector recall"
 git push -u origin main --tags
 ```
