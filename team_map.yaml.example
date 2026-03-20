@@ -1,0 +1,7 @@
+# Example team map — maps agent IDs to team names.
+# Used for metadata tagging and namespace resolution fallback.
+# Copy to your config directory and reference via TEAM_MAP_PATH env var.
+
+alice: research
+bob: infra
+charlie: personal

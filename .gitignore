@@ -1,0 +1,37 @@
+# Dependencies
+__pycache__/
+*.pyc
+*.pyo
+.eggs/
+*.egg-info/
+
+# Environment
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data (generated at runtime)
+data/
+*.db
+
+# Docker
+docker-compose.override.yml
+
+# Testing
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Models (downloaded at runtime)
+models/
+*.bin
+*.onnx

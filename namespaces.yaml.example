@@ -1,0 +1,30 @@
+# Archivist Namespace Configuration
+# Copy to your config directory and customize.
+#
+# Each namespace defines read/write ACLs for agents.
+# Use "all" to grant access to every agent.
+
+namespaces:
+  - id: default
+    read: ["all"]
+    write: ["all"]
+    consistency: eventual
+
+  - id: research
+    read: ["all"]
+    write: ["alice", "bob"]
+    consistency: eventual
+    ttl_days: 90
+
+  - id: private
+    read: ["admin"]
+    write: ["admin"]
+    consistency: strong
+    ttl_days: null  # permanent
+
+# Map agent IDs to their default namespace.
+# Agents not listed here default to "default" namespace.
+agent_namespaces:
+  alice: research
+  bob: research
+  admin: private
