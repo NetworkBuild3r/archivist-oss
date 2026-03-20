@@ -26,6 +26,10 @@ data/
 # Docker
 docker-compose.override.yml
 
+# Agent / one-off sync logs (do not commit)
+_git_sync_log.txt
+_agent_git_out.txt
+
 # Testing
 .pytest_cache/
 htmlcov/
