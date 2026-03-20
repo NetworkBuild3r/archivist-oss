@@ -1,18 +1,37 @@
-"""Conflict detection — checks for similar memories before writes."""
+"""Conflict detection — checks for similar memories before writes.
 
+v1.0: adds LLM-adjudicated dedup for high-similarity matches.
+"""
+
+import json
 import logging
 from dataclasses import dataclass
 
 from qdrant_client import QdrantClient
 from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchExcept
 
-from config import QDRANT_URL, QDRANT_COLLECTION
+from config import QDRANT_URL, QDRANT_COLLECTION, DEDUP_LLM_ENABLED, DEDUP_LLM_THRESHOLD
 from embeddings import embed_text
+from llm import llm_query
+import metrics as m
 
 logger = logging.getLogger("archivist.conflict")
 
 SIMILARITY_THRESHOLD = 0.85
 NEAR_DUPLICATE_THRESHOLD = 0.95
+
+_DEDUP_SYSTEM = (
+    "You are a memory deduplication judge. Given a NEW memory and up to 3 EXISTING memories "
+    "from the same namespace, decide how to handle each pair.\n\n"
+    "For each existing memory, output one decision:\n"
+    '- "skip": The new memory is a duplicate of this existing one — do not store it.\n'
+    '- "create": The new memory is distinct — store it alongside the existing one.\n'
+    '- "merge": The two should be combined into one richer entry.\n'
+    '- "delete": The new memory supersedes this existing one — archive the old one.\n\n'
+    "Return a JSON array of objects: "
+    '[{"existing_id": "...", "decision": "skip|create|merge|delete", "reasoning": "..."}]. '
+    "Return ONLY the JSON array."
+)
 
 
 @dataclass
@@ -21,6 +40,14 @@ class ConflictResult:
     conflicting_ids: list[str]
     max_similarity: float
     recommendation: str  # "keep_both", "merge", "manual_review"
+
+
+@dataclass
+class DedupResult:
+    action: str  # "store", "skip", "merge", "delete_old"
+    existing_ids: list[str]
+    decisions: list[dict]
+    max_similarity: float
 
 
 async def check_for_conflicts(
@@ -81,4 +108,92 @@ async def check_for_conflicts(
         conflicting_ids=conflict_ids,
         max_similarity=max_sim,
         recommendation=recommendation,
+    )
+
+
+async def llm_adjudicated_dedup(
+    text: str,
+    namespace: str,
+    agent_id: str,
+) -> DedupResult | None:
+    """Run LLM dedup on high-similarity matches. Returns None if dedup is disabled or no matches."""
+    if not DEDUP_LLM_ENABLED:
+        return None
+
+    vec = await embed_text(text)
+    client = QdrantClient(url=QDRANT_URL, timeout=30)
+
+    must_filters = [
+        FieldCondition(key="namespace", match=MatchValue(value=namespace)),
+    ]
+
+    try:
+        results = client.query_points(
+            collection_name=QDRANT_COLLECTION,
+            query=vec,
+            query_filter=Filter(must=must_filters),
+            limit=5,
+            with_payload=True,
+        ).points
+    except Exception as e:
+        logger.warning("Dedup similarity check failed: %s", e)
+        return None
+
+    high_sim = [r for r in results if r.score >= DEDUP_LLM_THRESHOLD]
+    if not high_sim:
+        return None
+
+    max_sim = max(r.score for r in high_sim)
+    top_matches = high_sim[:3]
+
+    existing_texts = []
+    for r in top_matches:
+        payload = r.payload or {}
+        existing_texts.append({
+            "id": str(r.id),
+            "text": (payload.get("text") or "")[:500],
+            "agent_id": payload.get("agent_id", ""),
+            "date": payload.get("date", ""),
+            "score": r.score,
+        })
+
+    prompt = (
+        f"NEW MEMORY (from agent '{agent_id}'):\n{text[:500]}\n\n"
+        f"EXISTING MEMORIES:\n"
+    )
+    for i, ex in enumerate(existing_texts, 1):
+        prompt += f"\n{i}. [ID: {ex['id']}, agent: {ex['agent_id']}, similarity: {ex['score']:.3f}]\n{ex['text']}\n"
+
+    try:
+        m.inc(m.CURATOR_LLM_CALLS)
+        raw = await llm_query(prompt, system=_DEDUP_SYSTEM, max_tokens=512, json_mode=True)
+        decisions = json.loads(raw.strip().strip("`").strip())
+        if not isinstance(decisions, list):
+            decisions = [decisions]
+    except Exception as e:
+        logger.warning("LLM dedup decision failed: %s", e)
+        return None
+
+    for d in decisions:
+        decision = d.get("decision", "create")
+        m.inc(m.CURATOR_DEDUP_DECISION, {"decision": decision})
+
+    skip_decisions = [d for d in decisions if d.get("decision") == "skip"]
+    merge_decisions = [d for d in decisions if d.get("decision") == "merge"]
+    delete_decisions = [d for d in decisions if d.get("decision") == "delete"]
+
+    if skip_decisions:
+        action = "skip"
+    elif merge_decisions:
+        action = "merge"
+    elif delete_decisions:
+        action = "delete_old"
+    else:
+        action = "store"
+
+    return DedupResult(
+        action=action,
+        existing_ids=[str(r.id) for r in top_matches],
+        decisions=decisions,
+        max_similarity=max_sim,
     )

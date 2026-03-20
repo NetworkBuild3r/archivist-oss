@@ -7,16 +7,19 @@ import sys
 
 from watchfiles import awatch, Change
 
-from config import MEMORY_ROOT, MCP_PORT, QDRANT_URL, QDRANT_COLLECTION, VECTOR_DIM
+from config import MEMORY_ROOT, MCP_PORT, QDRANT_URL, QDRANT_COLLECTION, VECTOR_DIM, ARCHIVIST_API_KEY, CURATOR_QUEUE_DRAIN_INTERVAL
 from graph import init_schema
 from indexer import full_index, index_file, delete_file_points
 from curator import curator_loop
+from curator_queue import drain as drain_curator_queue
 from mcp_server import server
 from rbac import load_config as load_rbac_config
 
 from starlette.applications import Starlette
+from starlette.middleware import Middleware
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.routing import Mount, Route
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, PlainTextResponse
 from mcp.server.sse import SseServerTransport
 
 logging.basicConfig(
@@ -74,6 +77,7 @@ def ensure_qdrant_collection():
             ("parent_id", PayloadSchemaType.KEYWORD),
             ("is_parent", PayloadSchemaType.BOOL),
             ("importance_score", PayloadSchemaType.FLOAT),
+            ("memory_type", PayloadSchemaType.KEYWORD),
         ]:
             client.create_payload_index(
                 collection_name=QDRANT_COLLECTION,
@@ -106,7 +110,7 @@ async def file_watcher():
 
 
 async def health(_request):
-    return JSONResponse({"status": "ok", "service": "archivist", "version": "0.3.0"})
+    return JSONResponse({"status": "ok", "service": "archivist", "version": "1.0.0"})
 
 
 async def handle_invalidate(_request):
@@ -158,7 +162,7 @@ async def handle_invalidate(_request):
 
 async def startup():
     """Run on app startup: init DB, load RBAC, ensure Qdrant collection, start background tasks."""
-    logger.info("Archivist v0.3.0 starting up...")
+    logger.info("Archivist v1.0.0 starting up...")
 
     init_schema()
     logger.info("Graph schema initialized")
@@ -171,7 +175,21 @@ async def startup():
     asyncio.create_task(run_initial_index())
     asyncio.create_task(file_watcher())
     asyncio.create_task(curator_loop())
+    asyncio.create_task(curator_queue_drain_loop())
     logger.info("Background tasks started")
+
+
+async def curator_queue_drain_loop():
+    """Periodically drain the curator write-ahead queue."""
+    logger.info("Curator queue drain loop started (interval: %ds)", CURATOR_QUEUE_DRAIN_INTERVAL)
+    while True:
+        try:
+            applied = drain_curator_queue(limit=50)
+            if applied:
+                logger.info("Curator queue: drained %d operations", len(applied))
+        except Exception as e:
+            logger.error("Curator queue drain error: %s", e)
+        await asyncio.sleep(CURATOR_QUEUE_DRAIN_INTERVAL)
 
 
 async def run_initial_index():
@@ -186,6 +204,22 @@ async def run_initial_index():
 sse_transport = SseServerTransport("/mcp/messages/")
 
 
+class ArchivistAuthMiddleware(BaseHTTPMiddleware):
+    """Optional API key on all routes except GET /health (for probes)."""
+
+    async def dispatch(self, request, call_next):
+        if request.url.path == "/health":
+            return await call_next(request)
+        if not ARCHIVIST_API_KEY:
+            return await call_next(request)
+        auth = request.headers.get("authorization", "")
+        xkey = request.headers.get("x-api-key", "")
+        ok = auth == f"Bearer {ARCHIVIST_API_KEY}" or xkey == ARCHIVIST_API_KEY
+        if not ok:
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        return await call_next(request)
+
+
 async def handle_sse(request):
     async with sse_transport.connect_sse(
         request.scope, request.receive, request._send
@@ -195,13 +229,51 @@ async def handle_sse(request):
         )
 
 
+async def handle_retrieval_export(request):
+    """REST endpoint for retrieval log export (dashboard/debugging)."""
+    from retrieval_log import get_retrieval_logs, get_retrieval_stats
+    params = request.query_params
+    if params.get("stats") == "true":
+        stats = get_retrieval_stats(
+            agent_id=params.get("agent_id", ""),
+            window_days=int(params.get("window_days", "7")),
+        )
+        return JSONResponse(stats)
+    logs = get_retrieval_logs(
+        agent_id=params.get("agent_id", ""),
+        limit=int(params.get("limit", "50")),
+        since=params.get("since", ""),
+    )
+    return JSONResponse({"logs": logs, "count": len(logs)})
+
+
+async def handle_metrics(_request):
+    """Prometheus text exposition format."""
+    from metrics import render
+    return PlainTextResponse(render(), media_type="text/plain; version=0.0.4; charset=utf-8")
+
+
+async def handle_dashboard(request):
+    """Health dashboard JSON."""
+    from dashboard import build_dashboard, batch_heuristic
+    params = request.query_params
+    window = int(params.get("window_days", "7"))
+    if params.get("batch") == "true":
+        return JSONResponse(batch_heuristic(window))
+    return JSONResponse(build_dashboard(window))
+
+
 app = Starlette(
     routes=[
         Route("/health", health),
+        Route("/metrics", handle_metrics),
         Route("/admin/invalidate", handle_invalidate, methods=["POST", "GET"]),
+        Route("/admin/retrieval-logs", handle_retrieval_export),
+        Route("/admin/dashboard", handle_dashboard),
         Route("/mcp/sse", endpoint=handle_sse),
         Mount("/mcp/messages/", app=sse_transport.handle_post_message),
     ],
+    middleware=[Middleware(ArchivistAuthMiddleware)],
     on_startup=[startup],
 )
 

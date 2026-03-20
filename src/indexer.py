@@ -18,10 +18,12 @@ from config import (
     CHUNK_SIZE, CHUNK_OVERLAP, TEAM_MAP,
     PARENT_CHUNK_SIZE, PARENT_CHUNK_OVERLAP,
     CHILD_CHUNK_SIZE, CHILD_CHUNK_OVERLAP,
+    TIERED_CONTEXT_ENABLED,
 )
 from chunking import chunk_text, chunk_text_hierarchical
 from embeddings import embed_batch
 from rbac import get_namespace_for_agent, get_namespace_config
+from tiering import generate_tiers
 
 logger = logging.getLogger("archivist.indexer")
 
@@ -138,6 +140,13 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
         if not hier_chunks:
             return 0
 
+        # Generate tiered summaries for parent chunks
+        tier_map: dict[str, dict] = {}
+        if TIERED_CONTEXT_ENABLED:
+            for c in hier_chunks:
+                if c["is_parent"]:
+                    tier_map[c["id"]] = await generate_tiers(c["content"])
+
         contents = [c["content"] for c in hier_chunks]
         vectors = await embed_batch(contents)
 
@@ -148,10 +157,17 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
                 f"{chunk_meta['content']}:{meta['agent_id']}:{meta['namespace']}".encode()
             ).hexdigest()
 
+            tiers = tier_map.get(chunk_meta["id"], {})
+            # Children inherit their parent's L0/L1 as context hint
+            if not chunk_meta["is_parent"] and chunk_meta["parent_id"]:
+                tiers = tier_map.get(chunk_meta["parent_id"], {})
+
             payload = {
                 **meta,
                 "chunk_index": i,
                 "text": chunk_meta["content"],
+                "l0": tiers.get("l0", ""),
+                "l1": tiers.get("l1", ""),
                 "parent_id": chunk_meta["parent_id"],
                 "is_parent": chunk_meta["is_parent"],
                 "version": 1,

@@ -1,25 +1,84 @@
 """RLM-inspired recursive retriever — coarse search, threshold filter, rerank, LLM refinement, synthesis.
 
-Phase 1 additions:
-  - Retrieval threshold: discard results below RETRIEVAL_THRESHOLD
-  - Rerank pipeline: optional cross-encoder reranking before LLM refinement
+Phase 1: threshold, rerank pipeline.
+Phase 2 (v0.5): graph-augmented retrieval, temporal decay, tiered context, multi-hop.
+Phase 3 (v0.6): outcome-aware scoring from trajectory history.
+Phase 4 (v0.7): memory_type routing.
+Phase 5 (v0.8): hot cache, retrieval trajectory logging.
 """
 
 import logging
+import time
 from qdrant_client import QdrantClient
-from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchAny
+from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchAny, Range
 
 from config import (
     QDRANT_URL, QDRANT_COLLECTION,
     RETRIEVAL_THRESHOLD, RERANK_ENABLED, RERANK_MODEL, RERANK_TOP_K,
     VECTOR_SEARCH_LIMIT,
+    GRAPH_RETRIEVAL_ENABLED, MULTI_HOP_DEPTH, TEMPORAL_DECAY_HALFLIFE_DAYS,
+    HOT_CACHE_ENABLED,
 )
 from embeddings import embed_text
 from llm import llm_query
 from memory_fusion import dedupe_vector_hits
 from retrieval_filters import apply_retrieval_threshold
+from graph_retrieval import (
+    extract_entity_mentions,
+    graph_context_for_entities,
+    apply_temporal_decay,
+    merge_graph_context_into_results,
+)
+from tiering import select_tier
+from trajectory import get_outcome_adjustments
+from hotness import apply_hotness_to_results
+import hot_cache
+import retrieval_log
+import metrics as m
 
 logger = logging.getLogger("archivist.rlm")
+
+
+def _retrieval_trace(
+    *,
+    vector_limit: int,
+    coarse_count: int,
+    deduped_count: int,
+    threshold: float,
+    after_threshold_count: int,
+    after_rerank_count: int,
+    parent_enriched: bool,
+    refinement_chunks: int,
+    graph_entities_found: int = 0,
+    graph_context_items: int = 0,
+    temporal_decay_applied: bool = False,
+    tier: str = "l2",
+    outcome_adjustments: int = 0,
+    context_status: dict | None = None,
+) -> dict:
+    trace = {
+        "vector_search_limit": vector_limit,
+        "coarse_hits": coarse_count,
+        "after_dedupe": deduped_count,
+        "threshold": threshold,
+        "after_threshold": after_threshold_count,
+        "rerank_enabled": RERANK_ENABLED,
+        "rerank_model": RERANK_MODEL if RERANK_ENABLED else None,
+        "after_rerank": after_rerank_count,
+        "parent_enrichment": parent_enriched,
+        "chunks_sent_to_refinement": refinement_chunks,
+        "rerank_top_k": RERANK_TOP_K if RERANK_ENABLED else None,
+        "graph_retrieval_enabled": GRAPH_RETRIEVAL_ENABLED,
+        "graph_entities_found": graph_entities_found,
+        "graph_context_items": graph_context_items,
+        "temporal_decay_applied": temporal_decay_applied,
+        "tier": tier,
+        "outcome_adjustments": outcome_adjustments,
+    }
+    if context_status:
+        trace["context_status"] = context_status
+    return trace
+
 
 REFINE_SYSTEM = (
     "You are a memory retrieval assistant. Given a search query and a memory chunk, "
@@ -56,6 +115,7 @@ async def search_vectors(
     file_type: str = "",
     date_from: str = "",
     date_to: str = "",
+    memory_type: str = "",
     limit: int = 20,
 ) -> list[dict]:
     """Stage 1: coarse vector search in Qdrant with optional filters."""
@@ -75,6 +135,12 @@ async def search_vectors(
         must_filters.append(FieldCondition(key="namespace", match=MatchValue(value=namespace)))
     if file_type:
         must_filters.append(FieldCondition(key="file_type", match=MatchValue(value=file_type)))
+    if date_from:
+        must_filters.append(FieldCondition(key="date", match=MatchValue(value=date_from)) if date_from == date_to else FieldCondition(key="date", range=Range(gte=date_from)))
+    if date_to and date_to != date_from:
+        must_filters.append(FieldCondition(key="date", range=Range(lte=date_to)))
+    if memory_type:
+        must_filters.append(FieldCondition(key="memory_type", match=MatchValue(value=memory_type)))
 
     search_filter = Filter(must=must_filters) if must_filters else None
 
@@ -91,6 +157,8 @@ async def search_vectors(
             "id": getattr(hit, "id", ""),
             "score": hit.score,
             "text": hit.payload.get("text", ""),
+            "l0": hit.payload.get("l0", ""),
+            "l1": hit.payload.get("l1", ""),
             "agent_id": hit.payload.get("agent_id", ""),
             "file_path": hit.payload.get("file_path", ""),
             "file_type": hit.payload.get("file_type", ""),
@@ -152,10 +220,36 @@ async def recursive_retrieve(
     limit: int = 20,
     refine: bool = True,
     threshold: float | None = None,
+    tier: str = "l2",
+    date_from: str = "",
+    date_to: str = "",
+    max_tokens: int | None = None,
+    memory_type: str = "",
 ) -> dict:
-    """Full RLM pipeline: coarse search → dedupe → threshold → rerank → parent enrichment → LLM refinement → synthesis."""
+    """Full RLM pipeline: coarse → dedupe → graph augment → temporal decay → threshold → rerank → parent → refine → synthesize."""
+    t0 = time.monotonic()
     effective_threshold = threshold if threshold is not None else RETRIEVAL_THRESHOLD
     vector_limit = max(VECTOR_SEARCH_LIMIT, limit)
+    n_graph_entities = 0
+    n_graph_items = 0
+
+    cache_extra = f"{agent_id}|{','.join(agent_ids or [])}|{team}|{date_from}|{date_to}|{limit}|{refine}"
+    cached = hot_cache.get(agent_id or "fleet", query, namespace=namespace,
+                           tier=tier, memory_type=memory_type, extra=cache_extra)
+    if cached is not None:
+        elapsed = int((time.monotonic() - t0) * 1000)
+        retrieval_log.log_retrieval(
+            agent_id=agent_id or "fleet", query=query, namespace=namespace,
+            tier=tier, memory_type=memory_type,
+            retrieval_trace=cached.get("retrieval_trace", {}),
+            result_count=len(cached.get("sources", [])),
+            cache_hit=True, duration_ms=elapsed,
+        )
+        cached["cache_hit"] = True
+        m.inc(m.CACHE_HIT)
+        m.inc(m.SEARCH_TOTAL)
+        m.observe(m.SEARCH_DURATION, elapsed)
+        return cached
 
     # Stage 1: Coarse vector search (wide recall)
     coarse = await search_vectors(
@@ -164,8 +258,25 @@ async def recursive_retrieve(
         agent_ids=agent_ids,
         team=team,
         namespace=namespace,
+        date_from=date_from,
+        date_to=date_to,
+        memory_type=memory_type,
         limit=vector_limit,
     )
+    n_coarse = len(coarse)
+
+    # Stage 1a: Graph augmentation (v0.5)
+    if GRAPH_RETRIEVAL_ENABLED:
+        entities = extract_entity_mentions(query)
+        n_graph_entities = len(entities)
+        if entities:
+            graph_items = graph_context_for_entities(
+                [e["id"] for e in entities],
+                depth=MULTI_HOP_DEPTH,
+            )
+            n_graph_items = len(graph_items)
+            if graph_items:
+                coarse = merge_graph_context_into_results(coarse, graph_items)
 
     if not coarse:
         return {
@@ -173,10 +284,33 @@ async def recursive_retrieve(
             "sources": [],
             "chunks_searched": 0,
             "agents_scoped": agent_ids or ([agent_id] if agent_id else []),
+            "retrieval_trace": _retrieval_trace(
+                vector_limit=vector_limit,
+                coarse_count=0,
+                deduped_count=0,
+                threshold=effective_threshold,
+                after_threshold_count=0,
+                after_rerank_count=0,
+                parent_enriched=False,
+                refinement_chunks=0,
+                graph_entities_found=n_graph_entities,
+                graph_context_items=n_graph_items,
+                tier=tier,
+            ),
         }
 
     # Stage 1b: Dedupe (important when merging multi-agent results)
     coarse = dedupe_vector_hits(coarse)
+    n_dedupe = len(coarse)
+
+    # Stage 1c: Temporal decay (v0.5)
+    temporal_applied = False
+    if TEMPORAL_DECAY_HALFLIFE_DAYS > 0:
+        coarse = apply_temporal_decay(coarse, TEMPORAL_DECAY_HALFLIFE_DAYS)
+        temporal_applied = True
+
+    # Stage 1d: Hotness scoring (v1.0)
+    coarse = apply_hotness_to_results(coarse)
 
     # Stage 2: Threshold filter (Phase 1)
     filtered = apply_retrieval_threshold(coarse, effective_threshold)
@@ -185,14 +319,46 @@ async def recursive_retrieve(
             "status": "below_threshold",
             "answer": "",
             "sources": [],
-            "chunks_searched": len(coarse),
+            "chunks_searched": n_coarse,
             "threshold": effective_threshold,
             "best_score": max(r["score"] for r in coarse) if coarse else 0,
             "agents_scoped": agent_ids or ([agent_id] if agent_id else []),
+            "retrieval_trace": _retrieval_trace(
+                vector_limit=vector_limit,
+                coarse_count=n_coarse,
+                deduped_count=n_dedupe,
+                threshold=effective_threshold,
+                after_threshold_count=0,
+                after_rerank_count=0,
+                parent_enriched=False,
+                refinement_chunks=0,
+                graph_entities_found=n_graph_entities,
+                graph_context_items=n_graph_items,
+                temporal_decay_applied=temporal_applied,
+                tier=tier,
+            ),
         }
+
+    # Stage 2b: Outcome-aware scoring (v0.6)
+    n_outcome_adj = 0
+    filtered_ids = [str(r.get("id", "")) for r in filtered if r.get("id")]
+    if filtered_ids:
+        try:
+            adjustments = get_outcome_adjustments(filtered_ids)
+            for r in filtered:
+                adj = adjustments.get(str(r.get("id", "")), 0.0)
+                if adj != 0.0:
+                    r["outcome_adjustment"] = adj
+                    r["score"] = r.get("score", 0) + adj
+                    n_outcome_adj += 1
+            if n_outcome_adj:
+                filtered.sort(key=lambda x: x.get("score", 0), reverse=True)
+        except Exception as e:
+            logger.debug("Outcome adjustments skipped: %s", e)
 
     # Stage 3: Rerank (Phase 1)
     reranked = _apply_rerank(query, filtered)
+    n_rerank = len(reranked)
 
     # Stage 4: Parent-child enrichment (Phase 1)
     enriched = await enrich_with_parent(reranked)
@@ -200,27 +366,80 @@ async def recursive_retrieve(
     # Cap how many chunks we refine (per-request limit)
     enriched = enriched[:limit]
 
+    # If max_tokens specified, further cap by approximate token budget
+    if max_tokens and max_tokens > 0:
+        budget = 0
+        capped = []
+        for r in enriched:
+            chunk_toks = len(select_tier(r, tier)) // 4
+            if budget + chunk_toks > max_tokens:
+                break
+            budget += chunk_toks
+            capped.append(r)
+        enriched = capped if capped else enriched[:1]
+
+    n_refine = len(enriched)
+
+    # Context-status signaling (v1.0)
+    result_tokens_approx = sum(len(select_tier(r, tier)) // 4 for r in enriched)
+    budget_tokens = max_tokens if max_tokens and max_tokens > 0 else None
+    if budget_tokens:
+        budget_used_pct = round(result_tokens_approx / budget_tokens * 100, 1)
+    else:
+        budget_used_pct = 0.0
+    _ctx_status = {
+        "result_tokens_approx": result_tokens_approx,
+        "budget_tokens": budget_tokens or "unlimited",
+        "budget_used_pct": budget_used_pct,
+        "tier": tier,
+        "hint": "compress" if budget_tokens and budget_used_pct > 80 else "ok",
+    }
+
+    _common_trace = dict(
+        vector_limit=vector_limit,
+        coarse_count=n_coarse,
+        deduped_count=n_dedupe,
+        threshold=effective_threshold,
+        after_threshold_count=len(filtered),
+        after_rerank_count=n_rerank,
+        parent_enriched=any(r.get("parent_context") for r in enriched),
+        refinement_chunks=n_refine,
+        graph_entities_found=n_graph_entities,
+        graph_context_items=n_graph_items,
+        temporal_decay_applied=temporal_applied,
+        tier=tier,
+        outcome_adjustments=n_outcome_adj,
+        context_status=_ctx_status,
+    )
+
     if not refine:
+        # Return tier-appropriate text in sources
+        for r in enriched:
+            r["tier_text"] = select_tier(r, tier)
         return {
             "answer": "",
             "sources": enriched[: min(10, limit)],
-            "chunks_searched": len(coarse),
+            "chunks_searched": n_coarse,
             "chunks_after_threshold": len(filtered),
             "agents_scoped": agent_ids or ([agent_id] if agent_id else []),
+            "retrieval_trace": _retrieval_trace(**_common_trace),
         }
 
     # Stage 5: LLM refinement
     refined = []
     multi_agent = len({h.get("agent_id") for h in enriched if h.get("agent_id")}) > 1
     for hit in enriched:
-        # Include parent context in the refinement prompt if available
-        context = hit["text"]
-        if hit.get("parent_context"):
-            context = f"[Parent context]\n{hit['parent_context']}\n\n[Matched chunk]\n{hit['text']}"
+        context = select_tier(hit, tier)
+        if hit.get("parent_context") and tier == "l2":
+            context = f"[Parent context]\n{hit['parent_context']}\n\n[Matched chunk]\n{context}"
+
+        graph_extra = ""
+        if hit.get("graph_context"):
+            graph_extra = "\n[Graph context] " + " | ".join(hit["graph_context"][:3])
 
         who = hit.get("agent_id") or "unknown"
         prompt = (
-            f"Query: {query}\n\nMemory chunk (agent={who}, file={hit['file_path']}, date={hit['date']}):\n{context}"
+            f"Query: {query}\n\nMemory chunk (agent={who}, file={hit['file_path']}, date={hit['date']}):\n{context}{graph_extra}"
         )
         try:
             extraction = await llm_query(prompt, system=REFINE_SYSTEM, max_tokens=512)
@@ -240,9 +459,10 @@ async def recursive_retrieve(
         return {
             "answer": "Found chunks but none were relevant after refinement.",
             "sources": [],
-            "chunks_searched": len(coarse),
+            "chunks_searched": n_coarse,
             "chunks_after_threshold": len(filtered),
             "agents_scoped": agent_ids or ([agent_id] if agent_id else []),
+            "retrieval_trace": _retrieval_trace(**_common_trace),
         }
 
     # Stage 6: Synthesis
@@ -263,16 +483,34 @@ async def recursive_retrieve(
         logger.error("Synthesis failed: %s", e)
         answer = extractions_text
 
-    return {
+    final_result = {
         "answer": answer,
         "sources": [
             {"file": r["source"], "date": r["date"], "agent": r["agent_id"],
              "score": r["score"], "rerank_score": r.get("rerank_score")}
             for r in refined
         ],
-        "chunks_searched": len(coarse),
+        "chunks_searched": n_coarse,
         "chunks_after_threshold": len(filtered),
         "chunks_relevant": len(refined),
         "multi_agent": multi_agent,
         "agents_scoped": agent_ids or ([agent_id] if agent_id else []),
+        "retrieval_trace": _retrieval_trace(**_common_trace),
     }
+
+    elapsed = int((time.monotonic() - t0) * 1000)
+    final_result["_cache_namespace"] = namespace
+    hot_cache.put(agent_id or "fleet", query, final_result, namespace=namespace,
+                  tier=tier, memory_type=memory_type, extra=cache_extra)
+    retrieval_log.log_retrieval(
+        agent_id=agent_id or "fleet", query=query, namespace=namespace,
+        tier=tier, memory_type=memory_type,
+        retrieval_trace=final_result.get("retrieval_trace", {}),
+        result_count=len(refined),
+        cache_hit=False, duration_ms=elapsed,
+    )
+    m.inc(m.SEARCH_TOTAL)
+    m.inc(m.CACHE_MISS)
+    m.observe(m.SEARCH_DURATION, elapsed)
+
+    return final_result

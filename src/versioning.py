@@ -4,7 +4,7 @@ import json
 import logging
 from datetime import datetime, timezone
 
-from graph import get_db
+from graph import get_db, GRAPH_WRITE_LOCK
 
 logger = logging.getLogger("archivist.versioning")
 
@@ -29,19 +29,26 @@ def record_version(
     parent_versions: list[int] | None = None,
 ) -> int:
     """Record a new version for a memory_id. Returns the new version number."""
-    current = get_current_version(memory_id)
-    new_version = current + 1
     now = datetime.now(timezone.utc).isoformat()
-    parents_json = json.dumps(parent_versions or [current] if current > 0 else [])
-
-    conn = get_db()
-    conn.execute(
-        """INSERT INTO memory_versions (memory_id, version, agent_id, timestamp, text_hash, operation, parent_versions)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (memory_id, new_version, agent_id, now, text_hash, operation, parents_json),
-    )
-    conn.commit()
-    conn.close()
+    with GRAPH_WRITE_LOCK:
+        conn = get_db()
+        try:
+            cur = conn.execute(
+                "SELECT MAX(version) as max_ver FROM memory_versions WHERE memory_id = ?",
+                (memory_id,),
+            )
+            row = cur.fetchone()
+            current = row["max_ver"] if row and row["max_ver"] is not None else 0
+            new_version = current + 1
+            parents_json = json.dumps(parent_versions or [current] if current > 0 else [])
+            conn.execute(
+                """INSERT INTO memory_versions (memory_id, version, agent_id, timestamp, text_hash, operation, parent_versions)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (memory_id, new_version, agent_id, now, text_hash, operation, parents_json),
+            )
+            conn.commit()
+        finally:
+            conn.close()
     return new_version
 
 

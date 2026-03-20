@@ -3,9 +3,13 @@
 import sqlite3
 import json
 import os
+import threading
 from datetime import datetime, timezone
 
 from config import SQLITE_PATH
+
+# Serialize writes — WAL allows concurrent readers; writers must not race.
+GRAPH_WRITE_LOCK = threading.Lock()
 
 
 def _ensure_dir():
@@ -14,7 +18,7 @@ def _ensure_dir():
 
 def get_db() -> sqlite3.Connection:
     _ensure_dir()
-    conn = sqlite3.connect(SQLITE_PATH)
+    conn = sqlite3.connect(SQLITE_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
@@ -22,8 +26,9 @@ def get_db() -> sqlite3.Connection:
 
 
 def init_schema():
-    conn = get_db()
-    conn.executescript("""
+    with GRAPH_WRITE_LOCK:
+        conn = get_db()
+        conn.executescript("""
         CREATE TABLE IF NOT EXISTS entities (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL UNIQUE COLLATE NOCASE,
@@ -98,24 +103,24 @@ def init_schema():
         CREATE INDEX IF NOT EXISTS idx_memver_memory ON memory_versions(memory_id);
         CREATE INDEX IF NOT EXISTS idx_memver_agent ON memory_versions(agent_id);
     """)
-    conn.commit()
-    conn.close()
+        conn.commit()
+        conn.close()
 
 
 def upsert_entity(name: str, entity_type: str = "unknown", agent_id: str = "") -> int:
     now = datetime.now(timezone.utc).isoformat()
-    conn = get_db()
-    cur = conn.execute("SELECT id, mention_count FROM entities WHERE name = ? COLLATE NOCASE", (name,))
-    row = cur.fetchone()
-    if row:
-        conn.execute(
-            "UPDATE entities SET last_seen=?, mention_count=mention_count+1 WHERE id=?",
-            (now, row["id"]),
-        )
-        conn.commit()
-        conn.close()
-        return row["id"]
-    else:
+    with GRAPH_WRITE_LOCK:
+        conn = get_db()
+        cur = conn.execute("SELECT id, mention_count FROM entities WHERE name = ? COLLATE NOCASE", (name,))
+        row = cur.fetchone()
+        if row:
+            conn.execute(
+                "UPDATE entities SET last_seen=?, mention_count=mention_count+1 WHERE id=?",
+                (now, row["id"]),
+            )
+            conn.commit()
+            conn.close()
+            return row["id"]
         cur = conn.execute(
             "INSERT INTO entities (name, entity_type, first_seen, last_seen) VALUES (?,?,?,?)",
             (name, entity_type, now, now),
@@ -128,31 +133,33 @@ def upsert_entity(name: str, entity_type: str = "unknown", agent_id: str = "") -
 
 def add_relationship(source_id: int, target_id: int, rel_type: str, evidence: str, agent_id: str = ""):
     now = datetime.now(timezone.utc).isoformat()
-    conn = get_db()
-    try:
-        conn.execute(
-            """INSERT INTO relationships (source_entity_id, target_entity_id, relation_type, evidence, agent_id, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?)
-               ON CONFLICT(source_entity_id, target_entity_id, relation_type)
-               DO UPDATE SET evidence=excluded.evidence, updated_at=excluded.updated_at, confidence=min(confidence+0.1, 1.0)""",
-            (source_id, target_id, rel_type, evidence, agent_id, now, now),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    with GRAPH_WRITE_LOCK:
+        conn = get_db()
+        try:
+            conn.execute(
+                """INSERT INTO relationships (source_entity_id, target_entity_id, relation_type, evidence, agent_id, created_at, updated_at)
+                   VALUES (?,?,?,?,?,?,?)
+                   ON CONFLICT(source_entity_id, target_entity_id, relation_type)
+                   DO UPDATE SET evidence=excluded.evidence, updated_at=excluded.updated_at, confidence=min(confidence+0.1, 1.0)""",
+                (source_id, target_id, rel_type, evidence, agent_id, now, now),
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
 
 def add_fact(entity_id: int, fact_text: str, source_file: str = "", agent_id: str = "") -> int:
     now = datetime.now(timezone.utc).isoformat()
-    conn = get_db()
-    cur = conn.execute(
-        "INSERT INTO facts (entity_id, fact_text, source_file, agent_id, created_at) VALUES (?,?,?,?,?)",
-        (entity_id, fact_text, source_file, agent_id, now),
-    )
-    conn.commit()
-    fid = cur.lastrowid
-    conn.close()
-    return fid
+    with GRAPH_WRITE_LOCK:
+        conn = get_db()
+        cur = conn.execute(
+            "INSERT INTO facts (entity_id, fact_text, source_file, agent_id, created_at) VALUES (?,?,?,?,?)",
+            (entity_id, fact_text, source_file, agent_id, now),
+        )
+        conn.commit()
+        fid = cur.lastrowid
+        conn.close()
+        return fid
 
 
 def search_entities(query: str, limit: int = 10) -> list[dict]:
@@ -202,10 +209,11 @@ def get_curator_state(key: str) -> str | None:
 
 
 def set_curator_state(key: str, value: str):
-    conn = get_db()
-    conn.execute(
-        "INSERT INTO curator_state (key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        (key, value),
-    )
-    conn.commit()
-    conn.close()
+    with GRAPH_WRITE_LOCK:
+        conn = get_db()
+        conn.execute(
+            "INSERT INTO curator_state (key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, value),
+        )
+        conn.commit()
+        conn.close()

@@ -155,6 +155,21 @@ def filter_agents_for_read(caller_agent_id: str, target_agent_ids: list[str]) ->
     return allowed, denied
 
 
+def is_permissive_mode() -> bool:
+    """True when namespaces.yaml failed to load and all access is allowed."""
+    return _permissive_fallback
+
+
+def can_read_agent_memory(caller_agent_id: str, target_agent_id: str) -> bool:
+    """True if caller may read memories/facts attributed to target_agent_id."""
+    if _permissive_fallback:
+        return True
+    if not target_agent_id:
+        return True
+    ns = get_namespace_for_agent(target_agent_id)
+    return check_access(caller_agent_id, "read", ns).allowed
+
+
 def list_accessible_namespaces(agent_id: str) -> list[dict]:
     """Return namespaces the agent can access, with read/write flags."""
     cfg = get_config()

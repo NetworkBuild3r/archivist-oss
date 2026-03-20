@@ -48,7 +48,7 @@ This starts:
 
 ```bash
 curl http://localhost:3100/health
-# {"status": "ok", "service": "archivist", "version": "0.3.0"}
+# {"status": "ok", "service": "archivist", "version": "1.0.0"}
 ```
 
 ### 4. Connect an MCP client
@@ -101,6 +101,9 @@ Point your MCP client at: `http://localhost:3100/mcp/sse`
 | `archivist_namespaces` | List accessible memory namespaces |
 | `archivist_audit_trail` | View audit log for memory operations |
 | `archivist_merge` | Merge conflicting memories |
+| `archivist_compress` | Archive memory blocks and return compact summaries |
+| `archivist_skill_relate` | Record relations between skills (similar, depends, composes, replaces) |
+| `archivist_skill_dependencies` | Get skill dependency/relation graph |
 
 ## Configuration
 
@@ -133,7 +136,7 @@ Create a `namespaces.yaml` (see [`namespaces.yaml.example`](namespaces.yaml.exam
 
 For multi-agent setups, create a `team_map.yaml` (see [`team_map.yaml.example`](team_map.yaml.example)) and set `TEAM_MAP_PATH` to its location. This maps agent IDs to teams for metadata tagging.
 
-## Phase 1 Improvements (v0.2.0+) / v0.3.0 fleet search
+## Phase 1–7 Improvements (v0.2.0 → v1.0.0)
 
 ### Retrieval Threshold
 Results below `RETRIEVAL_THRESHOLD` (default 0.65) are filtered out before LLM refinement, reducing noise and saving LLM tokens.
@@ -243,9 +246,67 @@ If you maintain an **internal** clone for the team and mirror **public** OSS to 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/health` | GET | Health check |
+| `/metrics` | GET | Prometheus metrics (text exposition) |
 | `/mcp/sse` | GET | MCP SSE connection |
 | `/mcp/messages/` | POST | MCP message handler |
 | `/admin/invalidate` | GET/POST | Trigger TTL-based memory expiry |
+| `/admin/retrieval-logs` | GET | Export retrieval pipeline logs and stats |
+| `/admin/dashboard` | GET | Health dashboard (add `?batch=true` for batch heuristic) |
+
+### Skill Registry (v0.7.0)
+
+Archivist tracks the operational health of skills (MCP tools) used by agents:
+
+```text
+archivist_register_skill → catalog a new tool with provider, version, endpoint
+archivist_skill_event    → log invocation outcome (success/partial/failure)
+archivist_skill_lesson   → record failure modes, workarounds, best practices
+archivist_skill_health   → get success rate, recent failures, health grade
+```
+
+Tag stored memories with `memory_type` (experience / skill / general) and filter searches by type.
+
+### Memory Hierarchy & URIs (v0.8.0)
+
+Three-layer architecture: session/ephemeral → per-agent hot cache → long-term (Qdrant + SQLite).
+
+```text
+archivist_resolve_uri       → resolve archivist://{ns}/{type}/{id} to its resource
+archivist_retrieval_logs    → export/analyze pipeline execution traces
+archivist_cache_stats       → hot cache health per agent
+archivist_cache_invalidate  → manual eviction by namespace, agent, or all
+```
+
+URIs follow the format `archivist://namespace/memory|entity|namespace|skill/id` and are included in `archivist_store` and `archivist_deref` responses.
+
+### Observability (v0.9.0)
+
+```text
+GET /metrics                       → Prometheus scrape endpoint
+archivist_health_dashboard         → memory, retrieval, skill, cache health in one view
+archivist_batch_heuristic          → recommended batch size from health signals (1-10)
+GET /admin/dashboard               → same data as REST (add ?batch=true for heuristic)
+```
+
+Webhooks fire on `memory_store`, `memory_conflict`, and `skill_event` — configure `WEBHOOK_URL` in your environment.
+
+### Memory Intelligence Layer (v1.0.0)
+
+Active curation pipeline that maintains memory quality automatically:
+
+```text
+archivist_compress      → archive old memories, get compact summaries
+archivist_skill_relate  → record skill relationships (substitutes, dependencies)
+archivist_skill_dependencies → get skill relation graph
+```
+
+**Curator queue:** Background write-ahead queue stages dedup merges, archival, and tip consolidation. No lock contention on the hot write path.
+
+**LLM-adjudicated dedup:** Stores above similarity threshold trigger LLM decision (skip/create/merge/delete) instead of just blocking.
+
+**Context-status signaling:** Every search response includes token estimates and compression hints so agents can manage their context windows.
+
+**Curator agent persona:** System prompt at `prompts/curator.md` defines a memory librarian persona for NemoClaw/OpenClaw deployments that performs scheduled health checks, contradiction resolution, and stale memory compression.
 
 ## License
 

@@ -15,7 +15,7 @@ from config import (
 from llm import llm_query
 from graph import (
     upsert_entity, add_fact, add_relationship,
-    get_curator_state, set_curator_state, get_db,
+    get_curator_state, set_curator_state, get_db, GRAPH_WRITE_LOCK,
 )
 from indexer import index_file
 
@@ -164,15 +164,16 @@ async def curate_cycle():
 
 async def decay_old_entries():
     """Soft-delete graph entries not referenced in 90+ days."""
-    conn = get_db()
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
-    conn.execute(
-        "UPDATE facts SET is_active=0 WHERE is_active=1 AND created_at < ? AND superseded_by IS NULL",
-        (cutoff,),
-    )
-    affected = conn.total_changes
-    conn.commit()
-    conn.close()
+    with GRAPH_WRITE_LOCK:
+        conn = get_db()
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
+        conn.execute(
+            "UPDATE facts SET is_active=0 WHERE is_active=1 AND created_at < ? AND superseded_by IS NULL",
+            (cutoff,),
+        )
+        affected = conn.total_changes
+        conn.commit()
+        conn.close()
     if affected:
         logger.info("Decayed %d old facts", affected)
 
