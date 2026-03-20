@@ -196,6 +196,12 @@ To push to GitHub without running any `.ps1`, use:
 scripts\push-networkbuild3r.cmd
 ```
 
+Or from any cwd (UNC-safe; uses `git -c safe.directory=*`):
+
+```bash
+python scripts/sync-public.py
+```
+
 ## Sharing this repo
 
 - Copy [`.env.example`](.env.example) to `.env` and set LLM/embed endpoints for your team.
