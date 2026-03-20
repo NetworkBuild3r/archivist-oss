@@ -1,0 +1,8 @@
+start
+
+$ git -c safe.directory=* -C \\192.168.11.102\k8s-argocd\openclaw\agents\nova\archivist-oss remote set-url origin https://github.com/NetworkBuild3r/archivist-oss.git
+exit=0
+stdout:
+
+stderr:
+

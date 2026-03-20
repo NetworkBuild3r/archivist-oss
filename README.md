@@ -28,7 +28,7 @@ Archivist provides long-term memory for AI agent fleets. It combines vector sear
 ### 1. Clone and configure
 
 ```bash
-git clone https://github.com/AHEAD-Labs/ai-archivist-oss.git
+git clone https://github.com/NetworkBuild3r/archivist-oss.git
 cd archivist
 cp .env.example .env
 # Edit .env with your LLM/embedding API details
@@ -166,6 +166,36 @@ python -m pytest tests/ -v
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for conventions.
 
+### Git on a UNC path (`\\server\share\...`)
+
+If Git reports **fatal: detected dubious ownership** (common for clones on SMB/NAS), register this folder **once**. Pick one:
+
+**A — Batch helper** (works even when PowerShell blocks unsigned `.ps1`):
+
+```bat
+scripts\trust-unc-repo.cmd
+```
+
+**B — PowerShell with bypass** (if you prefer the `.ps1`):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\trust-unc-repo.ps1
+```
+
+**C — Git only** (no scripts; replace the path with yours if different):
+
+```powershell
+git config --global --add safe.directory '%(prefix)///192.168.11.102/k8s-argocd/openclaw/agents/nova/archivist-oss'
+```
+
+After that, `git add`, `git commit`, and pushes work normally.
+
+To push to GitHub without running any `.ps1`, use:
+
+```bat
+scripts\push-networkbuild3r.cmd
+```
+
 ## Sharing this repo
 
 - Copy [`.env.example`](.env.example) to `.env` and set LLM/embed endpoints for your team.
@@ -181,12 +211,26 @@ git init
 git add -A
 git commit -m "Archivist OSS v0.3.0"
 git branch -M main
-git remote add origin git@github.com:AHEAD-Labs/ai-archivist-oss.git
+git remote add origin git@github.com:NetworkBuild3r/archivist-oss.git
 git tag -a v0.3.0 -m "Fleet multi-agent search, dedupe, wide vector recall"
 git push -u origin main --tags
 ```
 
 Replace `YOUR_ORG/archivist` with your organization and repository name.
+
+### Private team repo + public GitHub
+
+If you maintain an **internal** clone for the team and mirror **public** OSS to GitHub, use two remotes and see [docs/REMOTES.md](docs/REMOTES.md). Quick push to both:
+
+```powershell
+.\scripts\publish-remotes.ps1 `
+  -InternalUrl "https://your-gitlab.example.com/org/archivist-oss.git" `
+  -PublicUrl "git@github.com:NetworkBuild3r/archivist-oss.git" `
+  -PublicRemoteName origin `
+  -WithTags
+```
+
+(`-PublicRemoteName origin` if your GitHub remote is still named `origin`.)
 
 ## API Endpoints
 
