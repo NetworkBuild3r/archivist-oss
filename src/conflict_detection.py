@@ -65,7 +65,7 @@ async def check_for_conflicts(
     ]
     if agent_id:
         must_filters.append(
-            FieldCondition(key="agent_id", match=MatchExcept(except_=agent_id))
+            FieldCondition(key="agent_id", match=MatchExcept(**{"except": [agent_id]}))
         )
 
     try:

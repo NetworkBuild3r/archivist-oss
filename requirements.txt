@@ -6,6 +6,14 @@ pyyaml>=6.0
 uvicorn>=0.30.0
 starlette>=0.38.0
 
+# Dev / test dependencies
+# pytest>=8.0.0
+# pytest-asyncio>=0.24.0
+
+# Optional: accurate token counting (v1.1 context management)
+# Without tiktoken, falls back to chars//4 heuristic
+# tiktoken>=0.7.0
+
 # Optional: cross-encoder reranking (Phase 1)
 # Uncomment to enable RERANK_ENABLED=true
 # sentence-transformers>=3.0.0

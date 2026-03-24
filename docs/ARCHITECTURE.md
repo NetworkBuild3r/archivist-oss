@@ -98,8 +98,16 @@ Response with sources + retrieval_trace + context_status (v1.0)
 
 | Module | Responsibility |
 |--------|---------------|
-| `main.py` | Entry point, Starlette app, startup tasks |
-| `mcp_server.py` | MCP tool definitions and handlers |
+| `main.py` | Entry point, Starlette app, startup tasks, background task tracking |
+| `mcp_server.py` | Thin MCP orchestrator (~30 lines), delegates to `mcp/` package |
+| `mcp/_registry.py` | Central tool registry: aggregates tools and handlers from domain modules |
+| `mcp/_common.py` | Shared helpers: `_rbac_gate`, error/success formatters |
+| `mcp/tools_search.py` | 7 search/retrieval handlers (search, recall, timeline, insights, deref, index, contradictions) |
+| `mcp/tools_storage.py` | 3 storage handlers (store, merge, compress) |
+| `mcp/tools_trajectory.py` | 5 trajectory handlers (log_trajectory, annotate, rate, tips, session_end) |
+| `mcp/tools_skills.py` | 6 skill registry handlers (register, event, lesson, health, relate, dependencies) |
+| `mcp/tools_admin.py` | 7 admin handlers (context_check, namespaces, audit_trail, resolve_uri, retrieval_logs, health_dashboard, batch_heuristic) |
+| `mcp/tools_cache.py` | 2 cache handlers (cache_stats, cache_invalidate) |
 | `rlm_retriever.py` | RLM recursive retrieval pipeline |
 | `reranker.py` | Cross-encoder reranking (optional) |
 | `indexer.py` | File chunking, embedding, Qdrant indexing |
@@ -126,6 +134,9 @@ Response with sources + retrieval_trace + context_status (v1.0)
 | `merge.py` | Memory merge strategies |
 | `versioning.py` | Memory version tracking |
 | `conflict_detection.py` | Pre-write conflict detection |
+| `context_manager.py` | Token budget checks, message splitting, compaction hints |
+| `compaction.py` | Structured conversation compaction (Goal/Progress/Decisions/Next Steps) |
+| `tokenizer.py` | Token counting (tiktoken cl100k_base with chars//4 fallback) |
 
 ## Storage Schema
 
@@ -235,3 +246,20 @@ Response with sources + retrieval_trace + context_status (v1.0)
 - **Skill relation graph** — `skill_relations` table tracks typed edges between skills: `similar_to`, `depend_on`, `compose_with`, `replaced_by`. `archivist_skill_relate` creates/updates relations. `archivist_skill_dependencies` returns the relation subgraph (configurable depth). `archivist_skill_health` now includes `related_skills` (substitutes/dependencies).
 - **Curator agent persona** — `prompts/curator.md` defines the NemoClaw Curator: a memory librarian that checks health, compresses stale memories, resolves contradictions, and reports findings. Designed for cron-scheduled execution in an OpenClaw sandbox.
 - **Curator metrics** — Five new Prometheus metrics instrument the curation pipeline: `archivist_curator_queue_depth` (gauge), `archivist_curator_dedup_decisions_total` (counter by decision label), `archivist_curator_tip_consolidations_total` (counter), `archivist_curator_llm_calls_total` (counter), `archivist_curator_drain_duration_ms` (histogram).
+
+## v1.0.1 operational notes
+
+- **MCP server refactor** — Split monolithic 1,694-line `mcp_server.py` into `src/mcp/` package with 8 modules by domain (search, storage, trajectory, skills, admin, cache) plus shared helpers (`_common.py`) and central registry (`_registry.py`). `mcp_server.py` is now ~30 lines. Handler dispatch uses `dict.get()` instead of 58-branch if/elif chain.
+- **Fix `decay_old_entries()` row count** — Replaced `conn.total_changes` (cumulative for connection) with `cursor.rowcount` (per-statement) in `curator.py`.
+- **Track background tasks** — `startup()` stores task references in `_background_tasks` with named tasks and `done_callback` for crash logging. Same pattern applied to `webhooks.py` `fire_background()`.
+- **Non-root Docker** — Container runs as `archivist` user (UID/GID 1000 by default, configurable via `--build-arg`). Data directories pre-created and chowned.
+
+## v1.1.0 operational notes
+
+- **Token counting** — New `tokenizer.py` with tiktoken cl100k_base (lazy-loaded) + `chars//4` fallback. `count_tokens()` for strings, `count_message_tokens()` for chat message lists with per-message overhead.
+- **Context manager** — New `context_manager.py`: `check_context()` analyzes messages against token budget, returns usage %, hint (ok/compress/critical), split recommendations. `check_memories_budget()` for raw text lists.
+- **Structured compaction** — New `compaction.py`: `compact_structured()` produces Goal/Progress/Decisions/Next Steps/Critical Context JSON via LLM. Supports incremental compaction with `previous_summary`. Falls back to flat summary on parse failure.
+- **`archivist_context_check` MCP tool** — Pre-reasoning context check: agents send messages or memory texts, get token count, budget usage, and compaction hint. Added to `tools_admin.py`.
+- **Upgraded `archivist_compress`** — New `format` parameter (`flat`/`structured`) and `previous_summary` for incremental compaction. Delegates to `compaction` module.
+- **Retriever token counting** — `rlm_retriever.py` budget cap and context-status signaling now use `tokenizer.count_tokens()` instead of `len(text) // 4`.
+- **Config** — `DEFAULT_CONTEXT_BUDGET` env var (default 128000 tokens).

@@ -49,10 +49,29 @@ async def fire(event: str, payload: dict) -> bool:
         return False
 
 
+_pending_fires: set[asyncio.Task] = set()
+
+
+def _log_fire_exception(task: asyncio.Task):
+    """Log unhandled exceptions from fire-and-forget webhook tasks."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error("Webhook task %r failed: %s", task.get_name(), exc)
+
+
 def fire_background(event: str, payload: dict):
-    """Schedule a webhook fire without awaiting it (fire-and-forget)."""
+    """Schedule a webhook fire without awaiting it (fire-and-forget).
+
+    Task references are held in _pending_fires so they are not garbage-collected
+    before completion and any exceptions are logged rather than silently dropped.
+    """
     try:
         loop = asyncio.get_running_loop()
-        loop.create_task(fire(event, payload))
+        task = loop.create_task(fire(event, payload), name=f"webhook_{event}")
+        _pending_fires.add(task)
+        task.add_done_callback(_log_fire_exception)
+        task.add_done_callback(_pending_fires.discard)
     except RuntimeError:
         pass

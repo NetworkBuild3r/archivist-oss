@@ -1,5 +1,6 @@
 """Autonomous curator — consolidates daily notes, extracts entities, detects contradictions."""
 
+import hashlib
 import os
 import re
 import json
@@ -108,8 +109,17 @@ async def process_extraction(data: dict, agent_id: str, source_file: str):
             add_relationship(sid, tid, rtype, evidence, agent_id)
 
 
+def _file_checksum(text: str) -> str:
+    """SHA-256 of file content for change detection."""
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
 async def curate_cycle():
-    """Run one curation cycle: scan new files, extract knowledge, update graph."""
+    """Run one curation cycle: scan new files, extract knowledge, update graph.
+
+    Uses mtime as a fast first pass, then content checksum to skip files
+    whose content hasn't actually changed (e.g. touch, metadata-only update).
+    """
     last_run = get_curator_state("last_curate_time")
     if last_run:
         cutoff = datetime.fromisoformat(last_run)
@@ -118,6 +128,7 @@ async def curate_cycle():
 
     now = datetime.now(timezone.utc)
     processed = 0
+    skipped_unchanged = 0
 
     for root, _dirs, files in os.walk(MEMORY_ROOT):
         for fname in files:
@@ -136,6 +147,13 @@ async def curate_cycle():
                     continue
 
                 rel = os.path.relpath(filepath, MEMORY_ROOT)
+
+                current_checksum = _file_checksum(text)
+                stored_checksum = get_curator_state(f"checksum:{rel}")
+                if stored_checksum == current_checksum:
+                    skipped_unchanged += 1
+                    continue
+
                 parts = Path(rel).parts
                 agent_id = ""
                 if "agents" in parts:
@@ -154,11 +172,13 @@ async def curate_cycle():
 
                 await index_file(filepath)
 
+                set_curator_state(f"checksum:{rel}", current_checksum)
+
             except Exception as e:
                 logger.error("Curator failed on %s: %s", filepath, e)
 
     set_curator_state("last_curate_time", now.isoformat())
-    logger.info("Curator cycle complete: %d files processed", processed)
+    logger.info("Curator cycle complete: %d files processed, %d skipped (unchanged)", processed, skipped_unchanged)
     return processed
 
 
@@ -167,11 +187,11 @@ async def decay_old_entries():
     with GRAPH_WRITE_LOCK:
         conn = get_db()
         cutoff = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
-        conn.execute(
+        cur = conn.execute(
             "UPDATE facts SET is_active=0 WHERE is_active=1 AND created_at < ? AND superseded_by IS NULL",
             (cutoff,),
         )
-        affected = conn.total_changes
+        affected = cur.rowcount
         conn.commit()
         conn.close()
     if affected:
@@ -179,12 +199,17 @@ async def decay_old_entries():
 
 
 async def curator_loop():
-    """Background loop running curation cycles."""
+    """Background loop running curation cycles with exponential backoff on failure."""
+    base_interval = CURATOR_INTERVAL_MINUTES * 60
+    backoff_sec = base_interval
+    max_backoff = 3600
     logger.info("Curator loop started (interval: %d min)", CURATOR_INTERVAL_MINUTES)
     while True:
         try:
             await curate_cycle()
             await decay_old_entries()
+            backoff_sec = base_interval
         except Exception as e:
-            logger.error("Curator cycle error: %s", e)
-        await asyncio.sleep(CURATOR_INTERVAL_MINUTES * 60)
+            logger.error("Curator cycle error (next retry in %ds): %s", backoff_sec, e)
+            backoff_sec = min(backoff_sec * 2, max_backoff)
+        await asyncio.sleep(backoff_sec)

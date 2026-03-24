@@ -160,6 +160,18 @@ async def handle_invalidate(_request):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+_background_tasks: list[asyncio.Task] = []
+
+
+def _log_task_exception(task: asyncio.Task):
+    """Callback for background tasks — logs unhandled exceptions instead of silently dropping them."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.exception("Background task %r crashed", task.get_name(), exc_info=exc)
+
+
 async def startup():
     """Run on app startup: init DB, load RBAC, ensure Qdrant collection, start background tasks."""
     logger.info("Archivist v1.0.0 starting up...")
@@ -172,11 +184,16 @@ async def startup():
 
     ensure_qdrant_collection()
 
-    asyncio.create_task(run_initial_index())
-    asyncio.create_task(file_watcher())
-    asyncio.create_task(curator_loop())
-    asyncio.create_task(curator_queue_drain_loop())
-    logger.info("Background tasks started")
+    for coro, name in [
+        (run_initial_index(), "initial_index"),
+        (file_watcher(), "file_watcher"),
+        (curator_loop(), "curator_loop"),
+        (curator_queue_drain_loop(), "curator_queue_drain"),
+    ]:
+        t = asyncio.create_task(coro, name=name)
+        t.add_done_callback(_log_task_exception)
+        _background_tasks.append(t)
+    logger.info("Background tasks started: %s", [t.get_name() for t in _background_tasks])
 
 
 async def curator_queue_drain_loop():

@@ -14,21 +14,28 @@ logger = logging.getLogger("archivist.graph_retrieval")
 
 
 def extract_entity_mentions(query: str) -> list[dict]:
-    """Find entities from the KG whose names appear in the query."""
-    words = set(query.lower().split())
+    """Find entities from the KG whose names appear in the query.
+
+    Uses N-gram expansion (1, 2, 3-word windows) to match multi-word
+    entities like "Argo CD", "hot cache", or "Kubernetes cluster".
+    Longer phrases are tried first so multi-word matches take priority.
+    """
+    tokens = query.lower().split()
     results = []
-    for word in words:
-        if len(word) < 3:
-            continue
-        found = search_entities(word, limit=3)
-        results.extend(found)
-    seen = set()
-    deduped = []
-    for e in results:
-        if e["id"] not in seen:
-            seen.add(e["id"])
-            deduped.append(e)
-    return deduped
+    seen: set[int] = set()
+
+    for n in (3, 2, 1):
+        for i in range(len(tokens) - n + 1):
+            phrase = " ".join(tokens[i:i + n])
+            if len(phrase) < 2:
+                continue
+            found = search_entities(phrase, limit=3)
+            for e in found:
+                if e["id"] not in seen:
+                    seen.add(e["id"])
+                    results.append(e)
+
+    return results
 
 
 def graph_context_for_entities(entity_ids: list[int], depth: int = 1) -> list[dict]:

@@ -118,75 +118,43 @@ def test_cache_stats():
 
 # ── Retrieval log ────────────────────────────────────────────────────────────
 
-_test_conn = None
-
-
-def _patch_retrieval_log_db():
-    global _test_conn
-    _test_conn = sqlite3.connect(":memory:")
-    _test_conn.row_factory = sqlite3.Row
-    import graph
-    import retrieval_log as rl
-    graph._original_get_db = graph.get_db
-    rl._original_get_db = rl.get_db
-    graph.get_db = lambda: _test_conn
-    rl.get_db = lambda: _test_conn
-    rl._SCHEMA_APPLIED = False
-
-
-def _unpatch_retrieval_log_db():
-    import graph
-    import retrieval_log as rl
-    graph.get_db = graph._original_get_db
-    rl.get_db = rl._original_get_db
-    if _test_conn:
-        _test_conn.close()
-
 
 def test_retrieval_log_roundtrip():
-    _patch_retrieval_log_db()
-    try:
-        from retrieval_log import log_retrieval, get_retrieval_logs
+    from retrieval_log import log_retrieval, get_retrieval_logs
 
-        lid = log_retrieval(
-            agent_id="agent-x",
-            query="test query",
-            namespace="ns1",
-            tier="l2",
-            memory_type="",
-            retrieval_trace={"coarse_hits": 10, "after_threshold": 5},
-            result_count=3,
-            cache_hit=False,
-            duration_ms=150,
-        )
-        assert lid
+    lid = log_retrieval(
+        agent_id="agent-x",
+        query="test query",
+        namespace="ns1",
+        tier="l2",
+        memory_type="",
+        retrieval_trace={"coarse_hits": 10, "after_threshold": 5},
+        result_count=3,
+        cache_hit=False,
+        duration_ms=150,
+    )
+    assert lid
 
-        logs = get_retrieval_logs(agent_id="agent-x")
-        assert len(logs) == 1
-        assert logs[0]["query"] == "test query"
-        assert logs[0]["duration_ms"] == 150
-        assert logs[0]["retrieval_trace"]["coarse_hits"] == 10
-        assert logs[0]["cache_hit"] is False
-    finally:
-        _unpatch_retrieval_log_db()
+    logs = get_retrieval_logs(agent_id="agent-x")
+    assert len(logs) == 1
+    assert logs[0]["query"] == "test query"
+    assert logs[0]["duration_ms"] == 150
+    assert logs[0]["retrieval_trace"]["coarse_hits"] == 10
+    assert logs[0]["cache_hit"] is False
 
 
 def test_retrieval_stats():
-    _patch_retrieval_log_db()
-    try:
-        from retrieval_log import log_retrieval, get_retrieval_stats
+    from retrieval_log import log_retrieval, get_retrieval_stats
 
-        for i in range(5):
-            log_retrieval("a1", f"q{i}", "ns", "l2", "", {"hits": i}, i, cache_hit=(i % 2 == 0), duration_ms=100 + i * 10)
+    for i in range(5):
+        log_retrieval("a1", f"q{i}", "ns", "l2", "", {"hits": i}, i, cache_hit=(i % 2 == 0), duration_ms=100 + i * 10)
 
-        stats = get_retrieval_stats("a1")
-        assert stats["total"] == 5
-        assert stats["cache_hits"] == 3
-        assert stats["cache_hit_rate"] == 0.6
-        assert stats["avg_duration_ms"] is not None
-        assert len(stats["top_agents"]) >= 1
-    finally:
-        _unpatch_retrieval_log_db()
+    stats = get_retrieval_stats("a1")
+    assert stats["total"] == 5
+    assert stats["cache_hits"] == 3
+    assert stats["cache_hit_rate"] == 0.6
+    assert stats["avg_duration_ms"] is not None
+    assert len(stats["top_agents"]) >= 1
 
 
 # ── Consistency semantics ────────────────────────────────────────────────────

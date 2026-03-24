@@ -48,7 +48,7 @@ def chunk_text_hierarchical(
 
     for pi, parent in enumerate(parent_chunks):
         h = hashlib.md5(f"{filepath}\0{pi}\0{parent}".encode()).hexdigest()
-        parent_id = f"parent_{h[:16]}"
+        parent_id = f"{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:32]}"
         result.append({
             "id": parent_id,
             "parent_id": None,
@@ -58,8 +58,10 @@ def chunk_text_hierarchical(
 
         child_chunks = chunk_text(parent, size=child_size, overlap=child_overlap)
         for ci, child in enumerate(child_chunks):
+            ch = hashlib.md5(f"{filepath}\0{pi}\0{ci}\0{child}".encode()).hexdigest()
+            child_id = f"{ch[:8]}-{ch[8:12]}-{ch[12:16]}-{ch[16:20]}-{ch[20:32]}"
             result.append({
-                "id": f"{parent_id}_child_{ci}",
+                "id": child_id,
                 "parent_id": parent_id,
                 "content": child,
                 "is_parent": False,

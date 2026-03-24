@@ -1,6 +1,56 @@
 # Archivist Roadmap
 
-## Current: v1.0.0 (Phase 7 — Memory Intelligence Layer)
+## Current: v1.5.0 (Journal exports & review fixes)
+
+### ✅ v1.5.0 — Journal exports & post-deploy review fixes
+- **Markdown journal exports** — New `journal.py` module writes daily `YYYY-MM-DD.md` files to `JOURNAL_DIR` on every `archivist_store`. Human-readable, greppable, editable. Secondary to Qdrant — losing the journal has no effect on retrieval. Config: `JOURNAL_ENABLED` (default true), `JOURNAL_DIR` (default `/data/archivist/journal`).
+- **Webhook crash logging** — `fire_background()` now logs exceptions via `_log_fire_exception` callback (previously only stored task refs without logging failures).
+- **Remove dead `src/mcp/` directory** — Empty directory left over from `handlers/` rename.
+- **Integration test markers** — `test_dispatch.py` marked with `@pytest.mark.integration` so the marker defined in `pyproject.toml` is actually exercised.
+
+### ✅ v1.4.1 — Code review & bug fixes
+- **CRITICAL: Rename `src/mcp/` → `src/handlers/`** — The `src/mcp/` package shadowed the pip-installed `mcp` package, preventing `from mcp.types import Tool` and `from mcp.server import Server` from resolving. Renamed to `handlers/` to eliminate the conflict. `mcp_server.py` updated to import from `handlers._registry`.
+- **Fix `graph.py` missing `import logging`** — FTS5 error handlers used `logging.getLogger()` but `logging` was never imported. Any FTS failure would raise `NameError` instead of being gracefully logged.
+- **Fix `tokenizer.py` empty message list** — `count_message_tokens([])` returned 2 (reply priming) instead of 0. Added early return for empty input.
+- **Clean dead code** — Removed unused backward-scan loop in `context_manager.py`, unused imports in `tools_admin.py` (`search_entities`, `is_permissive_mode`, `_ct`), redundant `json.JSONDecodeError` in `compaction.py` exception handler.
+- **Fix 3 test assertions** — Relationship confidence test expected >1.0 but SQL uses `min(confidence+0.1, 1.0)` (caps at 1.0). Compaction fallback test missing import. Token counter empty list test updated.
+
+### ✅ v1.4.0 — Documentation & test coverage
+- **Full MCP tool documentation** — `CURSOR_SKILL.md` now documents all 30 tools with parameters, types, defaults, and examples. `REFERENCE.md` updated with condensed tool table and fleet agent mappings.
+- **pytest infrastructure** — `pyproject.toml` with `pythonpath`, `asyncio_mode=auto`, markers. Root `conftest.py` with shared fixtures: env isolation (`_isolate_env`), in-memory `graph_db`, `rbac_config` from test YAML, `mock_llm`.
+- **RBAC tests** (`test_rbac.py`, 13 tests) — `check_access` for own/other/unknown namespaces, `all` wildcard, namespace resolution, agent filtering, `list_accessible_namespaces` flags, permissive fallback mode.
+- **Graph tests** (`test_graph.py`, 14 tests) — Entity CRUD (create, upsert, case-insensitive, search, limit), facts, relationships with confidence, curator_state, FTS5 (upsert, namespace filter, delete by file).
+- **MCP dispatch tests** (`test_dispatch.py`, 8 tests) — Registry completeness (30+ tools, unique names, schemas, descriptions, expected set), unknown tool error, `archivist_context_check` and `archivist_namespaces` integration.
+- **New module tests** (`test_new_modules.py`, 20 tests) — Tokenizer (count_tokens, message tokens, fallback), context_manager (under/over budget, empty, memories), compaction (flat, structured, fallback, format), fts_search (query sanitization, disabled, fusion), N-gram entity extraction, curator checksum.
+
+### ✅ v1.3.0 — Curator improvements
+- **Content checksum guard** — `curate_cycle()` now computes `sha256(content)` and compares against `curator_state` before processing. Files with unchanged content are skipped even if mtime changed. Checksums written after successful processing so interrupted cycles retry.
+- **N-gram entity extraction** — `extract_entity_mentions()` upgraded from single-word matching to 3/2/1-word N-gram windows. Matches multi-word entities ("Argo CD", "hot cache"), short names (min 2 chars instead of 3), and compound phrases. Longer phrases tried first for priority.
+- **Curator loop backoff** — Exponential backoff on failure (2x, capped at 1 hour), reset to base interval on success. Prevents hammering failing dependencies.
+
+### ✅ v1.2.0 — BM25/FTS5 hybrid search (ReMe-inspired)
+- **SQLite FTS5 schema** — New `memory_chunks` table + `memory_fts` FTS5 virtual table (porter stemming, unicode61 tokenizer) in `graph.py`. Created on `init_schema()`.
+- **Dual-write indexing** — `indexer.index_file()` and `tools_storage._handle_store()` sync chunks to FTS5 after Qdrant upsert when `BM25_ENABLED=true`. `delete_file_points()` cleans both stores.
+- **FTS search module** — New `fts_search.py`: `search_bm25()` with FTS5 query sanitization, `merge_vector_and_bm25()` with normalized weighted fusion (`VECTOR_WEIGHT * norm_v + BM25_WEIGHT * norm_b`).
+- **Retriever integration** — BM25 results fused into `recursive_retrieve()` as "Stage 1-bm25" between vector search and graph augmentation. Full pipeline (dedup, decay, threshold, rerank) runs on fused results.
+- **Retrieval trace** — `bm25_enabled` and `bm25_hits` fields added to `retrieval_trace` for observability.
+- **Config** — `BM25_ENABLED` (default true), `BM25_WEIGHT` (default 0.3), `VECTOR_WEIGHT` (default 0.7).
+
+### ✅ v1.1.0 — Context window management & structured compaction (ReMe-inspired)
+- **Token counting module** — New `tokenizer.py` with tiktoken cl100k_base (lazy-loaded) + `chars//4` fallback. `count_tokens()` for strings, `count_message_tokens()` for chat message lists with per-message overhead.
+- **Context manager** — New `context_manager.py`: `check_context()` analyzes messages against token budget, returns usage %, hint (ok/compress/critical), split recommendations. `check_memories_budget()` for raw text lists.
+- **Structured compaction** — New `compaction.py`: `compact_structured()` produces Goal/Progress/Decisions/Next Steps/Critical Context JSON via LLM. Supports incremental compaction with `previous_summary`. Falls back to flat summary on parse failure.
+- **`archivist_context_check` MCP tool** — Pre-reasoning context check: agents send messages or memory texts, get token count, budget usage, and compaction hint. Added to `tools_admin.py`.
+- **Upgraded `archivist_compress`** — New `format` parameter (`flat`/`structured`) and `previous_summary` for incremental compaction. Delegates to `compaction` module. Structured responses include full JSON breakdown.
+- **Retriever token counting** — `rlm_retriever.py` budget cap and context-status signaling now use `tokenizer.count_tokens()` instead of `len(text) // 4`.
+- **Config** — `DEFAULT_CONTEXT_BUDGET` env var (default 128000 tokens).
+
+### ✅ v1.0.1 — Bug fixes, refactor & hardening (ReMe comparison review)
+- **Split monolithic `mcp_server.py`** — Refactored 1,694-line single file into `src/mcp/` package with 8 modules by domain (search, storage, trajectory, skills, admin, cache) plus shared helpers and central registry. `mcp_server.py` is now ~30 lines. Handler dispatch uses `dict.get()` instead of 58-branch if/elif chain.
+- **Fix `decay_old_entries()` row count** — Replaced `conn.total_changes` (cumulative for connection) with `cursor.rowcount` (per-statement) in `curator.py`.
+- **Track background tasks** — `startup()` now stores task references in `_background_tasks` with named tasks and `done_callback` for crash logging. Same pattern applied to `webhooks.py` `fire_background()`.
+- **Non-root Docker** — Container runs as `archivist` user (UID/GID 1000 by default, configurable via `--build-arg`). Data directories pre-created and chowned.
+- **Inspiration doc** — New `docs/INSPIRATION.md` tracking design influences from ReMe and other projects.
 
 ### ✅ v1.0.0 — Memory Intelligence Layer (Curator)
 - **Write-ahead curator queue** — Background `curator_queue` SQLite table stages dedup merges, archival, tip consolidation, and hotness updates. Periodic drain loop applies ops during idle, avoiding lock contention on the hot path.
@@ -90,13 +140,18 @@
 ---
 
 ## Future considerations
+
+### Near-term
+- End-to-end integration tests requiring Qdrant + LLM (marked `@pytest.mark.integration`)
+
+### Longer-term
 - Migrate SSE → Streamable HTTP transport for lower latency
 - PostgreSQL option for graph/metadata at scale
 - Streaming partial search results
 - Local embedding models (sentence-transformers)
-- Memory compaction (periodic LLM summarization)
 - Multi-collection Qdrant support
 - Web UI dashboard
+- Formal benchmarks (LoCoMo, HaluMem)
 
 ---
 

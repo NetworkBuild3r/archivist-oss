@@ -21,7 +21,9 @@ from config import (
     TIERED_CONTEXT_ENABLED,
 )
 from chunking import chunk_text, chunk_text_hierarchical
+from config import BM25_ENABLED
 from embeddings import embed_batch
+from graph import upsert_fts_chunk, delete_fts_chunks_by_file
 from rbac import get_namespace_for_agent, get_namespace_config
 from tiering import generate_tiers
 
@@ -86,9 +88,9 @@ def _extract_metadata(filepath: str) -> dict:
 # ── Point ID generation ──────────────────────────────────────────────────────
 
 def _point_id(filepath: str, chunk_idx: int) -> str:
-    """Deterministic ID from file path + chunk index."""
+    """Deterministic UUID from file path + chunk index."""
     h = hashlib.md5(f"{filepath}:{chunk_idx}".encode()).hexdigest()
-    return h
+    return f"{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:32]}"
 
 
 def _compute_ttl(namespace: str, importance: float = 0.5) -> int | None:
@@ -121,6 +123,8 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
 
     if len(text.strip()) < 20:
         return 0
+
+    await delete_file_points(filepath)
 
     meta = _extract_metadata(filepath)
     ns_config = get_namespace_config(meta["namespace"])
@@ -210,13 +214,28 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
 
     if points:
         client.upsert(collection_name=QDRANT_COLLECTION, points=points)
-        logger.info("Indexed %s: %d chunks (ns=%s, hierarchical=%s)", meta["file_path"], len(points), meta["namespace"], hierarchical)
+
+        if BM25_ENABLED:
+            for p in points:
+                upsert_fts_chunk(
+                    qdrant_id=str(p.id),
+                    text=p.payload.get("text", ""),
+                    file_path=p.payload.get("file_path", ""),
+                    chunk_index=p.payload.get("chunk_index", 0),
+                    agent_id=p.payload.get("agent_id", ""),
+                    namespace=p.payload.get("namespace", ""),
+                    date=p.payload.get("date", ""),
+                    memory_type=p.payload.get("memory_type", "general"),
+                )
+
+        logger.info("Indexed %s: %d chunks (ns=%s, hierarchical=%s, fts=%s)",
+                     meta["file_path"], len(points), meta["namespace"], hierarchical, BM25_ENABLED)
 
     return len(points)
 
 
 async def delete_file_points(filepath: str):
-    """Remove all points for a given file path."""
+    """Remove all points for a given file path from Qdrant and FTS5."""
     rel = os.path.relpath(filepath, MEMORY_ROOT)
     client = _client()
     client.delete(
@@ -225,6 +244,8 @@ async def delete_file_points(filepath: str):
             must=[FieldCondition(key="file_path", match=MatchValue(value=rel))]
         ),
     )
+    if BM25_ENABLED:
+        delete_fts_chunks_by_file(rel)
 
 
 _SKIP_DIRS = {"node_modules", ".git", ".cache", "__pycache__", ".pnpm", "dist", "build"}

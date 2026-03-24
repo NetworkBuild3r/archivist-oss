@@ -18,6 +18,7 @@ from config import (
     VECTOR_SEARCH_LIMIT,
     GRAPH_RETRIEVAL_ENABLED, MULTI_HOP_DEPTH, TEMPORAL_DECAY_HALFLIFE_DAYS,
     HOT_CACHE_ENABLED,
+    BM25_ENABLED,
 )
 from embeddings import embed_text
 from llm import llm_query
@@ -29,7 +30,9 @@ from graph_retrieval import (
     apply_temporal_decay,
     merge_graph_context_into_results,
 )
+from fts_search import search_bm25, merge_vector_and_bm25
 from tiering import select_tier
+from tokenizer import count_tokens
 from trajectory import get_outcome_adjustments
 from hotness import apply_hotness_to_results
 import hot_cache
@@ -55,10 +58,13 @@ def _retrieval_trace(
     tier: str = "l2",
     outcome_adjustments: int = 0,
     context_status: dict | None = None,
+    bm25_hits: int = 0,
 ) -> dict:
     trace = {
         "vector_search_limit": vector_limit,
         "coarse_hits": coarse_count,
+        "bm25_enabled": BM25_ENABLED,
+        "bm25_hits": bm25_hits,
         "after_dedupe": deduped_count,
         "threshold": threshold,
         "after_threshold": after_threshold_count,
@@ -265,6 +271,20 @@ async def recursive_retrieve(
     )
     n_coarse = len(coarse)
 
+    # Stage 1-bm25: BM25 keyword search + fusion (v1.2)
+    n_bm25 = 0
+    if BM25_ENABLED:
+        bm25_hits = await search_bm25(
+            query,
+            namespace=namespace,
+            agent_id=agent_id if not agent_ids else "",
+            memory_type=memory_type,
+            limit=vector_limit,
+        )
+        n_bm25 = len(bm25_hits)
+        if bm25_hits:
+            coarse = merge_vector_and_bm25(coarse, bm25_hits)
+
     # Stage 1a: Graph augmentation (v0.5)
     if GRAPH_RETRIEVAL_ENABLED:
         entities = extract_entity_mentions(query)
@@ -296,6 +316,7 @@ async def recursive_retrieve(
                 graph_entities_found=n_graph_entities,
                 graph_context_items=n_graph_items,
                 tier=tier,
+                bm25_hits=n_bm25,
             ),
         }
 
@@ -336,6 +357,7 @@ async def recursive_retrieve(
                 graph_context_items=n_graph_items,
                 temporal_decay_applied=temporal_applied,
                 tier=tier,
+                bm25_hits=n_bm25,
             ),
         }
 
@@ -366,12 +388,12 @@ async def recursive_retrieve(
     # Cap how many chunks we refine (per-request limit)
     enriched = enriched[:limit]
 
-    # If max_tokens specified, further cap by approximate token budget
+    # If max_tokens specified, further cap by token budget
     if max_tokens and max_tokens > 0:
         budget = 0
         capped = []
         for r in enriched:
-            chunk_toks = len(select_tier(r, tier)) // 4
+            chunk_toks = count_tokens(select_tier(r, tier))
             if budget + chunk_toks > max_tokens:
                 break
             budget += chunk_toks
@@ -380,8 +402,8 @@ async def recursive_retrieve(
 
     n_refine = len(enriched)
 
-    # Context-status signaling (v1.0)
-    result_tokens_approx = sum(len(select_tier(r, tier)) // 4 for r in enriched)
+    # Context-status signaling (v1.0, upgraded v1.1 with tokenizer)
+    result_tokens_approx = sum(count_tokens(select_tier(r, tier)) for r in enriched)
     budget_tokens = max_tokens if max_tokens and max_tokens > 0 else None
     if budget_tokens:
         budget_used_pct = round(result_tokens_approx / budget_tokens * 100, 1)
@@ -410,6 +432,7 @@ async def recursive_retrieve(
         tier=tier,
         outcome_adjustments=n_outcome_adj,
         context_status=_ctx_status,
+        bm25_hits=n_bm25,
     )
 
     if not refine:

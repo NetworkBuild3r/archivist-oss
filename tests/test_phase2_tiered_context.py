@@ -48,36 +48,33 @@ def test_temporal_decay_preserves_original():
 # ── contradiction detection ──────────────────────────────────────────────────
 
 def test_detect_contradictions_opposing_keywords():
-    from graph_retrieval import detect_contradictions
-    import graph
+    import graph_retrieval
 
-    original_fn = graph.get_entity_facts
-    graph.get_entity_facts = lambda eid: [
+    original_fn = graph_retrieval.get_entity_facts
+    graph_retrieval.get_entity_facts = lambda eid: [
         {"fact_text": "Service is enabled and running", "agent_id": "agent-a", "created_at": "2026-01-01"},
         {"fact_text": "Service is disabled", "agent_id": "agent-b", "created_at": "2026-01-02"},
     ]
     try:
-        from graph_retrieval import detect_contradictions as dc
-        contras = dc(1)
+        contras = graph_retrieval.detect_contradictions(1)
         assert len(contras) >= 1
         assert "enabled" in contras[0]["trigger"] or "disabled" in contras[0]["trigger"]
     finally:
-        graph.get_entity_facts = original_fn
+        graph_retrieval.get_entity_facts = original_fn
 
 def test_detect_contradictions_same_agent_skipped():
-    from graph_retrieval import detect_contradictions
-    import graph
+    import graph_retrieval
 
-    original_fn = graph.get_entity_facts
-    graph.get_entity_facts = lambda eid: [
+    original_fn = graph_retrieval.get_entity_facts
+    graph_retrieval.get_entity_facts = lambda eid: [
         {"fact_text": "Service enabled", "agent_id": "agent-a", "created_at": "2026-01-01"},
         {"fact_text": "Service disabled", "agent_id": "agent-a", "created_at": "2026-01-02"},
     ]
     try:
-        contras = detect_contradictions(1)
+        contras = graph_retrieval.detect_contradictions(1)
         assert len(contras) == 0
     finally:
-        graph.get_entity_facts = original_fn
+        graph_retrieval.get_entity_facts = original_fn
 
 # ── retrieval trace new fields ───────────────────────────────────────────────
 

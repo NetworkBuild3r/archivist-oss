@@ -1,15 +1,21 @@
-"""Embedding client — calls any OpenAI-compatible /v1/embeddings endpoint."""
+"""Embedding client — calls any OpenAI-compatible /v1/embeddings endpoint.
+
+Supports NVIDIA NIM endpoints which require extra fields (input_type, truncate).
+Set EMBED_PROVIDER=nvidia in .env to enable NVIDIA-specific payload.
+"""
 
 import asyncio
 import logging
+import os
 import httpx
-from config import EMBED_URL, LLM_API_KEY, EMBED_MODEL
+from config import EMBED_URL, EMBED_API_KEY, EMBED_MODEL
 
 logger = logging.getLogger("archivist.embeddings")
 
 _MAX_RETRIES = 3
 _RETRY_DELAYS = [1, 2, 4]
 _MAX_EMBED_CHARS = 1200
+_IS_NVIDIA = os.getenv("EMBED_PROVIDER", "").lower() == "nvidia" or "nvidia" in EMBED_URL.lower()
 
 
 async def embed_text(text: str, model: str = EMBED_MODEL) -> list[float]:
@@ -19,13 +25,19 @@ async def embed_text(text: str, model: str = EMBED_MODEL) -> list[float]:
     for attempt in range(_MAX_RETRIES):
         try:
             async with httpx.AsyncClient(timeout=60) as client:
+                payload: dict = {"model": model, "input": text}
+                if _IS_NVIDIA:
+                    payload["input_type"] = "passage"
+                    payload["truncate"] = "END"
+                    payload["encoding_format"] = "float"
+
                 resp = await client.post(
                     f"{EMBED_URL}/v1/embeddings",
                     headers={
-                        "Authorization": f"Bearer {LLM_API_KEY}",
+                        "Authorization": f"Bearer {EMBED_API_KEY}",
                         "Content-Type": "application/json",
                     },
-                    json={"model": model, "input": text},
+                    json=payload,
                 )
                 resp.raise_for_status()
                 data = resp.json()

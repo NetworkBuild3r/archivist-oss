@@ -19,55 +19,12 @@ if src not in sys.path:
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
-
-def _make_test_db():
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-_original_get_db = None
-
-
-def _patch_dbs():
-    global _original_get_db
-    import graph
-    _original_get_db = graph.get_db
-    mem_db = _make_test_db()
-    graph.get_db = lambda: mem_db
-    graph.init_schema()
-
-    import curator_queue
-    curator_queue._SCHEMA_APPLIED = False
-
-    import trajectory
-    trajectory._SCHEMA_APPLIED = False
-
-    import skills
-    skills._SCHEMA_APPLIED = False
-
-    import hotness
-    hotness._SCHEMA_APPLIED = False
-
-    return mem_db
-
-
-def _unpatch_dbs():
-    import graph
-    if _original_get_db:
-        graph.get_db = _original_get_db
+# DB isolation is handled by conftest._isolate_env (temp file DB, schema reset).
 
 
 # ── Curator Queue ────────────────────────────────────────────────────────────
 
 class TestCuratorQueue:
-    def setup_method(self):
-        self.db = _patch_dbs()
-        import curator_queue
-        curator_queue._SCHEMA_APPLIED = False
-
-    def teardown_method(self):
-        _unpatch_dbs()
 
     def test_enqueue_returns_uuid(self):
         from curator_queue import enqueue
@@ -146,13 +103,6 @@ class TestHotnessScoring:
 # ── Skill Relations ──────────────────────────────────────────────────────────
 
 class TestSkillRelations:
-    def setup_method(self):
-        self.db = _patch_dbs()
-        import skills
-        skills._SCHEMA_APPLIED = False
-
-    def teardown_method(self):
-        _unpatch_dbs()
 
     def test_add_and_get_relation(self):
         from skills import register_skill, add_skill_relation, get_skill_relations
@@ -201,13 +151,6 @@ class TestSkillRelations:
 # ── Trajectory (tip consolidation schema) ────────────────────────────────────
 
 class TestTipConsolidationSchema:
-    def setup_method(self):
-        self.db = _patch_dbs()
-        import trajectory
-        trajectory._SCHEMA_APPLIED = False
-
-    def teardown_method(self):
-        _unpatch_dbs()
 
     def test_tips_table_has_negative_example_column(self):
         from trajectory import _ensure_trajectory_schema
