@@ -5,4 +5,10 @@ asyncio_mode = "auto"
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: marks integration tests requiring external services",
+    "benchmark: marks performance benchmarks (run with 'pytest benchmarks/')",
 ]
+
+[tool.pytest-benchmark]
+disable_gc = true
+warmup = true
+min_rounds = 5

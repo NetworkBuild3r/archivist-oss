@@ -1,0 +1,1268 @@
+[
+  {
+    "id": 1,
+    "query": "What do we know about cluster?",
+    "expected_keywords": [
+      "1.29",
+      "12",
+      "1.",
+      "The",
+      "Kubernetes"
+    ],
+    "expected_answer": "The production Kubernetes cluster runs v1.29 across 12 nodes in us-east-1.",
+    "topic": "kubernetes",
+    "query_type": "single_hop",
+    "difficulty": "easy"
+  },
+  {
+    "id": 2,
+    "query": "Describe the kubernetes configuration.",
+    "expected_keywords": [
+      "70%",
+      "Pod"
+    ],
+    "expected_answer": "Pod autoscaling is configured with HPA targeting 70% CPU utilization.",
+    "topic": "kubernetes",
+    "query_type": "single_hop",
+    "difficulty": "easy"
+  },
+  {
+    "id": 3,
+    "query": "Describe the kubernetes configuration.",
+    "expected_keywords": [
+      "60%",
+      "The"
+    ],
+    "expected_answer": "The staging cluster uses spot instances to reduce cost by 60%.",
+    "topic": "kubernetes",
+    "query_type": "single_hop",
+    "difficulty": "easy"
+  },
+  {
+    "id": 4,
+    "query": "What do we know about cluster?",
+    "expected_keywords": [
+      "Istio"
+    ],
+    "expected_answer": "Istio service mesh is enabled for mTLS between all services.",
+    "topic": "kubernetes",
+    "query_type": "single_hop",
+    "difficulty": "easy"
+  },
+  {
+    "id": 5,
+    "query": "Tell me the details about deployment.",
+    "expected_keywords": [
+      "100",
+      "Node",
+      "Karpenter",
+      "Us"
+    ],
+    "expected_answer": "Node pool scaling uses Karpenter with provisioner limits of 100 CPUs.",
+    "topic": "kubernetes",
+    "query_type": "single_hop",
+    "difficulty": "easy"
+  },
+  {
+    "id": 6,
+    "query": "Describe the cicd configuration.",
+    "expected_keywords": [
+      "15",
+      "The",
+      "Git",
+      "Lab"
+    ],
+    "expected_answer": "The CI pipeline runs on GitLab CI with a 15-minute timeout per job.",
+    "topic": "cicd",
+    "query_type": "single_hop",
+    "difficulty": "easy"
+  },
+  {
+    "id": 7,
+    "query": "Describe the cicd configuration.",
+    "expected_keywords": [
+      "Deployment",
+      "Argo"
+    ],
+    "expected_answer": "Deployment uses ArgoCD with automated sync enabled for staging.",
+    "topic": "cicd",
+    "query_type": "single_hop",
+    "difficulty": "easy"
+  },
+  {
+    "id": 8,
+    "query": "Describe the cicd configuration.",
+    "expected_keywords": [
+      "Production"
+    ],
+    "expected_answer": "Production deployments require manual approval from the chief agent.",
+    "topic": "cicd",
+    "query_type": "single_hop",
+    "difficulty": "easy"
+  },
+  {
+    "id": 9,
+    "query": "Describe the cicd configuration.",
+    "expected_keywords": [
+      "5",
+      "The",
+      "Docker"
+    ],
+    "expected_answer": "The build pipeline caches Docker layers to reduce build time to under 5 minutes.",
+    "topic": "cicd",
+    "query_type": "single_hop",
+    "difficulty": "easy"
+  },
+  {
+    "id": 10,
+    "query": "Tell me the details about pipeline.",
+    "expected_keywords": [
+      "Release"
+    ],
+    "expected_answer": "Release tags follow semantic versioning with automatic changelog generation.",
+    "topic": "cicd",
+    "query_type": "single_hop",
+    "difficulty": "easy"
+  },
+  {
+    "id": 11,
+    "query": "Describe the monitoring configuration.",
+    "expected_keywords": [
+      "15",
+      "Prometheus"
+    ],
+    "expected_answer": "Prometheus scrapes metrics every 15 seconds from all services.",
+    "topic": "monitoring",
+    "query_type": "single_hop",
+    "difficulty": "easy"
+  },
+  {
+    "id": 12,
+    "query": "What is the current monitoring setup?",
+    "expected_keywords": [
+      "99",
+      "500",
+      "99.9%",
+      "The"
+    ],
+    "expected_answer": "The SLO for API latency is p99 under 500ms with 99.9% availability.",
+    "topic": "monitoring",
+    "query_type": "single_hop",
+    "difficulty": "easy"
+  },
+  {
+    "id": 13,
+    "query": "Tell me the details about SLO.",
+    "expected_keywords": [
+      "Grafana"
+    ],
+    "expected_answer": "Grafana dashboards are provisioned from code stored in the infra repo.",
+    "topic": "monitoring",
+    "query_type": "single_hop",
+    "difficulty": "easy"
+  },
+  {
+    "id": 14,
+    "query": "Describe the monitoring configuration.",
+    "expected_keywords": [
+      "1%",
+      "5",
+      "Pager",
+      "Duty"
+    ],
+    "expected_answer": "PagerDuty integration fires alerts when error rate exceeds 1% for 5 minutes.",
+    "topic": "monitoring",
+    "query_type": "single_hop",
+    "difficulty": "easy"
+  },
+  {
+    "id": 15,
+    "query": "What is the current monitoring setup?",
+    "expected_keywords": [
+      "90",
+      "The",
+      "Thanos"
+    ],
+    "expected_answer": "The monitoring stack uses Thanos for long-term metric storage with 90-day retention.",
+    "topic": "monitoring",
+    "query_type": "single_hop",
+    "difficulty": "easy"
+  },
+  {
+    "id": 16,
+    "query": "Describe the database configuration.",
+    "expected_keywords": [
+      "16",
+      "The",
+      "Postgre",
+      "Multi"
+    ],
+    "expected_answer": "The primary database is PostgreSQL 16 running on RDS with Multi-AZ.",
+    "topic": "database",
+    "query_type": "single_hop",
+    "difficulty": "easy"
+  },
+  {
+    "id": 17,
+    "query": "What do we know about schema?",
+    "expected_keywords": [
+      "Schema",
+      "Flyway"
+    ],
+    "expected_answer": "Schema migrations use Flyway with a separate approval process for production.",
+    "topic": "database",
+    "query_type": "single_hop",
+    "difficulty": "easy"
+  },
+  {
+    "id": 18,
+    "query": "What do we know about schema?",
+    "expected_keywords": [
+      "Read"
+    ],
+    "expected_answer": "Read replicas handle reporting queries to avoid impacting write throughput.",
+    "topic": "database",
+    "query_type": "single_hop",
+    "difficulty": "easy"
+  },
+  {
+    "id": 19,
+    "query": "Describe the database configuration.",
+    "expected_keywords": [
+      "The"
+    ],
+    "expected_answer": "The users table has a GIN index on the metadata JSONB column.",
+    "topic": "database",
+    "query_type": "single_hop",
+    "difficulty": "easy"
+  },
+  {
+    "id": 20,
+    "query": "Describe the database configuration.",
+    "expected_keywords": [
+      "200",
+      "Connection",
+      "Pg",
+      "Bouncer"
+    ],
+    "expected_answer": "Connection pooling uses PgBouncer with a max of 200 connections per service.",
+    "topic": "database",
+    "query_type": "single_hop",
+    "difficulty": "easy"
+  },
+  {
+    "id": 21,
+    "query": "Tell me the details about RBAC.",
+    "expected_keywords": [
+      "30",
+      "All",
+      "Hashi",
+      "Corp Vault"
+    ],
+    "expected_answer": "All secrets are stored in HashiCorp Vault with auto-rotation every 30 days.",
+    "topic": "security",
+    "query_type": "single_hop",
+    "difficulty": "easy"
+  },
+  {
+    "id": 22,
+    "query": "What is the current security setup?",
+    "expected_keywords": [
+      "1",
+      "7"
+    ],
+    "expected_answer": "JWT tokens expire after 1 hour with refresh tokens valid for 7 days.",
+    "topic": "security",
+    "query_type": "single_hop",
+    "difficulty": "easy"
+  },
+  {
+    "id": 23,
+    "query": "Describe the security configuration.",
+    "expected_keywords": [
+      "Let",
+      "Encrypt"
+    ],
+    "expected_answer": "TLS certificates are managed by cert-manager with Let's Encrypt.",
+    "topic": "security",
+    "query_type": "single_hop",
+    "difficulty": "easy"
+  },
+  {
+    "id": 24,
+    "query": "Describe the security configuration.",
+    "expected_keywords": [
+      "Open Policy Agent"
+    ],
+    "expected_answer": "RBAC policies use OPA (Open Policy Agent) for fine-grained authorization.",
+    "topic": "security",
+    "query_type": "single_hop",
+    "difficulty": "easy"
+  },
+  {
+    "id": 25,
+    "query": "What do we know about encryption?",
+    "expected_keywords": [
+      "256",
+      "All"
+    ],
+    "expected_answer": "All data at rest is encrypted with AES-256 using AWS KMS customer-managed keys.",
+    "topic": "security",
+    "query_type": "single_hop",
+    "difficulty": "easy"
+  },
+  {
+    "id": 26,
+    "query": "Describe the architecture configuration.",
+    "expected_keywords": [
+      "The",
+      "Rabbit"
+    ],
+    "expected_answer": "The system uses an event-driven architecture with RabbitMQ as the message broker.",
+    "topic": "architecture",
+    "query_type": "single_hop",
+    "difficulty": "easy"
+  },
+  {
+    "id": 27,
+    "query": "Tell me the details about gateway.",
+    "expected_keywords": [
+      "1000",
+      "The"
+    ],
+    "expected_answer": "The API gateway rate-limits at 1000 requests per second per API key.",
+    "topic": "architecture",
+    "query_type": "single_hop",
+    "difficulty": "easy"
+  },
+  {
+    "id": 28,
+    "query": "What is the current architecture setup?",
+    "expected_keywords": [
+      "Service"
+    ],
+    "expected_answer": "Service-to-service communication uses gRPC with protobuf contracts.",
+    "topic": "architecture",
+    "query_type": "single_hop",
+    "difficulty": "easy"
+  },
+  {
+    "id": 29,
+    "query": "What do we know about gateway?",
+    "expected_keywords": [
+      "The"
+    ],
+    "expected_answer": "The order processing service publishes events to three downstream consumers.",
+    "topic": "architecture",
+    "query_type": "single_hop",
+    "difficulty": "easy"
+  },
+  {
+    "id": 30,
+    "query": "What is the current architecture setup?",
+    "expected_keywords": [
+      "The"
+    ],
+    "expected_answer": "The configuration service uses etcd for distributed configuration management.",
+    "topic": "architecture",
+    "query_type": "single_hop",
+    "difficulty": "easy"
+  },
+  {
+    "id": 31,
+    "query": "Tell me the details about fixture.",
+    "expected_keywords": [
+      "85%",
+      "Unit"
+    ],
+    "expected_answer": "Unit test coverage is maintained above 85% across all services.",
+    "topic": "testing",
+    "query_type": "single_hop",
+    "difficulty": "easy"
+  },
+  {
+    "id": 32,
+    "query": "What is the current testing setup?",
+    "expected_keywords": [
+      "Integration",
+      "Docker Compose"
+    ],
+    "expected_answer": "Integration tests run against a Docker Compose environment nightly.",
+    "topic": "testing",
+    "query_type": "single_hop",
+    "difficulty": "easy"
+  },
+  {
+    "id": 33,
+    "query": "What do we know about test?",
+    "expected_keywords": [
+      "2",
+      "4",
+      "Playwright"
+    ],
+    "expected_answer": "E2E tests use Playwright and run in parallel across 4 browser types.",
+    "topic": "testing",
+    "query_type": "single_hop",
+    "difficulty": "easy"
+  },
+  {
+    "id": 34,
+    "query": "What is the current testing setup?",
+    "expected_keywords": [
+      "10",
+      "The"
+    ],
+    "expected_answer": "The test suite completes in under 10 minutes for the full pipeline.",
+    "topic": "testing",
+    "query_type": "single_hop",
+    "difficulty": "easy"
+  },
+  {
+    "id": 35,
+    "query": "Describe the testing configuration.",
+    "expected_keywords": [
+      "3",
+      "Flaky"
+    ],
+    "expected_answer": "Flaky test detection uses a quarantine system that retries 3 times before failing.",
+    "topic": "testing",
+    "query_type": "single_hop",
+    "difficulty": "easy"
+  },
+  {
+    "id": 36,
+    "query": "What is the current incident setup?",
+    "expected_keywords": [
+      "2025",
+      "02",
+      "15,",
+      "45",
+      "On"
+    ],
+    "expected_answer": "On 2025-02-15, a DNS misconfiguration caused 45 minutes of downtime.",
+    "topic": "incident",
+    "query_type": "single_hop",
+    "difficulty": "easy"
+  },
+  {
+    "id": 37,
+    "query": "What do we know about incident?",
+    "expected_keywords": [
+      "3",
+      "The",
+      "Argo"
+    ],
+    "expected_answer": "The rollback procedure takes under 3 minutes using ArgoCD's sync revert.",
+    "topic": "incident",
+    "query_type": "single_hop",
+    "difficulty": "easy"
+  },
+  {
+    "id": 38,
+    "query": "Tell me the details about rollback.",
+    "expected_keywords": [
+      "48",
+      "Incident"
+    ],
+    "expected_answer": "Incident response follows a blameless postmortem template within 48 hours.",
+    "topic": "incident",
+    "query_type": "single_hop",
+    "difficulty": "easy"
+  },
+  {
+    "id": 39,
+    "query": "What is the current incident setup?",
+    "expected_keywords": [
+      "30",
+      "1",
+      "The"
+    ],
+    "expected_answer": "The MTTR target is under 30 minutes for P1 incidents.",
+    "topic": "incident",
+    "query_type": "single_hop",
+    "difficulty": "easy"
+  },
+  {
+    "id": 40,
+    "query": "Tell me the details about recovery.",
+    "expected_keywords": [
+      "5%",
+      "2",
+      "Automatic"
+    ],
+    "expected_answer": "Automatic rollback triggers when the error rate exceeds 5% within 2 minutes of deployment.",
+    "topic": "incident",
+    "query_type": "single_hop",
+    "difficulty": "easy"
+  },
+  {
+    "id": 41,
+    "query": "What do we know about optimization?",
+    "expected_keywords": [
+      "200",
+      "15",
+      "Redis"
+    ],
+    "expected_answer": "Redis cache reduces API response time from 200ms to 15ms for hot paths.",
+    "topic": "performance",
+    "query_type": "single_hop",
+    "difficulty": "easy"
+  },
+  {
+    "id": 42,
+    "query": "Describe the performance configuration.",
+    "expected_keywords": [
+      "5000",
+      "50",
+      "30",
+      "The"
+    ],
+    "expected_answer": "The search service handles 5000 queries per second at p50 latency of 30ms.",
+    "topic": "performance",
+    "query_type": "single_hop",
+    "difficulty": "easy"
+  },
+  {
+    "id": 43,
+    "query": "What is the current performance setup?",
+    "expected_keywords": [
+      "80%"
+    ],
+    "expected_answer": "CDN caching serves 80% of static assets without hitting the origin server.",
+    "topic": "performance",
+    "query_type": "single_hop",
+    "difficulty": "easy"
+  },
+  {
+    "id": 44,
+    "query": "What do we know about optimization?",
+    "expected_keywords": [
+      "4",
+      "20",
+      "Database"
+    ],
+    "expected_answer": "Database query optimization reduced the daily reporting job from 4 hours to 20 minutes.",
+    "topic": "performance",
+    "query_type": "single_hop",
+    "difficulty": "easy"
+  },
+  {
+    "id": 45,
+    "query": "What do we know about scaling?",
+    "expected_keywords": [
+      "90",
+      "75%",
+      "Auto"
+    ],
+    "expected_answer": "Auto-scaling adds new instances within 90 seconds when CPU exceeds 75%.",
+    "topic": "performance",
+    "query_type": "single_hop",
+    "difficulty": "easy"
+  },
+  {
+    "id": 46,
+    "query": "Describe the cost configuration.",
+    "expected_keywords": [
+      "47,000",
+      "40,000",
+      "3.",
+      "Monthly"
+    ],
+    "expected_answer": "Monthly cloud spend is $47,000 with a target to reduce to $40,000 by Q3.",
+    "topic": "cost",
+    "query_type": "single_hop",
+    "difficulty": "easy"
+  },
+  {
+    "id": 47,
+    "query": "What is the current cost setup?",
+    "expected_keywords": [
+      "25%",
+      "Switching"
+    ],
+    "expected_answer": "Switching to ARM-based instances saved 25% on compute costs.",
+    "topic": "cost",
+    "query_type": "single_hop",
+    "difficulty": "easy"
+  },
+  {
+    "id": 48,
+    "query": "Tell me the details about cost.",
+    "expected_keywords": [
+      "8,000",
+      "Reserved"
+    ],
+    "expected_answer": "Reserved instances for the database tier saved $8,000 annually.",
+    "topic": "cost",
+    "query_type": "single_hop",
+    "difficulty": "easy"
+  },
+  {
+    "id": 49,
+    "query": "What is the current cost setup?",
+    "expected_keywords": [
+      "2,100",
+      "The"
+    ],
+    "expected_answer": "The data transfer cost between regions is $2,100 per month.",
+    "topic": "cost",
+    "query_type": "single_hop",
+    "difficulty": "easy"
+  },
+  {
+    "id": 50,
+    "query": "What is the current cost setup?",
+    "expected_keywords": [
+      "70%",
+      "Spot"
+    ],
+    "expected_answer": "Spot instances for batch processing reduced costs by 70% compared to on-demand.",
+    "topic": "cost",
+    "query_type": "single_hop",
+    "difficulty": "easy"
+  },
+  {
+    "id": 51,
+    "query": "How does the monitoring stack observe the Kubernetes cluster?",
+    "expected_keywords": [
+      "kubernetes",
+      "k8s",
+      "prometheus",
+      "grafana"
+    ],
+    "expected_answer": "The production Kubernetes cluster runs v1.29 across 12 nodes in us-east-1. Additionally, Prometheus scrapes metrics every 15 seconds from all services.",
+    "topic": "kubernetes+monitoring",
+    "query_type": "multi_hop",
+    "difficulty": "medium"
+  },
+  {
+    "id": 52,
+    "query": "What security measures protect the CI/CD pipeline?",
+    "expected_keywords": [
+      "pipeline",
+      "CI/CD",
+      "security",
+      "auth"
+    ],
+    "expected_answer": "The CI pipeline runs on GitLab CI with a 15-minute timeout per job. Additionally, All secrets are stored in HashiCorp Vault with auto-rotation every 30 days.",
+    "topic": "cicd+security",
+    "query_type": "multi_hop",
+    "difficulty": "medium"
+  },
+  {
+    "id": 53,
+    "query": "How does database optimization affect overall system performance?",
+    "expected_keywords": [
+      "database",
+      "postgres",
+      "latency",
+      "throughput"
+    ],
+    "expected_answer": "The primary database is PostgreSQL 16 running on RDS with Multi-AZ. Additionally, Redis cache reduces API response time from 200ms to 15ms for hot paths.",
+    "topic": "database+performance",
+    "query_type": "multi_hop",
+    "difficulty": "medium"
+  },
+  {
+    "id": 54,
+    "query": "How are microservices tested in the integration environment?",
+    "expected_keywords": [
+      "microservice",
+      "API",
+      "test",
+      "coverage"
+    ],
+    "expected_answer": "The system uses an event-driven architecture with RabbitMQ as the message broker. Additionally, Unit test coverage is maintained above 85% across all services.",
+    "topic": "architecture+testing",
+    "query_type": "multi_hop",
+    "difficulty": "medium"
+  },
+  {
+    "id": 55,
+    "query": "How do alerts relate to incident response?",
+    "expected_keywords": [
+      "incident",
+      "outage",
+      "prometheus",
+      "grafana"
+    ],
+    "expected_answer": "On 2025-02-15, a DNS misconfiguration caused 45 minutes of downtime. Additionally, Prometheus scrapes metrics every 15 seconds from all services.",
+    "topic": "incident+monitoring",
+    "query_type": "multi_hop",
+    "difficulty": "medium"
+  },
+  {
+    "id": 56,
+    "query": "What cost optimizations exist for Kubernetes compute?",
+    "expected_keywords": [
+      "cost",
+      "budget",
+      "kubernetes",
+      "k8s"
+    ],
+    "expected_answer": "Monthly cloud spend is $47,000 with a target to reduce to $40,000 by Q3. Additionally, The production Kubernetes cluster runs v1.29 across 12 nodes in us-east-1.",
+    "topic": "cost+kubernetes",
+    "query_type": "multi_hop",
+    "difficulty": "medium"
+  },
+  {
+    "id": 57,
+    "query": "How is database access controlled and encrypted?",
+    "expected_keywords": [
+      "security",
+      "auth",
+      "database",
+      "postgres"
+    ],
+    "expected_answer": "All secrets are stored in HashiCorp Vault with auto-rotation every 30 days. Additionally, The primary database is PostgreSQL 16 running on RDS with Multi-AZ.",
+    "topic": "security+database",
+    "query_type": "multi_hop",
+    "difficulty": "medium"
+  },
+  {
+    "id": 58,
+    "query": "How does the CI/CD pipeline deploy to Kubernetes?",
+    "expected_keywords": [
+      "pipeline",
+      "CI/CD",
+      "kubernetes",
+      "k8s"
+    ],
+    "expected_answer": "The CI pipeline runs on GitLab CI with a 15-minute timeout per job. Additionally, The production Kubernetes cluster runs v1.29 across 12 nodes in us-east-1.",
+    "topic": "cicd+kubernetes",
+    "query_type": "multi_hop",
+    "difficulty": "medium"
+  },
+  {
+    "id": 59,
+    "query": "How does the API gateway handle high throughput?",
+    "expected_keywords": [
+      "latency",
+      "throughput",
+      "microservice",
+      "API"
+    ],
+    "expected_answer": "Redis cache reduces API response time from 200ms to 15ms for hot paths. Additionally, The system uses an event-driven architecture with RabbitMQ as the message broker.",
+    "topic": "performance+architecture",
+    "query_type": "multi_hop",
+    "difficulty": "medium"
+  },
+  {
+    "id": 60,
+    "query": "How are tests integrated into the CI pipeline?",
+    "expected_keywords": [
+      "test",
+      "coverage",
+      "pipeline",
+      "CI/CD"
+    ],
+    "expected_answer": "Unit test coverage is maintained above 85% across all services. Additionally, The CI pipeline runs on GitLab CI with a 15-minute timeout per job.",
+    "topic": "testing+cicd",
+    "query_type": "multi_hop",
+    "difficulty": "medium"
+  },
+  {
+    "id": 61,
+    "query": "What happened on 2025-02-15?",
+    "expected_keywords": [
+      "DNS",
+      "misconfiguration",
+      "downtime",
+      "45 minutes"
+    ],
+    "expected_answer": "On 2025-02-15, a DNS misconfiguration caused 45 minutes of downtime.",
+    "topic": "incident",
+    "query_type": "temporal",
+    "difficulty": "easy"
+  },
+  {
+    "id": 62,
+    "query": "What are the most recent changes to the deployment pipeline?",
+    "expected_keywords": [
+      "ArgoCD",
+      "staging",
+      "automated",
+      "sync"
+    ],
+    "expected_answer": "Deployment uses ArgoCD with automated sync enabled for staging.",
+    "topic": "cicd",
+    "query_type": "temporal",
+    "difficulty": "medium"
+  },
+  {
+    "id": 63,
+    "query": "What is the current state of production Kubernetes?",
+    "expected_keywords": [
+      "v1.29",
+      "12 nodes",
+      "us-east-1"
+    ],
+    "expected_answer": "The production Kubernetes cluster runs v1.29 across 12 nodes in us-east-1.",
+    "topic": "kubernetes",
+    "query_type": "temporal",
+    "difficulty": "easy"
+  },
+  {
+    "id": 64,
+    "query": "When was the last significant incident?",
+    "expected_keywords": [
+      "2025-02-15",
+      "DNS",
+      "downtime"
+    ],
+    "expected_answer": "On 2025-02-15, a DNS misconfiguration caused 45 minutes of downtime.",
+    "topic": "incident",
+    "query_type": "temporal",
+    "difficulty": "medium"
+  },
+  {
+    "id": 65,
+    "query": "What security changes have been made recently?",
+    "expected_keywords": [
+      "Vault",
+      "rotation",
+      "30 days",
+      "TLS",
+      "cert-manager"
+    ],
+    "expected_answer": "All secrets are stored in HashiCorp Vault with auto-rotation every 30 days.",
+    "topic": "security",
+    "query_type": "temporal",
+    "difficulty": "medium"
+  },
+  {
+    "id": 66,
+    "query": "What is the Redis cache hit rate for the users table?",
+    "expected_keywords": [],
+    "expected_answer": "",
+    "topic": "performance+database",
+    "query_type": "adversarial",
+    "difficulty": "hard"
+  },
+  {
+    "id": 67,
+    "query": "How many pods are running in the staging cluster right now?",
+    "expected_keywords": [],
+    "expected_answer": "",
+    "topic": "kubernetes",
+    "query_type": "adversarial",
+    "difficulty": "hard"
+  },
+  {
+    "id": 68,
+    "query": "What is the total number of microservices in production?",
+    "expected_keywords": [],
+    "expected_answer": "",
+    "topic": "architecture",
+    "query_type": "adversarial",
+    "difficulty": "hard"
+  },
+  {
+    "id": 69,
+    "query": "Who approved the last production deployment?",
+    "expected_keywords": [
+      "chief",
+      "manual approval"
+    ],
+    "expected_answer": "Production deployments require manual approval from the chief agent.",
+    "topic": "cicd",
+    "query_type": "adversarial",
+    "difficulty": "hard"
+  },
+  {
+    "id": 70,
+    "query": "What are the conflicting reports about Kubernetes from different agents?",
+    "expected_keywords": [
+      "conflicting",
+      "contradiction"
+    ],
+    "expected_answer": "",
+    "topic": "kubernetes",
+    "query_type": "adversarial",
+    "difficulty": "hard"
+  },
+  {
+    "id": 71,
+    "query": "What has the chief agent reported about costs?",
+    "expected_keywords": [
+      "$47,000",
+      "budget",
+      "cloud spend"
+    ],
+    "expected_answer": "Monthly cloud spend is $47,000 with a target to reduce to $40,000 by Q3.",
+    "topic": "cost",
+    "query_type": "agent_scoped",
+    "difficulty": "medium",
+    "agent_filter": "chief"
+  },
+  {
+    "id": 72,
+    "query": "What does gitbob know about the CI pipeline?",
+    "expected_keywords": [
+      "GitLab CI",
+      "15-minute",
+      "timeout"
+    ],
+    "expected_answer": "The CI pipeline runs on GitLab CI with a 15-minute timeout per job.",
+    "topic": "cicd",
+    "query_type": "agent_scoped",
+    "difficulty": "medium",
+    "agent_filter": "gitbob"
+  },
+  {
+    "id": 73,
+    "query": "What monitoring information has grafgreg recorded?",
+    "expected_keywords": [
+      "Prometheus",
+      "Grafana",
+      "SLO",
+      "dashboard"
+    ],
+    "expected_answer": "Prometheus scrapes metrics every 15 seconds from all services.",
+    "topic": "monitoring",
+    "query_type": "agent_scoped",
+    "difficulty": "medium",
+    "agent_filter": "grafgreg"
+  },
+  {
+    "id": 74,
+    "query": "What deployments has argo managed?",
+    "expected_keywords": [
+      "ArgoCD",
+      "sync",
+      "staging",
+      "rollback"
+    ],
+    "expected_answer": "Deployment uses ArgoCD with automated sync enabled for staging.",
+    "topic": "cicd",
+    "query_type": "agent_scoped",
+    "difficulty": "medium",
+    "agent_filter": "argo"
+  },
+  {
+    "id": 75,
+    "query": "What has securitysam flagged about authentication?",
+    "expected_keywords": [
+      "JWT",
+      "Vault",
+      "RBAC",
+      "OPA"
+    ],
+    "expected_answer": "JWT tokens expire after 1 hour with refresh tokens valid for 7 days.",
+    "topic": "security",
+    "query_type": "agent_scoped",
+    "difficulty": "medium",
+    "agent_filter": "securitysam"
+  },
+  {
+    "id": 76,
+    "query": "Tell me about build",
+    "expected_keywords": [
+      "Production"
+    ],
+    "expected_answer": "Production deployments require manual approval from the chief agent.",
+    "topic": "cicd",
+    "query_type": "broad",
+    "difficulty": "easy"
+  },
+  {
+    "id": 77,
+    "query": "Tell me about RBAC",
+    "expected_keywords": [
+      "Open Policy Agent"
+    ],
+    "expected_answer": "RBAC policies use OPA (Open Policy Agent) for fine-grained authorization.",
+    "topic": "security",
+    "query_type": "broad",
+    "difficulty": "easy"
+  },
+  {
+    "id": 78,
+    "query": "Tell me about unit",
+    "expected_keywords": [
+      "2",
+      "4",
+      "Playwright"
+    ],
+    "expected_answer": "E2E tests use Playwright and run in parallel across 4 browser types.",
+    "topic": "testing",
+    "query_type": "broad",
+    "difficulty": "easy"
+  },
+  {
+    "id": 79,
+    "query": "Tell me about metric",
+    "expected_keywords": [
+      "99",
+      "500",
+      "99.9%",
+      "The"
+    ],
+    "expected_answer": "The SLO for API latency is p99 under 500ms with 99.9% availability.",
+    "topic": "monitoring",
+    "query_type": "broad",
+    "difficulty": "easy"
+  },
+  {
+    "id": 80,
+    "query": "Tell me about unit",
+    "expected_keywords": [
+      "Integration",
+      "Docker Compose"
+    ],
+    "expected_answer": "Integration tests run against a Docker Compose environment nightly.",
+    "topic": "testing",
+    "query_type": "broad",
+    "difficulty": "easy"
+  },
+  {
+    "id": 81,
+    "query": "Tell me about optimization",
+    "expected_keywords": [
+      "8,000",
+      "Reserved"
+    ],
+    "expected_answer": "Reserved instances for the database tier saved $8,000 annually.",
+    "topic": "cost",
+    "query_type": "broad",
+    "difficulty": "easy"
+  },
+  {
+    "id": 82,
+    "query": "Tell me about cache",
+    "expected_keywords": [
+      "200",
+      "15",
+      "Redis"
+    ],
+    "expected_answer": "Redis cache reduces API response time from 200ms to 15ms for hot paths.",
+    "topic": "performance",
+    "query_type": "broad",
+    "difficulty": "easy"
+  },
+  {
+    "id": 83,
+    "query": "Tell me about certificate",
+    "expected_keywords": [
+      "1",
+      "7"
+    ],
+    "expected_answer": "JWT tokens expire after 1 hour with refresh tokens valid for 7 days.",
+    "topic": "security",
+    "query_type": "broad",
+    "difficulty": "easy"
+  },
+  {
+    "id": 84,
+    "query": "Tell me about savings",
+    "expected_keywords": [
+      "70%",
+      "Spot"
+    ],
+    "expected_answer": "Spot instances for batch processing reduced costs by 70% compared to on-demand.",
+    "topic": "cost",
+    "query_type": "broad",
+    "difficulty": "easy"
+  },
+  {
+    "id": 85,
+    "query": "Tell me about postmortem",
+    "expected_keywords": [
+      "30",
+      "1",
+      "The"
+    ],
+    "expected_answer": "The MTTR target is under 30 minutes for P1 incidents.",
+    "topic": "incident",
+    "query_type": "broad",
+    "difficulty": "easy"
+  },
+  {
+    "id": 86,
+    "query": "Tell me about schema",
+    "expected_keywords": [
+      "200",
+      "Connection",
+      "Pg",
+      "Bouncer"
+    ],
+    "expected_answer": "Connection pooling uses PgBouncer with a max of 200 connections per service.",
+    "topic": "database",
+    "query_type": "broad",
+    "difficulty": "easy"
+  },
+  {
+    "id": 87,
+    "query": "Tell me about alert",
+    "expected_keywords": [
+      "15",
+      "Prometheus"
+    ],
+    "expected_answer": "Prometheus scrapes metrics every 15 seconds from all services.",
+    "topic": "monitoring",
+    "query_type": "broad",
+    "difficulty": "easy"
+  },
+  {
+    "id": 88,
+    "query": "Tell me about cache",
+    "expected_keywords": [
+      "90",
+      "75%",
+      "Auto"
+    ],
+    "expected_answer": "Auto-scaling adds new instances within 90 seconds when CPU exceeds 75%.",
+    "topic": "performance",
+    "query_type": "broad",
+    "difficulty": "easy"
+  },
+  {
+    "id": 89,
+    "query": "Tell me about release",
+    "expected_keywords": [
+      "Deployment",
+      "Argo"
+    ],
+    "expected_answer": "Deployment uses ArgoCD with automated sync enabled for staging.",
+    "topic": "cicd",
+    "query_type": "broad",
+    "difficulty": "easy"
+  },
+  {
+    "id": 90,
+    "query": "Tell me about auth",
+    "expected_keywords": [
+      "1",
+      "7"
+    ],
+    "expected_answer": "JWT tokens expire after 1 hour with refresh tokens valid for 7 days.",
+    "topic": "security",
+    "query_type": "broad",
+    "difficulty": "easy"
+  },
+  {
+    "id": 91,
+    "query": "Tell me about prometheus",
+    "expected_keywords": [
+      "15",
+      "Prometheus"
+    ],
+    "expected_answer": "Prometheus scrapes metrics every 15 seconds from all services.",
+    "topic": "monitoring",
+    "query_type": "broad",
+    "difficulty": "easy"
+  },
+  {
+    "id": 92,
+    "query": "Tell me about query",
+    "expected_keywords": [
+      "The"
+    ],
+    "expected_answer": "The users table has a GIN index on the metadata JSONB column.",
+    "topic": "database",
+    "query_type": "broad",
+    "difficulty": "easy"
+  },
+  {
+    "id": 93,
+    "query": "Tell me about deploy",
+    "expected_keywords": [
+      "5",
+      "The",
+      "Docker"
+    ],
+    "expected_answer": "The build pipeline caches Docker layers to reduce build time to under 5 minutes.",
+    "topic": "cicd",
+    "query_type": "broad",
+    "difficulty": "easy"
+  },
+  {
+    "id": 94,
+    "query": "Tell me about optimization",
+    "expected_keywords": [
+      "25%",
+      "Switching"
+    ],
+    "expected_answer": "Switching to ARM-based instances saved 25% on compute costs.",
+    "topic": "cost",
+    "query_type": "broad",
+    "difficulty": "easy"
+  },
+  {
+    "id": 95,
+    "query": "Tell me about outage",
+    "expected_keywords": [
+      "30",
+      "1",
+      "The"
+    ],
+    "expected_answer": "The MTTR target is under 30 minutes for P1 incidents.",
+    "topic": "incident",
+    "query_type": "broad",
+    "difficulty": "easy"
+  },
+  {
+    "id": 96,
+    "query": "Tell me about prometheus",
+    "expected_keywords": [
+      "15",
+      "Prometheus"
+    ],
+    "expected_answer": "Prometheus scrapes metrics every 15 seconds from all services.",
+    "topic": "monitoring",
+    "query_type": "broad",
+    "difficulty": "easy"
+  },
+  {
+    "id": 97,
+    "query": "Tell me about coverage",
+    "expected_keywords": [
+      "Integration",
+      "Docker Compose"
+    ],
+    "expected_answer": "Integration tests run against a Docker Compose environment nightly.",
+    "topic": "testing",
+    "query_type": "broad",
+    "difficulty": "easy"
+  },
+  {
+    "id": 98,
+    "query": "Tell me about latency",
+    "expected_keywords": [
+      "4",
+      "20",
+      "Database"
+    ],
+    "expected_answer": "Database query optimization reduced the daily reporting job from 4 hours to 20 minutes.",
+    "topic": "performance",
+    "query_type": "broad",
+    "difficulty": "easy"
+  },
+  {
+    "id": 99,
+    "query": "Tell me about latency",
+    "expected_keywords": [
+      "5000",
+      "50",
+      "30",
+      "The"
+    ],
+    "expected_answer": "The search service handles 5000 queries per second at p50 latency of 30ms.",
+    "topic": "performance",
+    "query_type": "broad",
+    "difficulty": "easy"
+  },
+  {
+    "id": 100,
+    "query": "Tell me about postmortem",
+    "expected_keywords": [
+      "3",
+      "The",
+      "Argo"
+    ],
+    "expected_answer": "The rollback procedure takes under 3 minutes using ArgoCD's sync revert.",
+    "topic": "incident",
+    "query_type": "broad",
+    "difficulty": "easy"
+  }
+]
