@@ -35,6 +35,9 @@ _agent_git_out.txt
 htmlcov/
 .coverage
 
+# Benchmark raw output (rendered report is in docs/BENCHMARKS.md)
+.benchmarks/
+
 # Models (downloaded at runtime)
 models/
 *.bin
