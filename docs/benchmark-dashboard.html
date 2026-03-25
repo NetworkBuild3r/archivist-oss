@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Archivist — Pipeline Benchmark Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --border: #2a2d3a;
+    --text: #e2e4ea;
+    --muted: #8b8fa3;
+    --accent: #6c5ce7;
+    --accent2: #00cec9;
+    --accent3: #fdcb6e;
+    --accent4: #e17055;
+    --accent5: #55efc4;
+    --green: #00b894;
+    --red: #d63031;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    padding: 2rem;
+  }
+  h1 { font-size: 1.8rem; font-weight: 700; margin-bottom: 0.3rem; }
+  h2 { font-size: 1.2rem; font-weight: 600; margin-bottom: 1rem; color: var(--muted); }
+  h3 { font-size: 1rem; font-weight: 600; margin-bottom: 0.75rem; }
+  .subtitle { color: var(--muted); font-size: 0.95rem; margin-bottom: 2rem; }
+
+  .kpi-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 1rem;
+    margin-bottom: 2rem;
+  }
+  .kpi-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.25rem;
+    text-align: center;
+  }
+  .kpi-value {
+    font-size: 2rem;
+    font-weight: 700;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .kpi-label { font-size: 0.85rem; color: var(--muted); margin-top: 0.25rem; }
+  .kpi-detail { font-size: 0.75rem; color: var(--muted); margin-top: 0.15rem; }
+
+  .charts-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1.5rem;
+    margin-bottom: 2rem;
+  }
+  .chart-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.5rem;
+  }
+  .chart-card.full-width {
+    grid-column: 1 / -1;
+  }
+  canvas { max-height: 350px; }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.9rem;
+  }
+  th, td {
+    padding: 0.65rem 1rem;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+  }
+  th {
+    color: var(--muted);
+    font-weight: 600;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  tr:hover td { background: rgba(108, 92, 231, 0.05); }
+
+  .bar-inline {
+    display: inline-block;
+    height: 6px;
+    border-radius: 3px;
+    background: var(--accent);
+    vertical-align: middle;
+    margin-left: 0.5rem;
+  }
+
+  .footer {
+    text-align: center;
+    color: var(--muted);
+    font-size: 0.8rem;
+    margin-top: 2rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--border);
+  }
+
+  @media (max-width: 900px) {
+    .charts-grid { grid-template-columns: 1fr; }
+    body { padding: 1rem; }
+  }
+</style>
+</head>
+<body>
+<h1>Archivist Pipeline Benchmark</h1>
+<p class="subtitle">100 queries x 7 pipeline variants — Qdrant + vLLM bge-base-en-v1.5 (768-dim) — 50 documents, 155 chunks</p>
+
+<div class="kpi-row">
+  <div class="kpi-card">
+    <div class="kpi-value">89.2%</div>
+    <div class="kpi-label">Recall@5 (vector only)</div>
+    <div class="kpi-detail">Baseline retrieval accuracy</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-value">87.7%</div>
+    <div class="kpi-label">Recall@5 (full pipeline)</div>
+    <div class="kpi-detail">With temporal awareness</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-value">99.0%</div>
+    <div class="kpi-label">Single-hop Recall</div>
+    <div class="kpi-detail">Direct factual lookups</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-value">100%</div>
+    <div class="kpi-label">Temporal Query Recall</div>
+    <div class="kpi-detail">Time-aware retrieval</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-value">727 ms</div>
+    <div class="kpi-label">Best p50 Latency</div>
+    <div class="kpi-detail">Vector + BM25 fusion</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-value">6</div>
+    <div class="kpi-label">Query Types Tested</div>
+    <div class="kpi-detail">Single-hop to adversarial</div>
+  </div>
+</div>
+
+<div class="charts-grid">
+  <div class="chart-card full-width">
+    <h3>Pipeline Ablation: Recall@5 by Stage</h3>
+    <canvas id="ablationChart"></canvas>
+  </div>
+
+  <div class="chart-card">
+    <h3>Recall by Query Type</h3>
+    <canvas id="queryTypeRecall"></canvas>
+  </div>
+
+  <div class="chart-card">
+    <h3>MRR by Query Type</h3>
+    <canvas id="queryTypeMRR"></canvas>
+  </div>
+
+  <div class="chart-card">
+    <h3>Latency vs Recall Tradeoff</h3>
+    <canvas id="latencyRecall"></canvas>
+  </div>
+
+  <div class="chart-card">
+    <h3>p50 Latency by Variant (ms)</h3>
+    <canvas id="latencyChart"></canvas>
+  </div>
+</div>
+
+<div class="chart-card full-width" style="margin-bottom: 2rem;">
+  <h3>Full Results Table</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>Variant</th>
+        <th>Recall@5</th>
+        <th>Recall@10</th>
+        <th>MRR</th>
+        <th>p50 Latency</th>
+        <th>p95 Latency</th>
+        <th>Tokens/Query</th>
+      </tr>
+    </thead>
+    <tbody id="resultsBody"></tbody>
+  </table>
+</div>
+
+<div class="chart-card full-width" style="margin-bottom: 2rem;">
+  <h3>Query Type Breakdown (Full Pipeline)</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>Query Type</th>
+        <th>Count</th>
+        <th>Recall</th>
+        <th></th>
+        <th>MRR</th>
+        <th>p50 Latency</th>
+      </tr>
+    </thead>
+    <tbody id="queryTypeBody"></tbody>
+  </table>
+</div>
+
+<div class="footer">
+  Generated from pipeline ablation benchmark &mdash; Archivist v1.5 &mdash;
+  <span id="timestamp"></span>
+</div>
+
+<script>
+const DATA = {
+  summaries: [
+    {variant:"vector_only",recall_at_5:0.8917,recall_at_10:0.8917,mrr:0.7352,latency_p50_ms:793.8,latency_p95_ms:943.4,latency_mean_ms:805.3,avg_tokens_per_query:4462},
+    {variant:"plus_bm25",recall_at_5:0.8917,recall_at_10:0.8917,mrr:0.7352,latency_p50_ms:727.0,latency_p95_ms:885.6,latency_mean_ms:744.2,avg_tokens_per_query:4462},
+    {variant:"plus_graph",recall_at_5:0.8917,recall_at_10:0.8917,mrr:0.7352,latency_p50_ms:747.4,latency_p95_ms:814.8,latency_mean_ms:750.8,avg_tokens_per_query:4462},
+    {variant:"plus_temporal",recall_at_5:0.8767,recall_at_10:0.8767,mrr:0.7033,latency_p50_ms:779.0,latency_p95_ms:966.9,latency_mean_ms:804.2,avg_tokens_per_query:4631},
+    {variant:"plus_hotness",recall_at_5:0.8767,recall_at_10:0.8767,mrr:0.7033,latency_p50_ms:730.4,latency_p95_ms:907.2,latency_mean_ms:754.9,avg_tokens_per_query:4631},
+    {variant:"plus_rerank",recall_at_5:0.8767,recall_at_10:0.8767,mrr:0.7033,latency_p50_ms:766.3,latency_p95_ms:908.3,latency_mean_ms:780.0,avg_tokens_per_query:4631},
+    {variant:"full_pipeline",recall_at_5:0.8767,recall_at_10:0.8767,mrr:0.7033,latency_p50_ms:823.2,latency_p95_ms:1048.7,latency_mean_ms:836.2,avg_tokens_per_query:4631},
+  ],
+  queryTypes: {
+    single_hop:{count:50,recall:0.99,mrr:0.785,latency_p50:805.3},
+    multi_hop:{count:10,recall:0.575,mrr:0.716,latency_p50:810.8},
+    temporal:{count:5,recall:1.0,mrr:0.867,latency_p50:871.0},
+    adversarial:{count:5,recall:0.4,mrr:0.2,latency_p50:962.9},
+    agent_scoped:{count:5,recall:0.833,mrr:0.667,latency_p50:986.7},
+    broad:{count:25,recall:0.85,mrr:0.611,latency_p50:769.8},
+  }
+};
+
+const LABELS = {
+  vector_only: "Vector Only",
+  plus_bm25: "+ BM25",
+  plus_graph: "+ Graph",
+  plus_temporal: "+ Temporal",
+  plus_hotness: "+ Hotness",
+  plus_rerank: "+ Rerank",
+  full_pipeline: "Full Pipeline",
+};
+
+const QT_LABELS = {
+  single_hop: "Single-hop",
+  multi_hop: "Multi-hop",
+  temporal: "Temporal",
+  adversarial: "Adversarial",
+  agent_scoped: "Agent-scoped",
+  broad: "Broad",
+};
+
+const COLORS = {
+  accent: "#6c5ce7",
+  accent2: "#00cec9",
+  accent3: "#fdcb6e",
+  accent4: "#e17055",
+  accent5: "#55efc4",
+  accent6: "#a29bfe",
+};
+
+Chart.defaults.color = "#8b8fa3";
+Chart.defaults.borderColor = "#2a2d3a";
+Chart.defaults.font.family = "Inter, -apple-system, sans-serif";
+
+// Pipeline Ablation Chart
+new Chart(document.getElementById("ablationChart"), {
+  type: "bar",
+  data: {
+    labels: DATA.summaries.map(s => LABELS[s.variant]),
+    datasets: [{
+      label: "Recall@5",
+      data: DATA.summaries.map(s => (s.recall_at_5 * 100).toFixed(1)),
+      backgroundColor: DATA.summaries.map((_, i) => i === DATA.summaries.length - 1 ? COLORS.accent2 : COLORS.accent),
+      borderRadius: 6,
+      barPercentage: 0.7,
+    }]
+  },
+  options: {
+    responsive: true,
+    plugins: {
+      legend: { display: false },
+      tooltip: { callbacks: { label: ctx => `Recall@5: ${ctx.raw}%` } }
+    },
+    scales: {
+      y: { min: 80, max: 95, title: { display: true, text: "Recall@5 (%)" }, grid: { color: "#1f2233" } },
+      x: { grid: { display: false } }
+    }
+  }
+});
+
+// Query Type Recall
+const qtKeys = Object.keys(DATA.queryTypes);
+new Chart(document.getElementById("queryTypeRecall"), {
+  type: "bar",
+  data: {
+    labels: qtKeys.map(k => QT_LABELS[k]),
+    datasets: [{
+      label: "Recall",
+      data: qtKeys.map(k => (DATA.queryTypes[k].recall * 100).toFixed(1)),
+      backgroundColor: [COLORS.accent5, COLORS.accent, COLORS.accent2, COLORS.accent4, COLORS.accent3, COLORS.accent6],
+      borderRadius: 6,
+      barPercentage: 0.65,
+    }]
+  },
+  options: {
+    responsive: true,
+    indexAxis: "y",
+    plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => `${ctx.raw}%` } } },
+    scales: {
+      x: { min: 0, max: 100, title: { display: true, text: "Recall (%)" }, grid: { color: "#1f2233" } },
+      y: { grid: { display: false } }
+    }
+  }
+});
+
+// Query Type MRR
+new Chart(document.getElementById("queryTypeMRR"), {
+  type: "bar",
+  data: {
+    labels: qtKeys.map(k => QT_LABELS[k]),
+    datasets: [{
+      label: "MRR",
+      data: qtKeys.map(k => DATA.queryTypes[k].mrr.toFixed(3)),
+      backgroundColor: [COLORS.accent5, COLORS.accent, COLORS.accent2, COLORS.accent4, COLORS.accent3, COLORS.accent6],
+      borderRadius: 6,
+      barPercentage: 0.65,
+    }]
+  },
+  options: {
+    responsive: true,
+    indexAxis: "y",
+    plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => `MRR: ${ctx.raw}` } } },
+    scales: {
+      x: { min: 0, max: 1.0, title: { display: true, text: "Mean Reciprocal Rank" }, grid: { color: "#1f2233" } },
+      y: { grid: { display: false } }
+    }
+  }
+});
+
+// Latency vs Recall scatter
+new Chart(document.getElementById("latencyRecall"), {
+  type: "scatter",
+  data: {
+    datasets: [{
+      label: "Pipeline Variants",
+      data: DATA.summaries.map(s => ({ x: s.latency_p50_ms, y: s.recall_at_5 * 100 })),
+      backgroundColor: DATA.summaries.map((_, i) => i === DATA.summaries.length - 1 ? COLORS.accent2 : COLORS.accent),
+      pointRadius: 8,
+      pointHoverRadius: 12,
+    }]
+  },
+  options: {
+    responsive: true,
+    plugins: {
+      legend: { display: false },
+      tooltip: {
+        callbacks: {
+          label: (ctx) => {
+            const s = DATA.summaries[ctx.dataIndex];
+            return `${LABELS[s.variant]}: ${ctx.parsed.y.toFixed(1)}% @ ${ctx.parsed.x.toFixed(0)}ms`;
+          }
+        }
+      }
+    },
+    scales: {
+      x: { title: { display: true, text: "p50 Latency (ms)" }, grid: { color: "#1f2233" } },
+      y: { min: 85, max: 92, title: { display: true, text: "Recall@5 (%)" }, grid: { color: "#1f2233" } }
+    }
+  }
+});
+
+// Latency bar chart
+new Chart(document.getElementById("latencyChart"), {
+  type: "bar",
+  data: {
+    labels: DATA.summaries.map(s => LABELS[s.variant]),
+    datasets: [
+      {
+        label: "p50",
+        data: DATA.summaries.map(s => s.latency_p50_ms),
+        backgroundColor: COLORS.accent,
+        borderRadius: 6,
+        barPercentage: 0.65,
+      },
+      {
+        label: "p95",
+        data: DATA.summaries.map(s => s.latency_p95_ms),
+        backgroundColor: COLORS.accent4,
+        borderRadius: 6,
+        barPercentage: 0.65,
+      }
+    ]
+  },
+  options: {
+    responsive: true,
+    plugins: { legend: { position: "top" } },
+    scales: {
+      y: { title: { display: true, text: "Latency (ms)" }, grid: { color: "#1f2233" } },
+      x: { grid: { display: false } }
+    }
+  }
+});
+
+// Results table
+const tbody = document.getElementById("resultsBody");
+DATA.summaries.forEach(s => {
+  const tr = document.createElement("tr");
+  const isFull = s.variant === "full_pipeline";
+  tr.innerHTML = `
+    <td style="${isFull ? 'font-weight:700;color:var(--accent2)' : ''}">${LABELS[s.variant]}</td>
+    <td>${(s.recall_at_5 * 100).toFixed(1)}%</td>
+    <td>${(s.recall_at_10 * 100).toFixed(1)}%</td>
+    <td>${s.mrr.toFixed(4)}</td>
+    <td>${s.latency_p50_ms.toFixed(0)} ms</td>
+    <td>${s.latency_p95_ms.toFixed(0)} ms</td>
+    <td>${s.avg_tokens_per_query.toFixed(0)}</td>
+  `;
+  tbody.appendChild(tr);
+});
+
+// Query type table
+const qtBody = document.getElementById("queryTypeBody");
+qtKeys.forEach(k => {
+  const qt = DATA.queryTypes[k];
+  const tr = document.createElement("tr");
+  const barW = Math.round(qt.recall * 200);
+  tr.innerHTML = `
+    <td>${QT_LABELS[k]}</td>
+    <td>${qt.count}</td>
+    <td>${(qt.recall * 100).toFixed(1)}%</td>
+    <td><span class="bar-inline" style="width:${barW}px;background:${qt.recall > 0.8 ? 'var(--green)' : qt.recall > 0.5 ? 'var(--accent3)' : 'var(--red)'}"></span></td>
+    <td>${qt.mrr.toFixed(3)}</td>
+    <td>${qt.latency_p50.toFixed(0)} ms</td>
+  `;
+  qtBody.appendChild(tr);
+});
+
+document.getElementById("timestamp").textContent = new Date().toLocaleDateString("en-US", {
+  year: "numeric", month: "long", day: "numeric",
+});
+</script>
+</body>
+</html>

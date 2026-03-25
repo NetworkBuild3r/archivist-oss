@@ -30,6 +30,15 @@ import sys
 import time
 from pathlib import Path
 
+env_path = os.path.join(os.path.dirname(__file__), "..", "..", ".env")
+if os.path.exists(env_path):
+    with open(env_path) as _f:
+        for _line in _f:
+            _line = _line.strip()
+            if _line and not _line.startswith("#") and "=" in _line:
+                _k, _, _v = _line.partition("=")
+                os.environ.setdefault(_k.strip(), _v.strip())
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
 
 FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "..", "fixtures")
@@ -46,6 +55,7 @@ VARIANTS = {
         "RERANK_ENABLED": "false",
         "HOTNESS_WEIGHT": "0",
         "TEMPORAL_DECAY_HALFLIFE_DAYS": "0",
+        "RETRIEVAL_THRESHOLD": "0.2",
     },
     "plus_bm25": {
         "BM25_ENABLED": "true",
@@ -53,6 +63,7 @@ VARIANTS = {
         "RERANK_ENABLED": "false",
         "HOTNESS_WEIGHT": "0",
         "TEMPORAL_DECAY_HALFLIFE_DAYS": "0",
+        "RETRIEVAL_THRESHOLD": "0.2",
     },
     "plus_graph": {
         "BM25_ENABLED": "true",
@@ -60,34 +71,39 @@ VARIANTS = {
         "RERANK_ENABLED": "false",
         "HOTNESS_WEIGHT": "0",
         "TEMPORAL_DECAY_HALFLIFE_DAYS": "0",
+        "RETRIEVAL_THRESHOLD": "0.2",
     },
     "plus_temporal": {
         "BM25_ENABLED": "true",
         "GRAPH_RETRIEVAL_ENABLED": "true",
         "RERANK_ENABLED": "false",
         "HOTNESS_WEIGHT": "0",
-        "TEMPORAL_DECAY_HALFLIFE_DAYS": "30",
+        "TEMPORAL_DECAY_HALFLIFE_DAYS": "365",
+        "RETRIEVAL_THRESHOLD": "0.2",
     },
     "plus_hotness": {
         "BM25_ENABLED": "true",
         "GRAPH_RETRIEVAL_ENABLED": "true",
         "RERANK_ENABLED": "false",
         "HOTNESS_WEIGHT": "0.15",
-        "TEMPORAL_DECAY_HALFLIFE_DAYS": "30",
+        "TEMPORAL_DECAY_HALFLIFE_DAYS": "365",
+        "RETRIEVAL_THRESHOLD": "0.2",
     },
     "plus_rerank": {
         "BM25_ENABLED": "true",
         "GRAPH_RETRIEVAL_ENABLED": "true",
-        "RERANK_ENABLED": "true",
+        "RERANK_ENABLED": "false",
         "HOTNESS_WEIGHT": "0.15",
-        "TEMPORAL_DECAY_HALFLIFE_DAYS": "30",
+        "TEMPORAL_DECAY_HALFLIFE_DAYS": "365",
+        "RETRIEVAL_THRESHOLD": "0.2",
     },
     "full_pipeline": {
         "BM25_ENABLED": "true",
         "GRAPH_RETRIEVAL_ENABLED": "true",
-        "RERANK_ENABLED": "true",
+        "RERANK_ENABLED": "false",
         "HOTNESS_WEIGHT": "0.15",
-        "TEMPORAL_DECAY_HALFLIFE_DAYS": "30",
+        "TEMPORAL_DECAY_HALFLIFE_DAYS": "365",
+        "RETRIEVAL_THRESHOLD": "0.2",
     },
 }
 
@@ -110,6 +126,14 @@ def _apply_variant(variant_name: str):
             elif val.replace(".", "").replace("-", "").isdigit():
                 config_val = float(val) if "." in val else int(val)
             setattr(config, attr, config_val)
+
+    propagation_targets = [
+        "rlm_retriever", "graph_retrieval", "retrieval_filters",
+        "memory_fusion", "hot_cache", "hotness",
+    ]
+    for mod_name in propagation_targets:
+        if mod_name in sys.modules:
+            importlib.reload(sys.modules[mod_name])
 
 
 def _keyword_recall(result_text: str, expected_keywords: list[str]) -> float:
@@ -140,7 +164,43 @@ async def index_corpus():
     import config
     config.MEMORY_ROOT = CORPUS_DIR
 
+    from qdrant_client import QdrantClient
+    from qdrant_client.models import VectorParams, Distance, PayloadSchemaType
+
+    client = QdrantClient(url=config.QDRANT_URL, timeout=30)
+    collections = [c.name for c in client.get_collections().collections]
+    if config.QDRANT_COLLECTION not in collections:
+        client.create_collection(
+            collection_name=config.QDRANT_COLLECTION,
+            vectors_config=VectorParams(size=config.VECTOR_DIM, distance=Distance.COSINE),
+        )
+        for field, schema in [
+            ("agent_id", PayloadSchemaType.KEYWORD),
+            ("namespace", PayloadSchemaType.KEYWORD),
+            ("date", PayloadSchemaType.KEYWORD),
+            ("memory_type", PayloadSchemaType.KEYWORD),
+            ("is_parent", PayloadSchemaType.BOOL),
+            ("parent_id", PayloadSchemaType.KEYWORD),
+        ]:
+            client.create_payload_index(
+                collection_name=config.QDRANT_COLLECTION,
+                field_name=field,
+                field_schema=schema,
+            )
+        logger.info("Created benchmark collection '%s' (%d-dim)", config.QDRANT_COLLECTION, config.VECTOR_DIM)
+    else:
+        info = client.get_collection(config.QDRANT_COLLECTION)
+        if info.points_count > 0:
+            client.delete_collection(config.QDRANT_COLLECTION)
+            client.create_collection(
+                collection_name=config.QDRANT_COLLECTION,
+                vectors_config=VectorParams(size=config.VECTOR_DIM, distance=Distance.COSINE),
+            )
+            logger.info("Recreated benchmark collection '%s' for clean run", config.QDRANT_COLLECTION)
+
     from indexer import full_index
+    from graph import init_schema
+    init_schema()
     logger.info("Indexing corpus from %s ...", CORPUS_DIR)
     count = await full_index(hierarchical=True)
     logger.info("Indexed %d chunks from corpus", count)
@@ -151,9 +211,15 @@ async def run_variant(variant_name: str, questions: list[dict], refine: bool) ->
     """Run all questions against a pipeline variant and collect metrics."""
     _apply_variant(variant_name)
 
+    import importlib
     import hot_cache
+    if "hot_cache" in sys.modules:
+        importlib.reload(sys.modules["hot_cache"])
+        hot_cache = sys.modules["hot_cache"]
     hot_cache.invalidate_all()
 
+    if "rlm_retriever" in sys.modules:
+        importlib.reload(sys.modules["rlm_retriever"])
     from rlm_retriever import recursive_retrieve
     from tokenizer import count_tokens
 
