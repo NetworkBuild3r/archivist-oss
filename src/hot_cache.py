@@ -87,6 +87,12 @@ def invalidate_namespace(namespace: str) -> int:
                 evicted += 1
     if evicted:
         logger.debug("Cache invalidation: evicted %d entries for namespace %s", evicted, namespace)
+    try:
+        import namespace_inventory
+
+        namespace_inventory.invalidate(namespace)
+    except Exception:
+        pass
     return evicted
 
 
@@ -102,7 +108,13 @@ def invalidate_all() -> int:
     with _lock:
         total = sum(len(c) for c in _agent_caches.values())
         _agent_caches.clear()
-        return total
+    try:
+        import namespace_inventory
+
+        namespace_inventory.invalidate_all()
+    except Exception:
+        pass
+    return total
 
 
 def stats() -> dict:

@@ -431,6 +431,21 @@ _CONSOLIDATION_SYSTEM = (
     "Return ONLY the JSON object."
 )
 
+_CONTRASTIVE_CONSOLIDATION_SYSTEM = (
+    "You consolidate operational tips that came from DIFFERENT agents working on related topics. "
+    "Extract invariant guidance that all agents' experience supports. "
+    "Identify violation patterns that distinguish success from failure across agents. "
+    "Discard agent-specific tool preferences, phrasing style, or architectural assumptions "
+    "unless all agents agree they matter.\n\n"
+    "Return a JSON object: "
+    '{"category": "strategy|recovery|optimization", '
+    '"tip": "the consolidated tip text", '
+    '"context": "when this applies", '
+    '"negative_example": "what NOT to do and why", '
+    '"invariant_source": "cross-agent"}. '
+    "Return ONLY the JSON object."
+)
+
 
 async def consolidate_tips(budget: int = 20) -> dict:
     """Cluster similar tips and merge clusters via LLM. Budget-capped.
@@ -471,16 +486,20 @@ async def consolidate_tips(budget: int = 20) -> dict:
         if budget_used >= budget:
             break
 
+        agent_ids = {t.get("agent_id") or "" for t in cluster}
+        agent_ids.discard("")
+        contrastive = len(agent_ids) >= 2
         tips_text = "\n\n".join(
-            f"[{t['category']}] {t['tip_text']}\nContext: {t.get('context', '')}"
+            f"[agent={t.get('agent_id', '')}] [{t['category']}] {t['tip_text']}\nContext: {t.get('context', '')}"
             for t in cluster
         )
         prompt = f"TIPS TO CONSOLIDATE ({len(cluster)} tips):\n\n{tips_text}"
+        system = _CONTRASTIVE_CONSOLIDATION_SYSTEM if contrastive else _CONSOLIDATION_SYSTEM
 
         try:
             m.inc(m.CURATOR_LLM_CALLS)
             budget_used += 1
-            raw = await llm_query(prompt, system=_CONSOLIDATION_SYSTEM, max_tokens=512, json_mode=True)
+            raw = await llm_query(prompt, system=system, max_tokens=512, json_mode=True)
             raw = raw.strip()
             raw = re.sub(r"^```(?:json)?\n?", "", raw)
             raw = re.sub(r"\n?```$", "", raw)
@@ -490,9 +509,10 @@ async def consolidate_tips(budget: int = 20) -> dict:
             continue
 
         original_ids = [t["id"] for t in cluster]
+        fleet_agent = "fleet" if contrastive else cluster[0].get("agent_id", "curator")
         curator_queue.enqueue("consolidate_tips", {
             "consolidated_tip": {
-                "agent_id": cluster[0].get("agent_id", "curator"),
+                "agent_id": fleet_agent,
                 "category": merged.get("category", "strategy"),
                 "tip": merged.get("tip", ""),
                 "context": merged.get("context", ""),

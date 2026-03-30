@@ -182,7 +182,7 @@ def _apply_consolidate_tips(conn, payload: dict):
         tip_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
         conn.execute(
-            "INSERT INTO tips (id, trajectory_id, agent_id, category, tip, context, negative_example, created_at) "
+            "INSERT INTO tips (id, trajectory_id, agent_id, category, tip_text, context, negative_example, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 tip_id,

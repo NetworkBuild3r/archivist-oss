@@ -7,7 +7,7 @@ import json
 import logging
 import re
 
-from llm import llm_query
+import llm as llm_mod
 
 logger = logging.getLogger("archivist.compaction")
 
@@ -23,9 +23,20 @@ STRUCTURED_COMPACT_SYSTEM = (
     "Return ONLY valid JSON. Be concise. Preserve specific details (names, paths, versions)."
 )
 
+STRUCTURED_COMPACT_MULTI_AGENT = (
+    STRUCTURED_COMPACT_SYSTEM
+    + "\n\nThese memories come from multiple agents. Preserve shared factual knowledge and "
+    "task-invariant insights. Discard agent-specific framing, tool preferences, or reasoning style."
+)
+
 FLAT_COMPACT_SYSTEM = (
     "Summarize these memory entries into a single concise summary (200 tokens max). "
     "Preserve key facts, entities, and actionable insights."
+)
+
+FLAT_COMPACT_MULTI_AGENT = (
+    FLAT_COMPACT_SYSTEM
+    + " Sources are from multiple agents — keep only cross-cutting facts, not idiosyncratic style."
 )
 
 
@@ -40,12 +51,14 @@ def _strip_fences(raw: str) -> str:
 async def compact_structured(
     texts: list[tuple[str, str]],
     previous_summary: str = "",
+    multi_agent: bool = False,
 ) -> dict:
     """Produce a structured compaction of memory texts.
 
     Args:
         texts: List of (memory_id, text) tuples to compact.
         previous_summary: Optional prior structured summary JSON to merge with.
+        multi_agent: When True, debias toward shared facts across agents.
 
     Returns:
         dict with goal, progress, decisions, next_steps, critical_context.
@@ -59,10 +72,11 @@ async def compact_structured(
     if previous_summary:
         combined = f"[Previous summary]\n{previous_summary}\n\n---\n\n[New memories]\n{combined}"
 
+    system = STRUCTURED_COMPACT_MULTI_AGENT if multi_agent else STRUCTURED_COMPACT_SYSTEM
     try:
-        raw = await llm_query(
+        raw = await llm_mod.llm_query(
             combined,
-            system=STRUCTURED_COMPACT_SYSTEM,
+            system=system,
             max_tokens=600,
             json_mode=True,
         )
@@ -73,24 +87,26 @@ async def compact_structured(
         return result
     except Exception as e:
         logger.warning("Structured compaction failed, falling back to flat: %s", e)
-        return await _fallback_flat(combined)
+        return await _fallback_flat(combined, multi_agent=multi_agent)
 
 
-async def compact_flat(texts: list[tuple[str, str]]) -> str:
+async def compact_flat(texts: list[tuple[str, str]], multi_agent: bool = False) -> str:
     """Produce a flat single-paragraph summary of memory texts."""
     combined = "\n\n---\n\n".join(f"[{mid}] {t[:400]}" for mid, t in texts)
+    system = FLAT_COMPACT_MULTI_AGENT if multi_agent else FLAT_COMPACT_SYSTEM
     try:
-        summary = await llm_query(combined, system=FLAT_COMPACT_SYSTEM, max_tokens=300)
+        summary = await llm_mod.llm_query(combined, system=system, max_tokens=300)
         return summary.strip()
     except Exception as e:
         logger.warning("Flat compaction failed: %s", e)
         return f"Compressed {len(texts)} memories."
 
 
-async def _fallback_flat(combined: str) -> dict:
+async def _fallback_flat(combined: str, multi_agent: bool = False) -> dict:
     """Fallback when structured parsing fails — wrap flat summary in structured shell."""
+    system = FLAT_COMPACT_MULTI_AGENT if multi_agent else FLAT_COMPACT_SYSTEM
     try:
-        summary = await llm_query(combined, system=FLAT_COMPACT_SYSTEM, max_tokens=300)
+        summary = await llm_mod.llm_query(combined, system=system, max_tokens=300)
         return {
             "goal": "",
             "progress": [summary.strip()],

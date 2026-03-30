@@ -101,6 +101,13 @@ CURATOR_EXTRACT_SKIP_SEGMENTS: list[str] = [
     if p.strip()
 ]
 
+# ── Memory awareness — Stage 0 query classification (v1.6 — MemCollab-inspired) ─
+QUERY_CLASSIFICATION_ENABLED = os.getenv("QUERY_CLASSIFICATION_ENABLED", "true").lower() in (
+    "true",
+    "1",
+    "yes",
+)
+
 # ── BM25 / FTS5 hybrid search (v1.2 — ReMe-inspired) ────────────────────────
 BM25_ENABLED = os.getenv("BM25_ENABLED", "true").lower() in ("true", "1", "yes")
 BM25_WEIGHT = float(os.getenv("BM25_WEIGHT", "0.3"))

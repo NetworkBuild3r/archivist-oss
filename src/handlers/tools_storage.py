@@ -322,27 +322,36 @@ async def _handle_compress(arguments: dict) -> list[TextContent]:
 
     client = QdrantClient(url=QDRANT_URL, timeout=30)
     texts: list[tuple[str, str]] = []
+    source_agent_ids: list[str] = []
     for mid in memory_ids:
         try:
             points = client.retrieve(
                 collection_name=QDRANT_COLLECTION, ids=[mid], with_payload=True,
             )
             if points:
-                texts.append((str(points[0].id), (points[0].payload or {}).get("text", "")))
+                pl = points[0].payload or {}
+                texts.append((str(points[0].id), pl.get("text", "")))
+                aid = pl.get("agent_id") or ""
+                if aid:
+                    source_agent_ids.append(str(aid))
         except Exception as e:
             logger.warning("Compress: failed to retrieve %s: %s", mid, e)
 
     if not texts:
         return error_response({"error": "no memories found for given IDs"})
 
+    multi_agent = len(set(source_agent_ids)) > 1
+
     if user_summary:
         summary_text = user_summary
         structured_data = None
     elif fmt == "structured":
-        structured_data = await compact_structured(texts, previous_summary=previous_summary)
+        structured_data = await compact_structured(
+            texts, previous_summary=previous_summary, multi_agent=multi_agent
+        )
         summary_text = format_structured_summary(structured_data)
     else:
-        summary_text = await compact_flat(texts)
+        summary_text = await compact_flat(texts, multi_agent=multi_agent)
         structured_data = None
 
     store_result = await _handle_store({
