@@ -4,20 +4,25 @@ various configuration variants and computes Recall@K, MRR, latency, and token co
 Prerequisites:
     - Qdrant running (docker compose up -d qdrant)
     - Embedding API reachable (LLM_URL / EMBED_URL configured)
-    - Seed corpus indexed: python -m benchmarks.pipeline.evaluate --index-only
+    - Seed corpus: benchmarks/fixtures/corpus/ (legacy) or generate presets:
+          python benchmarks/fixtures/generate_corpus.py --preset small
+          python benchmarks/fixtures/generate_corpus.py --write-questions
 
 Usage:
-    # Index corpus then run all ablation variants:
+    # Legacy corpus, index then all variants:
     python -m benchmarks.pipeline.evaluate
 
-    # Run a single variant:
+    # Dual-track preset (corpus under fixtures/corpus_small/):
+    python -m benchmarks.pipeline.evaluate --memory-scale small --output results.json
+
+    # After indexing, populate SQLite graph (LLM cost — optional):
+    python -m benchmarks.pipeline.evaluate --memory-scale medium --run-curator
+
+    # Compare vector_only vs full_pipeline across three corpus sizes:
+    python -m benchmarks.pipeline.evaluate --scale-sweep --variants vector_only,full_pipeline
+
+    # Single variant:
     python -m benchmarks.pipeline.evaluate --variant vector_only
-
-    # Skip indexing (already done):
-    python -m benchmarks.pipeline.evaluate --skip-index
-
-    # Output to file:
-    python -m benchmarks.pipeline.evaluate --output results.json
 """
 
 import argparse
@@ -42,9 +47,30 @@ if os.path.exists(env_path):
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
 
 FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "..", "fixtures")
-CORPUS_DIR = os.path.join(FIXTURES_DIR, "corpus")
+DEFAULT_CORPUS_DIR = os.path.join(FIXTURES_DIR, "corpus")
 QUESTIONS_PATH = os.path.join(FIXTURES_DIR, "questions.json")
 CONFIGS_DIR = os.path.join(os.path.dirname(__file__), "configs")
+
+CORPUS_BY_PRESET = {
+    "small": os.path.join(FIXTURES_DIR, "corpus_small"),
+    "medium": os.path.join(FIXTURES_DIR, "corpus_medium"),
+    "large": os.path.join(FIXTURES_DIR, "corpus_large"),
+}
+
+HYPOTHESES = {
+    "H1_large": (
+        "As indexed chunk count rises (fixed embedding model), the gap between vector_only "
+        "and full_pipeline on needle and multi_hop questions widens (BM25 + graph help more in a deep haystack)."
+    ),
+    "H2_small": (
+        "On a small corpus, headline recall may stay flat; value shows on contradiction, temporal, "
+        "and agent_scoped slices and on MRR, not global Recall@5 alone."
+    ),
+    "H3_graph": (
+        "If the knowledge graph is empty, graph-dependent questions cannot beat vector-only — "
+        "curator extraction (or offline seeding) is a prerequisite at every scale."
+    ),
+}
 
 logger = logging.getLogger("archivist.benchmark.pipeline")
 
@@ -159,10 +185,33 @@ def _reciprocal_rank(result_sources: list[dict], expected_answer: str) -> float:
     return 0.0
 
 
-async def index_corpus():
+def resolve_corpus_dir(memory_scale: str | None, corpus_dir_override: str | None) -> str:
+    if corpus_dir_override:
+        return os.path.abspath(corpus_dir_override)
+    if memory_scale and memory_scale in CORPUS_BY_PRESET:
+        return CORPUS_BY_PRESET[memory_scale]
+    return DEFAULT_CORPUS_DIR
+
+
+def filter_questions_for_scale(questions: list[dict], memory_scale: str | None) -> list[dict]:
+    """Drop questions whose `scales` list excludes this preset (Phase 2)."""
+    if not memory_scale:
+        return questions
+    out = []
+    for q in questions:
+        scales = q.get("scales")
+        if scales is None:
+            out.append(q)
+            continue
+        if "all" in scales or memory_scale in scales:
+            out.append(q)
+    return out
+
+
+async def index_corpus(corpus_dir: str):
     """Index the seed corpus files into Qdrant and FTS5."""
     import config
-    config.MEMORY_ROOT = CORPUS_DIR
+    config.MEMORY_ROOT = corpus_dir
 
     from qdrant_client import QdrantClient
     from qdrant_client.models import VectorParams, Distance, PayloadSchemaType
@@ -201,7 +250,7 @@ async def index_corpus():
     from indexer import full_index
     from graph import init_schema
     init_schema()
-    logger.info("Indexing corpus from %s ...", CORPUS_DIR)
+    logger.info("Indexing corpus from %s ...", corpus_dir)
     count = await full_index(hierarchical=True)
     logger.info("Indexed %d chunks from corpus", count)
     return count
@@ -331,33 +380,35 @@ def format_table(all_summaries: list[dict]) -> str:
     return "\n".join(lines)
 
 
-async def main():
-    parser = argparse.ArgumentParser(description="Archivist pipeline ablation benchmark")
-    parser.add_argument("--variant", choices=list(VARIANTS.keys()), help="Run a single variant")
-    parser.add_argument("--skip-index", action="store_true", help="Skip corpus indexing")
-    parser.add_argument("--index-only", action="store_true", help="Only index corpus, don't run queries")
-    parser.add_argument("--no-refine", action="store_true", help="Skip LLM refinement stages (faster)")
-    parser.add_argument("--output", type=str, help="Output JSON file path")
-    parser.add_argument("--limit", type=int, default=0, help="Limit number of questions (0=all)")
-    args = parser.parse_args()
+async def _run_benchmark_session(
+    *,
+    corpus_dir: str,
+    questions: list[dict],
+    variant_names: list[str],
+    refine: bool,
+    skip_index: bool,
+    run_curator: bool,
+    memory_scale: str | None,
+) -> tuple[dict, list[dict]]:
+    """Index (optional), curator (optional), run variants; return (all_results, all_summaries)."""
+    import importlib
+    import config
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    corpus_dir = os.path.abspath(corpus_dir)
+    os.environ["MEMORY_ROOT"] = corpus_dir
+    importlib.reload(config)
 
-    if not args.skip_index:
-        await index_corpus()
+    if not skip_index:
+        await index_corpus(corpus_dir)
 
-    if args.index_only:
-        return
+    if run_curator:
+        import curator
 
-    with open(QUESTIONS_PATH, "r") as f:
-        questions = json.load(f)
-    if args.limit > 0:
-        questions = questions[:args.limit]
-
-    logger.info("Running %d questions", len(questions))
-
-    variant_names = [args.variant] if args.variant else list(VARIANTS.keys())
-    refine = not args.no_refine
+        importlib.reload(config)
+        importlib.reload(curator)
+        logger.info("Running curator extraction over %s (LLM calls)...", corpus_dir)
+        n = await curator.extract_all_agent_memories()
+        logger.info("Curator finished: %d files extracted", n)
 
     all_results = {}
     all_summaries = []
@@ -366,7 +417,11 @@ async def main():
         logger.info("=== Variant: %s ===", variant)
         data = await run_variant(variant, questions, refine=refine)
         all_results[variant] = data
-        all_summaries.append(data["summary"])
+        summary = dict(data["summary"])
+        if memory_scale:
+            summary["memory_scale"] = memory_scale
+        summary["corpus_dir"] = corpus_dir
+        all_summaries.append(summary)
         logger.info(
             "  Recall@5=%.4f  MRR=%.4f  p50=%.0fms  tokens/q=%.0f",
             data["summary"]["recall_at_5"],
@@ -375,15 +430,152 @@ async def main():
             data["summary"]["avg_tokens_per_query"],
         )
 
+    return all_results, all_summaries
+
+
+async def main():
+    parser = argparse.ArgumentParser(description="Archivist pipeline ablation benchmark")
+    parser.add_argument("--variant", choices=list(VARIANTS.keys()), help="Run a single variant")
+    parser.add_argument(
+        "--variants",
+        type=str,
+        default="",
+        help="Comma-separated variants (used with --scale-sweep); default all variants",
+    )
+    parser.add_argument("--skip-index", action="store_true", help="Skip corpus indexing")
+    parser.add_argument("--index-only", action="store_true", help="Only index corpus, don't run queries")
+    parser.add_argument("--no-refine", action="store_true", help="Skip LLM refinement stages (faster)")
+    parser.add_argument("--output", type=str, help="Output JSON file path")
+    parser.add_argument("--limit", type=int, default=0, help="Limit number of questions (0=all)")
+    parser.add_argument(
+        "--memory-scale",
+        choices=["small", "medium", "large"],
+        default=None,
+        help="Use benchmarks/fixtures/corpus_<scale>/ (generate with generate_corpus.py --preset)",
+    )
+    parser.add_argument(
+        "--corpus-dir",
+        type=str,
+        default=None,
+        help="Override corpus root (agents/ tree). Overrides --memory-scale.",
+    )
+    parser.add_argument(
+        "--questions",
+        type=str,
+        default=None,
+        help="Path to questions JSON (default: fixtures/questions.json)",
+    )
+    parser.add_argument(
+        "--run-curator",
+        action="store_true",
+        help="After indexing, run LLM graph extraction on all agent markdown (costs tokens)",
+    )
+    parser.add_argument(
+        "--scale-sweep",
+        action="store_true",
+        help="Run the same variants for small, medium, large presets (re-indexes each time)",
+    )
+    args = parser.parse_args()
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+
+    questions_path = args.questions or QUESTIONS_PATH
+    with open(questions_path, "r", encoding="utf-8") as f:
+        questions_all = json.load(f)
+    if args.limit > 0:
+        questions_all = questions_all[: args.limit]
+
+    variant_names = (
+        [v.strip() for v in args.variants.split(",") if v.strip()]
+        if args.variants
+        else ([args.variant] if args.variant else list(VARIANTS.keys()))
+    )
+    refine = not args.no_refine
+
+    if args.scale_sweep:
+        by_scale = {}
+        combined_summaries = []
+        for scale in ("small", "medium", "large"):
+            corpus_dir = resolve_corpus_dir(scale, args.corpus_dir)
+            if not os.path.isdir(os.path.join(corpus_dir, "agents")):
+                logger.warning(
+                    "Skipping scale=%s — missing corpus at %s (run generate_corpus.py --preset %s)",
+                    scale,
+                    corpus_dir,
+                    scale,
+                )
+                continue
+            qs = filter_questions_for_scale(questions_all, scale)
+            logger.info("Scale %s: %d questions, corpus %s", scale, len(qs), corpus_dir)
+            all_results, summaries = await _run_benchmark_session(
+                corpus_dir=corpus_dir,
+                questions=qs,
+                variant_names=variant_names,
+                refine=refine,
+                skip_index=args.skip_index,
+                run_curator=args.run_curator,
+                memory_scale=scale,
+            )
+            by_scale[scale] = {
+                "summaries": summaries,
+                "full_results": {k: v["results"] for k, v in all_results.items()},
+            }
+            combined_summaries.extend(summaries)
+
+        print("\n" + format_table(combined_summaries))
+
+        if args.output:
+            output_data = {
+                "benchmark_meta": {
+                    "hypotheses": HYPOTHESES,
+                    "scale_sweep": True,
+                    "variants": variant_names,
+                },
+                "by_scale": by_scale,
+                "summaries": combined_summaries,
+                "comparison_table": format_table(combined_summaries),
+            }
+            with open(args.output, "w", encoding="utf-8") as f:
+                json.dump(output_data, f, indent=2)
+            logger.info("Results written to %s", args.output)
+        return
+
+    corpus_dir = resolve_corpus_dir(args.memory_scale, args.corpus_dir)
+    questions = filter_questions_for_scale(questions_all, args.memory_scale)
+
+    if args.index_only:
+        if not args.skip_index:
+            await index_corpus(corpus_dir)
+        return
+
+    logger.info("Corpus: %s | Questions: %d", corpus_dir, len(questions))
+
+    all_results, all_summaries = await _run_benchmark_session(
+        corpus_dir=corpus_dir,
+        questions=questions,
+        variant_names=variant_names,
+        refine=refine,
+        skip_index=args.skip_index,
+        run_curator=args.run_curator,
+        memory_scale=args.memory_scale,
+    )
+
     print("\n" + format_table(all_summaries))
 
     if args.output:
         output_data = {
+            "benchmark_meta": {
+                "hypotheses": HYPOTHESES,
+                "memory_scale": args.memory_scale,
+                "corpus_dir": corpus_dir,
+                "questions_path": questions_path,
+                "variants": variant_names,
+            },
             "summaries": all_summaries,
             "comparison_table": format_table(all_summaries),
             "full_results": {k: v["results"] for k, v in all_results.items()},
         }
-        with open(args.output, "w") as f:
+        with open(args.output, "w", encoding="utf-8") as f:
             json.dump(output_data, f, indent=2)
         logger.info("Results written to %s", args.output)
 

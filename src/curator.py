@@ -182,6 +182,45 @@ async def curate_cycle():
     return processed
 
 
+async def extract_all_agent_memories() -> int:
+    """Run knowledge extraction on every eligible agent markdown file under MEMORY_ROOT.
+
+    Ignores mtime/checksum (for benchmarks and backfills). Does not run decay.
+    """
+    processed = 0
+    for root, _dirs, files in os.walk(MEMORY_ROOT):
+        for fname in files:
+            if not fname.endswith(".md"):
+                continue
+            filepath = os.path.join(root, fname)
+            try:
+                with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+                    text = f.read()
+                if len(text.strip()) < 50:
+                    continue
+                rel = os.path.relpath(filepath, MEMORY_ROOT)
+                if not should_extract_knowledge(rel):
+                    continue
+                parts = Path(rel).parts
+                agent_id = ""
+                if "agents" in parts:
+                    idx = list(parts).index("agents")
+                    if idx + 1 < len(parts):
+                        agent_id = parts[idx + 1]
+                elif "memories" in parts:
+                    idx = list(parts).index("memories")
+                    if idx + 1 < len(parts):
+                        agent_id = parts[idx + 1]
+                data = await extract_knowledge(text, agent_id, rel)
+                if data:
+                    await process_extraction(data, agent_id, rel)
+                    processed += 1
+            except Exception as e:
+                logger.error("Bench curator failed on %s: %s", filepath, e)
+    logger.info("extract_all_agent_memories: processed %d files", processed)
+    return processed
+
+
 async def decay_old_entries():
     """Soft-delete graph entries not referenced in 90+ days."""
     with GRAPH_WRITE_LOCK:

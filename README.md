@@ -90,7 +90,7 @@ Each stage is observable via `retrieval_trace` in every response.
 
 ## Benchmarks
 
-Archivist's retrieval pipeline was benchmarked against a live stack (Qdrant + vLLM `BAAI/bge-base-en-v1.5` embeddings) running 100 queries across 6 query types against a 50-document, 155-chunk agent memory corpus. Each variant in the table below adds one more pipeline stage, showing the cumulative effect.
+Archivist's retrieval pipeline was benchmarked against a live stack (Qdrant + vLLM `BAAI/bge-base-en-v1.5` embeddings) running **~110** queries (including contradiction and needle slices) against the default 50-document corpus; **dual-track** presets (`benchmarks/fixtures/generate_corpus.py --preset small|medium|large` + `python -m benchmarks.pipeline.evaluate --memory-scale` or `--scale-sweep`) evaluate small vs large memory honestly. Each variant in the table below adds one more pipeline stage, showing the cumulative effect.
 
 ### Pipeline Ablation: Retrieval Quality by Stage
 
