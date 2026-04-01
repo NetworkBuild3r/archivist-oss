@@ -17,6 +17,17 @@ docker compose up -d --build
 curl -s http://localhost:3100/health
 ```
 
+### Git on a server without SSH keys
+
+If `git pull` fails with `Permission denied (publickey)`, use HTTPS:
+
+```bash
+git remote set-url origin https://github.com/NetworkBuild3r/archivist-oss.git
+git pull origin feature/v1.6-memory-awareness
+```
+
+Or use a [GitHub personal access token](https://github.com/settings/tokens) as the password when prompted.
+
 MCP endpoint: `http://localhost:3100/mcp/sse` (or your published host/port).
 
 ## Layout
@@ -68,8 +79,7 @@ Run Qdrant and Archivist on the host; point `QDRANT_URL`, `EMBED_URL`, and `LLM_
 
 ## Troubleshooting
 
-- **Qdrant unhealthy** (`dependency failed to start: ... qdrant ... unhealthy`):
-  - The official image has **no `curl`/`wget`**; this repo uses a **bash TCP check** on port `6333`. If it still fails, see `docker compose logs qdrant` and confirm nothing else is bound to host port `6333` (stop an old Qdrant container).
-  - **Port conflict**: another stack using `6333` prevents the new container from binding; change `QDRANT_PORT` in `.env` or stop the other service.
+- **Compose no longer depends on Qdrant “health”** — the official `qdrant` image has no `curl`/`wget`, and shell TCP probes can fail on some hosts. **Archivist waits up to 120s** for Qdrant to accept connections on startup (see `ensure_qdrant_collection` in `main.py`).
+- **Port conflict**: if host port `6333` is already in use, change `QDRANT_PORT` in `.env` or stop the other service.
 - **Archivist cannot reach embeddings on host**: confirm vLLM listens on `0.0.0.0:8000`, not only `127.0.0.1`, if needed.
 - **Vector dimension mismatch**: `VECTOR_DIM` must match the embedding model (e.g. `768` for `bge-base-en-v1.5`). Recreate the Qdrant collection if you change dimension after data was indexed.

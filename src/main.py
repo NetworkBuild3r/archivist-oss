@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import sys
+import time
 
 from watchfiles import awatch, Change
 
@@ -31,12 +32,31 @@ logger = logging.getLogger("archivist")
 
 
 def ensure_qdrant_collection():
-    """Create or migrate the Qdrant collection to the target vector dimension."""
+    """Create or migrate the Qdrant collection to the target vector dimension.
+
+    Retries until Qdrant accepts connections (Docker Compose may start archivist
+    before qdrant is listening; avoids brittle image-specific healthchecks).
+    """
     from qdrant_client import QdrantClient
     from qdrant_client.models import VectorParams, Distance, PayloadSchemaType
 
-    client = QdrantClient(url=QDRANT_URL, timeout=30)
-    collections = [c.name for c in client.get_collections().collections]
+    deadline = time.monotonic() + 120
+    last_err: Exception | None = None
+    client: QdrantClient | None = None
+    collections: list[str] = []
+    while time.monotonic() < deadline:
+        try:
+            client = QdrantClient(url=QDRANT_URL, timeout=30)
+            collections = [c.name for c in client.get_collections().collections]
+            break
+        except Exception as e:
+            last_err = e
+            logger.warning("Waiting for Qdrant at %s: %s — retrying in 2s", QDRANT_URL, e)
+            time.sleep(2)
+    else:
+        raise RuntimeError(f"Qdrant not reachable at {QDRANT_URL} after 120s") from last_err
+
+    assert client is not None
 
     needs_create = QDRANT_COLLECTION not in collections
 

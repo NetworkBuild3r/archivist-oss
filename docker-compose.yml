@@ -47,8 +47,7 @@ services:
       - archivist-data:/data
       - ${MEMORY_DIR:-./sample-memories}:/data/memories:ro
     depends_on:
-      qdrant:
-        condition: service_healthy
+      - qdrant
     restart: unless-stopped
 
   qdrant:
@@ -58,14 +57,8 @@ services:
       - "${QDRANT_GRPC_PORT:-6334}:6334"
     volumes:
       - qdrant-storage:/qdrant/storage
-    # Official qdrant image is Debian-based and does NOT ship curl/wget — HTTP healthchecks fail.
-    # TCP probe via bash (bash is present); verifies something is listening on REST port.
-    healthcheck:
-      test: ["CMD-SHELL", "bash -c 'echo >/dev/tcp/127.0.0.1/6333'"]
-      interval: 10s
-      timeout: 5s
-      retries: 8
-      start_period: 40s
+    # No healthcheck: the official image has no curl/wget; bash/TCP probes fail on some hosts.
+    # Archivist retries Qdrant for up to 120s on startup (see ensure_qdrant_collection in main.py).
     restart: unless-stopped
 
 volumes:
