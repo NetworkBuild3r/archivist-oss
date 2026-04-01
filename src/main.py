@@ -1,6 +1,7 @@
 """Archivist main entrypoint — starts MCP server, file watcher, curator loop, and initial index."""
 
 import asyncio
+from contextlib import asynccontextmanager
 import logging
 import os
 import sys
@@ -192,7 +193,7 @@ def _log_task_exception(task: asyncio.Task):
         logger.exception("Background task %r crashed", task.get_name(), exc_info=exc)
 
 
-async def startup():
+async def _startup():
     """Run on app startup: init DB, load RBAC, ensure Qdrant collection, start background tasks."""
     logger.info("Archivist v1.0.0 starting up...")
 
@@ -214,6 +215,21 @@ async def startup():
         t.add_done_callback(_log_task_exception)
         _background_tasks.append(t)
     logger.info("Background tasks started: %s", [t.get_name() for t in _background_tasks])
+
+
+@asynccontextmanager
+async def lifespan(_app: Starlette):
+    """Starlette ≥0.37 lifespan (replaces deprecated on_startup / on_shutdown)."""
+    await _startup()
+    try:
+        yield
+    finally:
+        for t in _background_tasks:
+            if not t.done():
+                t.cancel()
+        if _background_tasks:
+            await asyncio.gather(*_background_tasks, return_exceptions=True)
+        _background_tasks.clear()
 
 
 async def curator_queue_drain_loop():
@@ -311,7 +327,7 @@ app = Starlette(
         Mount("/mcp/messages/", app=sse_transport.handle_post_message),
     ],
     middleware=[Middleware(ArchivistAuthMiddleware)],
-    on_startup=[startup],
+    lifespan=lifespan,
 )
 
 
