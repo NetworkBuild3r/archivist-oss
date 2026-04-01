@@ -12,13 +12,6 @@ _MAX_RETRIES = 3
 _RETRY_DELAYS = [1, 2, 4]
 
 
-def _llm_headers() -> dict[str, str]:
-    """Omit Authorization when no key (local OpenAI-compatible servers)."""
-    if not LLM_API_KEY:
-        return {}
-    return {"Authorization": f"Bearer {LLM_API_KEY}"}
-
-
 async def llm_query(
     prompt: str,
     system: str = "",
@@ -42,12 +35,15 @@ async def llm_query(
 
     for attempt in range(_MAX_RETRIES):
         try:
+            headers: dict[str, str] = {}
+            if LLM_API_KEY:
+                headers["Authorization"] = f"Bearer {LLM_API_KEY}"
             async with httpx.AsyncClient(timeout=120) as client:
                 try:
                     resp = await client.post(
                         f"{LLM_URL}/v1/chat/completions",
                         json=body,
-                        headers=_llm_headers(),
+                        headers=headers,
                     )
                     resp.raise_for_status()
                     return resp.json()["choices"][0]["message"]["content"]
@@ -58,7 +54,7 @@ async def llm_query(
                         resp = await client.post(
                             f"{LLM_URL}/v1/chat/completions",
                             json=body,
-                            headers=_llm_headers(),
+                            headers=headers,
                         )
                         resp.raise_for_status()
                         return resp.json()["choices"][0]["message"]["content"]

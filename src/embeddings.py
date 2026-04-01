@@ -18,14 +18,6 @@ _MAX_EMBED_CHARS = 1200
 _IS_NVIDIA = os.getenv("EMBED_PROVIDER", "").lower() == "nvidia" or "nvidia" in EMBED_URL.lower()
 
 
-def _embed_headers() -> dict[str, str]:
-    """OpenAI-compatible servers often need no auth locally; empty Bearer is invalid for httpx."""
-    h = {"Content-Type": "application/json"}
-    if EMBED_API_KEY:
-        h["Authorization"] = f"Bearer {EMBED_API_KEY}"
-    return h
-
-
 async def embed_text(text: str, model: str = EMBED_MODEL) -> list[float]:
     """Embed a single text string, returning a float vector."""
     if len(text) > _MAX_EMBED_CHARS:
@@ -39,9 +31,12 @@ async def embed_text(text: str, model: str = EMBED_MODEL) -> list[float]:
                     payload["truncate"] = "END"
                     payload["encoding_format"] = "float"
 
+                headers: dict[str, str] = {"Content-Type": "application/json"}
+                if EMBED_API_KEY:
+                    headers["Authorization"] = f"Bearer {EMBED_API_KEY}"
                 resp = await client.post(
                     f"{EMBED_URL}/v1/embeddings",
-                    headers=_embed_headers(),
+                    headers=headers,
                     json=payload,
                 )
                 resp.raise_for_status()
