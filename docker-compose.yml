@@ -58,12 +58,14 @@ services:
       - "${QDRANT_GRPC_PORT:-6334}:6334"
     volumes:
       - qdrant-storage:/qdrant/storage
+    # Official qdrant image is Debian-based and does NOT ship curl/wget — HTTP healthchecks fail.
+    # TCP probe via bash (bash is present); verifies something is listening on REST port.
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:6333/healthz"]
+      test: ["CMD-SHELL", "bash -c 'echo >/dev/tcp/127.0.0.1/6333'"]
       interval: 10s
       timeout: 5s
-      retries: 5
-      start_period: 15s
+      retries: 8
+      start_period: 40s
     restart: unless-stopped
 
 volumes:

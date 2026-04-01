@@ -68,6 +68,8 @@ Run Qdrant and Archivist on the host; point `QDRANT_URL`, `EMBED_URL`, and `LLM_
 
 ## Troubleshooting
 
-- **Qdrant unhealthy**: ensure ports `6333`/`6334` are free; check `docker compose logs qdrant`.
+- **Qdrant unhealthy** (`dependency failed to start: ... qdrant ... unhealthy`):
+  - The official image has **no `curl`/`wget`**; this repo uses a **bash TCP check** on port `6333`. If it still fails, see `docker compose logs qdrant` and confirm nothing else is bound to host port `6333` (stop an old Qdrant container).
+  - **Port conflict**: another stack using `6333` prevents the new container from binding; change `QDRANT_PORT` in `.env` or stop the other service.
 - **Archivist cannot reach embeddings on host**: confirm vLLM listens on `0.0.0.0:8000`, not only `127.0.0.1`, if needed.
 - **Vector dimension mismatch**: `VECTOR_DIM` must match the embedding model (e.g. `768` for `bge-base-en-v1.5`). Recreate the Qdrant collection if you change dimension after data was indexed.
