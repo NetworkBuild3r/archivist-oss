@@ -1,23 +1,48 @@
-version: "3.8"
+# Archivist dev / single-node deployment
+#
+#   cp .env.example .env   # edit LLM / EMBED / keys
+#   docker compose up -d --build
+#   curl http://localhost:3100/health
+#
+# Embeddings on the host (e.g. vLLM :8000) from inside the archivist container:
+#   EMBED_URL=http://host.docker.internal:8000
+# Cloud LLM (e.g. xAI):
+#   LLM_URL=https://api.x.ai
+# (Do not put /v1 on LLM_URL — the app adds /v1/chat/completions.)
+#
+# Data under Docker volumes by default; use docker-compose.override.example.yml to bind /opt/appdata.
+
+name: archivist
 
 services:
   archivist:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
     ports:
-      - "3100:3100"
+      - "${MCP_PORT:-3100}:3100"
+    env_file:
+      - .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
-      - QDRANT_URL=http://qdrant:6333
-      - SQLITE_PATH=/data/archivist/graph.db
-      - MEMORY_ROOT=/data/memories
-      - LLM_URL=${LLM_URL:-http://host.docker.internal:4000}
-      - LLM_MODEL=${LLM_MODEL:-gpt-4o-mini}
-      - LLM_API_KEY=${LLM_API_KEY}
-      - EMBED_URL=${EMBED_URL:-http://host.docker.internal:4000}
-      - EMBED_MODEL=${EMBED_MODEL:-text-embedding-v3}
-      - VECTOR_DIM=${VECTOR_DIM:-1024}
-      - RERANK_ENABLED=${RERANK_ENABLED:-false}
-      - RETRIEVAL_THRESHOLD=${RETRIEVAL_THRESHOLD:-0.65}
-      - NAMESPACES_CONFIG_PATH=/data/archivist/config/namespaces.yaml
+      # Qdrant is always the compose service name (not localhost)
+      QDRANT_URL: http://qdrant:6333
+      # Paths inside the container
+      SQLITE_PATH: /data/archivist/graph.db
+      MEMORY_ROOT: /data/memories
+      NAMESPACES_CONFIG_PATH: /data/archivist/config/namespaces.yaml
+      # From .env (defaults for local dev without .env)
+      LLM_URL: ${LLM_URL:-http://host.docker.internal:11434}
+      LLM_MODEL: ${LLM_MODEL:-llama3.1}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      EMBED_URL: ${EMBED_URL:-http://host.docker.internal:8000}
+      EMBED_API_KEY: ${EMBED_API_KEY:-}
+      EMBED_MODEL: ${EMBED_MODEL:-BAAI/bge-base-en-v1.5}
+      VECTOR_DIM: ${VECTOR_DIM:-768}
+      MCP_PORT: ${MCP_PORT:-3100}
+      RERANK_ENABLED: ${RERANK_ENABLED:-false}
+      RETRIEVAL_THRESHOLD: ${RETRIEVAL_THRESHOLD:-0.65}
     volumes:
       - archivist-data:/data
       - ${MEMORY_DIR:-./sample-memories}:/data/memories:ro
@@ -29,8 +54,8 @@ services:
   qdrant:
     image: qdrant/qdrant:latest
     ports:
-      - "6333:6333"
-      - "6334:6334"
+      - "${QDRANT_PORT:-6333}:6333"
+      - "${QDRANT_GRPC_PORT:-6334}:6334"
     volumes:
       - qdrant-storage:/qdrant/storage
     healthcheck:
@@ -38,6 +63,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 15s
     restart: unless-stopped
 
 volumes:

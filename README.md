@@ -23,10 +23,12 @@ Vector search + knowledge graph + active curation — one MCP endpoint.</p>
 
 ```bash
 git clone https://github.com/NetworkBuild3r/archivist-oss.git
-cd archivist-oss && cp .env.example .env   # set your LLM/embed keys
-docker compose up -d                        # Archivist :3100 + Qdrant :6333
-curl http://localhost:3100/health            # {"status":"ok"}
+cd archivist-oss && cp .env.example .env   # set LLM + embed (see docs/DOCKER.md for xAI + host vLLM)
+docker compose up -d --build               # Archivist :3100 + Qdrant :6333
+curl http://localhost:3100/health          # {"status":"ok"}
 ```
+
+Full Docker options (host vLLM, `/opt/appdata` volumes, overrides): [`docs/DOCKER.md`](docs/DOCKER.md).
 
 Point any MCP client at `http://localhost:3100/mcp/sse` — done. Your agents now have long-term memory with search, RBAC, knowledge graphs, and active curation out of the box.
 
@@ -595,6 +597,7 @@ Archivist is integration and execution on top of public work from the agent-memo
 | Document | Covers |
 |----------|--------|
 | [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) | Three-tier benchmark results, reproduction steps, competitive comparison |
+| [`docs/DOCKER.md`](docs/DOCKER.md) | Docker Compose stack, host vLLM + cloud LLM, `/opt/appdata` volumes |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Module map, data flow diagrams, storage schema, per-version operational notes |
 | [`docs/CURSOR_SKILL.md`](docs/CURSOR_SKILL.md) | Full parameter schemas and examples for all 30 MCP tools |
 | [`docs/REFERENCE.md`](docs/REFERENCE.md) | Condensed tool reference table |
