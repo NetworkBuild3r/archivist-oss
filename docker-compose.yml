@@ -1,45 +1,128 @@
-version: "3.8"
+# Archivist dev / single-node deployment
+#
+#   cp .env.example .env   # edit LLM / EMBED / keys
+#   docker compose up -d --build
+#   curl http://localhost:3100/health
+#
+# Embeddings on the host (e.g. vLLM :8000) from inside the archivist container:
+#   EMBED_URL=http://host.docker.internal:8000
+# LiteLLM / proxy over Tailscale (configured via .env), often :80 from home k3s:
+#   LLM_URL=http://openclaw-vllm-corp
+#   OPENCLAW_VLLM_TSIP=<100.x from: docker exec ... tailscale status | grep openclaw>
+#
+# Benchmark in Docker (Qdrant + Tailscale in this compose; embeddings on host / other compose; LLM remote):
+#   docker compose up -d qdrant tailscale
+#   docker compose --profile benchmark build benchmark
+#   docker compose --profile benchmark run --rm benchmark --no-refine --output .benchmarks/pipeline.json
+# Set EMBED_URL in .env to http://host.docker.internal:8000 (or your embedding container IP).
+#
+# Data under Docker volumes by default; use docker-compose.override.example.yml to bind /opt/appdata.
+
+name: archivist
 
 services:
-  archivist:
-    build: .
+  tailscale:
+    image: tailscale/tailscale:latest
+    hostname: archivist-tailscale
+    # Docker's resolver (127.0.0.11) does not use Tailscale Magic DNS; map the peer hostname to its
+    # Tailscale IP. Update OPENCLAW_VLLM_TSIP in .env if this machine's 100.x address changes.
+    extra_hosts:
+      - "openclaw-vllm-corp:${OPENCLAW_VLLM_TSIP:-100.89.207.109}"
+      # Reach host from containers sharing this network (embedding vLLM on host or published port).
+      - "host.docker.internal:host-gateway"
     ports:
-      - "3100:3100"
+      - "${MCP_PORT:-3100}:3100"
     environment:
-      - QDRANT_URL=http://qdrant:6333
-      - SQLITE_PATH=/data/archivist/graph.db
-      - MEMORY_ROOT=/data/memories
-      - LLM_URL=${LLM_URL:-http://host.docker.internal:4000}
-      - LLM_MODEL=${LLM_MODEL:-gpt-4o-mini}
-      - LLM_API_KEY=${LLM_API_KEY}
-      - EMBED_URL=${EMBED_URL:-http://host.docker.internal:4000}
-      - EMBED_MODEL=${EMBED_MODEL:-text-embedding-v3}
-      - VECTOR_DIM=${VECTOR_DIM:-1024}
-      - RERANK_ENABLED=${RERANK_ENABLED:-false}
-      - RETRIEVAL_THRESHOLD=${RETRIEVAL_THRESHOLD:-0.65}
-      - NAMESPACES_CONFIG_PATH=/data/archivist/config/namespaces.yaml
+      - TS_AUTHKEY=${TS_AUTHKEY}
+      - TS_STATE_DIR=/var/lib/tailscale
+      - TS_USERSPACE=false
+    volumes:
+      - tailscale-state:/var/lib/tailscale
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    networks:
+      - archivist-net
+    restart: unless-stopped
+
+  # Pipeline benchmark: shares Tailscale (remote LLM), uses Qdrant on archivist-net, repo bind-mount.
+  benchmark:
+    profiles: ["benchmark"]
+    build:
+      context: .
+      dockerfile: Dockerfile.benchmark
+    env_file:
+      - .env
+    environment:
+      QDRANT_URL: http://qdrant:6333
+      # Do not use .env EMBED_URL=127.0.0.1 here — inside the container that points at itself.
+      # Embedding vLLM on the host or another compose stack: override BENCHMARK_EMBED_URL if needed.
+      EMBED_URL: ${BENCHMARK_EMBED_URL:-http://host.docker.internal:8000}
+      EMBED_API_KEY: ${EMBED_API_KEY:-}
+      EMBED_MODEL: ${EMBED_MODEL:-bge-base}
+      VECTOR_DIM: ${VECTOR_DIM:-768}
+      LLM_URL: ${LLM_URL:-http://openclaw-vllm-corp}
+      LLM_MODEL: ${LLM_MODEL:-qwen3.5-122b}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      RERANK_ENABLED: ${RERANK_ENABLED:-false}
+    volumes:
+      - .:/workspace
+    working_dir: /workspace
+    depends_on:
+      - qdrant
+      - tailscale
+    network_mode: "service:tailscale"
+
+  archivist:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    environment:
+      # Qdrant accessible via shared network
+      QDRANT_URL: http://qdrant:6333
+      # Paths inside the container
+      SQLITE_PATH: /data/archivist/graph.db
+      MEMORY_ROOT: /data/memories
+      NAMESPACES_CONFIG_PATH: /data/archivist/config/namespaces.yaml
+      # From .env
+      LLM_URL: ${LLM_URL:-http://host.docker.internal:11434}
+      LLM_MODEL: ${LLM_MODEL:-llama3.1}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      EMBED_URL: ${EMBED_URL:-http://host.docker.internal:8000}
+      EMBED_API_KEY: ${EMBED_API_KEY:-}
+      EMBED_MODEL: ${EMBED_MODEL:-BAAI/bge-base-en-v1.5}
+      VECTOR_DIM: ${VECTOR_DIM:-768}
+      MCP_PORT: ${MCP_PORT:-3100}
+      RERANK_ENABLED: ${RERANK_ENABLED:-false}
+      RETRIEVAL_THRESHOLD: ${RETRIEVAL_THRESHOLD:-0.65}
     volumes:
       - archivist-data:/data
       - ${MEMORY_DIR:-./sample-memories}:/data/memories:ro
     depends_on:
-      qdrant:
-        condition: service_healthy
+      - qdrant
+      - tailscale
+    network_mode: "service:tailscale"
     restart: unless-stopped
 
   qdrant:
     image: qdrant/qdrant:latest
     ports:
-      - "6333:6333"
-      - "6334:6334"
+      - "${QDRANT_PORT:-6333}:6333"
+      - "${QDRANT_GRPC_PORT:-6334}:6334"
     volumes:
       - qdrant-storage:/qdrant/storage
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:6333/healthz"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+    networks:
+      - archivist-net
     restart: unless-stopped
 
 volumes:
   archivist-data:
   qdrant-storage:
+  tailscale-state:
+
+networks:
+  archivist-net:
+    driver: bridge

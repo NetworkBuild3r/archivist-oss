@@ -14,40 +14,28 @@ import uuid
 from collections import deque
 from datetime import datetime, timezone
 
-from graph import get_db, GRAPH_WRITE_LOCK
+from graph import get_db, GRAPH_WRITE_LOCK, schema_guard
 from config import TRAJECTORY_EXPORT_ENABLED, TRAJECTORY_EXPORT_MAX
 
 logger = logging.getLogger("archivist.retrieval_log")
 
-_SCHEMA_APPLIED = False
-
-
-def _ensure_schema():
-    global _SCHEMA_APPLIED
-    if _SCHEMA_APPLIED:
-        return
-    with GRAPH_WRITE_LOCK:
-        conn = get_db()
-        conn.executescript("""
-        CREATE TABLE IF NOT EXISTS retrieval_logs (
-            id TEXT PRIMARY KEY,
-            agent_id TEXT NOT NULL,
-            query TEXT NOT NULL,
-            namespace TEXT DEFAULT '',
-            tier TEXT DEFAULT 'l2',
-            memory_type TEXT DEFAULT '',
-            retrieval_trace TEXT NOT NULL,
-            result_count INTEGER DEFAULT 0,
-            cache_hit INTEGER DEFAULT 0,
-            duration_ms INTEGER,
-            created_at TEXT NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_rl_agent ON retrieval_logs(agent_id);
-        CREATE INDEX IF NOT EXISTS idx_rl_created ON retrieval_logs(created_at);
-        """)
-        conn.commit()
-        conn.close()
-    _SCHEMA_APPLIED = True
+_ensure_schema = schema_guard("""
+    CREATE TABLE IF NOT EXISTS retrieval_logs (
+        id TEXT PRIMARY KEY,
+        agent_id TEXT NOT NULL,
+        query TEXT NOT NULL,
+        namespace TEXT DEFAULT '',
+        tier TEXT DEFAULT 'l2',
+        memory_type TEXT DEFAULT '',
+        retrieval_trace TEXT NOT NULL,
+        result_count INTEGER DEFAULT 0,
+        cache_hit INTEGER DEFAULT 0,
+        duration_ms INTEGER,
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_rl_agent ON retrieval_logs(agent_id);
+    CREATE INDEX IF NOT EXISTS idx_rl_created ON retrieval_logs(created_at);
+""")
 
 
 def log_retrieval(

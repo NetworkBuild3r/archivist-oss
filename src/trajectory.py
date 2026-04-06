@@ -11,13 +11,12 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
-from graph import get_db, GRAPH_WRITE_LOCK, upsert_entity, add_fact
+from graph import get_db, GRAPH_WRITE_LOCK, upsert_entity, add_fact, schema_guard
 from config import OUTCOME_RETRIEVAL_BOOST, OUTCOME_RETRIEVAL_PENALTY
+from text_utils import strip_fences
 from llm import llm_query
 
 logger = logging.getLogger("archivist.trajectory")
-
-_SCHEMA_APPLIED = False
 
 _ATTRIBUTION_SYSTEM = (
     "You are a post-mortem analyst. Given an agent's execution trajectory "
@@ -44,83 +43,74 @@ _SESSION_SYSTEM = (
 )
 
 
-def _ensure_trajectory_schema():
-    global _SCHEMA_APPLIED
-    if _SCHEMA_APPLIED:
-        return
-    with GRAPH_WRITE_LOCK:
-        conn = get_db()
-        conn.executescript("""
-        CREATE TABLE IF NOT EXISTS trajectories (
-            id TEXT PRIMARY KEY,
-            agent_id TEXT NOT NULL,
-            session_id TEXT,
-            task_description TEXT NOT NULL,
-            actions TEXT NOT NULL DEFAULT '[]',
-            outcome TEXT NOT NULL DEFAULT 'unknown',
-            outcome_score REAL,
-            memory_ids_used TEXT DEFAULT '[]',
-            created_at TEXT NOT NULL,
-            metadata TEXT DEFAULT '{}'
-        );
-        CREATE INDEX IF NOT EXISTS idx_traj_agent ON trajectories(agent_id);
-        CREATE INDEX IF NOT EXISTS idx_traj_session ON trajectories(session_id);
-        CREATE INDEX IF NOT EXISTS idx_traj_outcome ON trajectories(outcome);
+_ensure_trajectory_schema = schema_guard("""
+    CREATE TABLE IF NOT EXISTS trajectories (
+        id TEXT PRIMARY KEY,
+        agent_id TEXT NOT NULL,
+        session_id TEXT,
+        task_description TEXT NOT NULL,
+        actions TEXT NOT NULL DEFAULT '[]',
+        outcome TEXT NOT NULL DEFAULT 'unknown',
+        outcome_score REAL,
+        memory_ids_used TEXT DEFAULT '[]',
+        created_at TEXT NOT NULL,
+        metadata TEXT DEFAULT '{}'
+    );
+    CREATE INDEX IF NOT EXISTS idx_traj_agent ON trajectories(agent_id);
+    CREATE INDEX IF NOT EXISTS idx_traj_session ON trajectories(session_id);
+    CREATE INDEX IF NOT EXISTS idx_traj_outcome ON trajectories(outcome);
 
-        CREATE TABLE IF NOT EXISTS tips (
-            id TEXT PRIMARY KEY,
-            trajectory_id TEXT NOT NULL REFERENCES trajectories(id),
-            agent_id TEXT NOT NULL,
-            category TEXT NOT NULL,
-            tip_text TEXT NOT NULL,
-            context TEXT,
-            negative_example TEXT,
-            archived INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL,
-            usage_count INTEGER NOT NULL DEFAULT 0,
-            last_used_at TEXT
-        );
-        CREATE INDEX IF NOT EXISTS idx_tips_agent ON tips(agent_id);
-        CREATE INDEX IF NOT EXISTS idx_tips_category ON tips(category);
-        CREATE INDEX IF NOT EXISTS idx_tips_archived ON tips(archived);
+    CREATE TABLE IF NOT EXISTS tips (
+        id TEXT PRIMARY KEY,
+        trajectory_id TEXT NOT NULL REFERENCES trajectories(id),
+        agent_id TEXT NOT NULL,
+        category TEXT NOT NULL,
+        tip_text TEXT NOT NULL,
+        context TEXT,
+        negative_example TEXT,
+        archived INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        usage_count INTEGER NOT NULL DEFAULT 0,
+        last_used_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_tips_agent ON tips(agent_id);
+    CREATE INDEX IF NOT EXISTS idx_tips_category ON tips(category);
+    CREATE INDEX IF NOT EXISTS idx_tips_archived ON tips(archived);
 
-        CREATE TABLE IF NOT EXISTS annotations (
-            id TEXT PRIMARY KEY,
-            memory_id TEXT NOT NULL,
-            agent_id TEXT NOT NULL,
-            annotation_type TEXT NOT NULL DEFAULT 'note',
-            content TEXT NOT NULL,
-            quality_score REAL,
-            created_at TEXT NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_ann_memory ON annotations(memory_id);
-        CREATE INDEX IF NOT EXISTS idx_ann_agent ON annotations(agent_id);
+    CREATE TABLE IF NOT EXISTS annotations (
+        id TEXT PRIMARY KEY,
+        memory_id TEXT NOT NULL,
+        agent_id TEXT NOT NULL,
+        annotation_type TEXT NOT NULL DEFAULT 'note',
+        content TEXT NOT NULL,
+        quality_score REAL,
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_ann_memory ON annotations(memory_id);
+    CREATE INDEX IF NOT EXISTS idx_ann_agent ON annotations(agent_id);
 
-        CREATE TABLE IF NOT EXISTS ratings (
-            id TEXT PRIMARY KEY,
-            memory_id TEXT NOT NULL,
-            agent_id TEXT NOT NULL,
-            rating INTEGER NOT NULL,
-            context TEXT,
-            created_at TEXT NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_ratings_memory ON ratings(memory_id);
-        CREATE INDEX IF NOT EXISTS idx_ratings_agent ON ratings(agent_id);
+    CREATE TABLE IF NOT EXISTS ratings (
+        id TEXT PRIMARY KEY,
+        memory_id TEXT NOT NULL,
+        agent_id TEXT NOT NULL,
+        rating INTEGER NOT NULL,
+        context TEXT,
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_ratings_memory ON ratings(memory_id);
+    CREATE INDEX IF NOT EXISTS idx_ratings_agent ON ratings(agent_id);
 
-        CREATE TABLE IF NOT EXISTS memory_outcomes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            memory_id TEXT NOT NULL,
-            trajectory_id TEXT NOT NULL REFERENCES trajectories(id),
-            influence TEXT NOT NULL DEFAULT 'medium',
-            outcome TEXT NOT NULL,
-            outcome_score REAL,
-            created_at TEXT NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_mo_memory ON memory_outcomes(memory_id);
-        """)
-        conn.commit()
-        conn.close()
-    _SCHEMA_APPLIED = True
+    CREATE TABLE IF NOT EXISTS memory_outcomes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        memory_id TEXT NOT NULL,
+        trajectory_id TEXT NOT NULL REFERENCES trajectories(id),
+        influence TEXT NOT NULL DEFAULT 'medium',
+        outcome TEXT NOT NULL,
+        outcome_score REAL,
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_mo_memory ON memory_outcomes(memory_id);
+""")
 
 
 async def log_trajectory(
@@ -431,13 +421,27 @@ _CONSOLIDATION_SYSTEM = (
     "Return ONLY the JSON object."
 )
 
+_CONTRASTIVE_CONSOLIDATION_SYSTEM = (
+    "You consolidate operational tips that came from DIFFERENT agents working on related topics. "
+    "Extract invariant guidance that all agents' experience supports. "
+    "Identify violation patterns that distinguish success from failure across agents. "
+    "Discard agent-specific tool preferences, phrasing style, or architectural assumptions "
+    "unless all agents agree they matter.\n\n"
+    "Return a JSON object: "
+    '{"category": "strategy|recovery|optimization", '
+    '"tip": "the consolidated tip text", '
+    '"context": "when this applies", '
+    '"negative_example": "what NOT to do and why", '
+    '"invariant_source": "cross-agent"}. '
+    "Return ONLY the JSON object."
+)
+
 
 async def consolidate_tips(budget: int = 20) -> dict:
     """Cluster similar tips and merge clusters via LLM. Budget-capped.
 
     Returns summary of consolidation: clusters found, merged, budget used.
     """
-    import re
     from config import CURATOR_TIP_BUDGET
     from embeddings import embed_text
     import metrics as m
@@ -471,28 +475,30 @@ async def consolidate_tips(budget: int = 20) -> dict:
         if budget_used >= budget:
             break
 
+        agent_ids = {t.get("agent_id") or "" for t in cluster}
+        agent_ids.discard("")
+        contrastive = len(agent_ids) >= 2
         tips_text = "\n\n".join(
-            f"[{t['category']}] {t['tip_text']}\nContext: {t.get('context', '')}"
+            f"[agent={t.get('agent_id', '')}] [{t['category']}] {t['tip_text']}\nContext: {t.get('context', '')}"
             for t in cluster
         )
         prompt = f"TIPS TO CONSOLIDATE ({len(cluster)} tips):\n\n{tips_text}"
+        system = _CONTRASTIVE_CONSOLIDATION_SYSTEM if contrastive else _CONSOLIDATION_SYSTEM
 
         try:
             m.inc(m.CURATOR_LLM_CALLS)
             budget_used += 1
-            raw = await llm_query(prompt, system=_CONSOLIDATION_SYSTEM, max_tokens=512, json_mode=True)
-            raw = raw.strip()
-            raw = re.sub(r"^```(?:json)?\n?", "", raw)
-            raw = re.sub(r"\n?```$", "", raw)
-            merged = json.loads(raw)
+            raw = await llm_query(prompt, system=system, max_tokens=512, json_mode=True)
+            merged = json.loads(strip_fences(raw))
         except Exception as e:
             logger.warning("Tip consolidation LLM failed: %s", e)
             continue
 
         original_ids = [t["id"] for t in cluster]
+        fleet_agent = "fleet" if contrastive else cluster[0].get("agent_id", "curator")
         curator_queue.enqueue("consolidate_tips", {
             "consolidated_tip": {
-                "agent_id": cluster[0].get("agent_id", "curator"),
+                "agent_id": fleet_agent,
                 "category": merged.get("category", "strategy"),
                 "tip": merged.get("tip", ""),
                 "context": merged.get("context", ""),

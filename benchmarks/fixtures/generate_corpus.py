@@ -1,15 +1,78 @@
-"""Generate seed corpus (50 markdown files) and questions.json (100 QA pairs).
+"""Generate seed corpus and questions.json.
 
-Run once to populate benchmarks/fixtures/:
+Legacy (50 files → benchmarks/fixtures/corpus/):
     python benchmarks/fixtures/generate_corpus.py
+
+Dual-track scale presets (Phase 2):
+    python benchmarks/fixtures/generate_corpus.py --preset small
+    python benchmarks/fixtures/generate_corpus.py --preset medium
+    python benchmarks/fixtures/generate_corpus.py --preset large
+    python benchmarks/fixtures/generate_corpus.py --preset stress   # huge haystack; same questions as large
+
+Questions file (adds needle / contradiction tags; use with any preset):
+    python benchmarks/fixtures/generate_corpus.py --write-questions
 """
 
+import argparse
 import json
 import os
 import random
+from datetime import date, timedelta
 
 CORPUS_DIR = os.path.join(os.path.dirname(__file__), "corpus")
 QUESTIONS_PATH = os.path.join(os.path.dirname(__file__), "questions.json")
+
+# Needle fact for large/medium corpora (unique string for haystack tests)
+NEEDLE_SECRET = (
+    "ArchivistNeedleV1: the approved production backup window is exactly 04:15 UTC every Sunday; "
+    "no other window is authorized."
+)
+CONTRADICTION_FACT_A = (
+    "Monitoring SLO (authoritative Feb 2026): API p99 latency must stay under 200ms at all times."
+)
+CONTRADICTION_FACT_B = (
+    "Monitoring SLO (revised note): API p99 latency target was relaxed to 500ms for edge regions."
+)
+
+PRESETS = {
+    "small": {
+        "agents": 6,
+        "files_per_agent": 9,
+        "noise_files": 0,
+        "days_span": 75,
+        "needle": False,
+        "paraphrase_dupes": 0,
+        "contradiction_files": True,
+    },
+    "medium": {
+        "agents": 10,
+        "files_per_agent": 10,
+        "noise_files": 120,
+        "days_span": 120,
+        "needle": True,
+        "paraphrase_dupes": 30,
+        "contradiction_files": True,
+    },
+    "large": {
+        "agents": 10,
+        "files_per_agent": 14,
+        "noise_files": 320,
+        "days_span": 150,
+        "needle": True,
+        "paraphrase_dupes": 80,
+        "contradiction_files": True,
+    },
+    # Very large haystack: same question set as `large` in evaluate.py, extra noise + span for "memory not lost" demos.
+    "stress": {
+        "agents": 10,
+        "files_per_agent": 20,
+        "noise_files": 1200,
+        "days_span": 400,
+        "needle": True,
+        "paraphrase_dupes": 120,
+        "contradiction_files": True,
+    },
+}
 
 AGENTS = ["chief", "gitbob", "grafgreg", "argo", "kubekate",
            "devdan", "securitysam", "docbot", "testrunner", "deployer"]
@@ -296,7 +359,69 @@ def _generate_questions() -> list[dict]:
         qid += 1
         questions.append({"id": qid, **sq})
 
-    while len(questions) < 100:
+    contradiction_questions = [
+        {
+            "query": "What are the stated API p99 latency SLO values for monitoring, including conflicting notes?",
+            "expected_keywords": ["200ms", "500ms", "p99", "latency", "SLO"],
+            "expected_answer": CONTRADICTION_FACT_A,
+            "topic": "monitoring",
+            "query_type": "contradiction",
+            "tags": ["contradiction", "multi_hop"],
+            "scales": ["small", "medium", "large"],
+            "difficulty": "hard",
+        },
+        {
+            "query": "Is the monitoring latency target 200ms or 500ms p99?",
+            "expected_keywords": ["200", "500", "p99"],
+            "expected_answer": CONTRADICTION_FACT_B,
+            "topic": "monitoring",
+            "query_type": "contradiction",
+            "tags": ["contradiction"],
+            "scales": ["small", "medium", "large"],
+            "difficulty": "hard",
+        },
+    ]
+    for cq in contradiction_questions:
+        qid += 1
+        questions.append({"id": qid, **cq})
+
+    needle_questions = [
+        {
+            "query": "What is the exact approved production backup window (time and day)?",
+            "expected_keywords": ["ArchivistNeedleV1", "04:15", "Sunday", "UTC"],
+            "expected_answer": NEEDLE_SECRET,
+            "topic": "operations",
+            "query_type": "needle",
+            "tags": ["needle", "single_hop"],
+            "scales": ["medium", "large"],
+            "difficulty": "hard",
+        },
+        {
+            "query": "Find the canonical backup schedule phrase used for production.",
+            "expected_keywords": ["ArchivistNeedleV1", "backup"],
+            "expected_answer": NEEDLE_SECRET,
+            "topic": "operations",
+            "query_type": "needle",
+            "tags": ["needle"],
+            "scales": ["medium", "large"],
+            "difficulty": "hard",
+        },
+        {
+            "query": "needleagent backup policy UTC",
+            "expected_keywords": ["04:15", "Sunday"],
+            "expected_answer": NEEDLE_SECRET,
+            "topic": "operations",
+            "query_type": "needle",
+            "tags": ["needle"],
+            "scales": ["large"],
+            "difficulty": "medium",
+        },
+    ]
+    for nq in needle_questions:
+        qid += 1
+        questions.append({"id": qid, **nq})
+
+    while len(questions) < 110:
         topic_name = random.choice(list(TOPICS.keys()))
         topic = TOPICS[topic_name]
         fact = random.choice(topic["facts"])
@@ -311,7 +436,11 @@ def _generate_questions() -> list[dict]:
             "difficulty": "easy",
         })
 
-    return questions[:100]
+    for q in questions:
+        q.setdefault("tags", [q.get("query_type", "single_hop")])
+        q.setdefault("scales", ["small", "medium", "large"])
+
+    return questions[:120]
 
 
 def _fact_to_question(fact: str, topic: str) -> str:
@@ -333,43 +462,209 @@ def _extract_keywords(fact: str) -> list[str]:
     return (numbers + proper_nouns)[:5]
 
 
-def main():
-    random.seed(42)
-    os.makedirs(CORPUS_DIR, exist_ok=True)
+def _spread_dates(n: int, days_span: int) -> list[str]:
+    """Return n ISO dates spread across ~days_span days ending near 2026-03-30."""
+    end = date(2026, 3, 30)
+    start = end - timedelta(days=max(days_span, n))
+    if n <= 1:
+        return [end.isoformat()]
+    step = max(1, (end - start).days // max(n - 1, 1))
+    out = []
+    d = start
+    for _ in range(n):
+        out.append(d.isoformat())
+        d = min(end, d + timedelta(days=step))
+    return out
 
+
+def _write_contradiction_pair(corpus_root: str) -> None:
+    chief = os.path.join(corpus_root, "agents", "chief")
+    grafgreg = os.path.join(corpus_root, "agents", "grafgreg")
+    os.makedirs(chief, exist_ok=True)
+    os.makedirs(grafgreg, exist_ok=True)
+    with open(os.path.join(chief, "2026-02-01-monitoring-slo.md"), "w", encoding="utf-8") as f:
+        f.write(
+            "# Monitoring SLO (chief)\n\n**Agent:** chief\n**Date:** 2026-02-01\n\n"
+            f"## Fact\n\n{CONTRADICTION_FACT_A}\n\nRelated: Prometheus, Grafana, Kubernetes.\n"
+        )
+    with open(os.path.join(grafgreg, "2026-02-03-monitoring-slo-edge.md"), "w", encoding="utf-8") as f:
+        f.write(
+            "# Monitoring SLO edge regions (grafgreg)\n\n**Agent:** grafgreg\n**Date:** 2026-02-03\n\n"
+            f"## Update\n\n{CONTRADICTION_FACT_B}\n\nContext: PostgreSQL, ArgoCD, latency budgets.\n"
+        )
+
+
+def _write_needle_file(corpus_root: str) -> None:
+    ndir = os.path.join(corpus_root, "agents", "needleagent")
+    os.makedirs(ndir, exist_ok=True)
+    with open(os.path.join(ndir, "2026-01-20-backup-policy.md"), "w", encoding="utf-8") as f:
+        f.write(
+            "# Backup policy note\n\n**Agent:** needleagent\n**Date:** 2026-01-20\n\n"
+            "## Canonical window\n\n"
+            f"{NEEDLE_SECRET}\n\n"
+            "Unrelated filler: Kubernetes PostgreSQL ArgoCD monitoring deployment pipeline.\n"
+        )
+
+
+def _write_noise_file(corpus_root: str, idx: int, rng: random.Random) -> None:
+    ndir = os.path.join(corpus_root, "agents", "noise_bot")
+    os.makedirs(ndir, exist_ok=True)
+    tname = rng.choice(list(TOPICS.keys()))
+    topic = TOPICS[tname]
+    fact = rng.choice(topic["facts"])
+    noise = rng.choice(topic["facts"])
+    day = 1 + (idx % 28)
+    content = (
+        f"# Routine log {idx}\n\n**Agent:** noise_bot\n**Date:** 2025-06-{day:02d}\n\n"
+        f"- {fact}\n- {noise}\n- Reference: {rng.choice(topic['keywords'])} optimization.\n"
+    )
+    with open(os.path.join(ndir, f"noise_{idx:05d}.md"), "w", encoding="utf-8") as f:
+        f.write(content)
+
+
+def _write_paraphrase_dupes(corpus_root: str, count: int, rng: random.Random) -> None:
+    ndir = os.path.join(corpus_root, "agents", "paraphrase_bot")
+    os.makedirs(ndir, exist_ok=True)
+    base = "The CI pipeline uses GitLab CI with a fifteen minute timeout cap on each job."
+    for i in range(count):
+        variants = [
+            base,
+            "GitLab CI enforces a 15-minute timeout per pipeline job.",
+            "Each CI job is limited to fifteen minutes in GitLab CI.",
+        ]
+        text = rng.choice(variants)
+        with open(os.path.join(ndir, f"dup_{i:04d}.md"), "w", encoding="utf-8") as f:
+            f.write(
+                f"# CI note variant {i}\n\n**Agent:** paraphrase_bot\n**Date:** 2025-08-{(i % 28) + 1:02d}\n\n{text}\n"
+            )
+
+
+def generate_preset_corpus(preset: str, fixtures_dir: str) -> tuple[str, int]:
+    """Write corpus files for a scale preset. Returns (corpus_root, file_count)."""
+    import shutil
+
+    cfg = PRESETS[preset]
+    corpus_root = os.path.join(fixtures_dir, f"corpus_{preset}")
+    if os.path.isdir(corpus_root):
+        shutil.rmtree(corpus_root)
+    os.makedirs(corpus_root, exist_ok=True)
+
+    rng = random.Random(42 + sum(ord(c) for c in preset))
+    agents_use = AGENTS[: cfg["agents"]]
+    n_agent_files = cfg["agents"] * cfg["files_per_agent"]
+    dates = _spread_dates(n_agent_files, cfg["days_span"])
     topic_names = list(TOPICS.keys())
     file_idx = 0
 
-    for agent_idx, agent in enumerate(AGENTS):
-        agent_dir = os.path.join(CORPUS_DIR, "agents", agent)
+    for agent_idx, agent in enumerate(agents_use):
+        agent_dir = os.path.join(corpus_root, "agents", agent)
         os.makedirs(agent_dir, exist_ok=True)
+        for doc_idx in range(cfg["files_per_agent"]):
+            topic_name = topic_names[(agent_idx + doc_idx) % len(topic_names)]
+            topic = TOPICS[topic_name]
+            date_str = dates[file_idx % len(dates)]
+            content = _generate_file(agent, topic_name, topic, date_str, file_idx)
+            safe_name = date_str.replace("-", "") + f"_{doc_idx}.md"
+            filepath = os.path.join(agent_dir, safe_name)
+            with open(filepath, "w", encoding="utf-8") as f:
+                f.write(content)
+            file_idx += 1
 
+    if cfg.get("contradiction_files"):
+        _write_contradiction_pair(corpus_root)
+        file_idx += 2
+
+    if cfg.get("needle"):
+        _write_needle_file(corpus_root)
+        file_idx += 1
+
+    for i in range(cfg["noise_files"]):
+        _write_noise_file(corpus_root, i, rng)
+        file_idx += 1
+
+    if cfg.get("paraphrase_dupes", 0) > 0:
+        _write_paraphrase_dupes(corpus_root, cfg["paraphrase_dupes"], rng)
+        file_idx += cfg["paraphrase_dupes"]
+
+    return corpus_root, file_idx
+
+
+def generate_legacy_corpus(corpus_root: str) -> int:
+    """Original 50-file layout under corpus/."""
+    os.makedirs(corpus_root, exist_ok=True)
+    topic_names = list(TOPICS.keys())
+    file_idx = 0
+    for agent_idx, agent in enumerate(AGENTS):
+        agent_dir = os.path.join(corpus_root, "agents", agent)
+        os.makedirs(agent_dir, exist_ok=True)
         for doc_idx in range(5):
             topic_name = topic_names[(agent_idx + doc_idx) % len(topic_names)]
             topic = TOPICS[topic_name]
             day = 1 + (agent_idx * 3 + doc_idx) % 28
             date = f"2025-03-{day:02d}"
-
             content = _generate_file(agent, topic_name, topic, date, file_idx)
             filename = f"{date}.md"
             filepath = os.path.join(agent_dir, filename)
             with open(filepath, "w", encoding="utf-8") as f:
                 f.write(content)
             file_idx += 1
+    return file_idx
 
-    print(f"Generated {file_idx} corpus files in {CORPUS_DIR}")
 
-    questions = _generate_questions()
-    with open(QUESTIONS_PATH, "w", encoding="utf-8") as f:
-        json.dump(questions, f, indent=2, ensure_ascii=False)
+def main():
+    parser = argparse.ArgumentParser(description="Generate benchmark corpus / questions")
+    parser.add_argument(
+        "--preset",
+        choices=["small", "medium", "large", "stress"],
+        help="Write scaled corpus to benchmarks/fixtures/corpus_<preset>/",
+    )
+    parser.add_argument(
+        "--write-questions",
+        action="store_true",
+        help="Write benchmarks/fixtures/questions.json (with needle + contradiction entries)",
+    )
+    parser.add_argument(
+        "--corpus-only",
+        action="store_true",
+        help="With --preset: only write corpus files, not questions",
+    )
+    parser.add_argument(
+        "--questions-only",
+        action="store_true",
+        help="Only regenerate questions.json (no corpus files)",
+    )
+    args = parser.parse_args()
+    fixtures_dir = os.path.dirname(__file__)
+    random.seed(42)
 
-    type_counts = {}
-    for q in questions:
-        qt = q["query_type"]
-        type_counts[qt] = type_counts.get(qt, 0) + 1
+    def _write_questions_file():
+        questions = _generate_questions()
+        with open(QUESTIONS_PATH, "w", encoding="utf-8") as f:
+            json.dump(questions, f, indent=2, ensure_ascii=False)
+        type_counts = {}
+        for q in questions:
+            qt = q["query_type"]
+            type_counts[qt] = type_counts.get(qt, 0) + 1
+        print(f"Generated {len(questions)} questions in {QUESTIONS_PATH}")
+        print(f"  By type: {type_counts}")
 
-    print(f"Generated {len(questions)} questions in {QUESTIONS_PATH}")
-    print(f"  By type: {type_counts}")
+    if args.questions_only:
+        _write_questions_file()
+        return
+
+    if args.preset:
+        root, nfiles = generate_preset_corpus(args.preset, fixtures_dir)
+        print(f"Preset {args.preset}: {nfiles} files under {root}")
+    else:
+        os.makedirs(CORPUS_DIR, exist_ok=True)
+        nfiles = generate_legacy_corpus(CORPUS_DIR)
+        print(f"Generated {nfiles} corpus files in {CORPUS_DIR}")
+
+    if args.write_questions or not args.preset:
+        if not args.corpus_only:
+            _write_questions_file()
+    elif args.corpus_only:
+        pass
 
 
 if __name__ == "__main__":

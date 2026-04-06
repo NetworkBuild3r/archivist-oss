@@ -118,7 +118,7 @@
 </head>
 <body>
 <h1>Archivist Pipeline Benchmark</h1>
-<p class="subtitle">100 queries x 7 pipeline variants — Qdrant + vLLM bge-base-en-v1.5 (768-dim) — 50 documents, 155 chunks</p>
+<p class="subtitle">~110 queries (legacy corpus) x 7 pipeline variants — dual-track presets: <code>generate_corpus.py --preset small|medium|large</code> + <code>evaluate.py --memory-scale</code> / <code>--scale-sweep</code> — see <a href="BENCHMARKS.md" style="color:var(--accent2);">BENCHMARKS.md</a></p>
 
 <div class="kpi-row">
   <div class="kpi-card">

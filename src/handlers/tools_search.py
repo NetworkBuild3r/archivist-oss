@@ -1,20 +1,18 @@
 """MCP tool handlers — core search and retrieval."""
 
-import json
-
 from mcp.types import Tool, TextContent
 
 from rlm_retriever import recursive_retrieve, search_vectors
-from graph import search_entities, get_entity_facts, get_entity_relationships
+from graph import search_entities, get_entity_facts, get_entity_relationships, add_entity_alias
 from compressed_index import build_namespace_index
-from graph_retrieval import detect_contradictions
+from graph_retrieval import detect_contradictions, get_entity_brief
 from rbac import (
     get_namespace_for_agent, filter_agents_for_read,
     can_read_agent_memory, is_permissive_mode,
 )
 from archivist_uri import memory_uri
 
-from ._common import _rbac_gate, error_response, success_response
+from ._common import _rbac_gate, error_response, success_response, resolve_caller, require_caller
 
 # ---------------------------------------------------------------------------
 # Tool definitions
@@ -182,6 +180,32 @@ TOOLS: list[Tool] = [
             "required": ["entity"],
         },
     ),
+    Tool(
+        name="archivist_entity_brief",
+        description=(
+            "Get a structured knowledge card for an entity: all known facts, relationships, "
+            "retention class, mention count, timeline. Use for questions like "
+            "'What do we know about prod-db-01?' or 'Show me everything about Brandon'. "
+            "Returns structured data — better than grep through markdown files."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "entity": {"type": "string", "description": "Entity name to look up"},
+                "add_alias": {
+                    "type": "string",
+                    "description": "Optional alias to register for this entity (e.g. 'k8s' for 'Kubernetes')",
+                    "default": "",
+                },
+                "agent_id": {"type": "string", "description": "Calling agent for RBAC", "default": ""},
+                "caller_agent_id": {
+                    "type": "string",
+                    "description": "Invoker identity for RBAC (defaults to agent_id).",
+                },
+            },
+            "required": ["entity"],
+        },
+    ),
 ]
 
 # ---------------------------------------------------------------------------
@@ -213,7 +237,7 @@ async def _handle_search(arguments: dict) -> list[TextContent]:
         else:
             agent_ids = [str(x).strip() for x in raw_ids if str(x).strip()]
 
-    caller = (arguments.get("caller_agent_id") or "").strip() or agent_id
+    caller = resolve_caller(arguments)
 
     if namespace and caller:
         denied = _rbac_gate(caller, "read", namespace)
@@ -266,14 +290,9 @@ async def _handle_recall(arguments: dict) -> list[TextContent]:
     related_name = arguments.get("related_to", "")
     namespace = arguments.get("namespace", "")
 
-    agent_id = (arguments.get("agent_id") or "").strip()
-    caller = (arguments.get("caller_agent_id") or "").strip() or agent_id
-
-    if not is_permissive_mode() and not caller:
-        return error_response({
-            "error": "caller_agent_id_or_agent_id_required",
-            "reason": "RBAC requires caller identity for graph recall",
-        })
+    caller = resolve_caller(arguments)
+    if err := require_caller(caller):
+        return err
 
     if namespace and caller:
         denied = _rbac_gate(caller, "read", namespace)
@@ -310,20 +329,16 @@ async def _handle_recall(arguments: dict) -> list[TextContent]:
             ]
             result["shared_relationships"] = shared
 
-    return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+    return success_response(result, default=str)
 
 
 async def _handle_timeline(arguments: dict) -> list[TextContent]:
     query = arguments["query"]
     agent_id = arguments.get("agent_id", "")
     namespace = arguments.get("namespace", "")
-    caller = (arguments.get("caller_agent_id") or "").strip() or agent_id
-
-    if not is_permissive_mode() and not caller:
-        return error_response({
-            "error": "caller_agent_id_or_agent_id_required",
-            "reason": "RBAC requires caller identity for timeline",
-        })
+    caller = resolve_caller(arguments)
+    if err := require_caller(caller):
+        return err
 
     if namespace and caller:
         denied = _rbac_gate(caller, "read", namespace)
@@ -362,14 +377,9 @@ async def _handle_insights(arguments: dict) -> list[TextContent]:
     topic = arguments["topic"]
     limit = arguments.get("limit", 10)
     namespace = arguments.get("namespace", "")
-    agent_id = arguments.get("agent_id", "")
-    caller = (arguments.get("caller_agent_id") or "").strip() or agent_id
-
-    if not is_permissive_mode() and not caller:
-        return error_response({
-            "error": "caller_agent_id_or_agent_id_required",
-            "reason": "RBAC requires caller identity for insights",
-        })
+    caller = resolve_caller(arguments)
+    if err := require_caller(caller):
+        return err
 
     if namespace and caller:
         denied = _rbac_gate(caller, "read", namespace)
@@ -408,13 +418,13 @@ async def _handle_insights(arguments: dict) -> list[TextContent]:
 
 async def _handle_deref(arguments: dict) -> list[TextContent]:
     """Dereference a single memory point by ID — returns full L2 text + metadata."""
-    from qdrant_client import QdrantClient
-    from config import QDRANT_URL, QDRANT_COLLECTION
+    from config import QDRANT_COLLECTION
+    from qdrant import qdrant_client
 
     memory_id = arguments["memory_id"]
     agent_id = arguments.get("agent_id", "")
 
-    client = QdrantClient(url=QDRANT_URL, timeout=30)
+    client = qdrant_client()
     try:
         points = client.retrieve(
             collection_name=QDRANT_COLLECTION,
@@ -451,6 +461,7 @@ async def _handle_deref(arguments: dict) -> list[TextContent]:
         "parent_id": payload.get("parent_id"),
         "is_parent": payload.get("is_parent", False),
         "importance_score": payload.get("importance_score", 0.5),
+        "retention_class": payload.get("retention_class", "standard"),
         "version": payload.get("version", 1),
     })
 
@@ -495,6 +506,39 @@ async def _handle_contradictions(arguments: dict) -> list[TextContent]:
     })
 
 
+async def _handle_entity_brief(arguments: dict) -> list[TextContent]:
+    """Structured knowledge card for a single entity."""
+    entity_name = arguments["entity"]
+    alias = (arguments.get("add_alias") or "").strip()
+
+    caller = resolve_caller(arguments)
+
+    entities = search_entities(entity_name, limit=1)
+    if not entities:
+        return error_response({
+            "error": f"Entity '{entity_name}' not found in knowledge graph",
+            "hint": "Use archivist_recall or archivist_search first to discover entities.",
+        })
+
+    eid = entities[0]["id"]
+
+    if alias:
+        add_entity_alias(eid, alias)
+
+    brief = get_entity_brief(eid)
+    if not brief:
+        return error_response({"error": "Failed to build entity brief"})
+
+    if caller and not is_permissive_mode():
+        brief["facts"] = [
+            f for f in brief["facts"]
+            if can_read_agent_memory(caller, f.get("agent_id", ""))
+        ]
+        brief["fact_count"] = len(brief["facts"])
+
+    return success_response(brief)
+
+
 # ---------------------------------------------------------------------------
 # Handler registry
 # ---------------------------------------------------------------------------
@@ -507,4 +551,5 @@ HANDLERS: dict[str, object] = {
     "archivist_deref": _handle_deref,
     "archivist_index": _handle_index,
     "archivist_contradictions": _handle_contradictions,
+    "archivist_entity_brief": _handle_entity_brief,
 }

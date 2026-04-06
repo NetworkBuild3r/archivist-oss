@@ -1,0 +1,15 @@
+# Copy to docker-compose.override.yml (gitignored) to customize without editing the main file.
+#
+#   cp docker-compose.override.example.yml docker-compose.override.yml
+#
+# Docker Compose merges override.yml automatically when present.
+
+services:
+  archivist:
+    # Writable memories on the host (e.g. ROC /opt/appdata)
+    volumes:
+      - /opt/appdata/archivist-memories:/data/memories:rw
+    # Optional: pin data volume to a host path (SQLite + config live in named volume by default)
+    # Uncomment to store graph DB on disk:
+    # volumes:
+    #   - /opt/appdata/archivist-data:/data

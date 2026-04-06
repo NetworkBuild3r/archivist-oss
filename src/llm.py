@@ -2,9 +2,11 @@
 
 import asyncio
 import logging
+import time
 
 import httpx
 from config import LLM_URL, LLM_MODEL, LLM_API_KEY
+import metrics as m
 
 logger = logging.getLogger("archivist.llm")
 
@@ -33,17 +35,24 @@ async def llm_query(
     if json_mode:
         body["response_format"] = {"type": "json_object"}
 
+    m.inc(m.LLM_CALL)
+    t0 = time.monotonic()
     for attempt in range(_MAX_RETRIES):
         try:
+            headers: dict[str, str] = {}
+            if LLM_API_KEY:
+                headers["Authorization"] = f"Bearer {LLM_API_KEY}"
             async with httpx.AsyncClient(timeout=120) as client:
                 try:
                     resp = await client.post(
                         f"{LLM_URL}/v1/chat/completions",
                         json=body,
-                        headers={"Authorization": f"Bearer {LLM_API_KEY}"},
+                        headers=headers,
                     )
                     resp.raise_for_status()
-                    return resp.json()["choices"][0]["message"]["content"]
+                    result = resp.json()["choices"][0]["message"]["content"]
+                    m.observe(m.LLM_DURATION, (time.monotonic() - t0) * 1000)
+                    return result
                 except httpx.HTTPStatusError as exc:
                     if json_mode and exc.response.status_code in (400, 422):
                         logger.debug("json_mode unsupported by provider, retrying without it")
@@ -51,10 +60,12 @@ async def llm_query(
                         resp = await client.post(
                             f"{LLM_URL}/v1/chat/completions",
                             json=body,
-                            headers={"Authorization": f"Bearer {LLM_API_KEY}"},
+                            headers=headers,
                         )
                         resp.raise_for_status()
-                        return resp.json()["choices"][0]["message"]["content"]
+                        result = resp.json()["choices"][0]["message"]["content"]
+                        m.observe(m.LLM_DURATION, (time.monotonic() - t0) * 1000)
+                        return result
                     raise
         except Exception as e:
             if attempt < _MAX_RETRIES - 1:
@@ -62,5 +73,6 @@ async def llm_query(
                 logger.warning("LLM attempt %d failed: %s — retrying in %ds", attempt + 1, e, delay)
                 await asyncio.sleep(delay)
             else:
+                m.inc(m.LLM_ERROR)
                 logger.error("LLM failed after %d attempts: %s", _MAX_RETRIES, e)
                 raise

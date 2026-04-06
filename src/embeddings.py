@@ -31,12 +31,12 @@ async def embed_text(text: str, model: str = EMBED_MODEL) -> list[float]:
                     payload["truncate"] = "END"
                     payload["encoding_format"] = "float"
 
+                headers: dict[str, str] = {"Content-Type": "application/json"}
+                if EMBED_API_KEY:
+                    headers["Authorization"] = f"Bearer {EMBED_API_KEY}"
                 resp = await client.post(
                     f"{EMBED_URL}/v1/embeddings",
-                    headers={
-                        "Authorization": f"Bearer {EMBED_API_KEY}",
-                        "Content-Type": "application/json",
-                    },
+                    headers=headers,
                     json=payload,
                 )
                 resp.raise_for_status()
@@ -53,8 +53,5 @@ async def embed_text(text: str, model: str = EMBED_MODEL) -> list[float]:
 
 
 async def embed_batch(texts: list[str], model: str = EMBED_MODEL) -> list[list[float]]:
-    """Embed multiple texts sequentially. For high throughput, consider batching at the API level."""
-    results = []
-    for text in texts:
-        results.append(await embed_text(text, model))
-    return results
+    """Embed multiple texts in parallel using asyncio.gather."""
+    return list(await asyncio.gather(*(embed_text(t, model) for t in texts)))

@@ -1,0 +1,11 @@
+# Pipeline benchmark runner — same Python deps as the app; mount repo at /workspace.
+FROM python:3.12-slim
+
+WORKDIR /workspace
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Default: show CLI help; compose overrides with `docker compose run ... -- ARGS`
+ENTRYPOINT ["python", "-m", "benchmarks.pipeline.evaluate"]
+CMD ["--help"]

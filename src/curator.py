@@ -2,16 +2,16 @@
 
 import hashlib
 import os
-import re
 import json
 import logging
 import asyncio
 from datetime import datetime, timezone, timedelta
-from pathlib import Path
 
 from config import (
-    MEMORY_ROOT, CURATOR_INTERVAL_MINUTES, TEAM_MAP, QDRANT_URL, QDRANT_COLLECTION,
+    MEMORY_ROOT, CURATOR_INTERVAL_MINUTES, TEAM_MAP,
     CURATOR_EXTRACT_PREFIXES, CURATOR_EXTRACT_SKIP_SEGMENTS,
+    CURATOR_TIP_BUDGET,
+    DURABLE_ENTITY_TYPES,
 )
 from llm import llm_query
 from graph import (
@@ -19,13 +19,18 @@ from graph import (
     get_curator_state, set_curator_state, get_db, GRAPH_WRITE_LOCK,
 )
 from indexer import index_file
+from hotness import batch_update_hotness
+from text_utils import strip_fences, extract_agent_id_from_path
+from trajectory import consolidate_tips
 
 logger = logging.getLogger("archivist.curator")
 
 EXTRACT_SYSTEM = (
     "You are a knowledge extraction assistant. Given a daily memory note from an AI agent, "
     "extract structured information as JSON with these fields:\n"
-    "- entities: [{name, type}] (people, systems, tools, concepts, places)\n"
+    "- entities: [{name, type}] (people, systems, tools, concepts, places). "
+    "Use specific types: person, host, server, service, credential, organization, cluster, "
+    "database, network, user, tool, concept, place, project.\n"
     "- facts: [{entity_name, fact}] (durable facts about entities — paraphrase in short plain text; "
     "NEVER paste raw code, JSON, YAML, or markdown from the source)\n"
     "- relationships: [{source, target, type, evidence}] (connections between entities)\n"
@@ -50,14 +55,6 @@ def should_extract_knowledge(rel_path: str) -> bool:
     return any(normalised.startswith(prefix) for prefix in CURATOR_EXTRACT_PREFIXES)
 
 
-def _strip_fences(raw: str) -> str:
-    raw = raw.strip()
-    if raw.startswith("```"):
-        raw = re.sub(r"^```(?:json)?\n?", "", raw)
-        raw = re.sub(r"\n?```$", "", raw)
-    return raw.strip()
-
-
 async def extract_knowledge(text: str, agent_id: str, source_file: str) -> dict | None:
     """Use LLM to extract structured knowledge from a memory note."""
     if len(text.strip()) < 50:
@@ -68,14 +65,14 @@ async def extract_knowledge(text: str, agent_id: str, source_file: str) -> dict 
         raw = await llm_query(
             prompt, system=EXTRACT_SYSTEM, max_tokens=1024, json_mode=True,
         )
-        return json.loads(_strip_fences(raw))
+        return json.loads(strip_fences(raw))
     except json.JSONDecodeError:
         try:
             repair_prompt = f"Fix this invalid JSON:\n{raw[:2000]}"
             fixed = await llm_query(
                 repair_prompt, system=_JSON_REPAIR_SYSTEM, max_tokens=1024, json_mode=True,
             )
-            return json.loads(_strip_fences(fixed))
+            return json.loads(strip_fences(fixed))
         except (json.JSONDecodeError, Exception) as e2:
             logger.warning("Knowledge extraction failed for %s (after retry): %s", source_file, e2)
             return None
@@ -84,19 +81,31 @@ async def extract_knowledge(text: str, agent_id: str, source_file: str) -> dict 
         return None
 
 
+def _retention_for_entity_type(entity_type: str) -> str:
+    """Map entity type to a default retention class."""
+    if entity_type.lower() in DURABLE_ENTITY_TYPES:
+        return "durable"
+    return "standard"
+
+
 async def process_extraction(data: dict, agent_id: str, source_file: str):
     """Store extracted knowledge in the graph."""
+    entity_retention: dict[str, str] = {}
     for ent in data.get("entities", []):
         name = ent.get("name", "").strip()
         if name:
-            upsert_entity(name, ent.get("type", "unknown"), agent_id)
+            etype = ent.get("type", "unknown")
+            rc = _retention_for_entity_type(etype)
+            entity_retention[name.lower()] = rc
+            upsert_entity(name, etype, agent_id, retention_class=rc)
 
     for fact in data.get("facts", []):
         ename = fact.get("entity_name", "").strip()
         ftext = fact.get("fact", "").strip()
         if ename and ftext:
-            eid = upsert_entity(ename)
-            add_fact(eid, ftext, source_file, agent_id)
+            rc = entity_retention.get(ename.lower(), "standard")
+            eid = upsert_entity(ename, retention_class=rc)
+            add_fact(eid, ftext, source_file, agent_id, retention_class=rc)
 
     for rel in data.get("relationships", []):
         src = rel.get("source", "").strip()
@@ -154,17 +163,7 @@ async def curate_cycle():
                     skipped_unchanged += 1
                     continue
 
-                parts = Path(rel).parts
-                agent_id = ""
-                if "agents" in parts:
-                    idx = list(parts).index("agents")
-                    if idx + 1 < len(parts):
-                        agent_id = parts[idx + 1]
-                elif "memories" in parts:
-                    idx = list(parts).index("memories")
-                    if idx + 1 < len(parts):
-                        agent_id = parts[idx + 1]
-
+                agent_id = extract_agent_id_from_path(rel)
                 data = await extract_knowledge(text, agent_id, rel) if should_extract_knowledge(rel) else None
                 if data:
                     await process_extraction(data, agent_id, rel)
@@ -182,20 +181,107 @@ async def curate_cycle():
     return processed
 
 
-async def decay_old_entries():
-    """Soft-delete graph entries not referenced in 90+ days."""
+async def extract_all_agent_memories() -> int:
+    """Run knowledge extraction on every eligible agent markdown file under MEMORY_ROOT.
+
+    Ignores mtime/checksum (for benchmarks and backfills). Does not run decay.
+    """
+    processed = 0
+    for root, _dirs, files in os.walk(MEMORY_ROOT):
+        for fname in files:
+            if not fname.endswith(".md"):
+                continue
+            filepath = os.path.join(root, fname)
+            try:
+                with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+                    text = f.read()
+                if len(text.strip()) < 50:
+                    continue
+                rel = os.path.relpath(filepath, MEMORY_ROOT)
+                if not should_extract_knowledge(rel):
+                    continue
+                agent_id = extract_agent_id_from_path(rel)
+                data = await extract_knowledge(text, agent_id, rel)
+                if data:
+                    await process_extraction(data, agent_id, rel)
+                    processed += 1
+            except Exception as e:
+                logger.error("Bench curator failed on %s: %s", filepath, e)
+    logger.info("extract_all_agent_memories: processed %d files", processed)
+    return processed
+
+
+async def reinforce_durable_entities():
+    """Touch last_seen on durable/permanent entities so they stay fresh in temporal decay.
+
+    Also boosts confidence on relationships involving these entities.
+    This runs every curator cycle and is cheap (pure SQL, no LLM).
+    """
+    now = datetime.now(timezone.utc).isoformat()
     with GRAPH_WRITE_LOCK:
         conn = get_db()
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
         cur = conn.execute(
-            "UPDATE facts SET is_active=0 WHERE is_active=1 AND created_at < ? AND superseded_by IS NULL",
-            (cutoff,),
+            "UPDATE entities SET last_seen=? "
+            "WHERE retention_class IN ('durable', 'permanent')",
+            (now,),
         )
-        affected = cur.rowcount
+        reinforced = cur.rowcount
+
+        cur2 = conn.execute(
+            "UPDATE relationships SET updated_at=?, confidence=MIN(confidence+0.01, 1.0) "
+            "WHERE source_entity_id IN (SELECT id FROM entities WHERE retention_class IN ('durable','permanent')) "
+            "OR target_entity_id IN (SELECT id FROM entities WHERE retention_class IN ('durable','permanent'))",
+            (now,),
+        )
+        rels_boosted = cur2.rowcount
         conn.commit()
         conn.close()
-    if affected:
-        logger.info("Decayed %d old facts", affected)
+
+    if reinforced:
+        logger.info("Reinforced %d durable/permanent entities, %d relationships", reinforced, rels_boosted)
+
+
+async def decay_old_entries():
+    """Soft-delete graph entries based on age and superseded status.
+
+    Rules:
+    - durable/permanent facts: never decayed
+    - superseded standard/ephemeral facts: decay after 30 days
+    - non-superseded standard facts: decay after 90 days
+    - ephemeral facts: decay after 30 days regardless
+    """
+    with GRAPH_WRITE_LOCK:
+        conn = get_db()
+        now = datetime.now(timezone.utc)
+
+        cutoff_90 = (now - timedelta(days=90)).isoformat()
+        cur1 = conn.execute(
+            "UPDATE facts SET is_active=0 "
+            "WHERE is_active=1 AND created_at < ? AND superseded_by IS NULL "
+            "AND retention_class NOT IN ('durable', 'permanent')",
+            (cutoff_90,),
+        )
+        aged_out = cur1.rowcount
+
+        cutoff_30 = (now - timedelta(days=30)).isoformat()
+        cur2 = conn.execute(
+            "UPDATE facts SET is_active=0 "
+            "WHERE is_active=1 AND created_at < ? "
+            "AND (superseded_by IS NOT NULL OR retention_class = 'ephemeral') "
+            "AND retention_class NOT IN ('durable', 'permanent')",
+            (cutoff_30,),
+        )
+        superseded_out = cur2.rowcount
+
+        conn.commit()
+        conn.close()
+
+    total = aged_out + superseded_out
+    if total:
+        logger.info(
+            "Decayed %d facts (%d aged 90d, %d superseded/ephemeral 30d; durable/permanent preserved)",
+            total, aged_out, superseded_out,
+        )
 
 
 async def curator_loop():
@@ -207,7 +293,23 @@ async def curator_loop():
     while True:
         try:
             await curate_cycle()
+            await reinforce_durable_entities()
             await decay_old_entries()
+
+            try:
+                n_hot = batch_update_hotness()
+                if n_hot:
+                    logger.info("Hotness update: %d memories scored", n_hot)
+            except Exception as e:
+                logger.warning("Hotness update failed (non-fatal): %s", e)
+
+            try:
+                tip_result = await consolidate_tips(budget=CURATOR_TIP_BUDGET)
+                if tip_result.get("consolidated", 0):
+                    logger.info("Tip consolidation: %d clusters merged", tip_result["consolidated"])
+            except Exception as e:
+                logger.warning("Tip consolidation failed (non-fatal): %s", e)
+
             backoff_sec = base_interval
         except Exception as e:
             logger.error("Curator cycle error (next retry in %ds): %s", backoff_sec, e)

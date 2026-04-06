@@ -7,6 +7,11 @@ Override via .env or environment variables in production.
 import os
 import yaml
 
+
+def _env_bool(key: str, default: str = "true") -> bool:
+    """Parse a boolean environment variable (true/1/yes → True)."""
+    return os.getenv(key, default).lower() in ("true", "1", "yes")
+
 # ── Vector store ──────────────────────────────────────────────────────────────
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "archivist_memories")
@@ -37,19 +42,19 @@ CHILD_CHUNK_OVERLAP = int(os.getenv("CHILD_CHUNK_OVERLAP", "100"))
 
 # ── Retrieval ─────────────────────────────────────────────────────────────────
 RETRIEVAL_THRESHOLD = float(os.getenv("RETRIEVAL_THRESHOLD", "0.65"))
-RERANK_ENABLED = os.getenv("RERANK_ENABLED", "false").lower() in ("true", "1", "yes")
+RERANK_ENABLED = _env_bool("RERANK_ENABLED", "false")
 RERANK_MODEL = os.getenv("RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
 RERANK_TOP_K = int(os.getenv("RERANK_TOP_K", "10"))
 # Coarse vector search pulls this many points before threshold + rerank (higher = better recall).
 VECTOR_SEARCH_LIMIT = int(os.getenv("VECTOR_SEARCH_LIMIT", "64"))
 
 # ── Tiered context (v0.5 — OpenViking / Memex-inspired) ──────────────────────
-TIERED_CONTEXT_ENABLED = os.getenv("TIERED_CONTEXT_ENABLED", "true").lower() in ("true", "1", "yes")
+TIERED_CONTEXT_ENABLED = _env_bool("TIERED_CONTEXT_ENABLED")
 L0_MAX_TOKENS = int(os.getenv("L0_MAX_TOKENS", "100"))
 L1_MAX_TOKENS = int(os.getenv("L1_MAX_TOKENS", "500"))
 
 # ── Graph-augmented retrieval (v0.5) ─────────────────────────────────────────
-GRAPH_RETRIEVAL_ENABLED = os.getenv("GRAPH_RETRIEVAL_ENABLED", "true").lower() in ("true", "1", "yes")
+GRAPH_RETRIEVAL_ENABLED = _env_bool("GRAPH_RETRIEVAL_ENABLED")
 GRAPH_RETRIEVAL_WEIGHT = float(os.getenv("GRAPH_RETRIEVAL_WEIGHT", "0.3"))
 MULTI_HOP_DEPTH = int(os.getenv("MULTI_HOP_DEPTH", "2"))
 TEMPORAL_DECAY_HALFLIFE_DAYS = int(os.getenv("TEMPORAL_DECAY_HALFLIFE_DAYS", "30"))
@@ -59,15 +64,12 @@ OUTCOME_RETRIEVAL_BOOST = float(os.getenv("OUTCOME_RETRIEVAL_BOOST", "0.15"))
 OUTCOME_RETRIEVAL_PENALTY = float(os.getenv("OUTCOME_RETRIEVAL_PENALTY", "0.1"))
 
 # ── Hot cache (v0.8 — three-layer memory hierarchy) ─────────────────────────
-HOT_CACHE_ENABLED = os.getenv("HOT_CACHE_ENABLED", "true").lower() in ("true", "1", "yes")
+HOT_CACHE_ENABLED = _env_bool("HOT_CACHE_ENABLED")
 HOT_CACHE_MAX_PER_AGENT = int(os.getenv("HOT_CACHE_MAX_PER_AGENT", "128"))
 HOT_CACHE_TTL_SECONDS = int(os.getenv("HOT_CACHE_TTL_SECONDS", "600"))
 
-# ── Consistency (v0.8) ───────────────────────────────────────────────────────
-DEFAULT_CONSISTENCY = os.getenv("DEFAULT_CONSISTENCY", "eventual")
-
 # ── Retrieval trajectory export (v0.8) ───────────────────────────────────────
-TRAJECTORY_EXPORT_ENABLED = os.getenv("TRAJECTORY_EXPORT_ENABLED", "true").lower() in ("true", "1", "yes")
+TRAJECTORY_EXPORT_ENABLED = _env_bool("TRAJECTORY_EXPORT_ENABLED")
 TRAJECTORY_EXPORT_MAX = int(os.getenv("TRAJECTORY_EXPORT_MAX", "200"))
 
 # ── Webhooks (v0.9) ─────────────────────────────────────────────────────────
@@ -76,16 +78,21 @@ WEBHOOK_TIMEOUT = float(os.getenv("WEBHOOK_TIMEOUT", "5"))
 _raw_events = os.getenv("WEBHOOK_EVENTS", "").strip()
 WEBHOOK_EVENTS: set[str] = set(e.strip() for e in _raw_events.split(",") if e.strip()) if _raw_events else set()
 
-# ── Metrics (v0.9) ──────────────────────────────────────────────────────────
-METRICS_ENABLED = os.getenv("METRICS_ENABLED", "true").lower() in ("true", "1", "yes")
-
 # ── Curator intelligence (v1.0) ─────────────────────────────────────────────
-DEDUP_LLM_ENABLED = os.getenv("DEDUP_LLM_ENABLED", "true").lower() in ("true", "1", "yes")
+DEDUP_LLM_ENABLED = _env_bool("DEDUP_LLM_ENABLED")
 DEDUP_LLM_THRESHOLD = float(os.getenv("DEDUP_LLM_THRESHOLD", "0.80"))
 CURATOR_TIP_BUDGET = int(os.getenv("CURATOR_TIP_BUDGET", "20"))
 CURATOR_QUEUE_DRAIN_INTERVAL = int(os.getenv("CURATOR_QUEUE_DRAIN_INTERVAL", "30"))
 HOTNESS_WEIGHT = float(os.getenv("HOTNESS_WEIGHT", "0.15"))
 HOTNESS_HALFLIFE_DAYS = int(os.getenv("HOTNESS_HALFLIFE_DAYS", "7"))
+IMPORTANCE_WEIGHT = float(os.getenv("IMPORTANCE_WEIGHT", "0.10"))
+
+# ── Retention classes (v1.7 — "never forget" pinning) ────────────────────────
+VALID_RETENTION_CLASSES = ("ephemeral", "standard", "durable", "permanent")
+DURABLE_ENTITY_TYPES = frozenset({
+    "person", "host", "server", "service", "credential",
+    "organization", "cluster", "database", "network", "user",
+})
 
 # ── Curator ───────────────────────────────────────────────────────────────────
 CURATOR_INTERVAL_MINUTES = int(os.getenv("CURATOR_INTERVAL_MINUTES", "30"))
@@ -101,8 +108,11 @@ CURATOR_EXTRACT_SKIP_SEGMENTS: list[str] = [
     if p.strip()
 ]
 
+# ── Memory awareness — Stage 0 query classification (v1.6 — MemCollab-inspired) ─
+QUERY_CLASSIFICATION_ENABLED = _env_bool("QUERY_CLASSIFICATION_ENABLED")
+
 # ── BM25 / FTS5 hybrid search (v1.2 — ReMe-inspired) ────────────────────────
-BM25_ENABLED = os.getenv("BM25_ENABLED", "true").lower() in ("true", "1", "yes")
+BM25_ENABLED = _env_bool("BM25_ENABLED")
 BM25_WEIGHT = float(os.getenv("BM25_WEIGHT", "0.3"))
 VECTOR_WEIGHT = float(os.getenv("VECTOR_WEIGHT", "0.7"))
 
@@ -110,7 +120,7 @@ VECTOR_WEIGHT = float(os.getenv("VECTOR_WEIGHT", "0.7"))
 DEFAULT_CONTEXT_BUDGET = int(os.getenv("DEFAULT_CONTEXT_BUDGET", "128000"))
 
 # ── Journal exports (v1.5 — human-readable markdown alongside Qdrant) ────────
-JOURNAL_ENABLED = os.getenv("JOURNAL_ENABLED", "true").lower() in ("true", "1", "yes")
+JOURNAL_ENABLED = _env_bool("JOURNAL_ENABLED")
 JOURNAL_DIR = os.getenv("JOURNAL_DIR", "/data/archivist/journal")
 
 # ── Server ────────────────────────────────────────────────────────────────────
@@ -120,9 +130,9 @@ MCP_PORT = int(os.getenv("MCP_PORT", "3100"))
 ARCHIVIST_API_KEY = os.getenv("ARCHIVIST_API_KEY", "").strip()
 
 # Pre-store conflict check (vector similarity vs other agents' memories in same namespace)
-CONFLICT_CHECK_ON_STORE = os.getenv("CONFLICT_CHECK_ON_STORE", "true").lower() in ("true", "1", "yes")
+CONFLICT_CHECK_ON_STORE = _env_bool("CONFLICT_CHECK_ON_STORE")
 # When true, block the write when check_for_conflicts reports a conflict (unless force_skip_conflict_check)
-CONFLICT_BLOCK_ON_STORE = os.getenv("CONFLICT_BLOCK_ON_STORE", "true").lower() in ("true", "1", "yes")
+CONFLICT_BLOCK_ON_STORE = _env_bool("CONFLICT_BLOCK_ON_STORE")
 
 # ── Agent → team mapping (override via TEAM_MAP_PATH YAML file) ──────────────
 TEAM_MAP_PATH = os.getenv("TEAM_MAP_PATH", "")

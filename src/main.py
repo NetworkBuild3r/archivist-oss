@@ -1,13 +1,16 @@
 """Archivist main entrypoint — starts MCP server, file watcher, curator loop, and initial index."""
 
 import asyncio
+from contextlib import asynccontextmanager
 import logging
 import os
 import sys
+import time
 
 from watchfiles import awatch, Change
 
 from config import MEMORY_ROOT, MCP_PORT, QDRANT_URL, QDRANT_COLLECTION, VECTOR_DIM, ARCHIVIST_API_KEY, CURATOR_QUEUE_DRAIN_INTERVAL
+from qdrant import qdrant_client
 from graph import init_schema
 from indexer import full_index, index_file, delete_file_points
 from curator import curator_loop
@@ -31,12 +34,31 @@ logger = logging.getLogger("archivist")
 
 
 def ensure_qdrant_collection():
-    """Create or migrate the Qdrant collection to the target vector dimension."""
+    """Create or migrate the Qdrant collection to the target vector dimension.
+
+    Retries until Qdrant accepts connections (Docker Compose may start archivist
+    before qdrant is listening; avoids brittle image-specific healthchecks).
+    """
     from qdrant_client import QdrantClient
     from qdrant_client.models import VectorParams, Distance, PayloadSchemaType
 
-    client = QdrantClient(url=QDRANT_URL, timeout=30)
-    collections = [c.name for c in client.get_collections().collections]
+    deadline = time.monotonic() + 120
+    last_err: Exception | None = None
+    client: QdrantClient | None = None
+    collections: list[str] = []
+    while time.monotonic() < deadline:
+        try:
+            client = qdrant_client()
+            collections = [c.name for c in client.get_collections().collections]
+            break
+        except Exception as e:
+            last_err = e
+            logger.warning("Waiting for Qdrant at %s: %s — retrying in 2s", QDRANT_URL, e)
+            time.sleep(2)
+    else:
+        raise RuntimeError(f"Qdrant not reachable at {QDRANT_URL} after 120s") from last_err
+
+    assert client is not None
 
     needs_create = QDRANT_COLLECTION not in collections
 
@@ -78,6 +100,7 @@ def ensure_qdrant_collection():
             ("is_parent", PayloadSchemaType.BOOL),
             ("importance_score", PayloadSchemaType.FLOAT),
             ("memory_type", PayloadSchemaType.KEYWORD),
+            ("retention_class", PayloadSchemaType.KEYWORD),
         ]:
             client.create_payload_index(
                 collection_name=QDRANT_COLLECTION,
@@ -117,10 +140,9 @@ async def handle_invalidate(_request):
     """Endpoint to delete expired memories (TTL-based)."""
     from qdrant_client import QdrantClient
     from qdrant_client.models import Filter, FieldCondition, Range
-    import time
 
     now_ts = int(time.time())
-    client = QdrantClient(url=QDRANT_URL, timeout=60)
+    client = qdrant_client(timeout=60)
 
     try:
         expired = client.scroll(
@@ -172,7 +194,7 @@ def _log_task_exception(task: asyncio.Task):
         logger.exception("Background task %r crashed", task.get_name(), exc_info=exc)
 
 
-async def startup():
+async def _startup():
     """Run on app startup: init DB, load RBAC, ensure Qdrant collection, start background tasks."""
     logger.info("Archivist v1.0.0 starting up...")
 
@@ -194,6 +216,21 @@ async def startup():
         t.add_done_callback(_log_task_exception)
         _background_tasks.append(t)
     logger.info("Background tasks started: %s", [t.get_name() for t in _background_tasks])
+
+
+@asynccontextmanager
+async def lifespan(_app: Starlette):
+    """Starlette ≥0.37 lifespan (replaces deprecated on_startup / on_shutdown)."""
+    await _startup()
+    try:
+        yield
+    finally:
+        for t in _background_tasks:
+            if not t.done():
+                t.cancel()
+        if _background_tasks:
+            await asyncio.gather(*_background_tasks, return_exceptions=True)
+        _background_tasks.clear()
 
 
 async def curator_queue_drain_loop():
@@ -291,7 +328,7 @@ app = Starlette(
         Mount("/mcp/messages/", app=sse_transport.handle_post_message),
     ],
     middleware=[Middleware(ArchivistAuthMiddleware)],
-    on_startup=[startup],
+    lifespan=lifespan,
 )
 
 

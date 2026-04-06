@@ -1,23 +1,24 @@
 """MCP tool handlers — memory storage, merge, and compression."""
 
 import json
-import hashlib
 import uuid
 import logging
 from datetime import datetime, timezone
 
 from mcp.types import Tool, TextContent
-from qdrant_client import QdrantClient
 from qdrant_client.models import PointStruct
 
 from embeddings import embed_text
 from graph import upsert_entity, add_fact
 from config import (
-    QDRANT_URL, QDRANT_COLLECTION, TEAM_MAP,
+    QDRANT_COLLECTION, TEAM_MAP,
     CONFLICT_CHECK_ON_STORE, CONFLICT_BLOCK_ON_STORE,
 )
 from conflict_detection import check_for_conflicts, llm_adjudicated_dedup
+from indexer import compute_ttl
+from qdrant import qdrant_client
 from rbac import get_namespace_for_agent, get_namespace_config
+from text_utils import compute_memory_checksum
 from archivist_uri import memory_uri
 import hot_cache
 import journal
@@ -52,7 +53,13 @@ TOOLS: list[Tool] = [
                     "description": "Entity names mentioned (optional, will auto-extract if empty)",
                     "default": [],
                 },
-                "importance_score": {"type": "number", "description": "0.0-1.0 importance score (higher = longer retention)", "default": 0.5},
+                "importance_score": {"type": "number", "description": "0.0-1.0 importance score (higher = longer retention and retrieval boost)", "default": 0.5},
+                "retention_class": {
+                    "type": "string",
+                    "enum": ["ephemeral", "standard", "durable", "permanent"],
+                    "description": "How long to retain: ephemeral (auto-expire), standard (default decay), durable (no TTL, reduced decay), permanent (never decay, retrieval boost). Use permanent for critical facts like host IPs, person names, org structure.",
+                    "default": "standard",
+                },
                 "memory_type": {
                     "type": "string",
                     "enum": ["experience", "skill", "general"],
@@ -130,6 +137,43 @@ TOOLS: list[Tool] = [
             "required": ["agent_id", "namespace", "memory_ids"],
         },
     ),
+    Tool(
+        name="archivist_pin",
+        description=(
+            "Pin a memory or entity so it is never forgotten. "
+            "Sets retention_class to 'permanent' and importance_score to 1.0. "
+            "Use for critical facts: host IPs, person names, credentials, org structure, "
+            "service ownership — anything the agent must never lose."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "agent_id": {"type": "string", "description": "Calling agent"},
+                "memory_id": {"type": "string", "description": "Qdrant point ID to pin (optional if entity_name given)", "default": ""},
+                "entity_name": {"type": "string", "description": "Entity name to pin (optional if memory_id given)", "default": ""},
+                "reason": {"type": "string", "description": "Why this is being pinned (stored in audit log)", "default": ""},
+                "namespace": {"type": "string", "description": "Namespace context", "default": ""},
+            },
+            "required": ["agent_id"],
+        },
+    ),
+    Tool(
+        name="archivist_unpin",
+        description=(
+            "Remove permanent retention from a memory or entity, "
+            "returning it to 'standard' retention class."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "agent_id": {"type": "string", "description": "Calling agent"},
+                "memory_id": {"type": "string", "description": "Qdrant point ID to unpin (optional if entity_name given)", "default": ""},
+                "entity_name": {"type": "string", "description": "Entity name to unpin (optional if memory_id given)", "default": ""},
+                "namespace": {"type": "string", "description": "Namespace context", "default": ""},
+            },
+            "required": ["agent_id"],
+        },
+    ),
 ]
 
 # ---------------------------------------------------------------------------
@@ -143,7 +187,11 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
     namespace = arguments.get("namespace", "") or get_namespace_for_agent(agent_id)
     entity_names = arguments.get("entities", [])
     importance = arguments.get("importance_score", 0.5)
+    retention = arguments.get("retention_class", "standard")
     force_skip = bool(arguments.get("force_skip_conflict_check", False))
+
+    if retention == "permanent":
+        importance = max(importance, 1.0)
 
     denied = _rbac_gate(agent_id, "write", namespace)
     if denied:
@@ -194,24 +242,20 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
     consistency = ns_config.consistency if ns_config else "eventual"
 
     for ename in entity_names:
-        eid = upsert_entity(ename.strip())
-        add_fact(eid, text, f"explicit/{agent_id}", agent_id)
+        eid = upsert_entity(ename.strip(), retention_class=retention)
+        add_fact(eid, text, f"explicit/{agent_id}", agent_id, retention_class=retention)
 
     if not entity_names:
-        eid = upsert_entity(agent_id, "agent")
-        add_fact(eid, text, f"explicit/{agent_id}", agent_id)
+        eid = upsert_entity(agent_id, "agent", retention_class=retention)
+        add_fact(eid, text, f"explicit/{agent_id}", agent_id, retention_class=retention)
 
     vec = await embed_text(text)
-    client = QdrantClient(url=QDRANT_URL, timeout=30)
+    client = qdrant_client()
     pid = str(uuid.uuid4())
     now = datetime.now(timezone.utc)
-    checksum = hashlib.sha256(f"{text}:{agent_id}:{namespace}".encode()).hexdigest()
+    checksum = compute_memory_checksum(text, agent_id, namespace)
 
-    ttl_expires_at = None
-    if ns_config and ns_config.ttl_days is not None:
-        if importance < 0.9:
-            from datetime import timedelta
-            ttl_expires_at = int((now + timedelta(days=ns_config.ttl_days)).timestamp())
+    ttl_expires_at = compute_ttl(namespace, importance=importance)
 
     payload = {
         "agent_id": agent_id,
@@ -226,8 +270,11 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
         "consistency_level": consistency,
         "checksum": checksum,
         "importance_score": importance,
+        "retention_class": retention,
         "memory_type": arguments.get("memory_type", "general"),
     }
+    if retention in ("durable", "permanent"):
+        ttl_expires_at = None
     if ttl_expires_at is not None:
         payload["ttl_expires_at"] = ttl_expires_at
 
@@ -258,7 +305,7 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
         namespace=namespace,
         text_hash=checksum,
         version=1,
-        metadata={"trigger": "api", "importance_score": importance},
+        metadata={"trigger": "api", "importance_score": importance, "retention_class": retention},
     )
 
     hot_cache.invalidate_namespace(namespace)
@@ -295,7 +342,7 @@ async def _handle_merge(arguments: dict) -> list[TextContent]:
 
     from merge import merge_memories
     result = await merge_memories(memory_ids, strategy, agent_id, namespace)
-    return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+    return success_response(result, default=str)
 
 
 async def _handle_compress(arguments: dict) -> list[TextContent]:
@@ -320,29 +367,38 @@ async def _handle_compress(arguments: dict) -> list[TextContent]:
     if not memory_ids:
         return error_response({"error": "memory_ids required"})
 
-    client = QdrantClient(url=QDRANT_URL, timeout=30)
+    client = qdrant_client()
     texts: list[tuple[str, str]] = []
+    source_agent_ids: list[str] = []
     for mid in memory_ids:
         try:
             points = client.retrieve(
                 collection_name=QDRANT_COLLECTION, ids=[mid], with_payload=True,
             )
             if points:
-                texts.append((str(points[0].id), (points[0].payload or {}).get("text", "")))
+                pl = points[0].payload or {}
+                texts.append((str(points[0].id), pl.get("text", "")))
+                aid = pl.get("agent_id") or ""
+                if aid:
+                    source_agent_ids.append(str(aid))
         except Exception as e:
             logger.warning("Compress: failed to retrieve %s: %s", mid, e)
 
     if not texts:
         return error_response({"error": "no memories found for given IDs"})
 
+    multi_agent = len(set(source_agent_ids)) > 1
+
     if user_summary:
         summary_text = user_summary
         structured_data = None
     elif fmt == "structured":
-        structured_data = await compact_structured(texts, previous_summary=previous_summary)
+        structured_data = await compact_structured(
+            texts, previous_summary=previous_summary, multi_agent=multi_agent
+        )
         summary_text = format_structured_summary(structured_data)
     else:
-        summary_text = await compact_flat(texts)
+        summary_text = await compact_flat(texts, multi_agent=multi_agent)
         structured_data = None
 
     store_result = await _handle_store({
@@ -390,6 +446,132 @@ async def _handle_compress(arguments: dict) -> list[TextContent]:
     return success_response(result)
 
 
+async def _handle_pin(arguments: dict) -> list[TextContent]:
+    agent_id = arguments["agent_id"]
+    memory_id = arguments.get("memory_id", "").strip()
+    entity_name = arguments.get("entity_name", "").strip()
+    reason = arguments.get("reason", "")
+    namespace = arguments.get("namespace", "") or get_namespace_for_agent(agent_id)
+
+    if not memory_id and not entity_name:
+        return error_response({"error": "Provide memory_id or entity_name (or both)"})
+
+    denied = _rbac_gate(agent_id, "write", namespace)
+    if denied:
+        return [TextContent(type="text", text=denied)]
+
+    pinned = []
+
+    if memory_id:
+        client = qdrant_client()
+        try:
+            points = client.retrieve(collection_name=QDRANT_COLLECTION, ids=[memory_id], with_payload=True)
+            if points:
+                client.set_payload(
+                    collection_name=QDRANT_COLLECTION,
+                    payload={"retention_class": "permanent", "importance_score": 1.0},
+                    points=[memory_id],
+                )
+                pinned.append({"type": "memory", "id": memory_id})
+            else:
+                return error_response({"error": f"Memory {memory_id} not found"})
+        except Exception as e:
+            return error_response({"error": f"Failed to pin memory: {e}"})
+
+    if entity_name:
+        from graph import get_db, GRAPH_WRITE_LOCK
+        with GRAPH_WRITE_LOCK:
+            conn = get_db()
+            row = conn.execute(
+                "SELECT id FROM entities WHERE name = ? COLLATE NOCASE", (entity_name,)
+            ).fetchone()
+            if row:
+                conn.execute(
+                    "UPDATE entities SET retention_class='permanent' WHERE id=?", (row["id"],)
+                )
+                conn.execute(
+                    "UPDATE facts SET retention_class='permanent' WHERE entity_id=? AND is_active=1",
+                    (row["id"],),
+                )
+                conn.commit()
+                pinned.append({"type": "entity", "name": entity_name, "id": row["id"]})
+            else:
+                eid = upsert_entity(entity_name, retention_class="permanent")
+                pinned.append({"type": "entity", "name": entity_name, "id": eid, "created": True})
+            conn.close()
+
+    from audit import log_memory_event
+    await log_memory_event(
+        agent_id=agent_id, action="pin", memory_id=memory_id or entity_name,
+        namespace=namespace, text_hash="", version=0,
+        metadata={"reason": reason, "pinned": pinned},
+    )
+
+    hot_cache.invalidate_namespace(namespace)
+
+    return success_response({
+        "pinned": True,
+        "items": pinned,
+        "retention_class": "permanent",
+        "reason": reason,
+    })
+
+
+async def _handle_unpin(arguments: dict) -> list[TextContent]:
+    agent_id = arguments["agent_id"]
+    memory_id = arguments.get("memory_id", "").strip()
+    entity_name = arguments.get("entity_name", "").strip()
+    namespace = arguments.get("namespace", "") or get_namespace_for_agent(agent_id)
+
+    if not memory_id and not entity_name:
+        return error_response({"error": "Provide memory_id or entity_name (or both)"})
+
+    denied = _rbac_gate(agent_id, "write", namespace)
+    if denied:
+        return [TextContent(type="text", text=denied)]
+
+    unpinned = []
+
+    if memory_id:
+        client = qdrant_client()
+        try:
+            client.set_payload(
+                collection_name=QDRANT_COLLECTION,
+                payload={"retention_class": "standard", "importance_score": 0.5},
+                points=[memory_id],
+            )
+            unpinned.append({"type": "memory", "id": memory_id})
+        except Exception as e:
+            return error_response({"error": f"Failed to unpin memory: {e}"})
+
+    if entity_name:
+        from graph import get_db, GRAPH_WRITE_LOCK
+        with GRAPH_WRITE_LOCK:
+            conn = get_db()
+            row = conn.execute(
+                "SELECT id FROM entities WHERE name = ? COLLATE NOCASE", (entity_name,)
+            ).fetchone()
+            if row:
+                conn.execute(
+                    "UPDATE entities SET retention_class='standard' WHERE id=?", (row["id"],)
+                )
+                conn.execute(
+                    "UPDATE facts SET retention_class='standard' WHERE entity_id=? AND retention_class='permanent'",
+                    (row["id"],),
+                )
+                conn.commit()
+                unpinned.append({"type": "entity", "name": entity_name, "id": row["id"]})
+            conn.close()
+
+    hot_cache.invalidate_namespace(namespace)
+
+    return success_response({
+        "unpinned": True,
+        "items": unpinned,
+        "retention_class": "standard",
+    })
+
+
 # ---------------------------------------------------------------------------
 # Handler registry
 # ---------------------------------------------------------------------------
@@ -398,4 +580,6 @@ HANDLERS: dict[str, object] = {
     "archivist_store": _handle_store,
     "archivist_merge": _handle_merge,
     "archivist_compress": _handle_compress,
+    "archivist_pin": _handle_pin,
+    "archivist_unpin": _handle_unpin,
 }

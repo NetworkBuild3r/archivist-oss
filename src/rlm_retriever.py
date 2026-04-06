@@ -9,16 +9,17 @@ Phase 5 (v0.8): hot cache, retrieval trajectory logging.
 
 import logging
 import time
-from qdrant_client import QdrantClient
 from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchAny, Range
 
 from config import (
-    QDRANT_URL, QDRANT_COLLECTION,
+    QDRANT_COLLECTION,
     RETRIEVAL_THRESHOLD, RERANK_ENABLED, RERANK_MODEL, RERANK_TOP_K,
     VECTOR_SEARCH_LIMIT,
     GRAPH_RETRIEVAL_ENABLED, MULTI_HOP_DEPTH, TEMPORAL_DECAY_HALFLIFE_DAYS,
     HOT_CACHE_ENABLED,
     BM25_ENABLED,
+    QUERY_CLASSIFICATION_ENABLED,
+    IMPORTANCE_WEIGHT,
 )
 from embeddings import embed_text
 from llm import llm_query
@@ -29,8 +30,10 @@ from graph_retrieval import (
     graph_context_for_entities,
     apply_temporal_decay,
     merge_graph_context_into_results,
+    build_entity_fact_results,
 )
 from fts_search import search_bm25, merge_vector_and_bm25
+from qdrant import qdrant_client
 from tiering import select_tier
 from tokenizer import count_tokens
 from trajectory import get_outcome_adjustments
@@ -38,6 +41,8 @@ from hotness import apply_hotness_to_results
 import hot_cache
 import retrieval_log
 import metrics as m
+from namespace_inventory import NamespaceInventory, get_inventory
+from query_classifier import classify_query
 
 logger = logging.getLogger("archivist.rlm")
 
@@ -59,6 +64,9 @@ def _retrieval_trace(
     outcome_adjustments: int = 0,
     context_status: dict | None = None,
     bm25_hits: int = 0,
+    auto_classified_type: str = "",
+    inventory_total: int | None = None,
+    entity_facts_injected: int = 0,
 ) -> dict:
     trace = {
         "vector_search_limit": vector_limit,
@@ -77,13 +85,67 @@ def _retrieval_trace(
         "graph_retrieval_enabled": GRAPH_RETRIEVAL_ENABLED,
         "graph_entities_found": graph_entities_found,
         "graph_context_items": graph_context_items,
+        "entity_facts_injected": entity_facts_injected,
         "temporal_decay_applied": temporal_decay_applied,
         "tier": tier,
         "outcome_adjustments": outcome_adjustments,
     }
     if context_status:
         trace["context_status"] = context_status
+    if auto_classified_type:
+        trace["auto_classified_type"] = auto_classified_type
+    if inventory_total is not None:
+        trace["inventory_total"] = inventory_total
     return trace
+
+
+def _memory_awareness_payload(
+    inventory: NamespaceInventory,
+    auto_type: str,
+    user_memory_type: str,
+) -> dict:
+    searched_as = auto_type if auto_type else (user_memory_type if user_memory_type else "all")
+    hint = ""
+    by = inventory.by_type
+    if searched_as == "skill" and by.get("experience", 0) > 0:
+        hint = (
+            f"Also {by['experience']} experience memories in this namespace — "
+            "try memory_type=experience for 'what happened' queries."
+        )
+    elif searched_as == "experience" and by.get("skill", 0) > 0:
+        hint = (
+            f"Also {by['skill']} skill memories — try memory_type=skill for how-to questions."
+        )
+    elif searched_as in ("skill", "experience") and by.get("general", 0) > 0:
+        hint = f"Also {by['general']} general memories available."
+    out = {
+        "searched_as": searched_as,
+        "namespace_inventory": dict(by),
+        "total_memories": inventory.total_memories,
+        "top_entities": list(inventory.top_entities[:10]),
+        "has_fleet_tips": inventory.has_fleet_tips,
+    }
+    if hint:
+        out["hint"] = hint
+    return out
+
+
+def _attach_stage0(
+    result: dict,
+    inventory: NamespaceInventory | None,
+    auto_type: str,
+    user_memory_type: str,
+) -> None:
+    if inventory is None:
+        return
+    result["memory_awareness"] = _memory_awareness_payload(
+        inventory, auto_type, user_memory_type
+    )
+    rt = result.get("retrieval_trace")
+    if isinstance(rt, dict):
+        if auto_type:
+            rt["auto_classified_type"] = auto_type
+        rt["inventory_total"] = inventory.total_memories
 
 
 REFINE_SYSTEM = (
@@ -108,10 +170,6 @@ SYNTHESIZE_MULTI_AGENT = (
 )
 
 
-def _client() -> QdrantClient:
-    return QdrantClient(url=QDRANT_URL, timeout=30)
-
-
 async def search_vectors(
     query: str,
     agent_id: str = "",
@@ -126,7 +184,7 @@ async def search_vectors(
 ) -> list[dict]:
     """Stage 1: coarse vector search in Qdrant with optional filters."""
     query_vec = await embed_text(query)
-    client = _client()
+    client = qdrant_client()
 
     must_filters = []
     if agent_ids:
@@ -174,9 +232,33 @@ async def search_vectors(
             "chunk_index": hit.payload.get("chunk_index", 0),
             "parent_id": hit.payload.get("parent_id"),
             "is_parent": hit.payload.get("is_parent", False),
+            "importance_score": hit.payload.get("importance_score", 0.5),
+            "retention_class": hit.payload.get("retention_class", "standard"),
         }
         for hit in results
     ]
+
+
+def apply_importance_to_results(results: list[dict], weight: float | None = None) -> list[dict]:
+    """Boost/penalize retrieval results based on importance_score.
+
+    Normalised around the default (0.5) so standard memories are unaffected:
+      importance 0.0 → score × 0.90  (de-prioritised)
+      importance 0.5 → score × 1.00  (neutral default)
+      importance 1.0 → score × 1.10  (boosted — pinned/critical)
+    """
+    w = weight if weight is not None else IMPORTANCE_WEIGHT
+    if w <= 0 or not results:
+        return results
+
+    for r in results:
+        imp = r.get("importance_score", 0.5)
+        if imp != 0.5:
+            boost = (imp - 0.5) * 2
+            r["score"] = r.get("score", 0) * (1.0 + w * boost)
+
+    results.sort(key=lambda x: x.get("score", 0), reverse=True)
+    return results
 
 
 def _apply_rerank(query: str, results: list[dict]) -> list[dict]:
@@ -197,7 +279,7 @@ async def enrich_with_parent(results: list[dict]) -> list[dict]:
     if not parent_ids:
         return results
 
-    client = _client()
+    client = qdrant_client()
     try:
         parents = client.retrieve(
             collection_name=QDRANT_COLLECTION,
@@ -234,28 +316,52 @@ async def recursive_retrieve(
 ) -> dict:
     """Full RLM pipeline: coarse → dedupe → graph augment → temporal decay → threshold → rerank → parent → refine → synthesize."""
     t0 = time.monotonic()
+    user_memory_type = memory_type
+    stage0_inventory = None
+    auto_type = ""
+    effective_memory_type = memory_type
+    if QUERY_CLASSIFICATION_ENABLED and not memory_type and namespace:
+        stage0_inventory = get_inventory(namespace)
+        auto_type = await classify_query(query, stage0_inventory)
+        if auto_type:
+            effective_memory_type = auto_type
+
     effective_threshold = threshold if threshold is not None else RETRIEVAL_THRESHOLD
     vector_limit = max(VECTOR_SEARCH_LIMIT, limit)
     n_graph_entities = 0
     n_graph_items = 0
 
+    def _trace_kw() -> dict:
+        return {
+            "auto_classified_type": auto_type,
+            "inventory_total": stage0_inventory.total_memories if stage0_inventory else None,
+        }
+
     cache_extra = f"{agent_id}|{','.join(agent_ids or [])}|{team}|{date_from}|{date_to}|{limit}|{refine}"
     cached = hot_cache.get(agent_id or "fleet", query, namespace=namespace,
-                           tier=tier, memory_type=memory_type, extra=cache_extra)
+                           tier=tier, memory_type=effective_memory_type, extra=cache_extra)
     if cached is not None:
         elapsed = int((time.monotonic() - t0) * 1000)
+        out = dict(cached)
+        out["retrieval_trace"] = dict(cached.get("retrieval_trace", {}))
+        _attach_stage0(
+            out,
+            stage0_inventory,
+            out["retrieval_trace"].get("auto_classified_type") or auto_type,
+            user_memory_type,
+        )
         retrieval_log.log_retrieval(
             agent_id=agent_id or "fleet", query=query, namespace=namespace,
-            tier=tier, memory_type=memory_type,
-            retrieval_trace=cached.get("retrieval_trace", {}),
-            result_count=len(cached.get("sources", [])),
+            tier=tier, memory_type=effective_memory_type,
+            retrieval_trace=out.get("retrieval_trace", {}),
+            result_count=len(out.get("sources", [])),
             cache_hit=True, duration_ms=elapsed,
         )
-        cached["cache_hit"] = True
+        out["cache_hit"] = True
         m.inc(m.CACHE_HIT)
         m.inc(m.SEARCH_TOTAL)
         m.observe(m.SEARCH_DURATION, elapsed)
-        return cached
+        return out
 
     # Stage 1: Coarse vector search (wide recall)
     coarse = await search_vectors(
@@ -266,7 +372,7 @@ async def recursive_retrieve(
         namespace=namespace,
         date_from=date_from,
         date_to=date_to,
-        memory_type=memory_type,
+        memory_type=effective_memory_type,
         limit=vector_limit,
     )
     n_coarse = len(coarse)
@@ -274,11 +380,11 @@ async def recursive_retrieve(
     # Stage 1-bm25: BM25 keyword search + fusion (v1.2)
     n_bm25 = 0
     if BM25_ENABLED:
-        bm25_hits = await search_bm25(
+        bm25_hits = search_bm25(
             query,
             namespace=namespace,
             agent_id=agent_id if not agent_ids else "",
-            memory_type=memory_type,
+            memory_type=effective_memory_type,
             limit=vector_limit,
         )
         n_bm25 = len(bm25_hits)
@@ -286,8 +392,10 @@ async def recursive_retrieve(
             coarse = merge_vector_and_bm25(coarse, bm25_hits)
 
     # Stage 1a: Graph augmentation (v0.5)
+    detected_entities: list[dict] = []
     if GRAPH_RETRIEVAL_ENABLED:
         entities = extract_entity_mentions(query)
+        detected_entities = entities
         n_graph_entities = len(entities)
         if entities:
             graph_items = graph_context_for_entities(
@@ -299,7 +407,7 @@ async def recursive_retrieve(
                 coarse = merge_graph_context_into_results(coarse, graph_items)
 
     if not coarse:
-        return {
+        empty = {
             "answer": "No relevant memories found.",
             "sources": [],
             "chunks_searched": 0,
@@ -317,8 +425,11 @@ async def recursive_retrieve(
                 graph_context_items=n_graph_items,
                 tier=tier,
                 bm25_hits=n_bm25,
+                **_trace_kw(),
             ),
         }
+        _attach_stage0(empty, stage0_inventory, auto_type, user_memory_type)
+        return empty
 
     # Stage 1b: Dedupe (important when merging multi-agent results)
     coarse = dedupe_vector_hits(coarse)
@@ -333,10 +444,30 @@ async def recursive_retrieve(
     # Stage 1d: Hotness scoring (v1.0)
     coarse = apply_hotness_to_results(coarse)
 
+    # Stage 1e: Importance scoring (v1.7)
+    coarse = apply_importance_to_results(coarse)
+
     # Stage 2: Threshold filter (Phase 1)
     filtered = apply_retrieval_threshold(coarse, effective_threshold)
+
+    # Stage 2a: Entity fact injection (v1.7) — guaranteed recall for known entities
+    n_entity_facts_injected = 0
+    if GRAPH_RETRIEVAL_ENABLED and detected_entities:
+        entity_facts = build_entity_fact_results(
+            detected_entities, min_score=effective_threshold + 0.05,
+        )
+        if entity_facts:
+            existing_texts = {r.get("text", "")[:100] for r in filtered}
+            for ef in entity_facts:
+                if ef["text"][:100] not in existing_texts:
+                    filtered.append(ef)
+                    existing_texts.add(ef["text"][:100])
+                    n_entity_facts_injected += 1
+            if n_entity_facts_injected:
+                filtered.sort(key=lambda x: x.get("score", 0), reverse=True)
+
     if not filtered:
-        return {
+        below = {
             "status": "below_threshold",
             "answer": "",
             "sources": [],
@@ -358,8 +489,11 @@ async def recursive_retrieve(
                 temporal_decay_applied=temporal_applied,
                 tier=tier,
                 bm25_hits=n_bm25,
+                **_trace_kw(),
             ),
         }
+        _attach_stage0(below, stage0_inventory, auto_type, user_memory_type)
+        return below
 
     # Stage 2b: Outcome-aware scoring (v0.6)
     n_outcome_adj = 0
@@ -428,18 +562,20 @@ async def recursive_retrieve(
         refinement_chunks=n_refine,
         graph_entities_found=n_graph_entities,
         graph_context_items=n_graph_items,
+        entity_facts_injected=n_entity_facts_injected,
         temporal_decay_applied=temporal_applied,
         tier=tier,
         outcome_adjustments=n_outcome_adj,
         context_status=_ctx_status,
         bm25_hits=n_bm25,
+        **_trace_kw(),
     )
 
     if not refine:
         # Return tier-appropriate text in sources
         for r in enriched:
             r["tier_text"] = select_tier(r, tier)
-        return {
+        no_refine = {
             "answer": "",
             "sources": enriched[: min(10, limit)],
             "chunks_searched": n_coarse,
@@ -447,6 +583,8 @@ async def recursive_retrieve(
             "agents_scoped": agent_ids or ([agent_id] if agent_id else []),
             "retrieval_trace": _retrieval_trace(**_common_trace),
         }
+        _attach_stage0(no_refine, stage0_inventory, auto_type, user_memory_type)
+        return no_refine
 
     # Stage 5: LLM refinement
     refined = []
@@ -479,7 +617,7 @@ async def recursive_retrieve(
             logger.warning("LLM refinement failed for chunk: %s", e)
 
     if not refined:
-        return {
+        no_rel = {
             "answer": "Found chunks but none were relevant after refinement.",
             "sources": [],
             "chunks_searched": n_coarse,
@@ -487,6 +625,8 @@ async def recursive_retrieve(
             "agents_scoped": agent_ids or ([agent_id] if agent_id else []),
             "retrieval_trace": _retrieval_trace(**_common_trace),
         }
+        _attach_stage0(no_rel, stage0_inventory, auto_type, user_memory_type)
+        return no_rel
 
     # Stage 6: Synthesis
     extractions_text = "\n\n".join(
@@ -520,14 +660,15 @@ async def recursive_retrieve(
         "agents_scoped": agent_ids or ([agent_id] if agent_id else []),
         "retrieval_trace": _retrieval_trace(**_common_trace),
     }
+    _attach_stage0(final_result, stage0_inventory, auto_type, user_memory_type)
 
     elapsed = int((time.monotonic() - t0) * 1000)
     final_result["_cache_namespace"] = namespace
     hot_cache.put(agent_id or "fleet", query, final_result, namespace=namespace,
-                  tier=tier, memory_type=memory_type, extra=cache_extra)
+                  tier=tier, memory_type=effective_memory_type, extra=cache_extra)
     retrieval_log.log_retrieval(
         agent_id=agent_id or "fleet", query=query, namespace=namespace,
-        tier=tier, memory_type=memory_type,
+        tier=tier, memory_type=effective_memory_type,
         retrieval_trace=final_result.get("retrieval_trace", {}),
         result_count=len(refined),
         cache_hit=False, duration_ms=elapsed,

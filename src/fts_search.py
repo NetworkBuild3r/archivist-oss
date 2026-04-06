@@ -27,7 +27,7 @@ def _fts5_safe_query(raw_query: str) -> str:
     return " OR ".join(safe) if safe else ""
 
 
-async def search_bm25(
+def search_bm25(
     query: str,
     namespace: str = "",
     agent_id: str = "",

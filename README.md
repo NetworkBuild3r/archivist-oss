@@ -12,7 +12,7 @@ Vector search + knowledge graph + active curation — one MCP endpoint.</p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="License" />
-  <img src="https://img.shields.io/badge/version-v1.5.0-brightgreen" alt="Version" />
+  <img src="https://img.shields.io/badge/version-v1.7.0-brightgreen" alt="Version" />
   <img src="https://img.shields.io/badge/protocol-MCP-purple" alt="MCP" />
   <img src="https://img.shields.io/badge/models-any%20OpenAI--compatible-orange" alt="Models" />
 </p>
@@ -23,10 +23,12 @@ Vector search + knowledge graph + active curation — one MCP endpoint.</p>
 
 ```bash
 git clone https://github.com/NetworkBuild3r/archivist-oss.git
-cd archivist-oss && cp .env.example .env   # set your LLM/embed keys
-docker compose up -d                        # Archivist :3100 + Qdrant :6333
-curl http://localhost:3100/health            # {"status":"ok"}
+cd archivist-oss && cp .env.example .env   # set LLM + embed (see docs/DOCKER.md for xAI + host vLLM)
+docker compose up -d --build               # Archivist :3100 + Qdrant :6333
+curl http://localhost:3100/health          # {"status":"ok"}
 ```
+
+Full Docker options (host vLLM, `/opt/appdata` volumes, overrides): [`docs/DOCKER.md`](docs/DOCKER.md).
 
 Point any MCP client at `http://localhost:3100/mcp/sse` — done. Your agents now have long-term memory with search, RBAC, knowledge graphs, and active curation out of the box.
 
@@ -90,44 +92,50 @@ Each stage is observable via `retrieval_trace` in every response.
 
 ## Benchmarks
 
-Archivist's retrieval pipeline was benchmarked against a live stack (Qdrant + vLLM `BAAI/bge-base-en-v1.5` embeddings) running 100 queries across 6 query types against a 50-document, 155-chunk agent memory corpus. Each variant in the table below adds one more pipeline stage, showing the cumulative effect.
+Live run (2026-04-06) — **Qdrant** vector store, **`BAAI/bge-base-en-v1.5`** embeddings (local), **`qwen3.5-122b`** via LiteLLM over Tailscale. Four corpus scales (56 → 1,523 files), 107–110 questions per scale covering 8 query types. Context stuffing uses real LLM calls. All Archivist runs use `--no-refine` (pure retrieval, no generative synthesis). Context budget: **32,768 tokens** (realistic agent window after system prompt, history, and tools).
 
-### Pipeline Ablation: Retrieval Quality by Stage
+<p align="center">
+  <img src="assets/benchmark_comparison.png" alt="Archivist vs Context Stuffing benchmark" width="900">
+</p>
 
-| Pipeline Configuration | Recall@5 | MRR | p50 Latency | Tokens/Query |
-|------------------------|----------|-----|-------------|--------------|
-| Vector search only | 89.2% | 0.735 | 794 ms | 4,462 |
-| + BM25 keyword fusion | 89.2% | 0.735 | 727 ms | 4,462 |
-| + Knowledge graph augmentation | 89.2% | 0.735 | 747 ms | 4,462 |
-| + Temporal decay | 87.7% | 0.703 | 779 ms | 4,631 |
-| + Hotness scoring | 87.7% | 0.703 | 730 ms | 4,631 |
-| + Reranking | 87.7% | 0.703 | 766 ms | 4,631 |
-| **Full pipeline (all stages)** | **87.7%** | **0.703** | **823 ms** | **4,631** |
+### Scale Sweep: Recall vs Context Stuffing (MD Files)
 
-> **Why temporal decay shows lower recall:** The benchmark corpus is ~12 months old. Temporal decay correctly down-weights stale memories (halflife = 365 days), which is exactly what you want in production -- agents should prefer recent information. With current-date memories, temporal decay *increases* effective recall by surfacing fresh context first.
+| Scale | Files | Corpus Tokens | Fits in Window? | Stuffing Recall | Archivist Recall | Delta | Archivist Tok/Q | Stuffing p50 | Archivist p50 |
+|-------|-------|--------------|-----------------|-----------------|-----------------|-------|-----------------|-------------|--------------|
+| Small  | 56    | 8,681   | ✅ YES (27%)     | 80.0%  | **94.1%** | +14.1% | 6,302 | 3.3 s | **69 ms** |
+| Medium | 253   | 24,262  | ✅ YES (74%)     | 84.8%  | **90.3%** | +5.5%  | 5,638 | 5.9 s | **83 ms** |
+| Large  | 543   | 44,351  | ⚠️ OVERFLOW      | 80.6%  | **90.7%** | +10.1% | 5,423 | 6.9 s | **110 ms** |
+| Stress | 1,523 | 108,847 | ⚠️ OVERFLOW      | 83.7%  | **89.7%** | +6.0%  | 5,293 | 7.0 s | **159 ms** |
 
-### Retrieval Quality by Query Type
+**At stress scale: Archivist is 44× faster, uses 20× fewer tokens per query, and achieves 6% higher recall — with context that has completely overflowed stuffing.**
 
-The real value of a multi-stage pipeline shows in how it handles *different kinds* of queries:
+Archivist's token cost *decreases* slightly as the corpus grows (6,302 → 5,293 tok/q) because entity-anchored retrieval becomes more precise as the knowledge graph fills with facts. Stuffing's cost scales linearly with corpus size.
 
-| Query Type | Count | Recall | MRR | What it tests |
-|------------|-------|--------|-----|---------------|
-| **Single-hop** | 50 | 99.0% | 0.785 | Direct factual lookup ("What version of Kubernetes?") |
-| **Multi-hop** | 10 | 57.5% | 0.716 | Cross-document reasoning ("Which agents touched the API gateway?") |
-| **Temporal** | 5 | 100.0% | 0.867 | Time-aware retrieval ("What happened last week?") |
-| **Adversarial** | 5 | 40.0% | 0.200 | Queries designed to confuse ("What did we decide about the thing?") |
-| **Agent-scoped** | 5 | 83.3% | 0.667 | RBAC-filtered retrieval ("What does deployer know about prod?") |
-| **Broad** | 25 | 85.0% | 0.611 | Open-ended exploration ("Summarize our infrastructure strategy") |
+### Per-Query-Type Breakdown at Stress Scale (1,523 files, 100% overflow)
+
+| Query Type | n | Stuffing Recall | Archivist Recall | Delta | Notes |
+|------------|---|-----------------|-----------------|-------|-------|
+| Single-hop | 50 | 96.0% | **99.0%** | +3.0% | Direct factual lookups |
+| Multi-hop  | 10 | 60.0% | **77.5%** | +17.5% | Cross-document reasoning |
+| Broad      | 30 | 77.9% | **90.8%** | +12.9% | Open-ended synthesis |
+| Agent-scoped | 5 | 68.3% | **83.3%** | +15.0% | RBAC-filtered per-agent queries |
+| Temporal   | 5  | 100.0% | 100.0% | = | Time-anchored lookups (both excel) |
+| Adversarial | 5 | 40.0% | 40.0% | = | No ground truth — expected ceiling |
+| Contradiction | 2 | 100.0% | 100.0% | = | Fact conflict detection |
+| Needle     | 3 | 75.0% | 33.3% | −41.7% | Single rare fact; stuffing wins if doc survives truncation |
+
+Multi-hop and broad synthesis are where Archivist's knowledge graph pays off most — these are exactly the queries that require connecting facts across many files, which stuffing handles poorly under overflow. The needle regression is real and honest: if a rare, single-document fact isn't tied to a known entity, entity injection doesn't help.
 
 ### What Each Pipeline Stage Does
 
 | Stage | Purpose | When it matters |
 |-------|---------|----------------|
-| **Vector search** | Semantic similarity via embeddings | Baseline -- handles most single-hop queries |
+| **Vector search** | Semantic similarity via embeddings | Baseline — handles most single-hop queries |
 | **BM25 fusion** | Exact keyword matching merged with vector scores | Catches acronyms, error codes, and proper nouns that embeddings miss |
 | **Graph augmentation** | Entity-relationship traversal from knowledge graph | Multi-hop queries: "which agents worked on X?" |
+| **Entity injection** | Guarantees all known facts for detected entities are returned | Critical for agent-scoped, infrastructure, and person queries |
 | **Temporal decay** | Exponential recency weighting | Prevents stale memories from crowding out recent decisions |
-| **Hotness scoring** | Frequency x recency boost | Surfaces frequently-accessed memories (high signal) |
+| **Hotness scoring** | Frequency × recency boost | Surfaces frequently-accessed memories (high signal) |
 | **Reranking** | Cross-encoder reranking for precision | Tightens top-k ordering when precision matters more than recall |
 | **Parent enrichment** | Expands child chunks to parent context | Provides surrounding context for better synthesis |
 | **LLM refinement** | Generative synthesis of retrieved chunks | Produces coherent answers instead of raw chunk dumps |
@@ -139,14 +147,18 @@ The real value of a multi-stage pipeline shows in how it handles *different kind
 | Hybrid search (vector + BM25) | Yes (0.7/0.3 fusion) | Vector only (free) | Graph-based | Vector |
 | Temporal knowledge graph | Yes (SQLite + FTS5) | Pro only ($249/mo) | Yes (Graphiti) | No |
 | Active curation (background) | Yes (LLM dedup, tip consolidation) | No | No | Self-managed |
+| Retention classes (pin/unpin) | Yes (ephemeral/standard/durable/permanent) | No | No | No |
+| Entity-anchored retrieval | Yes (guaranteed recall for known entities) | No | Partial | No |
+| Fact versioning (superseded_by) | Yes (auto-detects conflicting facts) | No | Temporal versioning | No |
 | Multi-agent RBAC | Yes (namespace ACLs) | No | No | Per-agent isolation |
 | Cross-encoder reranking | Yes (BAAI/bge-reranker-v2-m3) | No | No | No |
-| Hotness scoring | Yes (freq x recency) | No | Temporal decay | No |
+| Hotness scoring | Yes (freq × recency) | No | Temporal decay | No |
 | Conflict detection | Yes (vector + LLM adjudication) | No | Temporal versioning | No |
 | Self-hosted / Apache 2.0 | Yes | Open core | Yes | Yes |
 
-> Full benchmark reproduction steps, micro-benchmark component timings, and raw data: [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md)
-> Interactive visual dashboard: [`docs/benchmark-dashboard.html`](docs/benchmark-dashboard.html)
+> **Reproduce:** `docker compose --profile benchmark run --rm --entrypoint /bin/bash benchmark benchmarks/scripts/run_full_comparison.sh`
+>
+> Full reproduction steps, raw JSON outputs, and per-query-type breakdown: [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md)
 
 ---
 
@@ -595,6 +607,7 @@ Archivist is integration and execution on top of public work from the agent-memo
 | Document | Covers |
 |----------|--------|
 | [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) | Three-tier benchmark results, reproduction steps, competitive comparison |
+| [`docs/DOCKER.md`](docs/DOCKER.md) | Docker Compose stack, host vLLM + cloud LLM, `/opt/appdata` volumes |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Module map, data flow diagrams, storage schema, per-version operational notes |
 | [`docs/CURSOR_SKILL.md`](docs/CURSOR_SKILL.md) | Full parameter schemas and examples for all 30 MCP tools |
 | [`docs/REFERENCE.md`](docs/REFERENCE.md) | Condensed tool reference table |

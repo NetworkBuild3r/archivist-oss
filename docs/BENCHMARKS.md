@@ -51,16 +51,70 @@ Tested against a live Archivist stack with 100 queries across 6 query types agai
 ### How to run
 
 ```bash
-# Configure .env with Qdrant, embedding, and LLM endpoints
-# Then:
-python benchmarks/pipeline/evaluate.py --no-refine --output .benchmarks/pipeline.json
+# Configure .env with Qdrant, embedding, and LLM endpoints (see “Remote stack” below).
+# Module form (recommended):
+python -m benchmarks.pipeline.evaluate --no-refine --output .benchmarks/pipeline.json
 
 # With LLM refinement (slower, higher quality):
-python benchmarks/pipeline/evaluate.py --output .benchmarks/pipeline.json
+python -m benchmarks.pipeline.evaluate --output .benchmarks/pipeline.json
 
 # Skip indexing if corpus already loaded:
-python benchmarks/pipeline/evaluate.py --no-refine --skip-index --output .benchmarks/pipeline.json
+python -m benchmarks.pipeline.evaluate --no-refine --skip-index --output .benchmarks/pipeline.json
 ```
+
+### Dual-track corpus (small / medium / large)
+
+Regenerate questions (adds `needle`, `contradiction`, `tags`, `scales` fields):
+
+```bash
+python benchmarks/fixtures/generate_corpus.py --questions-only
+```
+
+Generate scaled corpora under `benchmarks/fixtures/corpus_<preset>/` (gitignored by default):
+
+```bash
+python benchmarks/fixtures/generate_corpus.py --preset small --corpus-only
+python benchmarks/fixtures/generate_corpus.py --preset medium --corpus-only
+python benchmarks/fixtures/generate_corpus.py --preset large --corpus-only
+```
+
+Run the harness against one preset (re-indexes Qdrant from that tree):
+
+```bash
+python -m benchmarks.pipeline.evaluate --memory-scale small --no-refine --output .benchmarks/small.json
+```
+
+Optional: after indexing, run one-shot LLM graph extraction over all agent markdown (`curator.extract_all_agent_memories`) so SQLite/KG is populated — **significant LLM cost**:
+
+```bash
+python -m benchmarks.pipeline.evaluate --memory-scale medium --run-curator --no-refine --output .benchmarks/medium.json
+```
+
+Scale sweep (same variants across all three presets; skips missing `corpus_*` dirs):
+
+```bash
+python -m benchmarks.pipeline.evaluate --scale-sweep --variants vector_only,full_pipeline --no-refine --output .benchmarks/sweep.json
+```
+
+JSON output includes `benchmark_meta.hypotheses` (H1–H3) for pre-registered claims; sweep runs add `by_scale` with per-preset summaries and traces.
+
+### Remote stack (e.g. Docker on another host)
+
+Point `.env` at the machine running Qdrant and embedding/LLM services, for example:
+
+```bash
+QDRANT_URL=http://192.168.11.142:6333
+EMBED_URL=http://192.168.11.142:8000
+LLM_URL=http://192.168.11.142:7878
+```
+
+Run the evaluate module from a checkout of this repo with that `.env`; `MEMORY_ROOT` is overridden per run to the chosen corpus directory.
+
+### Limitations (what we prove vs. not)
+
+- **Legacy row** in the table above reflects one corpus size and query mix; dual-track runs are required to compare small vs large memory honestly.
+- **Needle** and **contradiction** slices depend on the generated markdown matching `questions.json` (regenerate both after changing `NEEDLE_SECRET` / contradiction facts in `generate_corpus.py`).
+- **Curator** metrics are not automatic: without `--run-curator`, graph-augmented stages may see an empty KG (hypothesis H3).
 
 ---
 

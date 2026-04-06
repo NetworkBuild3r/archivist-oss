@@ -1,6 +1,5 @@
 """MCP tool handlers — admin, observability, namespaces, audit, URI resolution."""
 
-import json
 import logging
 
 from mcp.types import Tool, TextContent
@@ -208,7 +207,7 @@ async def _handle_audit_trail(arguments: dict) -> list[TextContent]:
     else:
         entries = get_agent_activity("", limit=limit)
 
-    return [TextContent(type="text", text=json.dumps({"entries": entries}, indent=2, default=str))]
+    return success_response({"entries": entries}, default=str)
 
 
 async def _handle_resolve_uri(arguments: dict) -> list[TextContent]:
@@ -267,7 +266,7 @@ async def _handle_retrieval_logs(arguments: dict) -> list[TextContent]:
 async def _handle_health_dashboard(arguments: dict) -> list[TextContent]:
     """Comprehensive health dashboard across all subsystems."""
     result = build_dashboard(window_days=arguments.get("window_days", 7))
-    return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+    return success_response(result, default=str)
 
 
 async def _handle_batch_heuristic(arguments: dict) -> list[TextContent]:

@@ -11,99 +11,87 @@ import uuid
 from datetime import datetime, timezone
 from collections import defaultdict
 
-from graph import get_db, GRAPH_WRITE_LOCK
+from graph import get_db, GRAPH_WRITE_LOCK, schema_guard
 
 logger = logging.getLogger("archivist.skills")
 
-_SCHEMA_APPLIED = False
+_ensure_skill_schema = schema_guard("""
+    CREATE TABLE IF NOT EXISTS skills (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        provider TEXT NOT NULL DEFAULT '',
+        mcp_endpoint TEXT DEFAULT '',
+        current_version TEXT NOT NULL DEFAULT '0.0.0',
+        status TEXT NOT NULL DEFAULT 'active',
+        description TEXT DEFAULT '',
+        registered_by TEXT NOT NULL,
+        registered_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        metadata TEXT DEFAULT '{}',
+        UNIQUE(name, provider)
+    );
+    CREATE INDEX IF NOT EXISTS idx_skills_name ON skills(name);
+    CREATE INDEX IF NOT EXISTS idx_skills_provider ON skills(provider);
+    CREATE INDEX IF NOT EXISTS idx_skills_status ON skills(status);
 
+    CREATE TABLE IF NOT EXISTS skill_versions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        skill_id TEXT NOT NULL REFERENCES skills(id),
+        version TEXT NOT NULL,
+        changelog TEXT DEFAULT '',
+        breaking_changes TEXT DEFAULT '',
+        observed_at TEXT NOT NULL,
+        reported_by TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active',
+        UNIQUE(skill_id, version)
+    );
+    CREATE INDEX IF NOT EXISTS idx_sv_skill ON skill_versions(skill_id);
 
-def _ensure_skill_schema():
-    global _SCHEMA_APPLIED
-    if _SCHEMA_APPLIED:
-        return
-    with GRAPH_WRITE_LOCK:
-        conn = get_db()
-        conn.executescript("""
-        CREATE TABLE IF NOT EXISTS skills (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            provider TEXT NOT NULL DEFAULT '',
-            mcp_endpoint TEXT DEFAULT '',
-            current_version TEXT NOT NULL DEFAULT '0.0.0',
-            status TEXT NOT NULL DEFAULT 'active',
-            description TEXT DEFAULT '',
-            registered_by TEXT NOT NULL,
-            registered_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            metadata TEXT DEFAULT '{}',
-            UNIQUE(name, provider)
-        );
-        CREATE INDEX IF NOT EXISTS idx_skills_name ON skills(name);
-        CREATE INDEX IF NOT EXISTS idx_skills_provider ON skills(provider);
-        CREATE INDEX IF NOT EXISTS idx_skills_status ON skills(status);
+    CREATE TABLE IF NOT EXISTS skill_lessons (
+        id TEXT PRIMARY KEY,
+        skill_id TEXT NOT NULL REFERENCES skills(id),
+        lesson_type TEXT NOT NULL DEFAULT 'general',
+        title TEXT NOT NULL,
+        content TEXT NOT NULL,
+        skill_version TEXT DEFAULT '',
+        agent_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        upvotes INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_sl_skill ON skill_lessons(skill_id);
+    CREATE INDEX IF NOT EXISTS idx_sl_type ON skill_lessons(lesson_type);
 
-        CREATE TABLE IF NOT EXISTS skill_versions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            skill_id TEXT NOT NULL REFERENCES skills(id),
-            version TEXT NOT NULL,
-            changelog TEXT DEFAULT '',
-            breaking_changes TEXT DEFAULT '',
-            observed_at TEXT NOT NULL,
-            reported_by TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'active',
-            UNIQUE(skill_id, version)
-        );
-        CREATE INDEX IF NOT EXISTS idx_sv_skill ON skill_versions(skill_id);
+    CREATE TABLE IF NOT EXISTS skill_events (
+        id TEXT PRIMARY KEY,
+        skill_id TEXT NOT NULL REFERENCES skills(id),
+        agent_id TEXT NOT NULL,
+        event_type TEXT NOT NULL DEFAULT 'invocation',
+        outcome TEXT NOT NULL DEFAULT 'unknown',
+        skill_version TEXT DEFAULT '',
+        duration_ms INTEGER,
+        error_message TEXT DEFAULT '',
+        trajectory_id TEXT DEFAULT '',
+        created_at TEXT NOT NULL,
+        metadata TEXT DEFAULT '{}'
+    );
+    CREATE INDEX IF NOT EXISTS idx_se_skill ON skill_events(skill_id);
+    CREATE INDEX IF NOT EXISTS idx_se_agent ON skill_events(agent_id);
+    CREATE INDEX IF NOT EXISTS idx_se_outcome ON skill_events(outcome);
 
-        CREATE TABLE IF NOT EXISTS skill_lessons (
-            id TEXT PRIMARY KEY,
-            skill_id TEXT NOT NULL REFERENCES skills(id),
-            lesson_type TEXT NOT NULL DEFAULT 'general',
-            title TEXT NOT NULL,
-            content TEXT NOT NULL,
-            skill_version TEXT DEFAULT '',
-            agent_id TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            upvotes INTEGER NOT NULL DEFAULT 0
-        );
-        CREATE INDEX IF NOT EXISTS idx_sl_skill ON skill_lessons(skill_id);
-        CREATE INDEX IF NOT EXISTS idx_sl_type ON skill_lessons(lesson_type);
-
-        CREATE TABLE IF NOT EXISTS skill_events (
-            id TEXT PRIMARY KEY,
-            skill_id TEXT NOT NULL REFERENCES skills(id),
-            agent_id TEXT NOT NULL,
-            event_type TEXT NOT NULL DEFAULT 'invocation',
-            outcome TEXT NOT NULL DEFAULT 'unknown',
-            skill_version TEXT DEFAULT '',
-            duration_ms INTEGER,
-            error_message TEXT DEFAULT '',
-            trajectory_id TEXT DEFAULT '',
-            created_at TEXT NOT NULL,
-            metadata TEXT DEFAULT '{}'
-        );
-        CREATE INDEX IF NOT EXISTS idx_se_skill ON skill_events(skill_id);
-        CREATE INDEX IF NOT EXISTS idx_se_agent ON skill_events(agent_id);
-        CREATE INDEX IF NOT EXISTS idx_se_outcome ON skill_events(outcome);
-
-        CREATE TABLE IF NOT EXISTS skill_relations (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            skill_a TEXT NOT NULL REFERENCES skills(id),
-            skill_b TEXT NOT NULL REFERENCES skills(id),
-            relation_type TEXT NOT NULL,
-            confidence REAL NOT NULL DEFAULT 1.0,
-            evidence TEXT DEFAULT '',
-            created_by TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_sr_a ON skill_relations(skill_a);
-        CREATE INDEX IF NOT EXISTS idx_sr_b ON skill_relations(skill_b);
-        CREATE INDEX IF NOT EXISTS idx_sr_type ON skill_relations(relation_type);
-        """)
-        conn.commit()
-        conn.close()
-    _SCHEMA_APPLIED = True
+    CREATE TABLE IF NOT EXISTS skill_relations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        skill_a TEXT NOT NULL REFERENCES skills(id),
+        skill_b TEXT NOT NULL REFERENCES skills(id),
+        relation_type TEXT NOT NULL,
+        confidence REAL NOT NULL DEFAULT 1.0,
+        evidence TEXT DEFAULT '',
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_sr_a ON skill_relations(skill_a);
+    CREATE INDEX IF NOT EXISTS idx_sr_b ON skill_relations(skill_b);
+    CREATE INDEX IF NOT EXISTS idx_sr_type ON skill_relations(relation_type);
+""")
 
 
 def register_skill(
@@ -399,47 +387,6 @@ def find_skill(name: str, provider: str = "") -> dict | None:
     row = cur.fetchone()
     conn.close()
     return dict(row) if row else None
-
-
-def list_skills(status: str = "", provider: str = "", limit: int = 50) -> list[dict]:
-    """List registered skills with optional filters."""
-    _ensure_skill_schema()
-    conn = get_db()
-    conditions = []
-    params: list = []
-    if status:
-        conditions.append("status=?")
-        params.append(status)
-    if provider:
-        conditions.append("provider=?")
-        params.append(provider)
-
-    where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
-    params.append(limit)
-    cur = conn.execute(
-        f"SELECT * FROM skills{where} ORDER BY updated_at DESC LIMIT ?",
-        params,
-    )
-    rows = [dict(r) for r in cur.fetchall()]
-    conn.close()
-    return rows
-
-
-def update_skill_status(skill_id: str, status: str) -> bool:
-    """Set a skill's status (active, deprecated, broken)."""
-    _ensure_skill_schema()
-    now = datetime.now(timezone.utc).isoformat()
-    with GRAPH_WRITE_LOCK:
-        conn = get_db()
-        try:
-            conn.execute(
-                "UPDATE skills SET status=?, updated_at=? WHERE id=?",
-                (status, now, skill_id),
-            )
-            conn.commit()
-        finally:
-            conn.close()
-    return True
 
 
 # ── Skill relation graph (v1.0) ─────────────────────────────────────────────

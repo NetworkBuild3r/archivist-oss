@@ -1,6 +1,5 @@
 """Central tool registry — aggregates tool definitions and handlers from domain modules."""
 
-import json
 import logging
 from typing import Callable, Awaitable
 
@@ -12,6 +11,7 @@ from .tools_trajectory import TOOLS as TRAJECTORY_TOOLS, HANDLERS as TRAJECTORY_
 from .tools_skills import TOOLS as SKILL_TOOLS, HANDLERS as SKILL_HANDLERS
 from .tools_admin import TOOLS as ADMIN_TOOLS, HANDLERS as ADMIN_HANDLERS
 from .tools_cache import TOOLS as CACHE_TOOLS, HANDLERS as CACHE_HANDLERS
+from ._common import error_response
 
 logger = logging.getLogger("archivist.mcp")
 
@@ -48,7 +48,7 @@ async def dispatch_tool(name: str, arguments: dict) -> list[TextContent]:
         handler = TOOL_REGISTRY.get(name)
         if handler:
             return await handler(arguments)
-        return [TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}))]
+        return error_response({"error": f"Unknown tool: {name}"})
     except Exception as e:
         logger.error("Tool %s failed: %s", name, e, exc_info=True)
-        return [TextContent(type="text", text=json.dumps({"error": str(e)}))]
+        return error_response({"error": str(e)})

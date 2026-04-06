@@ -4,6 +4,7 @@ import logging
 import sqlite3
 import os
 import threading
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 from config import SQLITE_PATH
@@ -25,6 +26,50 @@ def get_db() -> sqlite3.Connection:
     return conn
 
 
+@contextmanager
+def db_conn():
+    """Context manager that yields an open SQLite connection and closes it on exit.
+
+    Usage::
+
+        with db_conn() as conn:
+            conn.execute(...)
+    """
+    conn = get_db()
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+def schema_guard(ddl: str):
+    """Return a zero-argument callable that runs *ddl* exactly once.
+
+    Usage (module level)::
+
+        _ensure_schema = schema_guard(\"\"\"
+            CREATE TABLE IF NOT EXISTS my_table (...);
+        \"\"\")
+
+    Then call ``_ensure_schema()`` at the top of each public function that
+    needs the schema to be initialised.
+    """
+    applied = False
+
+    def _ensure():
+        nonlocal applied
+        if applied:
+            return
+        with GRAPH_WRITE_LOCK:
+            conn = get_db()
+            conn.executescript(ddl)
+            conn.commit()
+            conn.close()
+        applied = True
+
+    return _ensure
+
+
 def init_schema():
     with GRAPH_WRITE_LOCK:
         conn = get_db()
@@ -36,7 +81,9 @@ def init_schema():
             first_seen TEXT NOT NULL,
             last_seen TEXT NOT NULL,
             mention_count INTEGER NOT NULL DEFAULT 1,
-            metadata TEXT DEFAULT '{}'
+            metadata TEXT DEFAULT '{}',
+            retention_class TEXT NOT NULL DEFAULT 'standard',
+            aliases TEXT NOT NULL DEFAULT '[]'
         );
         CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(name COLLATE NOCASE);
         CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(entity_type);
@@ -64,7 +111,8 @@ def init_schema():
             agent_id TEXT,
             created_at TEXT NOT NULL,
             superseded_by INTEGER REFERENCES facts(id),
-            is_active INTEGER NOT NULL DEFAULT 1
+            is_active INTEGER NOT NULL DEFAULT 1,
+            retention_class TEXT NOT NULL DEFAULT 'standard'
         );
         CREATE INDEX IF NOT EXISTS idx_facts_entity ON facts(entity_id);
         CREATE INDEX IF NOT EXISTS idx_facts_active ON facts(is_active);
@@ -73,22 +121,6 @@ def init_schema():
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
         );
-
-        CREATE TABLE IF NOT EXISTS audit_log (
-            id TEXT PRIMARY KEY,
-            timestamp TEXT NOT NULL,
-            agent_id TEXT NOT NULL,
-            action TEXT NOT NULL,
-            memory_id TEXT,
-            namespace TEXT,
-            text_hash TEXT,
-            version INTEGER,
-            metadata TEXT DEFAULT '{}'
-        );
-        CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp);
-        CREATE INDEX IF NOT EXISTS idx_audit_agent ON audit_log(agent_id);
-        CREATE INDEX IF NOT EXISTS idx_audit_memory ON audit_log(memory_id);
-        CREATE INDEX IF NOT EXISTS idx_audit_namespace ON audit_log(namespace);
 
         CREATE TABLE IF NOT EXISTS memory_versions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -121,7 +153,38 @@ def init_schema():
     """)
         conn.commit()
         conn.close()
+    _migrate_schema()
     _init_fts5()
+
+
+def _migrate_schema():
+    """Add columns introduced in v1.7+ if upgrading from an older database."""
+    _logger = logging.getLogger("archivist.graph")
+    migrations = [
+        ("facts", "retention_class", "TEXT NOT NULL DEFAULT 'standard'"),
+        ("entities", "retention_class", "TEXT NOT NULL DEFAULT 'standard'"),
+        ("entities", "aliases", "TEXT NOT NULL DEFAULT '[]'"),
+    ]
+    indexes = [
+        "CREATE INDEX IF NOT EXISTS idx_facts_retention ON facts(retention_class)",
+        "CREATE INDEX IF NOT EXISTS idx_entities_retention ON entities(retention_class)",
+    ]
+    with GRAPH_WRITE_LOCK:
+        conn = get_db()
+        for table, column, typedef in migrations:
+            try:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {typedef}")
+                conn.commit()
+                _logger.info("Migrated %s: added %s column", table, column)
+            except sqlite3.OperationalError:
+                pass
+        for ddl in indexes:
+            try:
+                conn.execute(ddl)
+                conn.commit()
+            except Exception:
+                pass
+        conn.close()
 
 
 def _init_fts5():
@@ -263,23 +326,32 @@ def search_fts(query: str, namespace: str = "", agent_id: str = "",
         conn.close()
 
 
-def upsert_entity(name: str, entity_type: str = "unknown", agent_id: str = "") -> int:
+_RETENTION_RANK = {"ephemeral": 0, "standard": 1, "durable": 2, "permanent": 3}
+
+
+def upsert_entity(name: str, entity_type: str = "unknown", agent_id: str = "",
+                  retention_class: str = "standard") -> int:
     now = datetime.now(timezone.utc).isoformat()
     with GRAPH_WRITE_LOCK:
         conn = get_db()
-        cur = conn.execute("SELECT id, mention_count FROM entities WHERE name = ? COLLATE NOCASE", (name,))
+        cur = conn.execute(
+            "SELECT id, mention_count, retention_class FROM entities WHERE name = ? COLLATE NOCASE",
+            (name,),
+        )
         row = cur.fetchone()
         if row:
+            existing_rc = row["retention_class"] if "retention_class" in row.keys() else "standard"
+            new_rc = retention_class if _RETENTION_RANK.get(retention_class, 1) > _RETENTION_RANK.get(existing_rc, 1) else existing_rc
             conn.execute(
-                "UPDATE entities SET last_seen=?, mention_count=mention_count+1 WHERE id=?",
-                (now, row["id"]),
+                "UPDATE entities SET last_seen=?, mention_count=mention_count+1, retention_class=? WHERE id=?",
+                (now, new_rc, row["id"]),
             )
             conn.commit()
             conn.close()
             return row["id"]
         cur = conn.execute(
-            "INSERT INTO entities (name, entity_type, first_seen, last_seen) VALUES (?,?,?,?)",
-            (name, entity_type, now, now),
+            "INSERT INTO entities (name, entity_type, first_seen, last_seen, retention_class) VALUES (?,?,?,?,?)",
+            (name, entity_type, now, now, retention_class),
         )
         conn.commit()
         eid = cur.lastrowid
@@ -304,40 +376,147 @@ def add_relationship(source_id: int, target_id: int, rel_type: str, evidence: st
             conn.close()
 
 
-def add_fact(entity_id: int, fact_text: str, source_file: str = "", agent_id: str = "") -> int:
+def _word_set(text: str) -> set[str]:
+    """Extract lowercase word tokens for overlap comparison."""
+    return {w for w in text.lower().split() if len(w) >= 2}
+
+
+def add_fact(entity_id: int, fact_text: str, source_file: str = "",
+             agent_id: str = "", retention_class: str = "standard") -> int:
     now = datetime.now(timezone.utc).isoformat()
+    new_words = _word_set(fact_text)
+
     with GRAPH_WRITE_LOCK:
         conn = get_db()
         cur = conn.execute(
-            "INSERT INTO facts (entity_id, fact_text, source_file, agent_id, created_at) VALUES (?,?,?,?,?)",
-            (entity_id, fact_text, source_file, agent_id, now),
+            "INSERT INTO facts (entity_id, fact_text, source_file, agent_id, created_at, retention_class) "
+            "VALUES (?,?,?,?,?,?)",
+            (entity_id, fact_text, source_file, agent_id, now, retention_class),
         )
         conn.commit()
         fid = cur.lastrowid
+
+        if new_words:
+            old_facts = conn.execute(
+                "SELECT id, fact_text FROM facts "
+                "WHERE entity_id=? AND is_active=1 AND id!=? AND superseded_by IS NULL",
+                (entity_id, fid),
+            ).fetchall()
+
+            superseded_ids = []
+            for old in old_facts:
+                old_words = _word_set(old["fact_text"])
+                if not old_words:
+                    continue
+                overlap = len(new_words & old_words) / max(len(old_words), 1)
+                if overlap >= 0.6:
+                    superseded_ids.append(old["id"])
+
+            if superseded_ids:
+                placeholders = ",".join("?" for _ in superseded_ids)
+                conn.execute(
+                    f"UPDATE facts SET superseded_by=? WHERE id IN ({placeholders})",
+                    [fid] + superseded_ids,
+                )
+                conn.commit()
+
         conn.close()
         return fid
 
 
+def supersede_fact(old_fact_id: int, new_fact_id: int):
+    """Explicitly mark an old fact as superseded by a newer one."""
+    with GRAPH_WRITE_LOCK:
+        conn = get_db()
+        conn.execute(
+            "UPDATE facts SET superseded_by=? WHERE id=?",
+            (new_fact_id, old_fact_id),
+        )
+        conn.commit()
+        conn.close()
+
+
+def _normalize(text: str) -> str:
+    """Lowercase, strip non-alphanumeric except hyphens/underscores."""
+    import re
+    return re.sub(r"[^\w\s\-]", "", text.lower()).strip()
+
+
 def search_entities(query: str, limit: int = 10) -> list[dict]:
+    """Search entities by name or aliases (case-insensitive, normalized)."""
     conn = get_db()
     try:
+        norm_q = _normalize(query)
         cur = conn.execute(
-            "SELECT * FROM entities WHERE name LIKE ? COLLATE NOCASE ORDER BY mention_count DESC LIMIT ?",
-            (f"%{query}%", limit),
+            "SELECT * FROM entities "
+            "WHERE name LIKE ? COLLATE NOCASE OR aliases LIKE ? COLLATE NOCASE "
+            "ORDER BY mention_count DESC LIMIT ?",
+            (f"%{query}%", f"%{norm_q}%", limit),
         )
         return [dict(r) for r in cur.fetchall()]
     finally:
         conn.close()
 
 
-def get_entity_facts(entity_id: int) -> list[dict]:
+def add_entity_alias(entity_id: int, alias: str):
+    """Add an alias to an entity (idempotent)."""
+    import json as _json
+    norm = _normalize(alias)
+    if not norm:
+        return
+    with GRAPH_WRITE_LOCK:
+        conn = get_db()
+        row = conn.execute("SELECT aliases FROM entities WHERE id=?", (entity_id,)).fetchone()
+        if row:
+            try:
+                current = _json.loads(row["aliases"])
+            except Exception:
+                current = []
+            if norm not in current:
+                current.append(norm)
+                conn.execute(
+                    "UPDATE entities SET aliases=? WHERE id=?",
+                    (_json.dumps(current), entity_id),
+                )
+                conn.commit()
+        conn.close()
+
+
+def get_entity_by_id(entity_id: int) -> dict | None:
     conn = get_db()
     try:
-        cur = conn.execute(
-            "SELECT * FROM facts WHERE entity_id=? AND is_active=1 ORDER BY created_at DESC",
-            (entity_id,),
-        )
-        return [dict(r) for r in cur.fetchall()]
+        row = conn.execute("SELECT * FROM entities WHERE id=?", (entity_id,)).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def get_entity_facts(entity_id: int, include_superseded: bool = False) -> list[dict]:
+    """Get active facts for an entity.
+
+    Non-superseded facts come first. Superseded facts are included only when
+    ``include_superseded`` is True (useful for history views).
+    """
+    conn = get_db()
+    try:
+        if include_superseded:
+            cur = conn.execute(
+                "SELECT * FROM facts WHERE entity_id=? AND is_active=1 "
+                "ORDER BY (superseded_by IS NOT NULL), created_at DESC",
+                (entity_id,),
+            )
+        else:
+            cur = conn.execute(
+                "SELECT * FROM facts WHERE entity_id=? AND is_active=1 AND superseded_by IS NULL "
+                "ORDER BY created_at DESC",
+                (entity_id,),
+            )
+        results = []
+        for r in cur.fetchall():
+            d = dict(r)
+            d["is_current"] = d.get("superseded_by") is None
+            results.append(d)
+        return results
     finally:
         conn.close()
 
