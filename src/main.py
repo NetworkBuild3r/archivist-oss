@@ -317,6 +317,23 @@ async def handle_dashboard(request):
     return JSONResponse(build_dashboard(window))
 
 
+async def handle_namespace_index(request):
+    """Plain-text per-agent memory index (same output as archivist_index MCP tool).
+
+    Used by CronJobs to write MEMORY_INDEX.md on agent NFS workspaces.
+    Query: agent_id (required).
+    """
+    agent_id = request.query_params.get("agent_id", "").strip()
+    if not agent_id:
+        return PlainTextResponse("missing agent_id query parameter", status_code=400)
+    from compressed_index import build_namespace_index
+    from rbac import get_namespace_for_agent
+
+    namespace = get_namespace_for_agent(agent_id)
+    text = build_namespace_index(namespace, agent_ids=[agent_id])
+    return PlainTextResponse(text, media_type="text/markdown; charset=utf-8")
+
+
 app = Starlette(
     routes=[
         Route("/health", health),
@@ -324,6 +341,7 @@ app = Starlette(
         Route("/admin/invalidate", handle_invalidate, methods=["POST", "GET"]),
         Route("/admin/retrieval-logs", handle_retrieval_export),
         Route("/admin/dashboard", handle_dashboard),
+        Route("/admin/namespace-index", handle_namespace_index, methods=["GET"]),
         Route("/mcp/sse", endpoint=handle_sse),
         Mount("/mcp/messages/", app=sse_transport.handle_post_message),
     ],
