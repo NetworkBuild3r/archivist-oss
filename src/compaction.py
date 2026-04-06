@@ -5,9 +5,9 @@ Inspired by ReMe's compact_memory() structured output format.
 
 import json
 import logging
-import re
 
 import llm as llm_mod
+from text_utils import strip_fences
 
 logger = logging.getLogger("archivist.compaction")
 
@@ -38,14 +38,6 @@ FLAT_COMPACT_MULTI_AGENT = (
     FLAT_COMPACT_SYSTEM
     + " Sources are from multiple agents — keep only cross-cutting facts, not idiosyncratic style."
 )
-
-
-def _strip_fences(raw: str) -> str:
-    raw = raw.strip()
-    if raw.startswith("```"):
-        raw = re.sub(r"^```(?:json)?\n?", "", raw)
-        raw = re.sub(r"\n?```$", "", raw)
-    return raw.strip()
 
 
 async def compact_structured(
@@ -80,7 +72,7 @@ async def compact_structured(
             max_tokens=600,
             json_mode=True,
         )
-        result = json.loads(_strip_fences(raw))
+        result = json.loads(strip_fences(raw))
         for key in ("goal", "progress", "decisions", "next_steps", "critical_context"):
             if key not in result:
                 result[key] = "" if key in ("goal", "critical_context") else []

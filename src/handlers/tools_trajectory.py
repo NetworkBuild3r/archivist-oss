@@ -11,7 +11,7 @@ from trajectory import (
     session_end_summary,
 )
 
-from ._common import success_response
+from ._common import error_response, success_response
 from .tools_storage import _handle_store
 
 logger = logging.getLogger("archivist.mcp")
@@ -180,11 +180,7 @@ async def _handle_log_trajectory(arguments: dict) -> list[TextContent]:
         metadata={"outcome": arguments["outcome"], "tips_extracted": len(tips)},
     )
 
-    return [TextContent(type="text", text=json.dumps({
-        **result,
-        "attributions": attributions,
-        "tips": tips,
-    }, indent=2, default=str))]
+    return success_response({**result, "attributions": attributions, "tips": tips}, default=str)
 
 
 async def _handle_annotate(arguments: dict) -> list[TextContent]:
@@ -207,11 +203,11 @@ async def _handle_annotate(arguments: dict) -> list[TextContent]:
         metadata={"annotation_id": ann_id, "type": arguments.get("annotation_type", "note")},
     )
 
-    return [TextContent(type="text", text=json.dumps({
+    return success_response({
         "annotation_id": ann_id,
         "memory_id": arguments["memory_id"],
         "annotations": get_annotations(arguments["memory_id"]),
-    }, indent=2, default=str))]
+    }, default=str)
 
 
 async def _handle_rate(arguments: dict) -> list[TextContent]:
@@ -259,7 +255,7 @@ async def _handle_session_end(arguments: dict) -> list[TextContent]:
     )
 
     if result.get("error"):
-        return [TextContent(type="text", text=json.dumps(result))]
+        return error_response(result)
 
     store = arguments.get("store_as_memory", True)
     stored_id = None

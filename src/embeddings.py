@@ -53,8 +53,5 @@ async def embed_text(text: str, model: str = EMBED_MODEL) -> list[float]:
 
 
 async def embed_batch(texts: list[str], model: str = EMBED_MODEL) -> list[list[float]]:
-    """Embed multiple texts sequentially. For high throughput, consider batching at the API level."""
-    results = []
-    for text in texts:
-        results.append(await embed_text(text, model))
-    return results
+    """Embed multiple texts in parallel using asyncio.gather."""
+    return list(await asyncio.gather(*(embed_text(t, model) for t in texts)))

@@ -10,6 +10,7 @@ import time
 from watchfiles import awatch, Change
 
 from config import MEMORY_ROOT, MCP_PORT, QDRANT_URL, QDRANT_COLLECTION, VECTOR_DIM, ARCHIVIST_API_KEY, CURATOR_QUEUE_DRAIN_INTERVAL
+from qdrant import qdrant_client
 from graph import init_schema
 from indexer import full_index, index_file, delete_file_points
 from curator import curator_loop
@@ -47,7 +48,7 @@ def ensure_qdrant_collection():
     collections: list[str] = []
     while time.monotonic() < deadline:
         try:
-            client = QdrantClient(url=QDRANT_URL, timeout=30)
+            client = qdrant_client()
             collections = [c.name for c in client.get_collections().collections]
             break
         except Exception as e:
@@ -99,6 +100,7 @@ def ensure_qdrant_collection():
             ("is_parent", PayloadSchemaType.BOOL),
             ("importance_score", PayloadSchemaType.FLOAT),
             ("memory_type", PayloadSchemaType.KEYWORD),
+            ("retention_class", PayloadSchemaType.KEYWORD),
         ]:
             client.create_payload_index(
                 collection_name=QDRANT_COLLECTION,
@@ -138,10 +140,9 @@ async def handle_invalidate(_request):
     """Endpoint to delete expired memories (TTL-based)."""
     from qdrant_client import QdrantClient
     from qdrant_client.models import Filter, FieldCondition, Range
-    import time
 
     now_ts = int(time.time())
-    client = QdrantClient(url=QDRANT_URL, timeout=60)
+    client = qdrant_client(timeout=60)
 
     try:
         expired = client.scroll(

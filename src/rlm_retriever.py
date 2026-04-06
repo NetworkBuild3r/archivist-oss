@@ -9,17 +9,17 @@ Phase 5 (v0.8): hot cache, retrieval trajectory logging.
 
 import logging
 import time
-from qdrant_client import QdrantClient
 from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchAny, Range
 
 from config import (
-    QDRANT_URL, QDRANT_COLLECTION,
+    QDRANT_COLLECTION,
     RETRIEVAL_THRESHOLD, RERANK_ENABLED, RERANK_MODEL, RERANK_TOP_K,
     VECTOR_SEARCH_LIMIT,
     GRAPH_RETRIEVAL_ENABLED, MULTI_HOP_DEPTH, TEMPORAL_DECAY_HALFLIFE_DAYS,
     HOT_CACHE_ENABLED,
     BM25_ENABLED,
     QUERY_CLASSIFICATION_ENABLED,
+    IMPORTANCE_WEIGHT,
 )
 from embeddings import embed_text
 from llm import llm_query
@@ -30,8 +30,10 @@ from graph_retrieval import (
     graph_context_for_entities,
     apply_temporal_decay,
     merge_graph_context_into_results,
+    build_entity_fact_results,
 )
 from fts_search import search_bm25, merge_vector_and_bm25
+from qdrant import qdrant_client
 from tiering import select_tier
 from tokenizer import count_tokens
 from trajectory import get_outcome_adjustments
@@ -64,6 +66,7 @@ def _retrieval_trace(
     bm25_hits: int = 0,
     auto_classified_type: str = "",
     inventory_total: int | None = None,
+    entity_facts_injected: int = 0,
 ) -> dict:
     trace = {
         "vector_search_limit": vector_limit,
@@ -82,6 +85,7 @@ def _retrieval_trace(
         "graph_retrieval_enabled": GRAPH_RETRIEVAL_ENABLED,
         "graph_entities_found": graph_entities_found,
         "graph_context_items": graph_context_items,
+        "entity_facts_injected": entity_facts_injected,
         "temporal_decay_applied": temporal_decay_applied,
         "tier": tier,
         "outcome_adjustments": outcome_adjustments,
@@ -166,10 +170,6 @@ SYNTHESIZE_MULTI_AGENT = (
 )
 
 
-def _client() -> QdrantClient:
-    return QdrantClient(url=QDRANT_URL, timeout=30)
-
-
 async def search_vectors(
     query: str,
     agent_id: str = "",
@@ -184,7 +184,7 @@ async def search_vectors(
 ) -> list[dict]:
     """Stage 1: coarse vector search in Qdrant with optional filters."""
     query_vec = await embed_text(query)
-    client = _client()
+    client = qdrant_client()
 
     must_filters = []
     if agent_ids:
@@ -232,9 +232,33 @@ async def search_vectors(
             "chunk_index": hit.payload.get("chunk_index", 0),
             "parent_id": hit.payload.get("parent_id"),
             "is_parent": hit.payload.get("is_parent", False),
+            "importance_score": hit.payload.get("importance_score", 0.5),
+            "retention_class": hit.payload.get("retention_class", "standard"),
         }
         for hit in results
     ]
+
+
+def apply_importance_to_results(results: list[dict], weight: float | None = None) -> list[dict]:
+    """Boost/penalize retrieval results based on importance_score.
+
+    Normalised around the default (0.5) so standard memories are unaffected:
+      importance 0.0 → score × 0.90  (de-prioritised)
+      importance 0.5 → score × 1.00  (neutral default)
+      importance 1.0 → score × 1.10  (boosted — pinned/critical)
+    """
+    w = weight if weight is not None else IMPORTANCE_WEIGHT
+    if w <= 0 or not results:
+        return results
+
+    for r in results:
+        imp = r.get("importance_score", 0.5)
+        if imp != 0.5:
+            boost = (imp - 0.5) * 2
+            r["score"] = r.get("score", 0) * (1.0 + w * boost)
+
+    results.sort(key=lambda x: x.get("score", 0), reverse=True)
+    return results
 
 
 def _apply_rerank(query: str, results: list[dict]) -> list[dict]:
@@ -255,7 +279,7 @@ async def enrich_with_parent(results: list[dict]) -> list[dict]:
     if not parent_ids:
         return results
 
-    client = _client()
+    client = qdrant_client()
     try:
         parents = client.retrieve(
             collection_name=QDRANT_COLLECTION,
@@ -356,7 +380,7 @@ async def recursive_retrieve(
     # Stage 1-bm25: BM25 keyword search + fusion (v1.2)
     n_bm25 = 0
     if BM25_ENABLED:
-        bm25_hits = await search_bm25(
+        bm25_hits = search_bm25(
             query,
             namespace=namespace,
             agent_id=agent_id if not agent_ids else "",
@@ -368,8 +392,10 @@ async def recursive_retrieve(
             coarse = merge_vector_and_bm25(coarse, bm25_hits)
 
     # Stage 1a: Graph augmentation (v0.5)
+    detected_entities: list[dict] = []
     if GRAPH_RETRIEVAL_ENABLED:
         entities = extract_entity_mentions(query)
+        detected_entities = entities
         n_graph_entities = len(entities)
         if entities:
             graph_items = graph_context_for_entities(
@@ -418,8 +444,28 @@ async def recursive_retrieve(
     # Stage 1d: Hotness scoring (v1.0)
     coarse = apply_hotness_to_results(coarse)
 
+    # Stage 1e: Importance scoring (v1.7)
+    coarse = apply_importance_to_results(coarse)
+
     # Stage 2: Threshold filter (Phase 1)
     filtered = apply_retrieval_threshold(coarse, effective_threshold)
+
+    # Stage 2a: Entity fact injection (v1.7) — guaranteed recall for known entities
+    n_entity_facts_injected = 0
+    if GRAPH_RETRIEVAL_ENABLED and detected_entities:
+        entity_facts = build_entity_fact_results(
+            detected_entities, min_score=effective_threshold + 0.05,
+        )
+        if entity_facts:
+            existing_texts = {r.get("text", "")[:100] for r in filtered}
+            for ef in entity_facts:
+                if ef["text"][:100] not in existing_texts:
+                    filtered.append(ef)
+                    existing_texts.add(ef["text"][:100])
+                    n_entity_facts_injected += 1
+            if n_entity_facts_injected:
+                filtered.sort(key=lambda x: x.get("score", 0), reverse=True)
+
     if not filtered:
         below = {
             "status": "below_threshold",
@@ -516,6 +562,7 @@ async def recursive_retrieve(
         refinement_chunks=n_refine,
         graph_entities_found=n_graph_entities,
         graph_context_items=n_graph_items,
+        entity_facts_injected=n_entity_facts_injected,
         temporal_decay_applied=temporal_applied,
         tier=tier,
         outcome_adjustments=n_outcome_adj,

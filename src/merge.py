@@ -6,12 +6,13 @@ import hashlib
 import os
 from datetime import datetime, timezone
 
-from qdrant_client import QdrantClient
 from qdrant_client.models import PointStruct
 
-from config import QDRANT_URL, QDRANT_COLLECTION, MEMORY_ROOT
+from config import QDRANT_COLLECTION, MEMORY_ROOT
 from embeddings import embed_text
 from llm import llm_query
+from qdrant import qdrant_client
+from text_utils import compute_memory_checksum
 from versioning import record_version
 from audit import log_memory_event
 
@@ -32,7 +33,7 @@ async def merge_memories(
     namespace: str = "",
 ) -> dict:
     """Merge multiple memory points using the specified strategy."""
-    client = QdrantClient(url=QDRANT_URL, timeout=30)
+    client = qdrant_client()
 
     points = client.retrieve(
         collection_name=QDRANT_COLLECTION,
@@ -61,7 +62,7 @@ async def merge_memories(
     merged_text = result["merged_text"]
     vec = await embed_text(merged_text)
     merged_id = hashlib.md5(f"merge:{':'.join(memory_ids)}".encode()).hexdigest()
-    checksum = hashlib.sha256(f"{merged_text}:{agent_id}:{namespace}".encode()).hexdigest()
+    checksum = compute_memory_checksum(merged_text, agent_id, namespace)
 
     ns = namespace or payloads[0][1].get("namespace", "default")
     merged_payload = {

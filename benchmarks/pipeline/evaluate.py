@@ -21,6 +21,14 @@ Usage:
     # Compare vector_only vs full_pipeline across three corpus sizes:
     python -m benchmarks.pipeline.evaluate --scale-sweep --variants vector_only,full_pipeline
 
+    # Huge haystack (generate corpus first: generate_corpus.py --preset stress --corpus-only):
+    python -m benchmarks.pipeline.evaluate --memory-scale stress --variants vector_only,full_pipeline \\
+        --no-refine --print-slices --output .benchmarks/stress.json
+
+    # Break-even: context stuffing vs Archivist across all scales (no LLM calls for stuffing):
+    python -m benchmarks.pipeline.evaluate --scale-sweep --variants vector_only,full_pipeline \\
+        --no-refine --compare-stuffing --output .benchmarks/breakeven.json
+
     # Single variant:
     python -m benchmarks.pipeline.evaluate --variant vector_only
 """
@@ -44,6 +52,13 @@ if os.path.exists(env_path):
                 _k, _, _v = _line.partition("=")
                 os.environ.setdefault(_k.strip(), _v.strip())
 
+# Host runs: default SQLITE_PATH is /data/... (Docker). Use a writable repo-local DB unless set in .env.
+_repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+os.environ.setdefault(
+    "SQLITE_PATH",
+    os.path.join(_repo_root, ".benchmarks", "sqlite", "graph.db"),
+)
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
 
 FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "..", "fixtures")
@@ -55,9 +70,15 @@ CORPUS_BY_PRESET = {
     "small": os.path.join(FIXTURES_DIR, "corpus_small"),
     "medium": os.path.join(FIXTURES_DIR, "corpus_medium"),
     "large": os.path.join(FIXTURES_DIR, "corpus_large"),
+    "stress": os.path.join(FIXTURES_DIR, "corpus_stress"),
 }
 
 HYPOTHESES = {
+    "H0_stress": (
+        "Under a very large memory footprint (stress preset), slice metrics for temporal and needle "
+        "queries show that specific facts remain retrievable — memory is not 'lost' to volume alone; "
+        "compare vector_only vs full_pipeline and per-query-type recall in --print-slices output."
+    ),
     "H1_large": (
         "As indexed chunk count rises (fixed embedding model), the gap between vector_only "
         "and full_pipeline on needle and multi_hop questions widens (BM25 + graph help more in a deep haystack)."
@@ -197,13 +218,15 @@ def filter_questions_for_scale(questions: list[dict], memory_scale: str | None) 
     """Drop questions whose `scales` list excludes this preset (Phase 2)."""
     if not memory_scale:
         return questions
+    # Stress corpus uses the same question mix as `large` (needles, temporal, etc.); only the haystack grows.
+    effective_scale = "large" if memory_scale == "stress" else memory_scale
     out = []
     for q in questions:
         scales = q.get("scales")
         if scales is None:
             out.append(q)
             continue
-        if "all" in scales or memory_scale in scales:
+        if "all" in scales or effective_scale in scales:
             out.append(q)
     return out
 
@@ -380,6 +403,192 @@ def format_table(all_summaries: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def format_retention_slices_table(
+    summaries: list[dict],
+    slice_types: tuple[str, ...] = ("temporal", "needle", "multi_hop", "single_hop"),
+) -> str:
+    """Markdown table: per-variant keyword recall on query types that show 'old fact' / haystack behavior."""
+    header = "| Variant | " + " | ".join(f"{t} (recall)" for t in slice_types) + " |"
+    sep = "|---------|" + "|".join("--------|" for _ in slice_types)
+    lines = [header, sep]
+    for s in summaries:
+        by = s.get("by_query_type") or {}
+        v = s.get("variant", "")
+        ms = s.get("memory_scale")
+        label = f"{ms}/{v}" if ms else v
+        cells = [label]
+        for t in slice_types:
+            row = by.get(t) or {}
+            r = row.get("recall")
+            n = row.get("count", 0)
+            cells.append(f"{r:.4f} (n={n})" if isinstance(r, (int, float)) else "—")
+        lines.append("| " + " | ".join(cells) + " |")
+    return "\n".join(lines)
+
+
+def format_comparison_table(
+    stuffing_summaries: list[dict],
+    archivist_summaries: list[dict],
+) -> str:
+    """Side-by-side markdown table: context stuffing baseline vs best Archivist variant per scale.
+
+    The table identifies the break-even point where context stuffing either overflows the
+    context window or produces meaningfully worse recall than Archivist retrieval.
+    """
+    # Index archivist summaries by (memory_scale, variant).
+    archivist_by_scale: dict[str, list[dict]] = {}
+    for s in archivist_summaries:
+        scale = s.get("memory_scale") or "default"
+        archivist_by_scale.setdefault(scale, []).append(s)
+
+    lines = [
+        "## Break-Even: Context Stuffing vs Archivist Retrieval",
+        "",
+        "| Scale | Files | Corpus Tokens | Fits in Context? | Stuffing Recall | Stuffing p50 (ms) "
+        "| Best Archivist Variant | Archivist Recall | Archivist p50 (ms) | Archivist Tok/Q |",
+        "|-------|-------|---------------|-----------------|-----------------|------------------"
+        "|------------------------|------------------|---------------------|-----------------|",
+    ]
+
+    # Group stuffing summaries by scale too.
+    for ss in stuffing_summaries:
+        scale = ss.get("memory_scale") or "default"
+        file_count = ss.get("file_count", "?")
+        corpus_tokens = ss.get("corpus_tokens", 0)
+        corpus_overflow = ss.get("corpus_overflow", False)
+        fits = "NO — OVERFLOW" if corpus_overflow else "YES"
+
+        stuffing_recall = f"{ss.get('recall', 0):.4f}" if ss.get("llm_called") else "—(no LLM)"
+        stuffing_p50 = f"{ss['latency_p50_ms']:.0f}" if ss.get("latency_p50_ms") is not None else "—"
+
+        # Pick best Archivist variant for this scale by recall.
+        arch_variants = archivist_by_scale.get(scale, [])
+        if arch_variants:
+            best_arch = max(arch_variants, key=lambda v: v.get("recall_at_5", 0))
+            arch_variant = best_arch.get("variant", "?")
+            arch_recall = f"{best_arch.get('recall_at_5', 0):.4f}"
+            arch_p50 = f"{best_arch.get('latency_p50_ms', 0):.0f}"
+            arch_tok = f"{best_arch.get('avg_tokens_per_query', 0):.0f}"
+        else:
+            arch_variant = arch_recall = arch_p50 = arch_tok = "—"
+
+        lines.append(
+            f"| {scale} | {file_count} | {corpus_tokens:,} | {fits} | {stuffing_recall} "
+            f"| {stuffing_p50} | {arch_variant} | {arch_recall} | {arch_p50} | {arch_tok} |"
+        )
+
+    # Append an interpretation note.
+    lines += [
+        "",
+        "> **Reading the table:** When 'Fits in Context?' = YES, stuffing has all facts available "
+        "but pays full corpus token cost per query and suffers 'lost in the middle' degradation. "
+        "When OVERFLOW, older or less-salient memories are silently truncated — facts are lost. "
+        "Archivist Tok/Q stays fixed regardless of corpus size.",
+    ]
+    return "\n".join(lines)
+
+
+def format_full_comparison_table(
+    stuffing_summaries: list[dict],
+    archivist_summaries: list[dict],
+) -> str:
+    """Per-query-type side-by-side: context stuffing (with real LLM) vs best Archivist variant.
+
+    Shows where stuffing degrades within-window (lost-in-middle) and where Archivist
+    gains across query categories at each scale.
+    """
+    query_types = ["single_hop", "multi_hop", "temporal", "adversarial",
+                   "agent_scoped", "broad", "contradiction", "needle"]
+
+    stuffing_by_scale: dict[str, dict] = {
+        ss.get("memory_scale", "default"): ss for ss in stuffing_summaries
+    }
+    archivist_by_scale: dict[str, list[dict]] = {}
+    for s in archivist_summaries:
+        scale = s.get("memory_scale", "default")
+        archivist_by_scale.setdefault(scale, []).append(s)
+
+    scales = list(dict.fromkeys(
+        [ss.get("memory_scale", "default") for ss in stuffing_summaries]
+        + list(archivist_by_scale.keys())
+    ))
+
+    lines = [
+        "## Full Comparison: Context Stuffing vs Archivist — Per Query Type",
+        "",
+        "> Stuffing recall measured with real LLM calls. "
+        "Archivist recall = best variant (full_pipeline preferred) at each scale.",
+        "",
+    ]
+
+    for scale in scales:
+        ss = stuffing_by_scale.get(scale)
+        arch_variants = archivist_by_scale.get(scale, [])
+        # Prefer full_pipeline, else best recall
+        best_arch = next(
+            (v for v in arch_variants if v.get("variant") == "full_pipeline"), None
+        ) or (max(arch_variants, key=lambda v: v.get("recall_at_5", 0)) if arch_variants else None)
+
+        overflow_label = ""
+        if ss:
+            if ss.get("corpus_overflow"):
+                overflow_label = f" **OVERFLOW** ({ss['corpus_tokens']:,} tok > {ss['context_budget']:,} budget)"
+            else:
+                pct = round(ss.get("corpus_tokens", 0) / max(ss.get("context_budget", 1), 1) * 100)
+                overflow_label = f" ({ss['corpus_tokens']:,} tok, {pct}% of window)"
+
+        arch_label = f"Archivist/{best_arch['variant']}" if best_arch else "Archivist"
+        lines.append(f"### Scale: {scale}{overflow_label}")
+        lines.append("")
+        lines.append(f"| Query Type | Count | Stuffing Recall | Stuffing Overflow% | {arch_label} Recall | Delta |")
+        lines.append("|------------|-------|-----------------|--------------------|---------------------|-------|")
+
+        # Collect all query types present in either side
+        all_types_here: list[str] = []
+        stuff_by_type = (ss or {}).get("by_query_type", {})
+        arch_by_type = (best_arch or {}).get("by_query_type", {})
+        for qt in query_types:
+            if qt in stuff_by_type or qt in arch_by_type:
+                all_types_here.append(qt)
+
+        for qt in all_types_here:
+            sr = stuff_by_type.get(qt, {})
+            ar = arch_by_type.get(qt, {})
+            n = sr.get("count") or ar.get("count") or 0
+            s_recall = sr.get("recall")
+            a_recall = ar.get("recall")
+            s_overflow = sr.get("overflow_pct")
+            if s_recall is not None and a_recall is not None:
+                delta = a_recall - s_recall
+                delta_str = f"+{delta:.3f}" if delta >= 0 else f"{delta:.3f}"
+            else:
+                delta_str = "—"
+            lines.append(
+                f"| {qt} | {n} "
+                f"| {f'{s_recall:.3f}' if s_recall is not None else '—'} "
+                f"| {f'{s_overflow:.0f}%' if s_overflow is not None else '—'} "
+                f"| {f'{a_recall:.3f}' if a_recall is not None else '—'} "
+                f"| {delta_str} |"
+            )
+
+        # Overall row
+        s_overall = (ss or {}).get("recall")
+        a_overall = best_arch.get("recall_at_5") if best_arch else None
+        if s_overall is not None and a_overall is not None:
+            delta = a_overall - s_overall
+            delta_str = f"+{delta:.3f}" if delta >= 0 else f"{delta:.3f}"
+            lines.append(
+                f"| **Overall** | — "
+                f"| **{s_overall:.3f}** "
+                f"| {(ss or {}).get('overflow_pct', 0):.0f}% "
+                f"| **{a_overall:.3f}** "
+                f"| **{delta_str}** |"
+            )
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 async def _run_benchmark_session(
     *,
     corpus_dir: str,
@@ -449,9 +658,9 @@ async def main():
     parser.add_argument("--limit", type=int, default=0, help="Limit number of questions (0=all)")
     parser.add_argument(
         "--memory-scale",
-        choices=["small", "medium", "large"],
+        choices=["small", "medium", "large", "stress"],
         default=None,
-        help="Use benchmarks/fixtures/corpus_<scale>/ (generate with generate_corpus.py --preset)",
+        help="Use benchmarks/fixtures/corpus_<scale>/; stress = very large haystack (generate with --preset stress)",
     )
     parser.add_argument(
         "--corpus-dir",
@@ -475,6 +684,34 @@ async def main():
         action="store_true",
         help="Run the same variants for small, medium, large presets (re-indexes each time)",
     )
+    parser.add_argument(
+        "--print-slices",
+        action="store_true",
+        help="After the main table, print per-query-type recall (temporal, needle, multi_hop, single_hop)",
+    )
+    parser.add_argument(
+        "--compare-stuffing",
+        action="store_true",
+        help=(
+            "Run the context stuffing baseline alongside Archivist and print a break-even comparison table. "
+            "By default uses token-count-only mode (no LLM calls); add --stuffing-call-llm to actually query."
+        ),
+    )
+    parser.add_argument(
+        "--stuffing-call-llm",
+        action="store_true",
+        help="When --compare-stuffing is set, actually call the LLM for each stuffing query (expensive for large corpora).",
+    )
+    parser.add_argument(
+        "--context-budget",
+        type=int,
+        default=128000,
+        help=(
+            "Token budget for context stuffing overflow detection (default: 128000). "
+            "Use a lower value (e.g. 32768) to simulate realistic agent context with system prompt, "
+            "conversation history, and tool overhead already consuming part of the window."
+        ),
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -495,6 +732,8 @@ async def main():
     if args.scale_sweep:
         by_scale = {}
         combined_summaries = []
+        stuffing_summaries: list[dict] = []
+
         for scale in ("small", "medium", "large"):
             corpus_dir = resolve_corpus_dir(scale, args.corpus_dir)
             if not os.path.isdir(os.path.join(corpus_dir, "agents")):
@@ -507,6 +746,27 @@ async def main():
                 continue
             qs = filter_questions_for_scale(questions_all, scale)
             logger.info("Scale %s: %d questions, corpus %s", scale, len(qs), corpus_dir)
+
+            if args.compare_stuffing:
+                from benchmarks.pipeline.context_stuffing_baseline import run_stuffing_baseline
+                logger.info("Running context stuffing baseline for scale=%s ...", scale)
+                stuffing_data = await run_stuffing_baseline(
+                    corpus_dir=corpus_dir,
+                    questions=qs,
+                    context_budget=args.context_budget,
+                    call_llm=args.stuffing_call_llm,
+                )
+                stuffing_summary = stuffing_data["summary"]
+                stuffing_summary["memory_scale"] = scale
+                stuffing_summaries.append(stuffing_summary)
+                logger.info(
+                    "  Stuffing: %d files, %d tokens, overflow=%s, recall=%.4f",
+                    stuffing_summary["file_count"],
+                    stuffing_summary["corpus_tokens"],
+                    stuffing_summary["corpus_overflow"],
+                    stuffing_summary["recall"],
+                )
+
             all_results, summaries = await _run_benchmark_session(
                 corpus_dir=corpus_dir,
                 questions=qs,
@@ -523,6 +783,15 @@ async def main():
             combined_summaries.extend(summaries)
 
         print("\n" + format_table(combined_summaries))
+        if args.print_slices:
+            print("\n### Per-query-type slices (memory / time / haystack)\n")
+            print(format_retention_slices_table(combined_summaries))
+        if args.compare_stuffing and stuffing_summaries:
+            print("\n")
+            print(format_comparison_table(stuffing_summaries, combined_summaries))
+            if args.stuffing_call_llm:
+                print("\n")
+                print(format_full_comparison_table(stuffing_summaries, combined_summaries))
 
         if args.output:
             output_data = {
@@ -530,11 +799,21 @@ async def main():
                     "hypotheses": HYPOTHESES,
                     "scale_sweep": True,
                     "variants": variant_names,
+                    "context_budget": args.context_budget if args.compare_stuffing else None,
                 },
                 "by_scale": by_scale,
                 "summaries": combined_summaries,
                 "comparison_table": format_table(combined_summaries),
             }
+            if args.print_slices:
+                output_data["retention_slices_table"] = format_retention_slices_table(combined_summaries)
+            if args.compare_stuffing and stuffing_summaries:
+                output_data["stuffing_summaries"] = stuffing_summaries
+                output_data["breakeven_table"] = format_comparison_table(stuffing_summaries, combined_summaries)
+                if args.stuffing_call_llm:
+                    output_data["full_comparison_table"] = format_full_comparison_table(
+                        stuffing_summaries, combined_summaries
+                    )
             with open(args.output, "w", encoding="utf-8") as f:
                 json.dump(output_data, f, indent=2)
             logger.info("Results written to %s", args.output)
@@ -550,6 +829,27 @@ async def main():
 
     logger.info("Corpus: %s | Questions: %d", corpus_dir, len(questions))
 
+    single_stuffing_summary: dict | None = None
+    if args.compare_stuffing:
+        from benchmarks.pipeline.context_stuffing_baseline import run_stuffing_baseline
+        logger.info("Running context stuffing baseline ...")
+        stuffing_data = await run_stuffing_baseline(
+            corpus_dir=corpus_dir,
+            questions=questions,
+            context_budget=args.context_budget,
+            call_llm=args.stuffing_call_llm,
+        )
+        single_stuffing_summary = stuffing_data["summary"]
+        if args.memory_scale:
+            single_stuffing_summary["memory_scale"] = args.memory_scale
+        logger.info(
+            "Stuffing: %d files, %d tokens, overflow=%s, recall=%.4f",
+            single_stuffing_summary["file_count"],
+            single_stuffing_summary["corpus_tokens"],
+            single_stuffing_summary["corpus_overflow"],
+            single_stuffing_summary["recall"],
+        )
+
     all_results, all_summaries = await _run_benchmark_session(
         corpus_dir=corpus_dir,
         questions=questions,
@@ -561,6 +861,15 @@ async def main():
     )
 
     print("\n" + format_table(all_summaries))
+    if args.print_slices:
+        print("\n### Per-query-type slices (memory / time / haystack)\n")
+        print(format_retention_slices_table(all_summaries))
+    if args.compare_stuffing and single_stuffing_summary:
+        print("\n")
+        print(format_comparison_table([single_stuffing_summary], all_summaries))
+        if args.stuffing_call_llm:
+            print("\n")
+            print(format_full_comparison_table([single_stuffing_summary], all_summaries))
 
     if args.output:
         output_data = {
@@ -570,11 +879,24 @@ async def main():
                 "corpus_dir": corpus_dir,
                 "questions_path": questions_path,
                 "variants": variant_names,
+                "context_budget": args.context_budget if args.compare_stuffing else None,
             },
             "summaries": all_summaries,
             "comparison_table": format_table(all_summaries),
             "full_results": {k: v["results"] for k, v in all_results.items()},
         }
+        if args.print_slices:
+            output_data["retention_slices_table"] = format_retention_slices_table(all_summaries)
+        if args.compare_stuffing and single_stuffing_summary:
+            output_data["stuffing_summary"] = single_stuffing_summary
+            output_data["stuffing_summaries"] = [single_stuffing_summary]
+            output_data["breakeven_table"] = format_comparison_table(
+                [single_stuffing_summary], all_summaries
+            )
+            if args.stuffing_call_llm:
+                output_data["full_comparison_table"] = format_full_comparison_table(
+                    [single_stuffing_summary], all_summaries
+                )
         with open(args.output, "w", encoding="utf-8") as f:
             json.dump(output_data, f, indent=2)
         logger.info("Results written to %s", args.output)

@@ -11,40 +11,28 @@ import time
 import uuid
 from datetime import datetime, timezone
 
-from graph import get_db, GRAPH_WRITE_LOCK
+from graph import get_db, GRAPH_WRITE_LOCK, schema_guard
 import metrics as m
 
 logger = logging.getLogger("archivist.curator_queue")
-
-_SCHEMA_APPLIED = False
 
 VALID_OP_TYPES = {
     "merge_memory", "delete_memory", "consolidate_tips",
     "update_hotness", "skip_store", "archive_memory",
 }
 
-
-def _ensure_schema():
-    global _SCHEMA_APPLIED
-    if _SCHEMA_APPLIED:
-        return
-    with GRAPH_WRITE_LOCK:
-        conn = get_db()
-        conn.executescript("""
-        CREATE TABLE IF NOT EXISTS curator_queue (
-            id TEXT PRIMARY KEY,
-            op_type TEXT NOT NULL,
-            payload TEXT NOT NULL DEFAULT '{}',
-            status TEXT NOT NULL DEFAULT 'pending',
-            created_at TEXT NOT NULL,
-            applied_at TEXT
-        );
-        CREATE INDEX IF NOT EXISTS idx_cq_status ON curator_queue(status);
-        CREATE INDEX IF NOT EXISTS idx_cq_created ON curator_queue(created_at);
-        """)
-        conn.commit()
-        conn.close()
-    _SCHEMA_APPLIED = True
+_ensure_schema = schema_guard("""
+    CREATE TABLE IF NOT EXISTS curator_queue (
+        id TEXT PRIMARY KEY,
+        op_type TEXT NOT NULL,
+        payload TEXT NOT NULL DEFAULT '{}',
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at TEXT NOT NULL,
+        applied_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_cq_status ON curator_queue(status);
+    CREATE INDEX IF NOT EXISTS idx_cq_created ON curator_queue(created_at);
+""")
 
 
 def enqueue(op_type: str, payload: dict) -> str:
@@ -133,14 +121,14 @@ def _apply_op(conn, op_type: str, payload: dict):
 
 def _apply_archive(payload: dict):
     """Set archived=true on Qdrant points (exclude from default search)."""
-    from qdrant_client import QdrantClient
-    from config import QDRANT_URL, QDRANT_COLLECTION
+    from config import QDRANT_COLLECTION
+    from qdrant import qdrant_client
 
     memory_ids = payload.get("memory_ids", [])
     if not memory_ids:
         return
 
-    client = QdrantClient(url=QDRANT_URL, timeout=30)
+    client = qdrant_client()
     for mid in memory_ids:
         try:
             client.set_payload(
@@ -159,14 +147,14 @@ def _apply_merge(payload: dict):
 
 def _apply_delete(payload: dict):
     """Delete a Qdrant point."""
-    from qdrant_client import QdrantClient
-    from config import QDRANT_URL, QDRANT_COLLECTION
+    from config import QDRANT_COLLECTION
+    from qdrant import qdrant_client
 
     memory_ids = payload.get("memory_ids", [])
     if not memory_ids:
         return
 
-    client = QdrantClient(url=QDRANT_URL, timeout=30)
+    client = qdrant_client()
     try:
         client.delete(collection_name=QDRANT_COLLECTION, points_selector=memory_ids)
     except Exception as e:

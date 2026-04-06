@@ -7,7 +7,10 @@ import math
 import logging
 from datetime import datetime, timezone
 
-from graph import search_entities, get_entity_facts, get_entity_relationships
+from graph import (
+    search_entities, get_entity_facts, get_entity_relationships,
+    get_entity_by_id, _normalize,
+)
 from config import GRAPH_RETRIEVAL_WEIGHT, MULTI_HOP_DEPTH, TEMPORAL_DECAY_HALFLIFE_DAYS
 
 logger = logging.getLogger("archivist.graph_retrieval")
@@ -169,6 +172,105 @@ def merge_graph_context_into_results(
 
     vector_results.sort(key=lambda x: x.get("score", 0), reverse=True)
     return vector_results
+
+
+def get_entity_brief(entity_id: int) -> dict | None:
+    """Build a structured summary card for an entity.
+
+    Reusable by MCP tools (archivist_entity_brief, archivist_recall) and
+    internal retrieval logic.
+    """
+    entity = get_entity_by_id(entity_id)
+    if not entity:
+        return None
+
+    facts = get_entity_facts(entity_id)
+    rels = get_entity_relationships(entity_id)
+
+    return {
+        "entity": {
+            "id": entity["id"],
+            "name": entity["name"],
+            "type": entity.get("entity_type", "unknown"),
+            "retention_class": entity.get("retention_class", "standard"),
+            "mention_count": entity.get("mention_count", 0),
+            "first_seen": entity.get("first_seen", ""),
+            "last_seen": entity.get("last_seen", ""),
+            "aliases": entity.get("aliases", "[]"),
+        },
+        "facts": [
+            {
+                "text": f["fact_text"],
+                "agent_id": f.get("agent_id", ""),
+                "source_file": f.get("source_file", ""),
+                "created_at": f.get("created_at", ""),
+                "retention_class": f.get("retention_class", "standard"),
+            }
+            for f in facts
+        ],
+        "relationships": [
+            {
+                "source": r.get("source_name", ""),
+                "target": r.get("target_name", ""),
+                "relation": r["relation_type"],
+                "evidence": r.get("evidence", ""),
+                "confidence": r.get("confidence", 1.0),
+            }
+            for r in rels
+        ],
+        "fact_count": len(facts),
+        "relationship_count": len(rels),
+    }
+
+
+def build_entity_fact_results(
+    entities: list[dict],
+    min_score: float = 0.70,
+) -> list[dict]:
+    """Convert entity graph facts into synthetic retrieval results.
+
+    These bypass the vector similarity threshold so that known entity
+    facts are guaranteed to appear in search results when the entity
+    is mentioned in the query.
+    """
+    results: list[dict] = []
+    seen_texts: set[str] = set()
+
+    for entity in entities:
+        eid = entity["id"]
+        facts = get_entity_facts(eid)
+        retention = entity.get("retention_class", "standard")
+
+        score_boost = 0.05 if retention in ("durable", "permanent") else 0.0
+
+        for f in facts:
+            text_key = f["fact_text"][:100]
+            if text_key in seen_texts:
+                continue
+            seen_texts.add(text_key)
+
+            results.append({
+                "id": "",
+                "score": min_score + score_boost,
+                "text": f"[{entity['name']}] {f['fact_text']}",
+                "l0": "",
+                "l1": "",
+                "agent_id": f.get("agent_id", ""),
+                "file_path": f.get("source_file", ""),
+                "file_type": "entity_fact",
+                "date": (f.get("created_at", "") or "")[:10],
+                "team": "",
+                "namespace": "",
+                "chunk_index": 0,
+                "parent_id": None,
+                "is_parent": False,
+                "importance_score": 1.0 if retention == "permanent" else 0.7,
+                "retention_class": f.get("retention_class", retention),
+                "entity_name": entity["name"],
+                "entity_id": eid,
+            })
+
+    return results
 
 
 def detect_contradictions(entity_id: int) -> list[dict]:

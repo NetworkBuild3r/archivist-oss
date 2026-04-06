@@ -5,7 +5,7 @@ import logging
 
 from mcp.types import TextContent
 
-from rbac import check_access
+from rbac import check_access, is_permissive_mode
 
 logger = logging.getLogger("archivist.mcp")
 
@@ -15,6 +15,27 @@ def _rbac_gate(agent_id: str, action: str, namespace: str) -> str | None:
     policy = check_access(agent_id, action, namespace)
     if not policy.allowed:
         return json.dumps({"error": "access_denied", "reason": policy.reason})
+    return None
+
+
+def resolve_caller(arguments: dict) -> str:
+    """Return the effective caller agent_id from tool arguments.
+
+    Prefers ``caller_agent_id`` over ``agent_id`` so that a delegating agent
+    can supply the original caller identity explicitly.
+    """
+    agent_id = (arguments.get("agent_id") or "").strip()
+    return (arguments.get("caller_agent_id") or "").strip() or agent_id
+
+
+def require_caller(caller: str) -> list[TextContent] | None:
+    """Return an error response when caller is missing in strict RBAC mode.
+
+    Returns ``None`` when the caller is present or when permissive mode is
+    active (so callers can do ``if err := require_caller(caller): return err``).
+    """
+    if not is_permissive_mode() and not caller:
+        return error_response({"error": "caller_required", "reason": "caller_agent_id is required in strict RBAC mode"})
     return None
 
 

@@ -10,11 +10,10 @@ import logging
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-from qdrant_client import QdrantClient
 from qdrant_client.models import PointStruct, Filter, FieldCondition, MatchValue
 
 from config import (
-    QDRANT_URL, QDRANT_COLLECTION, MEMORY_ROOT,
+    QDRANT_COLLECTION, MEMORY_ROOT,
     CHUNK_SIZE, CHUNK_OVERLAP, TEAM_MAP,
     PARENT_CHUNK_SIZE, PARENT_CHUNK_OVERLAP,
     CHILD_CHUNK_SIZE, CHILD_CHUNK_OVERLAP,
@@ -24,16 +23,15 @@ from chunking import chunk_text, chunk_text_hierarchical
 from config import BM25_ENABLED
 from embeddings import embed_batch
 from graph import upsert_fts_chunk, delete_fts_chunks_by_file
+from qdrant import qdrant_client
 from rbac import get_namespace_for_agent, get_namespace_config
+from text_utils import extract_agent_id_from_path, compute_memory_checksum
 from tiering import generate_tiers
+import metrics as _metrics
 
 logger = logging.getLogger("archivist.indexer")
 
 _DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
-
-
-def _client() -> QdrantClient:
-    return QdrantClient(url=QDRANT_URL, timeout=30)
 
 
 # ── Metadata extraction ───────────────────────────────────────────────────────
@@ -48,17 +46,11 @@ def _extract_metadata(filepath: str) -> dict:
     rel = os.path.relpath(filepath, MEMORY_ROOT)
     rel_parts = Path(rel).parts
 
-    if "agents" in rel_parts:
-        idx = list(rel_parts).index("agents")
-        if idx + 1 < len(rel_parts):
-            agent_id = rel_parts[idx + 1]
-            team = TEAM_MAP.get(agent_id, "unknown")
+    agent_id = extract_agent_id_from_path(rel)
+    if agent_id:
+        team = TEAM_MAP.get(agent_id, "unknown")
 
     if "memories" in rel_parts:
-        idx = list(rel_parts).index("memories")
-        if idx + 1 < len(rel_parts):
-            agent_id = agent_id or rel_parts[idx + 1]
-            team = TEAM_MAP.get(agent_id, "unknown")
         file_type = "legacy"
 
     fname = Path(filepath).stem
@@ -93,7 +85,7 @@ def _point_id(filepath: str, chunk_idx: int) -> str:
     return f"{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:32]}"
 
 
-def _compute_ttl(namespace: str, importance: float = 0.5) -> int | None:
+def compute_ttl(namespace: str, importance: float = 0.5) -> int | None:
     """Compute TTL expiration timestamp based on namespace config."""
     if importance >= 0.9:
         return None
@@ -129,8 +121,8 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
     meta = _extract_metadata(filepath)
     ns_config = get_namespace_config(meta["namespace"])
     consistency = ns_config.consistency if ns_config else "eventual"
-    ttl_expires_at = _compute_ttl(meta["namespace"])
-    client = _client()
+    ttl_expires_at = compute_ttl(meta["namespace"])
+    client = qdrant_client()
 
     if hierarchical:
         hier_chunks = chunk_text_hierarchical(
@@ -157,9 +149,7 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
         points = []
         for i, (chunk_meta, vec) in enumerate(zip(hier_chunks, vectors)):
             pid = chunk_meta["id"] if chunk_meta["id"] else _point_id(filepath, i)
-            checksum = hashlib.sha256(
-                f"{chunk_meta['content']}:{meta['agent_id']}:{meta['namespace']}".encode()
-            ).hexdigest()
+            checksum = compute_memory_checksum(chunk_meta["content"], meta["agent_id"], meta["namespace"])
 
             tiers = tier_map.get(chunk_meta["id"], {})
             # Children inherit their parent's L0/L1 as context hint
@@ -178,6 +168,7 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
                 "consistency_level": consistency,
                 "checksum": checksum,
                 "importance_score": 0.5,
+                "retention_class": "standard",
             }
             if ttl_expires_at is not None:
                 payload["ttl_expires_at"] = ttl_expires_at
@@ -194,9 +185,7 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
         points = []
         for i, (chunk, vec) in enumerate(zip(chunks, vectors)):
             pid = _point_id(filepath, i)
-            checksum = hashlib.sha256(
-                f"{chunk}:{meta['agent_id']}:{meta['namespace']}".encode()
-            ).hexdigest()
+            checksum = compute_memory_checksum(chunk, meta["agent_id"], meta["namespace"])
 
             payload = {
                 **meta,
@@ -206,6 +195,7 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
                 "consistency_level": consistency,
                 "checksum": checksum,
                 "importance_score": 0.5,
+                "retention_class": "standard",
             }
             if ttl_expires_at is not None:
                 payload["ttl_expires_at"] = ttl_expires_at
@@ -214,6 +204,7 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
 
     if points:
         client.upsert(collection_name=QDRANT_COLLECTION, points=points)
+        _metrics.inc(_metrics.INDEX_CHUNKS, value=len(points))
 
         if BM25_ENABLED:
             for p in points:
@@ -237,7 +228,7 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
 async def delete_file_points(filepath: str):
     """Remove all points for a given file path from Qdrant and FTS5."""
     rel = os.path.relpath(filepath, MEMORY_ROOT)
-    client = _client()
+    client = qdrant_client()
     client.delete(
         collection_name=QDRANT_COLLECTION,
         points_selector=Filter(

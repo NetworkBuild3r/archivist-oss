@@ -11,7 +11,8 @@ import time
 from datetime import datetime, timezone
 
 from graph import get_db
-from config import QDRANT_URL, QDRANT_COLLECTION
+from config import QDRANT_COLLECTION
+from qdrant import qdrant_client
 
 logger = logging.getLogger("archivist.dashboard")
 
@@ -121,8 +122,7 @@ def batch_heuristic(window_days: int = 7) -> dict:
 
 def _qdrant_stats() -> dict:
     try:
-        from qdrant_client import QdrantClient
-        client = QdrantClient(url=QDRANT_URL, timeout=10)
+        client = qdrant_client(timeout=10)
         info = client.get_collection(QDRANT_COLLECTION)
         return {
             "total_points": info.points_count,
@@ -135,9 +135,8 @@ def _qdrant_stats() -> dict:
 
 def _stale_estimate() -> dict:
     try:
-        from qdrant_client import QdrantClient
         from qdrant_client.models import Filter, FieldCondition, Range
-        client = QdrantClient(url=QDRANT_URL, timeout=10)
+        client = qdrant_client(timeout=10)
         now_ts = int(time.time())
 
         info = client.get_collection(QDRANT_COLLECTION)

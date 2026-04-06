@@ -7,6 +7,7 @@ Dual-track scale presets (Phase 2):
     python benchmarks/fixtures/generate_corpus.py --preset small
     python benchmarks/fixtures/generate_corpus.py --preset medium
     python benchmarks/fixtures/generate_corpus.py --preset large
+    python benchmarks/fixtures/generate_corpus.py --preset stress   # huge haystack; same questions as large
 
 Questions file (adds needle / contradiction tags; use with any preset):
     python benchmarks/fixtures/generate_corpus.py --write-questions
@@ -59,6 +60,16 @@ PRESETS = {
         "days_span": 150,
         "needle": True,
         "paraphrase_dupes": 80,
+        "contradiction_files": True,
+    },
+    # Very large haystack: same question set as `large` in evaluate.py, extra noise + span for "memory not lost" demos.
+    "stress": {
+        "agents": 10,
+        "files_per_agent": 20,
+        "noise_files": 1200,
+        "days_span": 400,
+        "needle": True,
+        "paraphrase_dupes": 120,
         "contradiction_files": True,
     },
 }
@@ -604,7 +615,7 @@ def main():
     parser = argparse.ArgumentParser(description="Generate benchmark corpus / questions")
     parser.add_argument(
         "--preset",
-        choices=["small", "medium", "large"],
+        choices=["small", "medium", "large", "stress"],
         help="Write scaled corpus to benchmarks/fixtures/corpus_<preset>/",
     )
     parser.add_argument(

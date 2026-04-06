@@ -7,12 +7,12 @@ import json
 import logging
 from dataclasses import dataclass
 
-from qdrant_client import QdrantClient
 from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchExcept
 
-from config import QDRANT_URL, QDRANT_COLLECTION, DEDUP_LLM_ENABLED, DEDUP_LLM_THRESHOLD
+from config import QDRANT_COLLECTION, DEDUP_LLM_ENABLED, DEDUP_LLM_THRESHOLD
 from embeddings import embed_text
 from llm import llm_query
+from qdrant import qdrant_client
 import metrics as m
 
 logger = logging.getLogger("archivist.conflict")
@@ -58,7 +58,7 @@ async def check_for_conflicts(
 ) -> ConflictResult:
     """Check if a new memory conflicts with existing ones in the same namespace."""
     vec = await embed_text(text)
-    client = QdrantClient(url=QDRANT_URL, timeout=30)
+    client = qdrant_client()
 
     must_filters = [
         FieldCondition(key="namespace", match=MatchValue(value=namespace)),
@@ -121,7 +121,7 @@ async def llm_adjudicated_dedup(
         return None
 
     vec = await embed_text(text)
-    client = QdrantClient(url=QDRANT_URL, timeout=30)
+    client = qdrant_client()
 
     must_filters = [
         FieldCondition(key="namespace", match=MatchValue(value=namespace)),

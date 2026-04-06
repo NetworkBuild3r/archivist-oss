@@ -11,32 +11,20 @@ import logging
 import math
 from datetime import datetime, timezone
 
-from graph import get_db, GRAPH_WRITE_LOCK
+from graph import get_db, GRAPH_WRITE_LOCK, schema_guard
 from config import HOTNESS_WEIGHT, HOTNESS_HALFLIFE_DAYS
 
 logger = logging.getLogger("archivist.hotness")
 
-_SCHEMA_APPLIED = False
-
-
-def _ensure_schema():
-    global _SCHEMA_APPLIED
-    if _SCHEMA_APPLIED:
-        return
-    with GRAPH_WRITE_LOCK:
-        conn = get_db()
-        conn.executescript("""
-        CREATE TABLE IF NOT EXISTS memory_hotness (
-            memory_id TEXT PRIMARY KEY,
-            score REAL NOT NULL DEFAULT 0.0,
-            retrieval_count INTEGER NOT NULL DEFAULT 0,
-            last_accessed TEXT,
-            updated_at TEXT NOT NULL
-        );
-        """)
-        conn.commit()
-        conn.close()
-    _SCHEMA_APPLIED = True
+_ensure_schema = schema_guard("""
+    CREATE TABLE IF NOT EXISTS memory_hotness (
+        memory_id TEXT PRIMARY KEY,
+        score REAL NOT NULL DEFAULT 0.0,
+        retrieval_count INTEGER NOT NULL DEFAULT 0,
+        last_accessed TEXT,
+        updated_at TEXT NOT NULL
+    );
+""")
 
 
 def _sigmoid(x: float) -> float:

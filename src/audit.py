@@ -6,40 +6,27 @@ import json
 import uuid
 from datetime import datetime, timezone
 
-from graph import get_db, GRAPH_WRITE_LOCK
+from graph import get_db, GRAPH_WRITE_LOCK, schema_guard
 
 logger = logging.getLogger("archivist.audit")
 
-_SCHEMA_APPLIED = False
-
-
-def _ensure_audit_schema():
-    """Create audit_log table if it doesn't exist."""
-    global _SCHEMA_APPLIED
-    if _SCHEMA_APPLIED:
-        return
-    with GRAPH_WRITE_LOCK:
-        conn = get_db()
-        conn.executescript("""
-        CREATE TABLE IF NOT EXISTS audit_log (
-            id TEXT PRIMARY KEY,
-            timestamp TEXT NOT NULL,
-            agent_id TEXT NOT NULL,
-            action TEXT NOT NULL,
-            memory_id TEXT,
-            namespace TEXT,
-            text_hash TEXT,
-            version INTEGER,
-            metadata TEXT DEFAULT '{}'
-        );
-        CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp);
-        CREATE INDEX IF NOT EXISTS idx_audit_agent ON audit_log(agent_id);
-        CREATE INDEX IF NOT EXISTS idx_audit_memory ON audit_log(memory_id);
-        CREATE INDEX IF NOT EXISTS idx_audit_namespace ON audit_log(namespace);
-    """)
-        conn.commit()
-        conn.close()
-    _SCHEMA_APPLIED = True
+_ensure_audit_schema = schema_guard("""
+    CREATE TABLE IF NOT EXISTS audit_log (
+        id TEXT PRIMARY KEY,
+        timestamp TEXT NOT NULL,
+        agent_id TEXT NOT NULL,
+        action TEXT NOT NULL,
+        memory_id TEXT,
+        namespace TEXT,
+        text_hash TEXT,
+        version INTEGER,
+        metadata TEXT DEFAULT '{}'
+    );
+    CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp);
+    CREATE INDEX IF NOT EXISTS idx_audit_agent ON audit_log(agent_id);
+    CREATE INDEX IF NOT EXISTS idx_audit_memory ON audit_log(memory_id);
+    CREATE INDEX IF NOT EXISTS idx_audit_namespace ON audit_log(namespace);
+""")
 
 
 async def log_memory_event(

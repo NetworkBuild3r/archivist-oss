@@ -1,6 +1,5 @@
 """MCP tool handlers — skill registry, events, lessons, health, relations."""
 
-import json
 import logging
 
 from mcp.types import Tool, TextContent
@@ -315,13 +314,13 @@ async def _handle_skill_dependencies(arguments: dict) -> list[TextContent]:
     relations = get_skill_relations(skill["id"], depth=depth)
     substitutes = get_skill_substitutes(skill["id"])
 
-    return [TextContent(type="text", text=json.dumps({
+    return success_response({
         "skill": skill["name"],
         "skill_id": skill["id"],
         "relations": relations,
         "substitutes": [{"name": s["name"], "relation": s["relation_type"], "confidence": s["confidence"]} for s in substitutes],
         "depth": depth,
-    }, indent=2, default=str))]
+    }, default=str)
 
 
 # ---------------------------------------------------------------------------
