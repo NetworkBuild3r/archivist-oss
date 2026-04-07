@@ -24,6 +24,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.routing import Mount, Route
 from starlette.responses import JSONResponse, PlainTextResponse
 from mcp.server.sse import SseServerTransport
+from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 
 logging.basicConfig(
     level=logging.INFO,
@@ -221,16 +222,22 @@ async def _startup():
 @asynccontextmanager
 async def lifespan(_app: Starlette):
     """Starlette ≥0.37 lifespan (replaces deprecated on_startup / on_shutdown)."""
-    await _startup()
     try:
-        yield
+        global streamable_http_session_manager
+        streamable_http_session_manager = _create_streamable_http_session_manager()
+        async with streamable_http_session_manager.run():
+            await _startup()
+            try:
+                yield
+            finally:
+                for t in _background_tasks:
+                    if not t.done():
+                        t.cancel()
+                if _background_tasks:
+                    await asyncio.gather(*_background_tasks, return_exceptions=True)
+                _background_tasks.clear()
     finally:
-        for t in _background_tasks:
-            if not t.done():
-                t.cancel()
-        if _background_tasks:
-            await asyncio.gather(*_background_tasks, return_exceptions=True)
-        _background_tasks.clear()
+        streamable_http_session_manager = None
 
 
 async def curator_queue_drain_loop():
@@ -256,6 +263,32 @@ async def run_initial_index():
 
 
 sse_transport = SseServerTransport("/mcp/messages/")
+streamable_http_session_manager: StreamableHTTPSessionManager | None = None
+
+
+def _create_streamable_http_session_manager() -> StreamableHTTPSessionManager:
+    """Create a fresh Streamable HTTP session manager for each app lifespan."""
+    return StreamableHTTPSessionManager(server, json_response=True)
+
+
+class SseASGIApp:
+    async def __call__(self, scope, receive, send):
+        async with sse_transport.connect_sse(scope, receive, send) as streams:
+            await server.run(
+                streams[0], streams[1], server.create_initialization_options()
+            )
+
+
+class StreamableHTTPASGIApp:
+    async def __call__(self, scope, receive, send):
+        manager = streamable_http_session_manager
+        if manager is None:
+            raise RuntimeError("Streamable HTTP session manager is not initialized")
+        await manager.handle_request(scope, receive, send)
+
+
+sse_app = SseASGIApp()
+streamable_http_app = StreamableHTTPASGIApp()
 
 
 class ArchivistAuthMiddleware(BaseHTTPMiddleware):
@@ -272,15 +305,6 @@ class ArchivistAuthMiddleware(BaseHTTPMiddleware):
         if not ok:
             return JSONResponse({"error": "unauthorized"}, status_code=401)
         return await call_next(request)
-
-
-async def handle_sse(request):
-    async with sse_transport.connect_sse(
-        request.scope, request.receive, request._send
-    ) as streams:
-        await server.run(
-            streams[0], streams[1], server.create_initialization_options()
-        )
 
 
 async def handle_retrieval_export(request):
@@ -342,7 +366,8 @@ app = Starlette(
         Route("/admin/retrieval-logs", handle_retrieval_export),
         Route("/admin/dashboard", handle_dashboard),
         Route("/admin/namespace-index", handle_namespace_index, methods=["GET"]),
-        Route("/mcp/sse", endpoint=handle_sse),
+        Route("/mcp", endpoint=streamable_http_app, methods=["GET", "POST", "DELETE"]),
+        Route("/mcp/sse", endpoint=sse_app, methods=["GET"]),
         Mount("/mcp/messages/", app=sse_transport.handle_post_message),
     ],
     middleware=[Middleware(ArchivistAuthMiddleware)],

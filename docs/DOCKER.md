@@ -4,7 +4,7 @@ The repo ships **`docker-compose.yml`** with:
 
 | Service    | Port (host) | Role |
 |------------|----------------|------|
-| `archivist` | `3100` (default) | MCP HTTP + SSE, file watcher, curator |
+| `archivist` | `3100` (default) | MCP HTTP (Streamable HTTP + SSE), file watcher, curator |
 | `qdrant`    | `6333`, `6334`   | Vector store |
 
 ## Quick start
@@ -28,7 +28,7 @@ git pull origin feature/v1.6-memory-awareness
 
 Or use a [GitHub personal access token](https://github.com/settings/tokens) as the password when prompted.
 
-MCP endpoint: `http://localhost:3100/mcp/sse` (or your published host/port).
+MCP endpoint: `http://localhost:3100/mcp` (preferred Streamable HTTP; legacy SSE remains at `http://localhost:3100/mcp/sse`).
 
 ## Layout
 
