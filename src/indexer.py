@@ -14,19 +14,21 @@ from qdrant_client.models import PointStruct, Filter, FieldCondition, MatchValue
 
 from config import (
     QDRANT_COLLECTION, MEMORY_ROOT,
-    CHUNK_SIZE, CHUNK_OVERLAP, TEAM_MAP,
+    TEAM_MAP,
     PARENT_CHUNK_SIZE, PARENT_CHUNK_OVERLAP,
     CHILD_CHUNK_SIZE, CHILD_CHUNK_OVERLAP,
     TIERED_CONTEXT_ENABLED,
+    BM25_ENABLED, TOPIC_ROUTING_ENABLED,
 )
 from chunking import chunk_text, chunk_text_hierarchical
-from config import BM25_ENABLED
 from embeddings import embed_batch
 from graph import upsert_fts_chunk, delete_fts_chunks_by_file
 from qdrant import qdrant_client
 from rbac import get_namespace_for_agent, get_namespace_config
 from text_utils import extract_agent_id_from_path, compute_memory_checksum
 from tiering import generate_tiers
+from topic_detector import detect_topics
+from pre_extractor import pre_extract
 import metrics as _metrics
 
 logger = logging.getLogger("archivist.indexer")
@@ -66,10 +68,13 @@ def _extract_metadata(filepath: str) -> dict:
         file_type = "system"
 
     namespace = get_namespace_for_agent(agent_id) if agent_id else "default"
+    indexed_at = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     return {
         "agent_id": agent_id,
-        "date": date_str or datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "content_date": date_str,
+        "indexed_at": indexed_at,
+        "date": date_str or indexed_at,
         "file_type": file_type,
         "team": team,
         "namespace": namespace,
@@ -156,6 +161,8 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
             if not chunk_meta["is_parent"] and chunk_meta["parent_id"]:
                 tiers = tier_map.get(chunk_meta["parent_id"], {})
 
+            topics = detect_topics(chunk_meta["content"]) if TOPIC_ROUTING_ENABLED else []
+            hints = pre_extract(chunk_meta["content"])
             payload = {
                 **meta,
                 "chunk_index": i,
@@ -164,6 +171,8 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
                 "l1": tiers.get("l1", ""),
                 "parent_id": chunk_meta["parent_id"],
                 "is_parent": chunk_meta["is_parent"],
+                "topic": topics[0] if topics else "",
+                "thought_type": hints.get("thought_type", "general"),
                 "version": 1,
                 "consistency_level": consistency,
                 "checksum": checksum,
@@ -187,10 +196,14 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
             pid = _point_id(filepath, i)
             checksum = compute_memory_checksum(chunk, meta["agent_id"], meta["namespace"])
 
+            topics = detect_topics(chunk) if TOPIC_ROUTING_ENABLED else []
+            hints = pre_extract(chunk)
             payload = {
                 **meta,
                 "chunk_index": i,
                 "text": chunk,
+                "topic": topics[0] if topics else "",
+                "thought_type": hints.get("thought_type", "general"),
                 "version": 1,
                 "consistency_level": consistency,
                 "checksum": checksum,

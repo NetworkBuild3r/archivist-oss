@@ -1,7 +1,4 @@
-"""Structured conversation compaction — produces Goal/Progress/Decisions/Next Steps summaries.
-
-Inspired by ReMe's compact_memory() structured output format.
-"""
+"""Structured conversation compaction — produces Goal/Progress/Decisions/Next Steps summaries."""
 
 import json
 import logging

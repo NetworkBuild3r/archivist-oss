@@ -62,6 +62,6 @@ The composite score weights the three tasks:
 - Memory versioning and supersession
 - BM25 + vector hybrid search for update verification
 
-## Published Competitor Results
+## Notes
 
-The HaluMem paper includes results for Mem0, Memobase, MemOS, Supermemory, and Zep. Archivist's active curation, conflict detection, and knowledge graph should provide advantages on the update and QA tasks where stale/contradictory memories cause hallucination.
+Archivist's active curation, conflict detection, and knowledge graph should provide advantages on the update and QA tasks where stale/contradictory memories cause hallucination.

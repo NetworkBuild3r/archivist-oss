@@ -101,6 +101,8 @@ def ensure_qdrant_collection():
             ("importance_score", PayloadSchemaType.FLOAT),
             ("memory_type", PayloadSchemaType.KEYWORD),
             ("retention_class", PayloadSchemaType.KEYWORD),
+            ("topic", PayloadSchemaType.KEYWORD),
+            ("thought_type", PayloadSchemaType.KEYWORD),
         ]:
             client.create_payload_index(
                 collection_name=QDRANT_COLLECTION,
@@ -138,7 +140,6 @@ async def health(_request):
 
 async def handle_invalidate(_request):
     """Endpoint to delete expired memories (TTL-based)."""
-    from qdrant_client import QdrantClient
     from qdrant_client.models import Filter, FieldCondition, Range
 
     now_ts = int(time.time())

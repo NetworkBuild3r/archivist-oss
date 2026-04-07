@@ -17,6 +17,7 @@ import argparse
 import json
 import os
 import random
+import re
 from datetime import date, timedelta
 
 CORPUS_DIR = os.path.join(os.path.dirname(__file__), "corpus")
@@ -280,11 +281,13 @@ def _generate_questions() -> list[dict]:
         {"query": "What happened on 2025-02-15?",
          "expected_keywords": ["DNS", "misconfiguration", "downtime", "45 minutes"],
          "expected_answer": "On 2025-02-15, a DNS misconfiguration caused 45 minutes of downtime.",
-         "topic": "incident", "query_type": "temporal", "difficulty": "easy"},
+         "topic": "incident", "query_type": "temporal", "difficulty": "easy",
+         "date_from": "2025-02-15", "date_to": "2025-02-15"},
         {"query": "What are the most recent changes to the deployment pipeline?",
          "expected_keywords": ["ArgoCD", "staging", "automated", "sync"],
          "expected_answer": "Deployment uses ArgoCD with automated sync enabled for staging.",
-         "topic": "cicd", "query_type": "temporal", "difficulty": "medium"},
+         "topic": "cicd", "query_type": "temporal", "difficulty": "medium",
+         "namespace": "pipeline"},
         {"query": "What is the current state of production Kubernetes?",
          "expected_keywords": ["v1.29", "12 nodes", "us-east-1"],
          "expected_answer": "The production Kubernetes cluster runs v1.29 across 12 nodes in us-east-1.",
@@ -333,27 +336,27 @@ def _generate_questions() -> list[dict]:
          "expected_keywords": ["$47,000", "budget", "cloud spend"],
          "expected_answer": "Monthly cloud spend is $47,000 with a target to reduce to $40,000 by Q3.",
          "topic": "cost", "query_type": "agent_scoped", "difficulty": "medium",
-         "agent_filter": "chief"},
+         "agent_filter": "chief", "caller_agent_id": "chief", "namespace": "chief"},
         {"query": "What does gitbob know about the CI pipeline?",
          "expected_keywords": ["GitLab CI", "15-minute", "timeout"],
          "expected_answer": "The CI pipeline runs on GitLab CI with a 15-minute timeout per job.",
          "topic": "cicd", "query_type": "agent_scoped", "difficulty": "medium",
-         "agent_filter": "gitbob"},
+         "agent_filter": "gitbob", "caller_agent_id": "gitbob", "namespace": "pipeline"},
         {"query": "What monitoring information has grafgreg recorded?",
          "expected_keywords": ["Prometheus", "Grafana", "SLO", "dashboard"],
          "expected_answer": "Prometheus scrapes metrics every 15 seconds from all services.",
          "topic": "monitoring", "query_type": "agent_scoped", "difficulty": "medium",
-         "agent_filter": "grafgreg"},
+         "agent_filter": "grafgreg", "caller_agent_id": "grafgreg", "namespace": "monitoring"},
         {"query": "What deployments has argo managed?",
          "expected_keywords": ["ArgoCD", "sync", "staging", "rollback"],
          "expected_answer": "Deployment uses ArgoCD with automated sync enabled for staging.",
          "topic": "cicd", "query_type": "agent_scoped", "difficulty": "medium",
-         "agent_filter": "argo"},
+         "agent_filter": "argo", "caller_agent_id": "argo", "namespace": "deployer"},
         {"query": "What has securitysam flagged about authentication?",
          "expected_keywords": ["JWT", "Vault", "RBAC", "OPA"],
          "expected_answer": "JWT tokens expire after 1 hour with refresh tokens valid for 7 days.",
          "topic": "security", "query_type": "agent_scoped", "difficulty": "medium",
-         "agent_filter": "securitysam"},
+         "agent_filter": "securitysam", "caller_agent_id": "securitysam", "namespace": "shared"},
     ]
     for sq in agent_scope_questions:
         qid += 1
@@ -456,7 +459,6 @@ def _fact_to_question(fact: str, topic: str) -> str:
 
 def _extract_keywords(fact: str) -> list[str]:
     """Pull key terms from a fact for keyword matching evaluation."""
-    import re
     numbers = re.findall(r'\d+[\d,.]*%?', fact)
     proper_nouns = re.findall(r'[A-Z][a-z]+(?:\s[A-Z][a-z]+)*', fact)
     return (numbers + proper_nouns)[:5]
@@ -660,11 +662,8 @@ def main():
         nfiles = generate_legacy_corpus(CORPUS_DIR)
         print(f"Generated {nfiles} corpus files in {CORPUS_DIR}")
 
-    if args.write_questions or not args.preset:
-        if not args.corpus_only:
-            _write_questions_file()
-    elif args.corpus_only:
-        pass
+    if (args.write_questions or not args.preset) and not args.corpus_only:
+        _write_questions_file()
 
 
 if __name__ == "__main__":

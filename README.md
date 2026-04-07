@@ -140,21 +140,21 @@ Multi-hop and broad synthesis are where Archivist's knowledge graph pays off mos
 | **Parent enrichment** | Expands child chunks to parent context | Provides surrounding context for better synthesis |
 | **LLM refinement** | Generative synthesis of retrieved chunks | Produces coherent answers instead of raw chunk dumps |
 
-### Competitive Positioning
+### Features
 
-| Feature | Archivist | Mem0 | Zep | Letta |
-|---------|-----------|------|-----|-------|
-| Hybrid search (vector + BM25) | Yes (0.7/0.3 fusion) | Vector only (free) | Graph-based | Vector |
-| Temporal knowledge graph | Yes (SQLite + FTS5) | Pro only ($249/mo) | Yes (Graphiti) | No |
-| Active curation (background) | Yes (LLM dedup, tip consolidation) | No | No | Self-managed |
-| Retention classes (pin/unpin) | Yes (ephemeral/standard/durable/permanent) | No | No | No |
-| Entity-anchored retrieval | Yes (guaranteed recall for known entities) | No | Partial | No |
-| Fact versioning (superseded_by) | Yes (auto-detects conflicting facts) | No | Temporal versioning | No |
-| Multi-agent RBAC | Yes (namespace ACLs) | No | No | Per-agent isolation |
-| Cross-encoder reranking | Yes (BAAI/bge-reranker-v2-m3) | No | No | No |
-| Hotness scoring | Yes (freq × recency) | No | Temporal decay | No |
-| Conflict detection | Yes (vector + LLM adjudication) | No | Temporal versioning | No |
-| Self-hosted / Apache 2.0 | Yes | Open core | Yes | Yes |
+| Feature | Archivist |
+|---------|-----------|
+| Hybrid search (vector + BM25) | Yes (0.7/0.3 fusion) |
+| Temporal knowledge graph | Yes (SQLite + FTS5) |
+| Active curation (background) | Yes (LLM dedup, tip consolidation) |
+| Retention classes (pin/unpin) | Yes (ephemeral/standard/durable/permanent) |
+| Entity-anchored retrieval | Yes (guaranteed recall for known entities) |
+| Fact versioning (superseded_by) | Yes (auto-detects conflicting facts) |
+| Multi-agent RBAC | Yes (namespace ACLs) |
+| Cross-encoder reranking | Yes (BAAI/bge-reranker-v2-m3) |
+| Hotness scoring | Yes (freq × recency) |
+| Conflict detection | Yes (vector + LLM adjudication) |
+| Self-hosted / Apache 2.0 | Yes |
 
 > **Reproduce:** `docker compose --profile benchmark run --rm --entrypoint /bin/bash benchmark benchmarks/scripts/run_full_comparison.sh`
 >

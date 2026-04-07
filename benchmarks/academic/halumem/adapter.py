@@ -14,8 +14,6 @@ Setup:
     2. Run:
        python -m benchmarks.academic.halumem.adapter --data-dir data/halumem
 
-Published competitor results (HaluMem, Jan 2026):
-    - Systems evaluated: Mem0, Memobase, MemOS, Supermemory, Zep
 """
 
 import argparse
@@ -27,7 +25,6 @@ import os
 import shutil
 import sys
 import tempfile
-import time
 from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "src"))
@@ -217,7 +214,27 @@ def _compute_qa_hallucination(answer: str, ground_truth: str, is_unanswerable: b
     return {"hallucinated": hallucinated, "hallucination_type": h_type, "f1": round(f1, 4)}
 
 
-async def run_halumem_benchmark(data_dir: str, limit: int = 0) -> dict:
+async def _run_curator_extraction(mem_root: str) -> None:
+    """Run curator entity extraction over indexed files for KG population."""
+    from curator import extract_knowledge, process_extraction
+    from graph import init_schema
+    init_schema()
+    for fp in sorted(Path(mem_root).rglob("*.md")):
+        try:
+            text = fp.read_text(encoding="utf-8")
+            rel = str(fp.relative_to(mem_root))
+            knowledge = await extract_knowledge(text, agent_id="halumem", source_file=rel)
+            if knowledge:
+                await process_extraction(knowledge, agent_id="halumem", source_file=rel)
+        except Exception as e:
+            logger.debug("Curator extraction failed for %s: %s", fp, e)
+
+
+async def run_halumem_benchmark(
+    data_dir: str,
+    limit: int = 0,
+    run_curator: bool = False,
+) -> dict:
     """Run the full HaluMem benchmark against Archivist."""
     data = _load_halumem_data(data_dir)
     users = data["users"]
@@ -235,6 +252,9 @@ async def run_halumem_benchmark(data_dir: str, limit: int = 0) -> dict:
         config.MEMORY_ROOT = mem_root
         os.environ["MEMORY_ROOT"] = mem_root
 
+        from graph import init_schema
+        init_schema()
+
         extraction_results = []
         update_results = []
         qa_results = []
@@ -244,6 +264,7 @@ async def run_halumem_benchmark(data_dir: str, limit: int = 0) -> dict:
             logger.info("Processing user %s (%d/%d)", user_id, ui + 1, len(users))
 
             conversations = _extract_conversations(user)
+            md_content = ""
             if conversations:
                 md_content = _conversation_to_markdown(conversations, user_id)
                 filepath = os.path.join(mem_root, f"users/{user_id}/history.md")
@@ -258,8 +279,11 @@ async def run_halumem_benchmark(data_dir: str, limit: int = 0) -> dict:
             from indexer import full_index
             await full_index(hierarchical=True)
 
+            if run_curator:
+                await _run_curator_extraction(mem_root)
+
             if gt_memories:
-                all_indexed_text = md_content if conversations else ""
+                all_indexed_text = md_content
                 ext_eval = _compute_extraction_accuracy(all_indexed_text, gt_memories)
                 ext_eval["user_id"] = user_id
                 extraction_results.append(ext_eval)
@@ -370,12 +394,13 @@ async def main():
     parser = argparse.ArgumentParser(description="HaluMem benchmark adapter for Archivist")
     parser.add_argument("--data-dir", required=True, help="Path to HaluMem dataset directory")
     parser.add_argument("--limit", type=int, default=0, help="Limit users (0=all)")
+    parser.add_argument("--run-curator", action="store_true", help="Run curator KG extraction")
     parser.add_argument("--output", type=str, default="halumem_results.json", help="Output JSON path")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
-    data = await run_halumem_benchmark(args.data_dir, limit=args.limit)
+    data = await run_halumem_benchmark(args.data_dir, limit=args.limit, run_curator=args.run_curator)
 
     with open(args.output, "w") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)

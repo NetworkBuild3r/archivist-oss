@@ -1,14 +1,18 @@
-"""Compressed index generator — builds a per-namespace semantic TOC (zer0dex-inspired).
+"""Compressed index generator — builds a per-namespace semantic TOC.
 
 The compressed index is a short text (~500-800 tokens) listing what categories
 of knowledge exist in a namespace, so agents can bridge cross-domain queries
 without relying solely on vector similarity.
+
+Also produces compact wake-up payloads (~200 tokens) for session start,
+compiling identity, critical facts, and namespace overview into a single payload.
 """
 
+import json
 import logging
 from collections import defaultdict
 
-from graph import get_db
+from graph import get_db, get_curator_state, set_curator_state
 
 logger = logging.getLogger("archivist.compressed_index")
 
@@ -119,3 +123,177 @@ def build_namespace_index(namespace: str, agent_ids: list[str] | None = None) ->
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# Wake-up context — compact session bootstrap payload
+# ---------------------------------------------------------------------------
+
+_WAKE_UP_CACHE_PREFIX = "wake_up:"
+
+
+def build_wake_up_context(namespace: str, agent_id: str = "") -> dict:
+    """Build a compact wake-up payload for session start.
+
+    Pulls identity from permanent/durable entities (L0), critical facts from
+    permanent + most-recent active facts (L1), and the existing namespace TOC.
+
+    Target: L0+L1 combined under ~200 tokens.
+    """
+    conn = get_db()
+    try:
+        agent_ids = [agent_id] if agent_id else None
+
+        # L0: permanent/durable entities for identity
+        if agent_ids:
+            placeholders = ",".join("?" for _ in agent_ids)
+            cur = conn.execute(
+                f"""SELECT DISTINCT e.name, e.entity_type, e.retention_class
+                    FROM entities e
+                    JOIN facts f ON f.entity_id = e.id AND f.is_active = 1
+                    WHERE f.agent_id IN ({placeholders})
+                      AND e.retention_class IN ('permanent', 'durable')
+                    ORDER BY e.mention_count DESC
+                    LIMIT 10""",
+                agent_ids,
+            )
+        else:
+            cur = conn.execute(
+                """SELECT name, entity_type, retention_class
+                   FROM entities
+                   WHERE retention_class IN ('permanent', 'durable')
+                   ORDER BY mention_count DESC
+                   LIMIT 10"""
+            )
+        identity_entities = [dict(r) for r in cur.fetchall()]
+
+        l0_parts = []
+        if namespace:
+            l0_parts.append(f"Namespace: {namespace}")
+        if agent_id:
+            l0_parts.append(f"Agent: {agent_id}")
+        if identity_entities:
+            names = ", ".join(e["name"] for e in identity_entities[:6])
+            l0_parts.append(f"Core entities: {names}")
+        l0_identity = "; ".join(l0_parts) if l0_parts else "No identity data yet."
+
+        # L1: pinned/permanent facts + most recent active facts
+        entity_ids = [e["name"] for e in identity_entities]
+        pinned_facts: list[str] = []
+        if entity_ids:
+            name_placeholders = ",".join("?" for _ in entity_ids)
+            cur = conn.execute(
+                f"""SELECT e.name, f.fact_text
+                    FROM facts f
+                    JOIN entities e ON f.entity_id = e.id
+                    WHERE e.name IN ({name_placeholders})
+                      AND f.is_active = 1 AND f.superseded_by IS NULL
+                      AND f.retention_class = 'permanent'
+                    ORDER BY f.created_at DESC
+                    LIMIT 5""",
+                entity_ids,
+            )
+            for row in cur.fetchall():
+                pinned_facts.append(f"[{row['name']}] {row['fact_text'][:100]}")
+
+        recent_facts: list[str] = []
+        if agent_ids:
+            placeholders = ",".join("?" for _ in agent_ids)
+            cur = conn.execute(
+                f"""SELECT e.name, f.fact_text
+                    FROM facts f
+                    JOIN entities e ON f.entity_id = e.id
+                    WHERE f.agent_id IN ({placeholders})
+                      AND f.is_active = 1 AND f.superseded_by IS NULL
+                    ORDER BY f.created_at DESC
+                    LIMIT 5""",
+                agent_ids,
+            )
+        else:
+            cur = conn.execute(
+                """SELECT e.name, f.fact_text
+                   FROM facts f
+                   JOIN entities e ON f.entity_id = e.id
+                   WHERE f.is_active = 1 AND f.superseded_by IS NULL
+                   ORDER BY f.created_at DESC
+                   LIMIT 5"""
+            )
+        for row in cur.fetchall():
+            line = f"[{row['name']}] {row['fact_text'][:100]}"
+            if line not in pinned_facts:
+                recent_facts.append(line)
+
+        l1_lines = pinned_facts + recent_facts[:max(0, 5 - len(pinned_facts))]
+        l1_critical = "\n".join(l1_lines) if l1_lines else "No facts recorded yet."
+
+        # Counts
+        if namespace:
+            row = conn.execute(
+                "SELECT COUNT(*) AS c FROM memory_chunks WHERE namespace = ?",
+                (namespace,),
+            ).fetchone()
+        else:
+            row = conn.execute("SELECT COUNT(*) AS c FROM memory_chunks").fetchone()
+        total_memories = row["c"] if row else 0
+
+        # Last activity
+        if agent_ids:
+            placeholders = ",".join("?" for _ in agent_ids)
+            row = conn.execute(
+                f"SELECT MAX(last_seen) AS ls FROM entities "
+                f"WHERE name IN (SELECT DISTINCT e.name FROM entities e "
+                f"JOIN facts f ON f.entity_id = e.id WHERE f.agent_id IN ({placeholders}))",
+                agent_ids,
+            ).fetchone()
+        else:
+            row = conn.execute("SELECT MAX(last_seen) AS ls FROM entities").fetchone()
+        last_activity = (row["ls"] or "")[:10] if row else ""
+
+        top_entities = [e["name"] for e in identity_entities[:10]]
+    finally:
+        conn.close()
+
+    namespace_toc = build_namespace_index(namespace, agent_ids=agent_ids)
+
+    return {
+        "l0_identity": l0_identity,
+        "l1_critical": l1_critical,
+        "namespace_toc": namespace_toc,
+        "total_memories": total_memories,
+        "last_activity": last_activity,
+        "top_entities": top_entities,
+    }
+
+
+def get_cached_wake_up(namespace: str, agent_id: str = "") -> dict | None:
+    """Return pre-computed wake-up context from curator_state, or None."""
+    key = f"{_WAKE_UP_CACHE_PREFIX}{namespace}:{agent_id}"
+    raw = get_curator_state(key)
+    if raw:
+        try:
+            return json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return None
+
+
+def cache_wake_up(namespace: str, agent_id: str = "") -> dict:
+    """Build wake-up context and persist it in curator_state for fast retrieval."""
+    ctx = build_wake_up_context(namespace, agent_id=agent_id)
+    key = f"{_WAKE_UP_CACHE_PREFIX}{namespace}:{agent_id}"
+    set_curator_state(key, json.dumps(ctx))
+    return ctx
+
+
+def format_wake_up_text(ctx: dict) -> str:
+    """Render a wake-up context dict as a compact text block for agent consumption."""
+    parts = [
+        f"## Wake-Up Context",
+        f"**Identity:** {ctx.get('l0_identity', 'unknown')}",
+        f"**Memories:** {ctx.get('total_memories', 0)} | **Last active:** {ctx.get('last_activity', 'n/a')}",
+    ]
+    l1 = ctx.get("l1_critical", "")
+    if l1 and l1 != "No facts recorded yet.":
+        parts.append(f"\n**Critical facts:**\n{l1}")
+    toc = ctx.get("namespace_toc", "")
+    if toc and "No indexed knowledge" not in toc:
+        parts.append(f"\n{toc}")
+    return "\n".join(parts)

@@ -4,7 +4,7 @@ from mcp.types import Tool, TextContent
 
 from rlm_retriever import recursive_retrieve, search_vectors
 from graph import search_entities, get_entity_facts, get_entity_relationships, add_entity_alias
-from compressed_index import build_namespace_index
+from compressed_index import build_namespace_index, get_cached_wake_up, cache_wake_up, format_wake_up_text
 from graph_retrieval import detect_contradictions, get_entity_brief
 from rbac import (
     get_namespace_for_agent, filter_agents_for_read,
@@ -75,13 +75,19 @@ TOOLS: list[Tool] = [
         name="archivist_recall",
         description=(
             "Graph-based multi-hop recall. Finds entities and their relationships/facts. "
-            "Use for questions like 'What do we know about X?' or 'How does X relate to Y?'"
+            "Use for questions like 'What do we know about X?' or 'How does X relate to Y?'. "
+            "Use as_of to see facts valid at a specific date."
         ),
         inputSchema={
             "type": "object",
             "properties": {
                 "entity": {"type": "string", "description": "Entity name to look up"},
                 "related_to": {"type": "string", "description": "Optional second entity to find connections", "default": ""},
+                "as_of": {
+                    "type": "string",
+                    "description": "ISO date (YYYY-MM-DD) — only return facts valid at this date. Omit for current facts.",
+                    "default": "",
+                },
                 "agent_id": {"type": "string", "description": "Calling agent for RBAC (optional)", "default": ""},
                 "caller_agent_id": {
                     "type": "string",
@@ -96,7 +102,8 @@ TOOLS: list[Tool] = [
         name="archivist_timeline",
         description=(
             "Get a chronological timeline of memories about a topic. "
-            "Use for questions like 'What happened with X over the last 2 weeks?'"
+            "Use for questions like 'What happened with X over the last 2 weeks?'. "
+            "Use as_of to anchor the timeline to a specific date."
         ),
         inputSchema={
             "type": "object",
@@ -109,6 +116,11 @@ TOOLS: list[Tool] = [
                 },
                 "namespace": {"type": "string", "description": "Memory namespace to search (optional)", "default": ""},
                 "days": {"type": "integer", "description": "How many days back to search", "default": 14},
+                "as_of": {
+                    "type": "string",
+                    "description": "ISO date (YYYY-MM-DD) — anchor the timeline to this date for entity facts. Omit for current.",
+                    "default": "",
+                },
             },
             "required": ["query"],
         },
@@ -185,8 +197,9 @@ TOOLS: list[Tool] = [
         description=(
             "Get a structured knowledge card for an entity: all known facts, relationships, "
             "retention class, mention count, timeline. Use for questions like "
-            "'What do we know about prod-db-01?' or 'Show me everything about Brandon'. "
-            "Returns structured data — better than grep through markdown files."
+            "'What do we know about prod-db-01?' or 'Show me everything about Alice'. "
+            "Returns structured data — better than grep through markdown files. "
+            "Use as_of to see facts valid at a specific date (e.g. 'What was true on 2025-01-15?')."
         ),
         inputSchema={
             "type": "object",
@@ -197,6 +210,11 @@ TOOLS: list[Tool] = [
                     "description": "Optional alias to register for this entity (e.g. 'k8s' for 'Kubernetes')",
                     "default": "",
                 },
+                "as_of": {
+                    "type": "string",
+                    "description": "ISO date (YYYY-MM-DD) — only return facts valid at this date. Omit for current facts.",
+                    "default": "",
+                },
                 "agent_id": {"type": "string", "description": "Calling agent for RBAC", "default": ""},
                 "caller_agent_id": {
                     "type": "string",
@@ -204,6 +222,22 @@ TOOLS: list[Tool] = [
                 },
             },
             "required": ["entity"],
+        },
+    ),
+    Tool(
+        name="archivist_wake_up",
+        description=(
+            "Load session context for an agent — identity, critical facts, "
+            "and namespace overview in ~200 tokens. Call once at session start "
+            "to bootstrap the agent's working memory."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "agent_id": {"type": "string", "description": "Agent identity for namespace resolution and fact scoping"},
+                "namespace": {"type": "string", "description": "Namespace to load (default: auto-detect from agent_id)", "default": ""},
+            },
+            "required": ["agent_id"],
         },
     ),
 ]
@@ -289,6 +323,7 @@ async def _handle_recall(arguments: dict) -> list[TextContent]:
     entity_name = arguments["entity"]
     related_name = arguments.get("related_to", "")
     namespace = arguments.get("namespace", "")
+    as_of = (arguments.get("as_of") or "").strip()
 
     caller = resolve_caller(arguments)
     if err := require_caller(caller):
@@ -304,7 +339,7 @@ async def _handle_recall(arguments: dict) -> list[TextContent]:
         return error_response({"error": f"Entity '{entity_name}' not found in knowledge graph"})
 
     eid = entities[0]["id"]
-    facts = get_entity_facts(eid)
+    facts = get_entity_facts(eid, as_of=as_of)
     rels = get_entity_relationships(eid)
 
     facts, rels = _filter_facts_rels_for_caller(caller, facts, rels)
@@ -319,7 +354,7 @@ async def _handle_recall(arguments: dict) -> list[TextContent]:
         rel_entities = search_entities(related_name)
         if rel_entities:
             rel_eid = rel_entities[0]["id"]
-            rel_facts = get_entity_facts(rel_eid)
+            rel_facts = get_entity_facts(rel_eid, as_of=as_of)
             rel_facts, _ = _filter_facts_rels_for_caller(caller, rel_facts, [])
             result["related_entity"] = rel_entities[0]
             result["related_facts"] = rel_facts[:10]
@@ -333,9 +368,12 @@ async def _handle_recall(arguments: dict) -> list[TextContent]:
 
 
 async def _handle_timeline(arguments: dict) -> list[TextContent]:
+    from datetime import datetime, timedelta, timezone
+
     query = arguments["query"]
     agent_id = arguments.get("agent_id", "")
     namespace = arguments.get("namespace", "")
+    days = int(arguments.get("days", 14))
     caller = resolve_caller(arguments)
     if err := require_caller(caller):
         return err
@@ -354,7 +392,8 @@ async def _handle_timeline(arguments: dict) -> list[TextContent]:
                 "denied_agents": denied_list,
             })
 
-    results = await search_vectors(query, agent_id=agent_id, namespace=namespace, limit=50)
+    date_from = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d") if days > 0 else ""
+    results = await search_vectors(query, agent_id=agent_id, namespace=namespace, date_from=date_from, limit=50)
     results = [r for r in results if can_read_agent_memory(caller, r.get("agent_id", ""))]
     results.sort(key=lambda x: x.get("date", ""))
 
@@ -510,6 +549,7 @@ async def _handle_entity_brief(arguments: dict) -> list[TextContent]:
     """Structured knowledge card for a single entity."""
     entity_name = arguments["entity"]
     alias = (arguments.get("add_alias") or "").strip()
+    as_of = (arguments.get("as_of") or "").strip()
 
     caller = resolve_caller(arguments)
 
@@ -525,7 +565,7 @@ async def _handle_entity_brief(arguments: dict) -> list[TextContent]:
     if alias:
         add_entity_alias(eid, alias)
 
-    brief = get_entity_brief(eid)
+    brief = get_entity_brief(eid, as_of=as_of)
     if not brief:
         return error_response({"error": "Failed to build entity brief"})
 
@@ -537,6 +577,26 @@ async def _handle_entity_brief(arguments: dict) -> list[TextContent]:
         brief["fact_count"] = len(brief["facts"])
 
     return success_response(brief)
+
+
+async def _handle_wake_up(arguments: dict) -> list[TextContent]:
+    """Session bootstrap — return compact identity + critical facts + TOC."""
+    agent_id = arguments.get("agent_id", "")
+    namespace = arguments.get("namespace", "")
+
+    if not namespace and agent_id:
+        namespace = get_namespace_for_agent(agent_id)
+
+    if namespace and agent_id and not is_permissive_mode():
+        denied = _rbac_gate(agent_id, "read", namespace)
+        if denied:
+            return [TextContent(type="text", text=denied)]
+
+    ctx = get_cached_wake_up(namespace, agent_id=agent_id)
+    if not ctx:
+        ctx = cache_wake_up(namespace, agent_id=agent_id)
+
+    return [TextContent(type="text", text=format_wake_up_text(ctx))]
 
 
 # ---------------------------------------------------------------------------
@@ -552,4 +612,5 @@ HANDLERS: dict[str, object] = {
     "archivist_index": _handle_index,
     "archivist_contradictions": _handle_contradictions,
     "archivist_entity_brief": _handle_entity_brief,
+    "archivist_wake_up": _handle_wake_up,
 }

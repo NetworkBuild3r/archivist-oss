@@ -91,11 +91,11 @@ def _format_locomo(data: dict) -> str:
         f"**Questions evaluated:** {s['evaluated_questions']}  ",
         f"**Total chunks indexed:** {s['total_chunks']}",
         "",
-        "| Metric | Archivist | Mem0 | Zep | Letta |",
-        "|--------|-----------|------|-----|-------|",
-        f"| F1 | **{s['overall_f1']:.4f}** | 0.58 | 0.85 | 0.832 |",
-        f"| BLEU-1 | {s['overall_bleu']:.4f} | — | — | — |",
-        f"| ROUGE-L | {s['overall_rouge_l']:.4f} | — | — | — |",
+        "| Metric | Archivist |",
+        "|--------|-----------|",
+        f"| F1 | **{s['overall_f1']:.4f}** |",
+        f"| BLEU-1 | {s['overall_bleu']:.4f} |",
+        f"| ROUGE-L | {s['overall_rouge_l']:.4f} |",
     ]
 
     if s.get("by_category"):
@@ -219,29 +219,17 @@ Tests whether the memory system introduces hallucinated information during extra
 
 ---
 
-## Competitive Positioning
+## Archivist Features
 
-| System | LoCoMo QA | HaluMem Composite | Architecture |
-|--------|-----------|-------------------|-------------|
-| **Archivist** | **TBD** | **TBD** | 10-stage RLM pipeline, hybrid search, temporal KG, active curation |
-| Zep (Graphiti) | ~85% | — | Temporal knowledge graph |
-| Letta/MemGPT | ~83.2% | — | Self-managed 3-tier agent memory |
-| Mem0 | ~58-66% | — | Vector similarity + knowledge graph (Pro) |
-| Memobase | — | See HaluMem paper | — |
-| MemOS | — | See HaluMem paper | — |
-| Supermemory | — | See HaluMem paper | — |
-
-### Archivist Differentiators
-
-| Feature | Archivist | Mem0 | Zep | Letta |
-|---------|-----------|------|-----|-------|
-| Hybrid search (vector + BM25) | Yes (0.7/0.3 fusion) | Vector only (free) | Graph-based | Vector |
-| Temporal knowledge graph | Yes (SQLite + FTS5) | Pro only ($249/mo) | Yes (Graphiti) | No |
-| Active curation (background) | Yes (LLM dedup, tip consolidation) | No | No | Self-managed |
-| Multi-agent RBAC | Yes (namespace ACLs) | No | No | Per-agent isolation |
-| Cross-encoder reranking | Yes (BAAI/bge-reranker-v2-m3) | No | No | No |
-| Hotness scoring | Yes (freq x recency) | No | Temporal decay | No |
-| Conflict detection | Yes (vector + LLM adjudication) | No | Temporal versioning | No |
+| Feature | Archivist |
+|---------|-----------|
+| Hybrid search (vector + BM25) | Yes (0.7/0.3 fusion) |
+| Temporal knowledge graph | Yes (SQLite + FTS5) |
+| Active curation (background) | Yes (LLM dedup, tip consolidation) |
+| Multi-agent RBAC | Yes (namespace ACLs) |
+| Cross-encoder reranking | Yes (BAAI/bge-reranker-v2-m3) |
+| Hotness scoring | Yes (freq x recency) |
+| Conflict detection | Yes (vector + LLM adjudication) |
 | Self-hosted / Apache 2.0 | Yes | Open core | Yes | Yes |
 
 ---

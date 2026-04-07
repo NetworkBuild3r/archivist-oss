@@ -14,10 +14,6 @@ Setup:
     3. Run:
        python -m benchmarks.academic.locomo.adapter --data-dir data/locomo
 
-Published competitor scores (2026):
-    - Letta/MemGPT: ~83.2%
-    - Zep (Graphiti): ~85%
-    - Mem0: ~58-66%
 """
 
 import argparse
@@ -26,7 +22,6 @@ import collections
 import json
 import logging
 import os
-import re
 import shutil
 import sys
 import tempfile
@@ -176,15 +171,47 @@ def _extract_questions(dialogue: dict) -> list[dict]:
     return questions
 
 
-async def run_locomo_benchmark(data_dir: str, limit: int = 0, refine: bool = True) -> dict:
+def _keyword_recall(text: str, ground_truth: str) -> float:
+    """Fraction of ground-truth words found in text (case-insensitive)."""
+    gt_words = set(ground_truth.lower().split())
+    if not gt_words:
+        return 0.0
+    text_lower = text.lower()
+    found = sum(1 for w in gt_words if w in text_lower)
+    return found / len(gt_words)
+
+
+async def _run_curator_extraction(mem_root: str) -> None:
+    """Run curator entity extraction over indexed files for KG population."""
+    from curator import extract_knowledge, process_extraction
+    from graph import init_schema
+    init_schema()
+    for fp in sorted(Path(mem_root).rglob("*.md")):
+        try:
+            text = fp.read_text(encoding="utf-8")
+            rel = str(fp.relative_to(mem_root))
+            knowledge = await extract_knowledge(text, agent_id="locomo", source_file=rel)
+            if knowledge:
+                await process_extraction(knowledge, agent_id="locomo", source_file=rel)
+        except Exception as e:
+            logger.debug("Curator extraction failed for %s: %s", fp, e)
+
+
+async def run_locomo_benchmark(
+    data_dir: str,
+    limit: int = 0,
+    refine: bool = True,
+    run_curator: bool = False,
+) -> dict:
     """Run the full LoCoMo benchmark against Archivist.
 
     Steps:
         1. Load LoCoMo dialogue data
         2. Convert each dialogue to markdown files in a temp MEMORY_ROOT
         3. Index all files
-        4. For each QA pair, call archivist_search
-        5. Evaluate with F1, BLEU, ROUGE-L
+        4. (Optional) Run curator for KG population
+        5. For each QA pair, call archivist_search
+        6. Evaluate with keyword_recall, F1, BLEU, ROUGE-L
     """
     dialogues = _load_locomo_data(data_dir)
     if not dialogues:
@@ -223,8 +250,14 @@ async def run_locomo_benchmark(data_dir: str, limit: int = 0, refine: bool = Tru
                      total_files, len(dialogues), len(all_questions))
 
         from indexer import full_index
+        from graph import init_schema
+        init_schema()
         chunk_count = await full_index(hierarchical=True)
         logger.info("Indexed %d chunks", chunk_count)
+
+        if run_curator:
+            logger.info("Running curator extraction over %d files...", total_files)
+            await _run_curator_extraction(mem_root)
 
         from rlm_retriever import recursive_retrieve
 
@@ -251,7 +284,12 @@ async def run_locomo_benchmark(data_dir: str, limit: int = 0, refine: bool = Tru
             elapsed_ms = (time.monotonic() - t0) * 1000
 
             answer = result.get("answer", "")
+            sources_text = " ".join(
+                s.get("text", "")[:500] for s in result.get("sources", [])
+            )
+            combined = f"{answer} {sources_text}"
 
+            recall = _keyword_recall(combined, ground_truth) if ground_truth else 0.0
             f1 = _compute_f1(answer, ground_truth) if ground_truth else 0.0
             bleu = _compute_bleu(answer, ground_truth) if ground_truth else 0.0
             rouge_l = _compute_rouge_l(answer, ground_truth) if ground_truth else 0.0
@@ -262,6 +300,7 @@ async def run_locomo_benchmark(data_dir: str, limit: int = 0, refine: bool = Tru
                 "query": query,
                 "ground_truth": ground_truth[:200],
                 "answer": answer[:200],
+                "keyword_recall": round(recall, 4),
                 "f1": round(f1, 4),
                 "bleu": round(bleu, 4),
                 "rouge_l": round(rouge_l, 4),
@@ -271,6 +310,7 @@ async def run_locomo_benchmark(data_dir: str, limit: int = 0, refine: bool = Tru
             all_results.append(entry)
             results_by_category[category].append(entry)
 
+        overall_recall = _mean([r["keyword_recall"] for r in all_results])
         overall_f1 = _mean([r["f1"] for r in all_results])
         overall_bleu = _mean([r["bleu"] for r in all_results])
         overall_rouge_l = _mean([r["rouge_l"] for r in all_results])
@@ -279,6 +319,7 @@ async def run_locomo_benchmark(data_dir: str, limit: int = 0, refine: bool = Tru
         for cat, cat_results in results_by_category.items():
             by_category[cat] = {
                 "count": len(cat_results),
+                "keyword_recall": round(_mean([r["keyword_recall"] for r in cat_results]), 4),
                 "f1": _mean([r["f1"] for r in cat_results]),
                 "bleu": _mean([r["bleu"] for r in cat_results]),
                 "rouge_l": _mean([r["rouge_l"] for r in cat_results]),
@@ -294,15 +335,12 @@ async def run_locomo_benchmark(data_dir: str, limit: int = 0, refine: bool = Tru
             "total_chunks": chunk_count,
             "total_questions": len(all_questions),
             "evaluated_questions": len(all_results),
+            "overall_keyword_recall": round(overall_recall, 4),
             "overall_f1": round(overall_f1, 4),
             "overall_bleu": round(overall_bleu, 4),
             "overall_rouge_l": round(overall_rouge_l, 4),
             "by_category": by_category,
-            "competitor_scores": {
-                "letta": 0.832,
-                "zep": 0.85,
-                "mem0": 0.58,
-            },
+            "curator": run_curator,
         }
 
         return {"summary": summary, "results": all_results}
@@ -320,12 +358,18 @@ async def main():
     parser.add_argument("--data-dir", required=True, help="Path to LoCoMo dataset directory")
     parser.add_argument("--limit", type=int, default=0, help="Limit dialogues (0=all)")
     parser.add_argument("--no-refine", action="store_true", help="Skip LLM refinement")
+    parser.add_argument("--run-curator", action="store_true", help="Run curator KG extraction")
     parser.add_argument("--output", type=str, default="locomo_results.json", help="Output JSON path")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
-    data = await run_locomo_benchmark(args.data_dir, limit=args.limit, refine=not args.no_refine)
+    data = await run_locomo_benchmark(
+        args.data_dir,
+        limit=args.limit,
+        refine=not args.no_refine,
+        run_curator=args.run_curator,
+    )
 
     with open(args.output, "w") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
@@ -334,15 +378,14 @@ async def main():
         s = data["summary"]
         print(f"\n=== LoCoMo Benchmark Results ===")
         print(f"Dialogues: {s['dialogues']}, Questions: {s['evaluated_questions']}")
+        print(f"Curator:         {'yes' if s.get('curator') else 'no'}")
+        print(f"Keyword Recall:  {s['overall_keyword_recall']:.4f}")
         print(f"Overall F1:      {s['overall_f1']:.4f}")
         print(f"Overall BLEU:    {s['overall_bleu']:.4f}")
         print(f"Overall ROUGE-L: {s['overall_rouge_l']:.4f}")
         print(f"\nBy category:")
         for cat, vals in s["by_category"].items():
-            print(f"  {cat:15s}: F1={vals['f1']:.4f}  BLEU={vals['bleu']:.4f}  ROUGE-L={vals['rouge_l']:.4f}  (n={vals['count']})")
-        print(f"\nCompetitor scores (LoCoMo QA):")
-        for name, score in s["competitor_scores"].items():
-            print(f"  {name:15s}: {score:.1%}")
+            print(f"  {cat:15s}: recall={vals['keyword_recall']:.4f}  F1={vals['f1']:.4f}  BLEU={vals['bleu']:.4f}  ROUGE-L={vals['rouge_l']:.4f}  (n={vals['count']})")
     else:
         print(json.dumps(data, indent=2))
 

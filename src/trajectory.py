@@ -1,11 +1,12 @@
 """Trajectory logging, decision attribution, tips, and outcome-aware retrieval.
 
-Inspired by arXiv:2603.10600 (Trajectory-Informed Memory). Agents log execution
-trajectories (actions + outcomes), which are analyzed to extract actionable tips
+Agents log execution trajectories (actions + outcomes), which are analyzed
+to extract actionable tips
 (strategy / recovery / optimization). Memories linked to successful trajectories
 get retrieval boosts; those linked to failures get warnings.
 """
 
+import hashlib
 import json
 import logging
 import uuid
@@ -15,6 +16,17 @@ from graph import get_db, GRAPH_WRITE_LOCK, upsert_entity, add_fact, schema_guar
 from config import OUTCOME_RETRIEVAL_BOOST, OUTCOME_RETRIEVAL_PENALTY
 from text_utils import strip_fences
 from llm import llm_query
+
+
+def compute_task_fingerprint(task_description: str) -> str:
+    """Stable hash of the normalized task description for cross-agent grouping.
+
+    Two agents working on "deploy the API service" and "Deploy the API Service"
+    produce the same fingerprint, enabling contrastive consolidation across
+    agents that tackled similar tasks.
+    """
+    normalized = " ".join(task_description.lower().split())
+    return hashlib.sha256(normalized.encode()).hexdigest()[:16]
 
 logger = logging.getLogger("archivist.trajectory")
 
@@ -49,6 +61,7 @@ _ensure_trajectory_schema = schema_guard("""
         agent_id TEXT NOT NULL,
         session_id TEXT,
         task_description TEXT NOT NULL,
+        task_fingerprint TEXT DEFAULT '',
         actions TEXT NOT NULL DEFAULT '[]',
         outcome TEXT NOT NULL DEFAULT 'unknown',
         outcome_score REAL,
@@ -59,6 +72,7 @@ _ensure_trajectory_schema = schema_guard("""
     CREATE INDEX IF NOT EXISTS idx_traj_agent ON trajectories(agent_id);
     CREATE INDEX IF NOT EXISTS idx_traj_session ON trajectories(session_id);
     CREATE INDEX IF NOT EXISTS idx_traj_outcome ON trajectories(outcome);
+    CREATE INDEX IF NOT EXISTS idx_traj_fingerprint ON trajectories(task_fingerprint);
 
     CREATE TABLE IF NOT EXISTS tips (
         id TEXT PRIMARY KEY,
@@ -122,22 +136,25 @@ async def log_trajectory(
     memory_ids_used: list[str] | None = None,
     session_id: str = "",
     metadata: dict | None = None,
+    task_fingerprint: str = "",
 ) -> dict:
     """Log an execution trajectory and auto-extract tips via LLM."""
     _ensure_trajectory_schema()
 
     traj_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
+    fp = task_fingerprint or compute_task_fingerprint(task_description)
 
     with GRAPH_WRITE_LOCK:
         conn = get_db()
         try:
             conn.execute(
                 """INSERT INTO trajectories
-                   (id, agent_id, session_id, task_description, actions, outcome, outcome_score,
+                   (id, agent_id, session_id, task_description, task_fingerprint,
+                    actions, outcome, outcome_score,
                     memory_ids_used, created_at, metadata)
-                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
-                (traj_id, agent_id, session_id, task_description,
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                (traj_id, agent_id, session_id, task_description, fp,
                  json.dumps(actions), outcome, outcome_score,
                  json.dumps(memory_ids_used or []), now,
                  json.dumps(metadata or {})),
@@ -549,3 +566,48 @@ def _cluster_tips(tips: list[dict], embeddings: list[list[float]], threshold: fl
         clusters.append(cluster)
 
     return clusters
+
+
+# ── Contrastive consolidation eligibility (v1.9) ─────────────────────────────
+
+def contrastive_consolidation_candidates(min_agents: int = 2, limit: int = 20) -> list[dict]:
+    """Find task fingerprints worked on by multiple agents — eligible for
+    cross-agent contrastive consolidation.
+
+    Returns fingerprints with agent counts and outcome distributions so the
+    curator can decide which clusters warrant LLM-driven contrastive merging.
+    """
+    _ensure_trajectory_schema()
+    conn = get_db()
+    try:
+        cur = conn.execute(
+            """SELECT task_fingerprint,
+                      COUNT(DISTINCT agent_id) AS agent_count,
+                      COUNT(*) AS trajectory_count,
+                      SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END) AS successes,
+                      SUM(CASE WHEN outcome = 'failure' THEN 1 ELSE 0 END) AS failures,
+                      GROUP_CONCAT(DISTINCT agent_id) AS agents
+               FROM trajectories
+               WHERE task_fingerprint != ''
+               GROUP BY task_fingerprint
+               HAVING COUNT(DISTINCT agent_id) >= ?
+               ORDER BY trajectory_count DESC
+               LIMIT ?""",
+            (min_agents, limit),
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+    return [
+        {
+            "task_fingerprint": r["task_fingerprint"],
+            "agent_count": r["agent_count"],
+            "trajectory_count": r["trajectory_count"],
+            "successes": r["successes"],
+            "failures": r["failures"],
+            "agents": r["agents"].split(",") if r["agents"] else [],
+            "eligible": r["successes"] > 0 and r["failures"] > 0,
+        }
+        for r in rows
+    ]

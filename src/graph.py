@@ -1,6 +1,7 @@
 """SQLite-backed temporal knowledge graph for entity/relationship tracking."""
 
 import logging
+import re
 import sqlite3
 import os
 import threading
@@ -52,21 +53,25 @@ def schema_guard(ddl: str):
         \"\"\")
 
     Then call ``_ensure_schema()`` at the top of each public function that
-    needs the schema to be initialised.
+    needs the schema to be initialised.  Call ``_ensure_schema.reset()`` in
+    test fixtures to force re-initialisation against a fresh database.
     """
-    applied = False
 
     def _ensure():
-        nonlocal applied
-        if applied:
+        if _ensure.applied:
             return
         with GRAPH_WRITE_LOCK:
             conn = get_db()
             conn.executescript(ddl)
             conn.commit()
             conn.close()
-        applied = True
+        _ensure.applied = True
 
+    def _reset():
+        _ensure.applied = False
+
+    _ensure.applied = False
+    _ensure.reset = _reset
     return _ensure
 
 
@@ -98,6 +103,7 @@ def init_schema():
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             confidence REAL NOT NULL DEFAULT 1.0,
+            provenance TEXT NOT NULL DEFAULT 'unknown',
             UNIQUE(source_entity_id, target_entity_id, relation_type)
         );
         CREATE INDEX IF NOT EXISTS idx_rel_source ON relationships(source_entity_id);
@@ -112,10 +118,13 @@ def init_schema():
             created_at TEXT NOT NULL,
             superseded_by INTEGER REFERENCES facts(id),
             is_active INTEGER NOT NULL DEFAULT 1,
-            retention_class TEXT NOT NULL DEFAULT 'standard'
+            retention_class TEXT NOT NULL DEFAULT 'standard',
+            valid_from TEXT NOT NULL DEFAULT '',
+            valid_until TEXT NOT NULL DEFAULT ''
         );
         CREATE INDEX IF NOT EXISTS idx_facts_entity ON facts(entity_id);
         CREATE INDEX IF NOT EXISTS idx_facts_active ON facts(is_active);
+        CREATE INDEX IF NOT EXISTS idx_facts_valid_from ON facts(valid_from);
 
         CREATE TABLE IF NOT EXISTS curator_state (
             key TEXT PRIMARY KEY,
@@ -164,10 +173,14 @@ def _migrate_schema():
         ("facts", "retention_class", "TEXT NOT NULL DEFAULT 'standard'"),
         ("entities", "retention_class", "TEXT NOT NULL DEFAULT 'standard'"),
         ("entities", "aliases", "TEXT NOT NULL DEFAULT '[]'"),
+        ("facts", "valid_from", "TEXT NOT NULL DEFAULT ''"),
+        ("facts", "valid_until", "TEXT NOT NULL DEFAULT ''"),
+        ("relationships", "provenance", "TEXT NOT NULL DEFAULT 'unknown'"),
     ]
     indexes = [
         "CREATE INDEX IF NOT EXISTS idx_facts_retention ON facts(retention_class)",
         "CREATE INDEX IF NOT EXISTS idx_entities_retention ON entities(retention_class)",
+        "CREATE INDEX IF NOT EXISTS idx_facts_valid_from ON facts(valid_from)",
     ]
     with GRAPH_WRITE_LOCK:
         conn = get_db()
@@ -359,17 +372,20 @@ def upsert_entity(name: str, entity_type: str = "unknown", agent_id: str = "",
         return eid
 
 
-def add_relationship(source_id: int, target_id: int, rel_type: str, evidence: str, agent_id: str = ""):
+def add_relationship(source_id: int, target_id: int, rel_type: str, evidence: str,
+                     agent_id: str = "", provenance: str = "unknown"):
     now = datetime.now(timezone.utc).isoformat()
     with GRAPH_WRITE_LOCK:
         conn = get_db()
         try:
             conn.execute(
-                """INSERT INTO relationships (source_entity_id, target_entity_id, relation_type, evidence, agent_id, created_at, updated_at)
-                   VALUES (?,?,?,?,?,?,?)
+                """INSERT INTO relationships (source_entity_id, target_entity_id, relation_type,
+                   evidence, agent_id, created_at, updated_at, provenance)
+                   VALUES (?,?,?,?,?,?,?,?)
                    ON CONFLICT(source_entity_id, target_entity_id, relation_type)
-                   DO UPDATE SET evidence=excluded.evidence, updated_at=excluded.updated_at, confidence=min(confidence+0.1, 1.0)""",
-                (source_id, target_id, rel_type, evidence, agent_id, now, now),
+                   DO UPDATE SET evidence=excluded.evidence, updated_at=excluded.updated_at,
+                   confidence=min(confidence+0.1, 1.0), provenance=excluded.provenance""",
+                (source_id, target_id, rel_type, evidence, agent_id, now, now, provenance),
             )
             conn.commit()
         finally:
@@ -381,17 +397,28 @@ def _word_set(text: str) -> set[str]:
     return {w for w in text.lower().split() if len(w) >= 2}
 
 
+_DATE_IN_PATH_RE = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
+
+
 def add_fact(entity_id: int, fact_text: str, source_file: str = "",
-             agent_id: str = "", retention_class: str = "standard") -> int:
+             agent_id: str = "", retention_class: str = "standard",
+             valid_from: str = "", valid_until: str = "") -> int:
     now = datetime.now(timezone.utc).isoformat()
     new_words = _word_set(fact_text)
+
+    if not valid_from and source_file:
+        m = _DATE_IN_PATH_RE.search(source_file)
+        if m:
+            valid_from = m.group(1)
 
     with GRAPH_WRITE_LOCK:
         conn = get_db()
         cur = conn.execute(
-            "INSERT INTO facts (entity_id, fact_text, source_file, agent_id, created_at, retention_class) "
-            "VALUES (?,?,?,?,?,?)",
-            (entity_id, fact_text, source_file, agent_id, now, retention_class),
+            "INSERT INTO facts (entity_id, fact_text, source_file, agent_id, created_at, "
+            "retention_class, valid_from, valid_until) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (entity_id, fact_text, source_file, agent_id, now, retention_class,
+             valid_from, valid_until),
         )
         conn.commit()
         fid = cur.lastrowid
@@ -424,6 +451,23 @@ def add_fact(entity_id: int, fact_text: str, source_file: str = "",
         return fid
 
 
+def invalidate_fact(fact_id: int, ended: str = ""):
+    """Mark a fact as no longer valid by setting ``valid_until``.
+
+    If *ended* is empty the current UTC date is used.
+    """
+    if not ended:
+        ended = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    with GRAPH_WRITE_LOCK:
+        conn = get_db()
+        conn.execute(
+            "UPDATE facts SET valid_until=? WHERE id=?",
+            (ended, fact_id),
+        )
+        conn.commit()
+        conn.close()
+
+
 def supersede_fact(old_fact_id: int, new_fact_id: int):
     """Explicitly mark an old fact as superseded by a newer one."""
     with GRAPH_WRITE_LOCK:
@@ -438,7 +482,6 @@ def supersede_fact(old_fact_id: int, new_fact_id: int):
 
 def _normalize(text: str) -> str:
     """Lowercase, strip non-alphanumeric except hyphens/underscores."""
-    import re
     return re.sub(r"[^\w\s\-]", "", text.lower()).strip()
 
 
@@ -491,26 +534,37 @@ def get_entity_by_id(entity_id: int) -> dict | None:
         conn.close()
 
 
-def get_entity_facts(entity_id: int, include_superseded: bool = False) -> list[dict]:
+def get_entity_facts(entity_id: int, include_superseded: bool = False,
+                     as_of: str = "") -> list[dict]:
     """Get active facts for an entity.
 
     Non-superseded facts come first. Superseded facts are included only when
     ``include_superseded`` is True (useful for history views).
+
+    When ``as_of`` is an ISO-date string (e.g. ``"2025-03-15"``), only facts
+    whose validity window contains that date are returned.  Dateless facts
+    (empty ``valid_from``) are always included.
     """
     conn = get_db()
     try:
+        base = "SELECT * FROM facts WHERE entity_id=? AND is_active=1"
+        params: list = [entity_id]
+
+        if not include_superseded:
+            base += " AND superseded_by IS NULL"
+
+        if as_of:
+            base += " AND (valid_from = '' OR valid_from <= ?)"
+            params.append(as_of)
+            base += " AND (valid_until = '' OR valid_until > ?)"
+            params.append(as_of)
+
         if include_superseded:
-            cur = conn.execute(
-                "SELECT * FROM facts WHERE entity_id=? AND is_active=1 "
-                "ORDER BY (superseded_by IS NOT NULL), created_at DESC",
-                (entity_id,),
-            )
+            base += " ORDER BY (superseded_by IS NOT NULL), created_at DESC"
         else:
-            cur = conn.execute(
-                "SELECT * FROM facts WHERE entity_id=? AND is_active=1 AND superseded_by IS NULL "
-                "ORDER BY created_at DESC",
-                (entity_id,),
-            )
+            base += " ORDER BY created_at DESC"
+
+        cur = conn.execute(base, params)
         results = []
         for r in cur.fetchall():
             d = dict(r)

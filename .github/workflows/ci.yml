@@ -33,3 +33,4 @@ jobs:
         working-directory: src
         run: |
           python -c "import chunking, retrieval_filters, memory_fusion, config, rlm_retriever, reranker"
+          python -c "import pre_extractor, topic_detector, query_intent, query_classifier, compressed_index"

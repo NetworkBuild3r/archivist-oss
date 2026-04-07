@@ -389,6 +389,38 @@ def find_skill(name: str, provider: str = "") -> dict | None:
     return dict(row) if row else None
 
 
+def list_skills(status: str = "", limit: int = 100) -> list[dict]:
+    """Return all registered skills, optionally filtered by status."""
+    _ensure_skill_schema()
+    conn = get_db()
+    if status:
+        cur = conn.execute(
+            "SELECT * FROM skills WHERE status=? ORDER BY name LIMIT ?",
+            (status, limit),
+        )
+    else:
+        cur = conn.execute("SELECT * FROM skills ORDER BY name LIMIT ?", (limit,))
+    rows = [dict(r) for r in cur.fetchall()]
+    conn.close()
+    return rows
+
+
+def update_skill_status(skill_id: str, status: str) -> None:
+    """Update a skill's status (active, deprecated, disabled)."""
+    _ensure_skill_schema()
+    now = datetime.now(timezone.utc).isoformat()
+    with GRAPH_WRITE_LOCK:
+        conn = get_db()
+        try:
+            conn.execute(
+                "UPDATE skills SET status=?, updated_at=? WHERE id=?",
+                (status, now, skill_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
 # ── Skill relation graph (v1.0) ─────────────────────────────────────────────
 
 VALID_RELATION_TYPES = {"similar_to", "depend_on", "compose_with", "replaced_by"}

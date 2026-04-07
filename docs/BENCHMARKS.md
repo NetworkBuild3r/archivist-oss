@@ -205,18 +205,18 @@ python -m pytest benchmarks/micro/ --benchmark-json=.benchmarks/micro.json -v
 
 ---
 
-## Competitive Positioning
+## Feature Overview
 
-| Feature | Archivist | Mem0 | Zep | Letta |
-|---------|-----------|------|-----|-------|
-| Hybrid search (vector + BM25) | Yes (0.7/0.3 fusion) | Vector only (free) | Graph-based | Vector |
-| Temporal knowledge graph | Yes (SQLite + FTS5) | Pro only ($249/mo) | Yes (Graphiti) | No |
-| Active curation (background) | Yes (LLM dedup, tip consolidation) | No | No | Self-managed |
-| Multi-agent RBAC | Yes (namespace ACLs) | No | No | Per-agent isolation |
-| Cross-encoder reranking | Yes (BAAI/bge-reranker-v2-m3) | No | No | No |
-| Hotness scoring | Yes (freq x recency) | No | Temporal decay | No |
-| Conflict detection | Yes (vector + LLM adjudication) | No | Temporal versioning | No |
-| Self-hosted / Apache 2.0 | Yes | Open core | Yes | Yes |
+| Feature | Archivist |
+|---------|-----------|
+| Hybrid search (vector + BM25) | Yes (0.7/0.3 fusion) |
+| Temporal knowledge graph | Yes (SQLite + FTS5) |
+| Active curation (background) | Yes (LLM dedup, tip consolidation) |
+| Multi-agent RBAC | Yes (namespace ACLs) |
+| Cross-encoder reranking | Yes (BAAI/bge-reranker-v2-m3) |
+| Hotness scoring | Yes (freq x recency) |
+| Conflict detection | Yes (vector + LLM adjudication) |
+| Self-hosted / Apache 2.0 | Yes |
 
 ---
 

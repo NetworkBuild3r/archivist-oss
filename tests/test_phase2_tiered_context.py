@@ -32,18 +32,26 @@ def test_temporal_decay_recent_scores_higher():
     from graph_retrieval import apply_temporal_decay
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     results = [
-        {"score": 0.9, "date": today},
-        {"score": 0.9, "date": "2020-01-01"},
+        {"score": 0.9, "date": today, "content_date": today},
+        {"score": 0.9, "date": "2020-01-01", "content_date": "2020-01-01"},
     ]
     decayed = apply_temporal_decay(results, halflife_days=30)
     assert decayed[0]["score"] > decayed[1]["score"]
 
 def test_temporal_decay_preserves_original():
     from graph_retrieval import apply_temporal_decay
-    results = [{"score": 0.8, "date": "2025-06-01"}]
+    results = [{"score": 0.8, "date": "2025-06-01", "content_date": "2025-06-01"}]
     decayed = apply_temporal_decay(results, halflife_days=30)
     assert "original_score" in decayed[0]
     assert decayed[0]["original_score"] == 0.8
+
+def test_temporal_decay_skips_without_content_date():
+    """Results without content_date (inferred index date) should not be decayed."""
+    from graph_retrieval import apply_temporal_decay
+    results = [{"score": 0.9, "date": "2020-01-01"}]
+    decayed = apply_temporal_decay(results, halflife_days=30)
+    assert decayed[0]["score"] == 0.9
+    assert "original_score" not in decayed[0]
 
 # ── contradiction detection ──────────────────────────────────────────────────
 

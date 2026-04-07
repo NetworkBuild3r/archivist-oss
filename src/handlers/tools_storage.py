@@ -20,6 +20,7 @@ from qdrant import qdrant_client
 from rbac import get_namespace_for_agent, get_namespace_config
 from text_utils import compute_memory_checksum
 from archivist_uri import memory_uri
+from pre_extractor import pre_extract
 import hot_cache
 import journal
 import metrics as m
@@ -65,6 +66,13 @@ TOOLS: list[Tool] = [
                     "enum": ["experience", "skill", "general"],
                     "description": "Tag this memory as an experience (I did X), skill (how to do X), or general. Default general.",
                     "default": "general",
+                },
+                "thought_type": {
+                    "type": "string",
+                    "enum": ["decision", "lesson", "constraint", "insight",
+                             "preference", "milestone", "correction", "general"],
+                    "description": "Semantic thought type for precise filtering. Auto-detected if omitted.",
+                    "default": "",
                 },
                 "force_skip_conflict_check": {
                     "type": "boolean",
@@ -257,6 +265,11 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
 
     ttl_expires_at = compute_ttl(namespace, importance=importance)
 
+    thought_type = (arguments.get("thought_type") or "").strip()
+    if not thought_type:
+        hints = pre_extract(text)
+        thought_type = hints.get("thought_type", "general")
+
     payload = {
         "agent_id": agent_id,
         "text": text,
@@ -272,6 +285,7 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
         "importance_score": importance,
         "retention_class": retention,
         "memory_type": arguments.get("memory_type", "general"),
+        "thought_type": thought_type,
     }
     if retention in ("durable", "permanent"):
         ttl_expires_at = None

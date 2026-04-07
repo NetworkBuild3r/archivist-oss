@@ -1,9 +1,9 @@
 """Health dashboard and batch-size heuristic — aggregates operational metrics
 across memory, skills, retrieval, and conflicts for a single-pane view.
 
-The batch heuristic is inspired by the Batch Size Gravity article: when
-memory health degrades (high conflict rate, stale memories, low retrieval
-quality), recommend smaller batches / more frequent checkpoints.
+The batch heuristic: when memory health degrades (high conflict rate, stale
+memories, low retrieval quality), recommend smaller batches / more frequent
+checkpoints.
 """
 
 import logging

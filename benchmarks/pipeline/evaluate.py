@@ -139,7 +139,7 @@ VARIANTS = {
     "plus_rerank": {
         "BM25_ENABLED": "true",
         "GRAPH_RETRIEVAL_ENABLED": "true",
-        "RERANK_ENABLED": "false",
+        "RERANK_ENABLED": "true",
         "HOTNESS_WEIGHT": "0.15",
         "TEMPORAL_DECAY_HALFLIFE_DAYS": "365",
         "RETRIEVAL_THRESHOLD": "0.2",
@@ -151,6 +151,17 @@ VARIANTS = {
         "HOTNESS_WEIGHT": "0.15",
         "TEMPORAL_DECAY_HALFLIFE_DAYS": "365",
         "RETRIEVAL_THRESHOLD": "0.2",
+    },
+    "full_pipeline_rerank": {
+        "BM25_ENABLED": "true",
+        "GRAPH_RETRIEVAL_ENABLED": "true",
+        "RERANK_ENABLED": "true",
+        "HOTNESS_WEIGHT": "0.15",
+        "TEMPORAL_DECAY_HALFLIFE_DAYS": "365",
+        "RETRIEVAL_THRESHOLD": "0.2",
+        "TEMPORAL_INTENT_ENABLED": "true",
+        "BM25_RESCUE_ENABLED": "true",
+        "ADAPTIVE_VECTOR_LIMIT_ENABLED": "true",
     },
 }
 
@@ -304,13 +315,20 @@ async def run_variant(variant_name: str, questions: list[dict], refine: bool) ->
 
     for q in questions:
         t0 = time.monotonic()
+        q_namespace = q.get("namespace", "")
+        q_agent_id = q.get("caller_agent_id", "")
+        q_date_from = q.get("date_from", "")
+        q_date_to = q.get("date_to", "")
         try:
             result = await recursive_retrieve(
                 query=q["query"],
-                namespace="",
+                namespace=q_namespace,
+                agent_id=q_agent_id,
                 limit=10,
                 refine=refine,
                 tier="l2",
+                date_from=q_date_from,
+                date_to=q_date_to,
             )
         except Exception as e:
             logger.warning("Query %d failed: %s", q["id"], e)
@@ -589,6 +607,65 @@ def format_full_comparison_table(
     return "\n".join(lines)
 
 
+_FIXTURE_GLOSSARY = {
+    "kubernetes": {"type": "technology", "aliases": ["k8s"]},
+    "prometheus": {"type": "tool"},
+    "grafana": {"type": "tool"},
+    "argocd": {"type": "tool", "aliases": ["argo cd"]},
+    "gitlab ci": {"type": "tool", "aliases": ["gitlab"]},
+    "postgresql": {"type": "database", "aliases": ["postgres"]},
+    "redis": {"type": "database"},
+    "vault": {"type": "tool", "aliases": ["hashicorp vault"]},
+    "istio": {"type": "technology"},
+    "rabbitmq": {"type": "tool"},
+    "pagerduty": {"type": "tool"},
+    "karpenter": {"type": "tool"},
+    "flyway": {"type": "tool"},
+    "pgbouncer": {"type": "tool"},
+    "playwright": {"type": "tool"},
+    "thanos": {"type": "tool"},
+    "etcd": {"type": "database"},
+    "chief": {"type": "agent"},
+    "gitbob": {"type": "agent"},
+    "grafgreg": {"type": "agent"},
+    "argo": {"type": "agent"},
+    "kubekate": {"type": "agent"},
+    "securitysam": {"type": "agent"},
+    "needleagent": {"type": "agent"},
+}
+
+
+def _seed_graph_from_fixtures(corpus_dir: str):
+    """Deterministic graph population from a known glossary — no LLM calls.
+
+    Seeds entities + stub facts so graph-dependent retrieval paths activate
+    during benchmarks without requiring a full curator run.
+    """
+    from graph import upsert_entity, add_fact, init_schema
+    init_schema()
+
+    for name, meta in _FIXTURE_GLOSSARY.items():
+        eid = upsert_entity(name, meta["type"])
+        add_fact(eid, f"{name} is a {meta['type']} in the benchmark corpus", "benchmark/fixtures", "benchmark")
+        for alias in meta.get("aliases", []):
+            upsert_entity(alias, meta["type"])
+
+    import glob as _glob
+    md_files = _glob.glob(os.path.join(corpus_dir, "**", "*.md"), recursive=True)
+    for fpath in md_files[:50]:
+        try:
+            with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+                text = f.read(2000).lower()
+        except Exception:
+            continue
+        rel = os.path.relpath(fpath, corpus_dir)
+        for name, meta in _FIXTURE_GLOSSARY.items():
+            if name in text:
+                eid = upsert_entity(name, meta["type"])
+                snippet = text[:200].replace("\n", " ").strip()
+                add_fact(eid, f"Referenced in {rel}: {snippet[:120]}", rel, "benchmark")
+
+
 async def _run_benchmark_session(
     *,
     corpus_dir: str,
@@ -598,6 +675,7 @@ async def _run_benchmark_session(
     skip_index: bool,
     run_curator: bool,
     memory_scale: str | None,
+    **kwargs,
 ) -> tuple[dict, list[dict]]:
     """Index (optional), curator (optional), run variants; return (all_results, all_summaries)."""
     import importlib
@@ -618,6 +696,11 @@ async def _run_benchmark_session(
         logger.info("Running curator extraction over %s (LLM calls)...", corpus_dir)
         n = await curator.extract_all_agent_memories()
         logger.info("Curator finished: %d files extracted", n)
+
+    warm_graph = kwargs.get("warm_graph", False)
+    if warm_graph and not run_curator:
+        _seed_graph_from_fixtures(corpus_dir)
+        logger.info("Warm graph seeded from fixture glossary")
 
     all_results = {}
     all_summaries = []
@@ -678,6 +761,11 @@ async def main():
         "--run-curator",
         action="store_true",
         help="After indexing, run LLM graph extraction on all agent markdown (costs tokens)",
+    )
+    parser.add_argument(
+        "--warm-graph",
+        action="store_true",
+        help="Seed the KG from a deterministic fixture glossary (no LLM cost; cheaper than --run-curator)",
     )
     parser.add_argument(
         "--scale-sweep",
@@ -775,6 +863,7 @@ async def main():
                 skip_index=args.skip_index,
                 run_curator=args.run_curator,
                 memory_scale=scale,
+                warm_graph=args.warm_graph,
             )
             by_scale[scale] = {
                 "summaries": summaries,
@@ -857,6 +946,7 @@ async def main():
         refine=refine,
         skip_index=args.skip_index,
         run_curator=args.run_curator,
+        warm_graph=args.warm_graph,
         memory_scale=args.memory_scale,
     )
 

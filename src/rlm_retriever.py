@@ -20,6 +20,11 @@ from config import (
     BM25_ENABLED,
     QUERY_CLASSIFICATION_ENABLED,
     IMPORTANCE_WEIGHT,
+    TEMPORAL_INTENT_ENABLED,
+    BM25_RESCUE_ENABLED, BM25_RESCUE_MIN_SCORE_RATIO, BM25_RESCUE_MAX_SLOTS,
+    ADAPTIVE_VECTOR_LIMIT_ENABLED, ADAPTIVE_VECTOR_MIN_RESULTS, ADAPTIVE_VECTOR_LIMIT_MULTIPLIER,
+    CROSS_AGENT_MAX_SHARE,
+    TOPIC_ROUTING_ENABLED,
 )
 from embeddings import embed_text
 from llm import llm_query
@@ -38,11 +43,13 @@ from tiering import select_tier
 from tokenizer import count_tokens
 from trajectory import get_outcome_adjustments
 from hotness import apply_hotness_to_results
+from query_intent import classify_temporal_intent
+from topic_detector import detect_query_topic
 import hot_cache
 import retrieval_log
 import metrics as m
 from namespace_inventory import NamespaceInventory, get_inventory
-from query_classifier import classify_query
+from query_classifier import classify_query_full, SUBCATEGORY_TO_TOPIC
 
 logger = logging.getLogger("archivist.rlm")
 
@@ -67,6 +74,10 @@ def _retrieval_trace(
     auto_classified_type: str = "",
     inventory_total: int | None = None,
     entity_facts_injected: int = 0,
+    temporal_intent: str = "",
+    bm25_rescue_count: int = 0,
+    adaptive_widened: bool = False,
+    cross_agent_capped: bool = False,
 ) -> dict:
     trace = {
         "vector_search_limit": vector_limit,
@@ -96,6 +107,14 @@ def _retrieval_trace(
         trace["auto_classified_type"] = auto_classified_type
     if inventory_total is not None:
         trace["inventory_total"] = inventory_total
+    if temporal_intent:
+        trace["temporal_intent"] = temporal_intent
+    if bm25_rescue_count:
+        trace["bm25_rescue_count"] = bm25_rescue_count
+    if adaptive_widened:
+        trace["adaptive_widened"] = True
+    if cross_agent_capped:
+        trace["cross_agent_capped"] = True
     return trace
 
 
@@ -180,6 +199,8 @@ async def search_vectors(
     date_from: str = "",
     date_to: str = "",
     memory_type: str = "",
+    topic: str = "",
+    thought_type: str = "",
     limit: int = 20,
 ) -> list[dict]:
     """Stage 1: coarse vector search in Qdrant with optional filters."""
@@ -205,6 +226,10 @@ async def search_vectors(
         must_filters.append(FieldCondition(key="date", range=Range(lte=date_to)))
     if memory_type:
         must_filters.append(FieldCondition(key="memory_type", match=MatchValue(value=memory_type)))
+    if topic:
+        must_filters.append(FieldCondition(key="topic", match=MatchValue(value=topic)))
+    if thought_type:
+        must_filters.append(FieldCondition(key="thought_type", match=MatchValue(value=thought_type)))
 
     search_filter = Filter(must=must_filters) if must_filters else None
 
@@ -227,6 +252,8 @@ async def search_vectors(
             "file_path": hit.payload.get("file_path", ""),
             "file_type": hit.payload.get("file_type", ""),
             "date": hit.payload.get("date", ""),
+            "content_date": hit.payload.get("content_date", ""),
+            "indexed_at": hit.payload.get("indexed_at", ""),
             "team": hit.payload.get("team", ""),
             "namespace": hit.payload.get("namespace", ""),
             "chunk_index": hit.payload.get("chunk_index", 0),
@@ -234,6 +261,8 @@ async def search_vectors(
             "is_parent": hit.payload.get("is_parent", False),
             "importance_score": hit.payload.get("importance_score", 0.5),
             "retention_class": hit.payload.get("retention_class", "standard"),
+            "topic": hit.payload.get("topic", ""),
+            "thought_type": hit.payload.get("thought_type", ""),
         }
         for hit in results
     ]
@@ -319,22 +348,47 @@ async def recursive_retrieve(
     user_memory_type = memory_type
     stage0_inventory = None
     auto_type = ""
+    auto_subcategory = ""
     effective_memory_type = memory_type
-    if QUERY_CLASSIFICATION_ENABLED and not memory_type and namespace:
-        stage0_inventory = get_inventory(namespace)
-        auto_type = await classify_query(query, stage0_inventory)
+    if QUERY_CLASSIFICATION_ENABLED and not memory_type:
+        if namespace:
+            stage0_inventory = get_inventory(namespace)
+        auto_type, auto_subcategory = await classify_query_full(
+            query, inventory=stage0_inventory,
+        )
         if auto_type:
             effective_memory_type = auto_type
+
+    temporal_intent = ""
+    if TEMPORAL_INTENT_ENABLED:
+        temporal_intent = classify_temporal_intent(query)
+
+    detected_topic = ""
+    topic_fallback_used = False
+    if TOPIC_ROUTING_ENABLED:
+        detected_topic = detect_query_topic(query)
+        if not detected_topic and auto_subcategory:
+            detected_topic = SUBCATEGORY_TO_TOPIC.get(auto_subcategory, "")
 
     effective_threshold = threshold if threshold is not None else RETRIEVAL_THRESHOLD
     vector_limit = max(VECTOR_SEARCH_LIMIT, limit)
     n_graph_entities = 0
     n_graph_items = 0
+    n_bm25_rescue = 0
+    was_adaptive_widened = False
+    was_cross_agent_capped = False
 
     def _trace_kw() -> dict:
         return {
             "auto_classified_type": auto_type,
+            "auto_subcategory": auto_subcategory,
             "inventory_total": stage0_inventory.total_memories if stage0_inventory else None,
+            "temporal_intent": temporal_intent,
+            "detected_topic": detected_topic,
+            "topic_fallback_used": topic_fallback_used,
+            "bm25_rescue_count": n_bm25_rescue,
+            "adaptive_widened": was_adaptive_widened,
+            "cross_agent_capped": was_cross_agent_capped,
         }
 
     cache_extra = f"{agent_id}|{','.join(agent_ids or [])}|{team}|{date_from}|{date_to}|{limit}|{refine}"
@@ -364,6 +418,7 @@ async def recursive_retrieve(
         return out
 
     # Stage 1: Coarse vector search (wide recall)
+    # Topic routing: try topic-filtered search first, fall back if too few results
     coarse = await search_vectors(
         query,
         agent_id=agent_id,
@@ -373,8 +428,23 @@ async def recursive_retrieve(
         date_from=date_from,
         date_to=date_to,
         memory_type=effective_memory_type,
+        topic=detected_topic,
         limit=vector_limit,
     )
+    if detected_topic and len(coarse) < ADAPTIVE_VECTOR_MIN_RESULTS:
+        topic_fallback_used = True
+        coarse = await search_vectors(
+            query,
+            agent_id=agent_id,
+            agent_ids=agent_ids,
+            team=team,
+            namespace=namespace,
+            date_from=date_from,
+            date_to=date_to,
+            memory_type=effective_memory_type,
+            topic="",
+            limit=vector_limit,
+        )
     n_coarse = len(coarse)
 
     # Stage 1-bm25: BM25 keyword search + fusion (v1.2)
@@ -435,10 +505,12 @@ async def recursive_retrieve(
     coarse = dedupe_vector_hits(coarse)
     n_dedupe = len(coarse)
 
-    # Stage 1c: Temporal decay (v0.5)
+    # Stage 1c: Temporal decay (v0.5, intent-aware v1.9)
     temporal_applied = False
     if TEMPORAL_DECAY_HALFLIFE_DAYS > 0:
-        coarse = apply_temporal_decay(coarse, TEMPORAL_DECAY_HALFLIFE_DAYS)
+        coarse = apply_temporal_decay(
+            coarse, TEMPORAL_DECAY_HALFLIFE_DAYS, temporal_intent=temporal_intent,
+        )
         temporal_applied = True
 
     # Stage 1d: Hotness scoring (v1.0)
@@ -450,11 +522,83 @@ async def recursive_retrieve(
     # Stage 2: Threshold filter (Phase 1)
     filtered = apply_retrieval_threshold(coarse, effective_threshold)
 
+    # Stage 2-rescue: Adaptive vector limit (v1.9)
+    if (ADAPTIVE_VECTOR_LIMIT_ENABLED
+            and len(filtered) < ADAPTIVE_VECTOR_MIN_RESULTS
+            and n_coarse >= vector_limit):
+        wider_limit = int(vector_limit * ADAPTIVE_VECTOR_LIMIT_MULTIPLIER)
+        wider_coarse = await search_vectors(
+            query, agent_id=agent_id, agent_ids=agent_ids, team=team,
+            namespace=namespace, date_from=date_from, date_to=date_to,
+            memory_type=effective_memory_type, limit=wider_limit,
+        )
+        if len(wider_coarse) > n_coarse:
+            was_adaptive_widened = True
+            wider_coarse = dedupe_vector_hits(wider_coarse)
+            if TEMPORAL_DECAY_HALFLIFE_DAYS > 0:
+                wider_coarse = apply_temporal_decay(
+                    wider_coarse, TEMPORAL_DECAY_HALFLIFE_DAYS,
+                    temporal_intent=temporal_intent,
+                )
+            wider_coarse = apply_hotness_to_results(wider_coarse)
+            wider_coarse = apply_importance_to_results(wider_coarse)
+            wider_filtered = apply_retrieval_threshold(wider_coarse, effective_threshold)
+            existing_ids = {r.get("id") for r in filtered if r.get("id")}
+            for r in wider_filtered:
+                if r.get("id") and r["id"] not in existing_ids:
+                    filtered.append(r)
+                    existing_ids.add(r["id"])
+            filtered.sort(key=lambda x: x.get("score", 0), reverse=True)
+
+    # Stage 2-bm25-rescue: BM25 rescue slots (v1.9)
+    if BM25_RESCUE_ENABLED and BM25_ENABLED and n_bm25 > 0:
+        bm25_max = max((r.get("bm25_score", 0) for r in coarse if r.get("bm25_score")), default=0)
+        if bm25_max > 0:
+            rescue_threshold = bm25_max * BM25_RESCUE_MIN_SCORE_RATIO
+            existing_ids = {r.get("id") for r in filtered if r.get("id")}
+            rescued = 0
+            for r in coarse:
+                if rescued >= BM25_RESCUE_MAX_SLOTS:
+                    break
+                bm25_s = r.get("bm25_score", 0)
+                if bm25_s >= rescue_threshold and r.get("id") and r["id"] not in existing_ids:
+                    r["bm25_rescue"] = True
+                    filtered.append(r)
+                    existing_ids.add(r["id"])
+                    rescued += 1
+            if rescued:
+                n_bm25_rescue = rescued
+                filtered.sort(key=lambda x: x.get("score", 0), reverse=True)
+
+    # Stage 2-xagent: Cross-agent rank guards (v1.9)
+    if agent_ids and len(agent_ids) > 1 and CROSS_AGENT_MAX_SHARE < 1.0 and filtered:
+        max_per_agent = max(1, int(len(filtered) * CROSS_AGENT_MAX_SHARE))
+        agent_counts: dict[str, int] = {}
+        guarded: list[dict] = []
+        overflow: list[dict] = []
+        for r in filtered:
+            aid = r.get("agent_id", "")
+            cnt = agent_counts.get(aid, 0)
+            if cnt < max_per_agent:
+                guarded.append(r)
+                agent_counts[aid] = cnt + 1
+            else:
+                overflow.append(r)
+                was_cross_agent_capped = True
+        guarded.extend(overflow)
+        filtered = guarded
+
     # Stage 2a: Entity fact injection (v1.7) — guaranteed recall for known entities
+    # Vector-first preservation (v1.8): snapshot top vector results so they
+    # are never displaced by injected entity facts.
     n_entity_facts_injected = 0
     if GRAPH_RETRIEVAL_ENABLED and detected_entities:
+        vector_preserve_n = min(5, max(limit // 2, 1))
+        vector_winners = [r for r in filtered if r.get("file_type") != "entity_fact"][:vector_preserve_n]
+
         entity_facts = build_entity_fact_results(
             detected_entities, min_score=effective_threshold + 0.05,
+            as_of=date_from,
         )
         if entity_facts:
             existing_texts = {r.get("text", "")[:100] for r in filtered}
@@ -465,6 +609,14 @@ async def recursive_retrieve(
                     n_entity_facts_injected += 1
             if n_entity_facts_injected:
                 filtered.sort(key=lambda x: x.get("score", 0), reverse=True)
+
+        # Re-insert vector winners that got pushed out by injections
+        if vector_winners:
+            present_texts = {r.get("text", "")[:100] for r in filtered[:limit]}
+            for vw in vector_winners:
+                if vw.get("text", "")[:100] not in present_texts:
+                    filtered.insert(0, vw)
+            filtered.sort(key=lambda x: x.get("score", 0), reverse=True)
 
     if not filtered:
         below = {

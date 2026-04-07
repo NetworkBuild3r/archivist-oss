@@ -139,7 +139,7 @@ TOOLS: list[Tool] = [
         description=(
             "Recommend a safe batch size based on memory health signals. "
             "Considers conflict rate, stale memory %, cache hit rate, and degraded skills. "
-            "Inspired by Batch Size Gravity — when health degrades, use smaller batches."
+            "When health degrades, use smaller batches."
         ),
         inputSchema={
             "type": "object",

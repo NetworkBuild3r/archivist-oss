@@ -31,11 +31,20 @@ def _isolate_env(monkeypatch, tmp_path):
     monkeypatch.setattr(graph, "SQLITE_PATH", db_path)
     graph.init_schema()
 
-    for mod_name in ("trajectory", "skills", "curator_queue", "retrieval_log"):
+    _schema_guards = [
+        ("trajectory", "_ensure_trajectory_schema"),
+        ("skills", "_ensure_skill_schema"),
+        ("curator_queue", "_ensure_schema"),
+        ("retrieval_log", "_ensure_schema"),
+        ("hotness", "_ensure_schema"),
+        ("audit", "_ensure_audit_schema"),
+    ]
+    for mod_name, guard_attr in _schema_guards:
         try:
             mod = __import__(mod_name)
-            if hasattr(mod, "_SCHEMA_APPLIED"):
-                monkeypatch.setattr(mod, "_SCHEMA_APPLIED", False)
+            guard = getattr(mod, guard_attr, None)
+            if guard is not None and hasattr(guard, "reset"):
+                guard.reset()
         except ImportError:
             pass
 

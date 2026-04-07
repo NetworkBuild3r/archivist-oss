@@ -72,6 +72,10 @@ HOT_CACHE_TTL_SECONDS = int(os.getenv("HOT_CACHE_TTL_SECONDS", "600"))
 TRAJECTORY_EXPORT_ENABLED = _env_bool("TRAJECTORY_EXPORT_ENABLED")
 TRAJECTORY_EXPORT_MAX = int(os.getenv("TRAJECTORY_EXPORT_MAX", "200"))
 
+# ── Observability (v0.9) ──────────────────────────────────────────────────────
+METRICS_ENABLED = _env_bool("METRICS_ENABLED", "true")
+DEFAULT_CONSISTENCY = os.getenv("DEFAULT_CONSISTENCY", "eventual")
+
 # ── Webhooks (v0.9) ─────────────────────────────────────────────────────────
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").strip()
 WEBHOOK_TIMEOUT = float(os.getenv("WEBHOOK_TIMEOUT", "5"))
@@ -86,6 +90,25 @@ CURATOR_QUEUE_DRAIN_INTERVAL = int(os.getenv("CURATOR_QUEUE_DRAIN_INTERVAL", "30
 HOTNESS_WEIGHT = float(os.getenv("HOTNESS_WEIGHT", "0.15"))
 HOTNESS_HALFLIFE_DAYS = int(os.getenv("HOTNESS_HALFLIFE_DAYS", "7"))
 IMPORTANCE_WEIGHT = float(os.getenv("IMPORTANCE_WEIGHT", "0.10"))
+
+# ── Entity injection tuning (v1.8 — needle regression fix) ──────────────────
+MAX_ENTITY_FACT_INJECTIONS = int(os.getenv("MAX_ENTITY_FACT_INJECTIONS", "15"))
+ENTITY_SPECIFICITY_MAX_MENTIONS = int(os.getenv("ENTITY_SPECIFICITY_MAX_MENTIONS", "20"))
+
+# ── Temporal intent & adaptive retrieval (v1.9 — recall improvements) ────────
+TEMPORAL_INTENT_ENABLED = _env_bool("TEMPORAL_INTENT_ENABLED")
+TEMPORAL_HISTORICAL_HALFLIFE_MULTIPLIER = float(os.getenv("TEMPORAL_HISTORICAL_HALFLIFE_MULTIPLIER", "10"))
+BM25_RESCUE_ENABLED = _env_bool("BM25_RESCUE_ENABLED")
+BM25_RESCUE_MIN_SCORE_RATIO = float(os.getenv("BM25_RESCUE_MIN_SCORE_RATIO", "0.6"))
+BM25_RESCUE_MAX_SLOTS = int(os.getenv("BM25_RESCUE_MAX_SLOTS", "3"))
+ADAPTIVE_VECTOR_LIMIT_ENABLED = _env_bool("ADAPTIVE_VECTOR_LIMIT_ENABLED")
+ADAPTIVE_VECTOR_MIN_RESULTS = int(os.getenv("ADAPTIVE_VECTOR_MIN_RESULTS", "3"))
+ADAPTIVE_VECTOR_LIMIT_MULTIPLIER = float(os.getenv("ADAPTIVE_VECTOR_LIMIT_MULTIPLIER", "3"))
+CROSS_AGENT_MAX_SHARE = float(os.getenv("CROSS_AGENT_MAX_SHARE", "0.6"))
+
+# ── Topic routing (v1.10 — keyword-based pre-vector filter) ──────────────
+TOPIC_ROUTING_ENABLED = _env_bool("TOPIC_ROUTING_ENABLED")
+TOPIC_MAP_PATH = os.getenv("TOPIC_MAP_PATH", "")
 
 # ── Retention classes (v1.7 — "never forget" pinning) ────────────────────────
 VALID_RETENTION_CLASSES = ("ephemeral", "standard", "durable", "permanent")
@@ -108,15 +131,15 @@ CURATOR_EXTRACT_SKIP_SEGMENTS: list[str] = [
     if p.strip()
 ]
 
-# ── Memory awareness — Stage 0 query classification (v1.6 — MemCollab-inspired) ─
+# ── Memory awareness — Stage 0 query classification (v1.6) ───────────────────
 QUERY_CLASSIFICATION_ENABLED = _env_bool("QUERY_CLASSIFICATION_ENABLED")
 
-# ── BM25 / FTS5 hybrid search (v1.2 — ReMe-inspired) ────────────────────────
+# ── BM25 / FTS5 hybrid search (v1.2) ─────────────────────────────────────────
 BM25_ENABLED = _env_bool("BM25_ENABLED")
 BM25_WEIGHT = float(os.getenv("BM25_WEIGHT", "0.3"))
 VECTOR_WEIGHT = float(os.getenv("VECTOR_WEIGHT", "0.7"))
 
-# ── Context window management (v1.1 — ReMe-inspired) ────────────────────────
+# ── Context window management (v1.1) ─────────────────────────────────────────
 DEFAULT_CONTEXT_BUDGET = int(os.getenv("DEFAULT_CONTEXT_BUDGET", "128000"))
 
 # ── Journal exports (v1.5 — human-readable markdown alongside Qdrant) ────────

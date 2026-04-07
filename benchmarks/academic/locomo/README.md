@@ -42,14 +42,11 @@ python -m benchmarks.academic.locomo.adapter --data-dir data/locomo --limit 5 --
 5. For each benchmark question, calls `recursive_retrieve` with `refine=true`
 6. Compares the synthesized answer against ground truth using F1, BLEU-1, and ROUGE-L
 
-## Published Competitor Scores (2026)
+## Archivist Scores
 
-| System | LoCoMo QA Score |
-|--------|----------------|
-| Zep (Graphiti) | ~85% |
-| Letta/MemGPT | ~83.2% |
-| Mem0 | ~58-66% |
-| **Archivist** | **TBD** |
+| Metric | Score |
+|--------|-------|
+| **Archivist** | Run the adapter to measure |
 
 ## What Archivist Features Are Exercised
 
