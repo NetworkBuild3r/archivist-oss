@@ -30,7 +30,7 @@ curl http://localhost:3100/health          # {"status":"ok"}
 
 Full Docker options (host vLLM, `/opt/appdata` volumes, overrides): [`docs/DOCKER.md`](docs/DOCKER.md).
 
-Point any MCP client at `http://localhost:3100/mcp/sse` — done. Your agents now have long-term memory with search, RBAC, knowledge graphs, and active curation out of the box.
+Point any MCP client at `http://localhost:3100/mcp` — done. Your agents now have long-term memory with search, RBAC, knowledge graphs, and active curation out of the box. Legacy SSE compatibility remains available at `http://localhost:3100/mcp/sse`.
 
 ---
 
@@ -210,8 +210,10 @@ curl http://localhost:3100/health
 
 Point any MCP client at:
 ```
-http://localhost:3100/mcp/sse
+http://localhost:3100/mcp
 ```
+
+Legacy SSE clients can continue using `http://localhost:3100/mcp/sse`.
 
 That's it. Your agents can now `archivist_store`, `archivist_search`, `archivist_recall`, and use all 30 tools.
 
@@ -342,7 +344,7 @@ graph TB
         Files[("Markdown Files<br/>Journal Exports<br/>+ MEMORY_ROOT")]
     end
 
-    A1 & A2 & A3 <-->|"MCP over HTTP SSE"| Router
+    A1 & A2 & A3 <-->|"MCP over HTTP"| Router
     Pipeline <--> Qdrant
     Pipeline <--> SQLite
     Curator --> SQLite
@@ -497,8 +499,9 @@ These are available alongside the MCP interface for admin, monitoring, and integ
 |----------|--------|------|-------------|
 | `/health` | GET | No | Liveness probe (Kubernetes-friendly) |
 | `/metrics` | GET | Yes | Prometheus text exposition |
-| `/mcp/sse` | GET | Yes | MCP SSE transport entrypoint |
-| `/mcp/messages/` | POST | Yes | MCP message handler |
+| `/mcp` | GET/POST/DELETE | Yes | MCP Streamable HTTP transport entrypoint (preferred) |
+| `/mcp/sse` | GET | Yes | Legacy MCP SSE transport entrypoint |
+| `/mcp/messages/` | POST | Yes | Legacy SSE message handler |
 | `/admin/invalidate` | GET/POST | Yes | Trigger TTL-based memory expiry |
 | `/admin/retrieval-logs` | GET | Yes | Export retrieval pipeline traces |
 | `/admin/dashboard` | GET | Yes | Health dashboard JSON (`?batch=true` for batch heuristic) |

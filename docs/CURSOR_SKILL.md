@@ -2,13 +2,14 @@
 
 ## Overview
 
-Archivist exposes 30 memory tools via the Model Context Protocol (MCP) over HTTP SSE. Any MCP-compatible client can connect and use these tools.
+Archivist exposes 30 memory tools via the Model Context Protocol (MCP) over Streamable HTTP (preferred) or legacy HTTP SSE. Any MCP-compatible client can connect and use these tools.
 
 ## Connection
 
-```
-SSE endpoint: http://<host>:3100/mcp/sse
-Message endpoint: http://<host>:3100/mcp/messages/
+```text
+Streamable HTTP endpoint: http://<host>:3100/mcp
+Legacy SSE endpoint: http://<host>:3100/mcp/sse
+Legacy SSE message endpoint: http://<host>:3100/mcp/messages/
 ```
 
 ---
