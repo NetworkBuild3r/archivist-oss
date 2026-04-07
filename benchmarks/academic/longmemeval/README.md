@@ -10,6 +10,16 @@ Evaluates Archivist against **LongMemEval** (ICLR 2025) — a 500-question bench
 | Temporal Reasoning | Understand temporal aspects | temporal-reasoning |
 | Abstention | Refrain from answering unknown questions | *_abs suffixed questions |
 
+## Evaluation Protocol
+
+This adapter uses the **official LongMemEval evaluation protocol** from the paper:
+
+- **QA Accuracy** via **LLM-as-judge** with task-specific prompts (from `src/evaluation/evaluate_qa.py` in the official repo). Each question type has its own judge prompt to handle nuances like off-by-one tolerance for temporal questions, update precedence for knowledge-update, and preference rubrics.
+- **Retrieval metrics**: **Recall@k** and **NDCG@k** (k=5, 10) computed against ground-truth `answer_session_ids`, matching `src/retrieval/eval_utils.py`.
+- Results are broken down by the 6 official question types for direct comparison with published numbers.
+
+The official protocol uses GPT-4o as judge; we use whatever `LLM_MODEL` is configured (e.g., Qwen). The judge prompts are identical to the paper's.
+
 ## Setup
 
 ### 1. Download dataset
@@ -17,22 +27,13 @@ Evaluates Archivist against **LongMemEval** (ICLR 2025) — a 500-question bench
 ```bash
 mkdir -p data/longmemeval && cd data/longmemeval
 wget https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_s_cleaned.json
-wget https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_oracle.json
-# Optional (large, ~500 sessions per question):
-# wget https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_m_cleaned.json
 cd ../..
 ```
 
-### 2. Ensure Qdrant is running
+### 2. Run
 
 ```bash
-docker compose up -d qdrant
-```
-
-### 3. Run
-
-```bash
-# Full run (500 questions, with LLM refinement)
+# Full run (500 questions)
 python -m benchmarks.academic.longmemeval.adapter \
     --data-file data/longmemeval/longmemeval_s_cleaned.json \
     --output .benchmarks/longmemeval_results.json
@@ -43,28 +44,32 @@ python -m benchmarks.academic.longmemeval.adapter \
     --limit 10 --no-refine \
     --output .benchmarks/longmemeval_quick.json
 
-# With curator (KG entity extraction for entity-anchored retrieval)
+# Ablation across pipeline variants
 python -m benchmarks.academic.longmemeval.adapter \
     --data-file data/longmemeval/longmemeval_s_cleaned.json \
-    --run-curator \
-    --output .benchmarks/longmemeval_with_kg.json
+    --ablation --output .benchmarks/longmemeval_ablation.json
+
+# Docker (uses compose Qwen/Qdrant/Tailscale):
+bash benchmarks/scripts/run_academic_benchmarks_docker.sh --limit 50
 ```
 
 ## Metrics
 
-| Metric | Description |
-|--------|-------------|
-| **keyword_recall** | Fraction of ground-truth words found in answer + sources (R@k proxy) |
-| **session_recall** | Fraction of evidence sessions retrieved in top-k results |
-| **f1** | Token-level F1 between answer and ground truth |
+| Metric | Source | Description |
+|--------|--------|-------------|
+| **QA Accuracy** | Official (LLM-as-judge) | Binary correct/incorrect per question, task-specific prompts |
+| **Task-Averaged Accuracy** | Official | Mean accuracy across the 6 question types (not micro-averaged) |
+| **Abstention Accuracy** | Official | Accuracy on unanswerable questions (*_abs) |
+| **Recall@k** | Official (eval_utils.py) | Fraction of evidence sessions retrieved in top-k |
+| **NDCG@k** | Official (eval_utils.py) | Normalized DCG over evidence session rankings |
 
 ## Reference
 
 ```bibtex
-@article{wu2024longmemeval,
+@inproceedings{wu2025longmemeval,
     title={LongMemEval: Benchmarking Chat Assistants on Long-Term Interactive Memory},
     author={Wu, Di and Wang, Hongwei and Yu, Wenhao and Zhang, Yuwei and Chang, Kai-Wei and Yu, Dong},
-    year={2024},
-    journal={arXiv preprint arXiv:2410.10813},
+    booktitle={ICLR},
+    year={2025},
 }
 ```

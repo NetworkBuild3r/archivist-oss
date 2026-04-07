@@ -1,6 +1,11 @@
 """LongMemEval benchmark adapter — evaluates Archivist against the LongMemEval
 benchmark (ICLR 2025, xiaowu0162/LongMemEval).
 
+Uses the **official evaluation protocol**:
+  - QA Accuracy via LLM-as-judge (task-specific prompts from evaluate_qa.py)
+  - Retrieval: Recall@5, Recall@10, NDCG@5, NDCG@10 using ground-truth evidence sessions
+  - Per-category breakdown matching the paper's 6 question types
+
 LongMemEval tests 5 core long-term memory abilities across 500 questions:
   - Information Extraction (single-session-user, single-session-assistant, single-session-preference)
   - Multi-Session Reasoning (multi-session)
@@ -12,7 +17,6 @@ Setup:
     1. Download the dataset:
        mkdir -p data/longmemeval && cd data/longmemeval
        wget https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_s_cleaned.json
-       wget https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_oracle.json
 
     2. Run single variant:
        python -m benchmarks.academic.longmemeval.adapter \\
@@ -31,12 +35,14 @@ Setup:
            --limit 10 --no-refine --output .benchmarks/longmemeval_quick.json
 
 """
+from __future__ import annotations
 
 import argparse
 import asyncio
 import collections
 import json
 import logging
+import math
 import os
 import shutil
 import sys
@@ -44,7 +50,13 @@ import tempfile
 import time
 from pathlib import Path
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "src"))
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+from benchmarks.env_loader import load_repo_env
+
+load_repo_env()
+sys.path.insert(0, os.path.join(_REPO_ROOT, "src"))
 
 logger = logging.getLogger("archivist.benchmark.longmemeval")
 
@@ -111,47 +123,107 @@ def _apply_variant(variant_name: str):
     importlib.reload(config)
 
 
-# Category mapping from LongMemEval question_type to readable names
-_CATEGORY_MAP = {
-    "single-session-user": "information_extraction",
-    "single-session-assistant": "information_extraction",
-    "single-session-preference": "information_extraction",
-    "multi-session": "multi_session_reasoning",
-    "knowledge-update": "knowledge_updates",
-    "temporal-reasoning": "temporal_reasoning",
-}
+# ── Official LLM-as-judge prompts (from xiaowu0162/LongMemEval) ──────────────
+# These task-specific prompts are from src/evaluation/evaluate_qa.py in the
+# official repo (MIT license).  They produce a yes/no verdict with >97% human
+# agreement per the paper.
+
+def _get_judge_prompt(task: str, question: str, answer: str, response: str,
+                      abstention: bool = False) -> str:
+    """Build the official LongMemEval answer-check prompt for the LLM judge."""
+    if abstention:
+        return (
+            "I will give you an unanswerable question, an explanation, and a response "
+            "from a model. Please answer yes if the model correctly identifies the question "
+            "as unanswerable. The model could say that the information is incomplete, or "
+            "some other information is given but the asked information is not.\n\n"
+            f"Question: {question}\n\nExplanation: {answer}\n\n"
+            f"Model Response: {response}\n\n"
+            "Does the model correctly identify the question as unanswerable? Answer yes or no only."
+        )
+
+    templates = {
+        "single-session-user": (
+            "I will give you a question, a correct answer, and a response from a model. "
+            "Please answer yes if the response contains the correct answer. Otherwise, answer no. "
+            "If the response is equivalent to the correct answer or contains all the intermediate "
+            "steps to get the correct answer, you should also answer yes. If the response only "
+            "contains a subset of the information required by the answer, answer no."
+        ),
+        "single-session-assistant": None,  # same as user
+        "multi-session": None,  # same as user
+        "temporal-reasoning": (
+            "I will give you a question, a correct answer, and a response from a model. "
+            "Please answer yes if the response contains the correct answer. Otherwise, answer no. "
+            "If the response is equivalent to the correct answer or contains all the intermediate "
+            "steps to get the correct answer, you should also answer yes. If the response only "
+            "contains a subset of the information required by the answer, answer no. "
+            "In addition, do not penalize off-by-one errors for the number of days. "
+            "If the question asks for the number of days/weeks/months, etc., and the model "
+            "makes off-by-one errors (e.g., predicting 19 days when the answer is 18), "
+            "the model's response is still correct."
+        ),
+        "knowledge-update": (
+            "I will give you a question, a correct answer, and a response from a model. "
+            "Please answer yes if the response contains the correct answer. Otherwise, answer no. "
+            "If the response contains some previous information along with an updated answer, "
+            "the response should be considered as correct as long as the updated answer is "
+            "the required answer."
+        ),
+        "single-session-preference": (
+            "I will give you a question, a rubric for desired personalized response, and a "
+            "response from a model. Please answer yes if the response satisfies the desired "
+            "response. Otherwise, answer no. The model does not need to reflect all the points "
+            "in the rubric. The response is correct as long as it recalls and utilizes the "
+            "user's personal information correctly."
+        ),
+    }
+
+    base = templates.get(task)
+    if base is None:
+        base = templates["single-session-user"]
+
+    label_a = "Correct Answer" if task != "single-session-preference" else "Rubric"
+    return (
+        f"{base}\n\n"
+        f"Question: {question}\n\n{label_a}: {answer}\n\n"
+        f"Model Response: {response}\n\n"
+        "Is the model response correct? Answer yes or no only."
+    )
 
 
-def _classify_question(item: dict) -> str:
-    """Map a LongMemEval question to a high-level category."""
-    if str(item.get("question_id", "")).endswith("_abs"):
-        return "abstention"
-    qt = item.get("question_type", "")
-    return _CATEGORY_MAP.get(qt, qt or "unknown")
+# ── Official retrieval metrics (from src/retrieval/eval_utils.py) ─────────────
 
-
-def _compute_keyword_recall(answer: str, ground_truth: str) -> float:
-    """Fraction of ground-truth words found in the answer (case-insensitive)."""
-    gt_words = set(ground_truth.lower().split())
-    if not gt_words:
+def _dcg(relevances: list[int], k: int) -> float:
+    """Discounted Cumulative Gain at k."""
+    rel = relevances[:k]
+    if not rel:
         return 0.0
-    answer_lower = answer.lower()
-    found = sum(1 for w in gt_words if w in answer_lower)
-    return found / len(gt_words)
+    result = float(rel[0])
+    for i in range(1, len(rel)):
+        result += rel[i] / math.log2(i + 2)
+    return result
 
 
-def _compute_f1(prediction: str, ground_truth: str) -> float:
-    pred_tokens = set(prediction.lower().split())
-    truth_tokens = set(ground_truth.lower().split())
-    if not pred_tokens or not truth_tokens:
+def _ndcg_at_k(retrieved_session_ids: list[int], evidence_ids: set[int], k: int) -> float:
+    """NDCG@k — did we rank evidence sessions highly?"""
+    relevances = [1 if sid in evidence_ids else 0 for sid in retrieved_session_ids]
+    ideal = sorted(relevances, reverse=True)
+    ideal_dcg = _dcg(ideal, k)
+    if ideal_dcg == 0:
         return 0.0
-    common = pred_tokens & truth_tokens
-    if not common:
-        return 0.0
-    precision = len(common) / len(pred_tokens)
-    recall = len(common) / len(truth_tokens)
-    return 2 * precision * recall / (precision + recall)
+    return _dcg(relevances[:k], k) / ideal_dcg
 
+
+def _recall_at_k(retrieved_session_ids: list[int], evidence_ids: set[int], k: int) -> float:
+    """Recall@k — fraction of evidence sessions found in top-k retrieved."""
+    if not evidence_ids:
+        return 0.0
+    top_k = set(retrieved_session_ids[:k])
+    return len(top_k & evidence_ids) / len(evidence_ids)
+
+
+# ── Data loading and helpers ──────────────────────────────────────────────────
 
 def _load_data(data_file: str) -> list[dict]:
     """Load a LongMemEval JSON file (longmemeval_s_cleaned.json etc.)."""
@@ -171,11 +243,7 @@ def _sessions_to_markdown(
     dates: list[str],
     question_id: str,
 ) -> list[tuple[str, str]]:
-    """Convert LongMemEval sessions to markdown files (one per session).
-
-    Each session is a list of turns: [{"role": "user/assistant", "content": "..."}].
-    Returns list of (filename, markdown_content) pairs.
-    """
+    """Convert LongMemEval sessions to markdown files (one per session)."""
     files = []
     for si, session in enumerate(sessions):
         date_str = dates[si] if si < len(dates) else f"session-{si:04d}"
@@ -207,6 +275,38 @@ async def _run_curator_on_files(mem_root: str) -> None:
             logger.debug("Curator extraction failed for %s: %s", fp, e)
 
 
+async def _llm_judge(question: str, ground_truth: str, hypothesis: str,
+                     question_type: str, is_abstention: bool) -> bool:
+    """Call the LLM to judge whether the hypothesis answers the question correctly.
+
+    Uses the same task-specific prompts as the official LongMemEval evaluation.
+    Returns True if the judge says 'yes'.
+    """
+    from llm import llm_query
+
+    prompt = _get_judge_prompt(
+        task=question_type,
+        question=question,
+        answer=ground_truth,
+        response=hypothesis,
+        abstention=is_abstention,
+    )
+
+    try:
+        response = await llm_query(prompt, max_tokens=10)
+        return "yes" in response.lower()
+    except Exception as e:
+        logger.warning("LLM judge failed: %s — defaulting to keyword fallback", e)
+        gt_words = set(ground_truth.lower().split())
+        if not gt_words:
+            return False
+        hyp_lower = hypothesis.lower()
+        found = sum(1 for w in gt_words if w in hyp_lower)
+        return (found / len(gt_words)) > 0.5
+
+
+# ── Main benchmark runner ────────────────────────────────────────────────────
+
 async def run_longmemeval_benchmark(
     data_file: str,
     limit: int = 0,
@@ -222,10 +322,8 @@ async def run_longmemeval_benchmark(
       2. Index them into Qdrant + FTS5
       3. Optionally run curator for KG population
       4. Call recursive_retrieve
-      5. Measure keyword_recall (R@k proxy), F1, and latency
-
-    If *variant* is set, applies env-var overrides before retrieval.
-    Returns summary + per-question results.
+      5. **LLM-as-judge** for QA accuracy (official protocol)
+      6. **Recall@k** and **NDCG@k** for retrieval quality (official protocol)
     """
     if variant:
         if variant not in VARIANTS:
@@ -262,13 +360,15 @@ async def run_longmemeval_benchmark(
         init_schema()
 
         all_results: list[dict] = []
-        results_by_category: dict[str, list[dict]] = collections.defaultdict(list)
+        # Track by the 6 official question_type categories
+        results_by_qtype: dict[str, list[dict]] = collections.defaultdict(list)
 
         for qi, item in enumerate(items):
             qid = str(item.get("question_id", qi))
             question = item.get("question", "")
             answer_gt = item.get("answer", "")
-            category = _classify_question(item)
+            question_type = item.get("question_type", "")
+            is_abstention = str(qid).endswith("_abs")
             sessions = item.get("haystack_sessions", [])
             dates = item.get("haystack_dates", [])
 
@@ -276,7 +376,6 @@ async def run_longmemeval_benchmark(
                 logger.warning("Skipping item %s: no question or sessions", qid)
                 continue
 
-            # Write sessions to disk
             md_files = _sessions_to_markdown(sessions, dates, qid)
             for filename, content in md_files:
                 filepath = os.path.join(mem_root, filename)
@@ -284,7 +383,6 @@ async def run_longmemeval_benchmark(
                 with open(filepath, "w", encoding="utf-8") as f:
                     f.write(content)
 
-            # Fresh collection per question to avoid cross-contamination
             try:
                 qclient.delete_collection(config.QDRANT_COLLECTION)
             except Exception:
@@ -313,42 +411,52 @@ async def run_longmemeval_benchmark(
             elapsed_ms = (time.monotonic() - t0) * 1000
 
             answer = result.get("answer", "")
-            sources_text = " ".join(
-                s.get("text", "")[:500] for s in result.get("sources", [])
+
+            # ── Official metric 1: LLM-as-judge QA accuracy ──────────────
+            correct = await _llm_judge(
+                question=question,
+                ground_truth=answer_gt,
+                hypothesis=answer,
+                question_type=question_type,
+                is_abstention=is_abstention,
             )
-            combined = f"{answer} {sources_text}"
 
-            recall = _compute_keyword_recall(combined, answer_gt) if answer_gt else 0.0
-            f1 = _compute_f1(combined, answer_gt) if answer_gt else 0.0
-
-            # Session-level recall: did we retrieve from evidence sessions?
+            # ── Official metric 2: Session-level Recall@k and NDCG@k ────
             evidence_ids = set(item.get("answer_session_ids", []))
-            retrieved_files = {s.get("file_path", "") for s in result.get("sources", [])}
-            session_hits = 0
-            for eid in evidence_ids:
-                for rf in retrieved_files:
-                    if f"session-{eid + 1:04d}" in rf or f"session-{eid:04d}" in rf:
-                        session_hits += 1
+            retrieved_files = [s.get("file_path", "") for s in result.get("sources", [])]
+            retrieved_session_ids: list[int] = []
+            seen: set[int] = set()
+            for rf in retrieved_files:
+                for si in range(len(sessions)):
+                    if si not in seen and (f"session-{si + 1:04d}" in rf or f"session-{si:04d}" in rf):
+                        retrieved_session_ids.append(si)
+                        seen.add(si)
                         break
-            session_recall = session_hits / max(len(evidence_ids), 1)
+
+            retrieval_metrics = {}
+            if evidence_ids and not is_abstention:
+                for k in (5, 10):
+                    retrieval_metrics[f"recall@{k}"] = round(
+                        _recall_at_k(retrieved_session_ids, evidence_ids, k), 4)
+                    retrieval_metrics[f"ndcg@{k}"] = round(
+                        _ndcg_at_k(retrieved_session_ids, evidence_ids, k), 4)
 
             entry = {
                 "question_id": qid,
-                "category": category,
-                "question_type": item.get("question_type", ""),
+                "question_type": question_type,
+                "is_abstention": is_abstention,
                 "query": question[:200],
                 "ground_truth": answer_gt[:200],
-                "answer": answer[:200],
-                "keyword_recall": round(recall, 4),
-                "f1": round(f1, 4),
-                "session_recall": round(session_recall, 4),
+                "hypothesis": answer[:500],
+                "correct": correct,
+                "retrieval": retrieval_metrics,
                 "latency_ms": round(elapsed_ms, 1),
                 "sources_count": len(result.get("sources", [])),
                 "chunks_indexed": chunk_count,
                 "sessions_count": len(sessions),
             }
             all_results.append(entry)
-            results_by_category[category].append(entry)
+            results_by_qtype[question_type].append(entry)
 
             # Clean up for next question
             for filename, _ in md_files:
@@ -359,38 +467,58 @@ async def run_longmemeval_benchmark(
             if os.path.isdir(parent):
                 shutil.rmtree(parent, ignore_errors=True)
 
-            if (qi + 1) % 10 == 0:
+            status = "✓" if correct else "✗"
+            if (qi + 1) % 5 == 0 or qi == 0:
+                running_acc = _mean([float(r["correct"]) for r in all_results])
                 logger.info(
-                    "Progress: %d/%d  |  avg keyword_recall=%.3f  session_recall=%.3f",
-                    qi + 1, len(items),
-                    _mean([r["keyword_recall"] for r in all_results]),
-                    _mean([r["session_recall"] for r in all_results]),
+                    "[%d/%d] %s q=%s acc=%.1f%%",
+                    qi + 1, len(items), status, qid, running_acc * 100,
                 )
 
-        # Build summary
-        by_category = {}
-        for cat, cat_results in results_by_category.items():
-            latencies = sorted(r["latency_ms"] for r in cat_results)
-            by_category[cat] = {
-                "count": len(cat_results),
-                "keyword_recall": _mean([r["keyword_recall"] for r in cat_results]),
-                "f1": _mean([r["f1"] for r in cat_results]),
-                "session_recall": _mean([r["session_recall"] for r in cat_results]),
-                "latency_p50": round(latencies[len(latencies) // 2], 1) if latencies else 0,
+        # ── Build official-format summary ─────────────────────────────────
+        non_abs = [r for r in all_results if not r["is_abstention"]]
+        abs_only = [r for r in all_results if r["is_abstention"]]
+
+        by_qtype = {}
+        task_accs = []
+        for qt, qt_results in results_by_qtype.items():
+            acc = _mean([float(r["correct"]) for r in qt_results])
+            task_accs.append(acc)
+            retrieval_keys = ["recall@5", "ndcg@5", "recall@10", "ndcg@10"]
+            qt_retrieval = {}
+            for rk in retrieval_keys:
+                vals = [r["retrieval"].get(rk, 0) for r in qt_results if r["retrieval"]]
+                if vals:
+                    qt_retrieval[rk] = round(_mean(vals), 4)
+            by_qtype[qt] = {
+                "count": len(qt_results),
+                "accuracy": round(acc, 4),
+                **qt_retrieval,
             }
+
+        overall_acc = _mean([float(r["correct"]) for r in all_results])
+        task_avg_acc = _mean(task_accs) if task_accs else 0.0
+        abs_acc = _mean([float(r["correct"]) for r in abs_only]) if abs_only else None
+
+        retrieval_summary = {}
+        for rk in ["recall@5", "ndcg@5", "recall@10", "ndcg@10"]:
+            vals = [r["retrieval"].get(rk, 0) for r in non_abs if r["retrieval"]]
+            if vals:
+                retrieval_summary[rk] = round(_mean(vals), 4)
 
         summary = {
             "benchmark": "LongMemEval",
             "variant": variant or "default",
+            "eval_protocol": "llm-as-judge (official, per-task prompts)",
+            "judge_model": os.environ.get("LLM_MODEL", "unknown"),
             "data_file": os.path.basename(data_file),
             "total_questions": len(items),
             "evaluated_questions": len(all_results),
-            "overall_keyword_recall": round(_mean([r["keyword_recall"] for r in all_results]), 4),
-            "overall_f1": round(_mean([r["f1"] for r in all_results]), 4),
-            "overall_session_recall": round(_mean([r["session_recall"] for r in all_results]), 4),
-            "by_category": {k: {kk: round(vv, 4) if isinstance(vv, float) else vv
-                                for kk, vv in v.items()}
-                           for k, v in by_category.items()},
+            "overall_accuracy": round(overall_acc, 4),
+            "task_averaged_accuracy": round(task_avg_acc, 4),
+            "abstention_accuracy": round(abs_acc, 4) if abs_acc is not None else None,
+            "retrieval": retrieval_summary,
+            "by_question_type": by_qtype,
             "search_limit": search_limit,
             "refine": refine,
             "curator": run_curator,
@@ -411,25 +539,39 @@ def _mean(values: list[float]) -> float:
 
 
 def _print_summary(s: dict) -> None:
-    """Print a single variant's summary to stdout."""
-    print(f"\n{'=' * 60}")
-    print(f"  LongMemEval — variant: {s.get('variant', 'default')}")
-    print(f"{'=' * 60}")
+    """Print a single variant's summary in a format comparable to published results."""
+    print(f"\n{'=' * 72}")
+    print(f"  LongMemEval — {s.get('variant', 'default')}  (judge: {s.get('judge_model', '?')})")
+    print(f"{'=' * 72}")
     print(f"  Dataset:    {s['data_file']}")
     print(f"  Questions:  {s['evaluated_questions']}/{s['total_questions']}")
-    print(f"  Curator:    {'yes' if s['curator'] else 'no'}")
-    print(f"  Refine:     {'yes' if s['refine'] else 'no'}")
+    print(f"  Protocol:   {s.get('eval_protocol', 'llm-as-judge')}")
     print()
-    print(f"  Keyword Recall:  {s['overall_keyword_recall']:.4f}")
-    print(f"  Session Recall:  {s['overall_session_recall']:.4f}")
-    print(f"  Token F1:        {s['overall_f1']:.4f}")
+    print(f"  ┌─────────────────────────────────────────────────────────────┐")
+    print(f"  │  Overall Accuracy:        {s['overall_accuracy']:>6.1%}                         │")
+    print(f"  │  Task-Averaged Accuracy:  {s['task_averaged_accuracy']:>6.1%}                         │")
+    if s.get("abstention_accuracy") is not None:
+        print(f"  │  Abstention Accuracy:     {s['abstention_accuracy']:>6.1%}                         │")
+    print(f"  └─────────────────────────────────────────────────────────────┘")
     print()
-    print(f"  By category:")
-    for cat, vals in s["by_category"].items():
-        print(f"    {cat:25s}  recall={vals['keyword_recall']:.4f}"
-              f"  session={vals['session_recall']:.4f}"
-              f"  f1={vals['f1']:.4f}  (n={vals['count']})")
-    print(f"{'=' * 60}")
+
+    retr = s.get("retrieval", {})
+    if retr:
+        print(f"  Retrieval:  Recall@5={retr.get('recall@5', 0):.4f}  "
+              f"NDCG@5={retr.get('ndcg@5', 0):.4f}  "
+              f"Recall@10={retr.get('recall@10', 0):.4f}  "
+              f"NDCG@10={retr.get('ndcg@10', 0):.4f}")
+        print()
+
+    print(f"  {'Question Type':<28s}  {'Acc':>6s}  {'R@5':>6s}  {'NDCG@5':>6s}  {'n':>4s}")
+    print(f"  {'-' * 28}  {'-' * 6}  {'-' * 6}  {'-' * 6}  {'-' * 4}")
+    for qt, vals in s.get("by_question_type", {}).items():
+        acc = f"{vals['accuracy']:.1%}"
+        r5 = f"{vals.get('recall@5', 0):.4f}" if vals.get("recall@5") else "  —"
+        n5 = f"{vals.get('ndcg@5', 0):.4f}" if vals.get("ndcg@5") else "  —"
+        print(f"  {qt:<28s}  {acc:>6s}  {r5:>6s}  {n5:>6s}  {vals['count']:>4d}")
+
+    print(f"{'=' * 72}")
 
 
 def _print_ablation_comparison(ablation_data: dict) -> None:
@@ -438,25 +580,26 @@ def _print_ablation_comparison(ablation_data: dict) -> None:
     if not variants:
         return
 
-    print(f"\n{'=' * 78}")
-    print(f"  LongMemEval Ablation Results")
-    print(f"{'=' * 78}")
-    print(f"  {'Variant':<25s}  {'Keyword R':>10s}  {'Session R':>10s}  {'F1':>10s}")
-    print(f"  {'-' * 25}  {'-' * 10}  {'-' * 10}  {'-' * 10}")
+    print(f"\n{'=' * 80}")
+    print(f"  LongMemEval Ablation — QA Accuracy (Official LLM-as-Judge)")
+    print(f"{'=' * 80}")
+    print(f"  {'Variant':<25s}  {'Accuracy':>10s}  {'Task-Avg':>10s}  {'R@5':>8s}  {'NDCG@5':>8s}")
+    print(f"  {'-' * 25}  {'-' * 10}  {'-' * 10}  {'-' * 8}  {'-' * 8}")
 
     for vname, vdata in variants.items():
         s = vdata.get("summary", {})
-        kr = s.get("overall_keyword_recall", 0)
-        sr = s.get("overall_session_recall", 0)
-        f1 = s.get("overall_f1", 0)
-        print(f"  {vname:<25s}  {kr:>10.4f}  {sr:>10.4f}  {f1:>10.4f}")
+        acc = s.get("overall_accuracy", 0)
+        tavg = s.get("task_averaged_accuracy", 0)
+        r5 = s.get("retrieval", {}).get("recall@5", 0)
+        n5 = s.get("retrieval", {}).get("ndcg@5", 0)
+        print(f"  {vname:<25s}  {acc:>9.1%}  {tavg:>9.1%}  {r5:>8.4f}  {n5:>8.4f}")
 
-    print(f"{'=' * 78}")
+    print(f"{'=' * 80}")
 
 
 async def main():
     parser = argparse.ArgumentParser(
-        description="LongMemEval benchmark adapter for Archivist",
+        description="LongMemEval benchmark adapter for Archivist (official eval protocol)",
     )
     parser.add_argument(
         "--data-file", required=True,
@@ -496,6 +639,7 @@ async def main():
         ablation_results: dict = {
             "benchmark": "LongMemEval",
             "mode": "ablation",
+            "eval_protocol": "llm-as-judge (official, per-task prompts)",
             "variants": {},
         }
         for vname in variant_names:

@@ -5,9 +5,9 @@
 # Usage:
 #   bash benchmarks/scripts/run_academic_benchmarks.sh [--limit N] [--no-curator] [--no-refine]
 #
-# From Docker:
-#   docker compose run --rm --entrypoint /bin/bash benchmark \
-#     benchmarks/scripts/run_academic_benchmarks.sh
+# From Docker (recommended when LLM host only resolves inside compose, e.g. Qwen / Tailscale):
+#   bash benchmarks/scripts/run_academic_benchmarks_docker.sh
+#   bash benchmarks/scripts/run_academic_benchmarks_docker.sh --limit 50
 #
 # Output:
 #   .benchmarks/longmemeval_results.json
@@ -16,6 +16,18 @@
 #   .benchmarks/academic_scores.json  (merged summary)
 
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+cd "$REPO_ROOT"
+# On the host, source .env for LLM_URL / EMBED_URL / QDRANT_URL.
+# Inside Docker (compose already sets env), skip — .env values like 127.0.0.1 break container DNS.
+if [[ -f .env && ! -f /.dockerenv ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source .env
+  set +a
+fi
 
 LIMIT=0
 CURATOR="--run-curator"

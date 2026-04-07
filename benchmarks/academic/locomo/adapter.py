@@ -28,23 +28,76 @@ import tempfile
 import time
 from pathlib import Path
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "src"))
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+from benchmarks.env_loader import load_repo_env
+
+load_repo_env()
+sys.path.insert(0, os.path.join(_REPO_ROOT, "src"))
 
 logger = logging.getLogger("archivist.benchmark.locomo")
 
 
+def _normalize_answer(s: str) -> str:
+    """Official LoCoMo answer normalization (from task_eval/evaluation.py)."""
+    import string
+    import unicodedata
+    s = unicodedata.normalize("NFD", s)
+    s = s.replace(",", "")
+    s = s.lower()
+    exclude = set(string.punctuation)
+    s = "".join(ch for ch in s if ch not in exclude)
+    import re
+    s = re.sub(r"\b(a|an|the|and)\b", " ", s)
+    s = " ".join(s.split())
+    return s
+
+
+def _stem_tokens(text: str) -> list[str]:
+    """Stem tokens using Porter stemmer (matches official LoCoMo eval)."""
+    try:
+        from nltk.stem import PorterStemmer
+        ps = PorterStemmer()
+        return [ps.stem(w) for w in _normalize_answer(text).split()]
+    except ImportError:
+        return _normalize_answer(text).split()
+
+
 def _compute_f1(prediction: str, ground_truth: str) -> float:
-    """Compute token-level F1 between prediction and ground truth."""
-    pred_tokens = set(prediction.lower().split())
-    truth_tokens = set(ground_truth.lower().split())
-    if not pred_tokens or not truth_tokens:
+    """Official LoCoMo stemmed F1 score (from task_eval/evaluation.py).
+
+    Uses answer normalization + Porter stemming for token-level F1, matching
+    what the paper reports.
+    """
+    from collections import Counter
+    pred_tokens = _stem_tokens(prediction)
+    truth_tokens = _stem_tokens(ground_truth)
+    common = Counter(pred_tokens) & Counter(truth_tokens)
+    num_same = sum(common.values())
+    if num_same == 0:
         return 0.0
-    common = pred_tokens & truth_tokens
-    if not common:
+    precision = num_same / len(pred_tokens)
+    recall = num_same / len(truth_tokens)
+    return (2 * precision * recall) / (precision + recall)
+
+
+def _compute_f1_multi(prediction: str, ground_truth: str) -> float:
+    """F1 for multi-hop with comma-separated sub-answers (official protocol).
+
+    For multi-hop answers like 'Alice, Bob', computes F1 for each sub-answer
+    against each sub-prediction and takes the mean of best matches.
+    """
+    predictions = [p.strip() for p in prediction.split(",")]
+    ground_truths = [g.strip() for g in ground_truth.split(",")]
+    if not ground_truths:
         return 0.0
-    precision = len(common) / len(pred_tokens)
-    recall = len(common) / len(truth_tokens)
-    return 2 * precision * recall / (precision + recall)
+    import numpy as np
+    scores = []
+    for gt in ground_truths:
+        best = max(_compute_f1(pred, gt) for pred in predictions) if predictions else 0.0
+        scores.append(best)
+    return float(np.mean(scores)) if scores else 0.0
 
 
 def _compute_bleu(prediction: str, ground_truth: str) -> float:
@@ -289,8 +342,17 @@ async def run_locomo_benchmark(
             )
             combined = f"{answer} {sources_text}"
 
-            recall = _keyword_recall(combined, ground_truth) if ground_truth else 0.0
-            f1 = _compute_f1(answer, ground_truth) if ground_truth else 0.0
+            # Official LoCoMo category-specific scoring
+            # Categories: 1=multi_hop, 2=temporal, 3=open_domain, 4=single_hop, 5=adversarial
+            cat_num = qa.get("category", 0) if isinstance(qa.get("category"), int) else 0
+            if cat_num == 1 or category == "multi_hop":
+                f1 = _compute_f1_multi(answer, ground_truth) if ground_truth else 0.0
+            elif cat_num == 5 or category == "adversarial":
+                f1 = 1.0 if ("no information available" in answer.lower()
+                             or "not mentioned" in answer.lower()) else 0.0
+            else:
+                f1 = _compute_f1(answer, ground_truth) if ground_truth else 0.0
+
             bleu = _compute_bleu(answer, ground_truth) if ground_truth else 0.0
             rouge_l = _compute_rouge_l(answer, ground_truth) if ground_truth else 0.0
 
@@ -299,8 +361,7 @@ async def run_locomo_benchmark(
                 "category": category,
                 "query": query,
                 "ground_truth": ground_truth[:200],
-                "answer": answer[:200],
-                "keyword_recall": round(recall, 4),
+                "prediction": answer[:500],
                 "f1": round(f1, 4),
                 "bleu": round(bleu, 4),
                 "rouge_l": round(rouge_l, 4),
@@ -310,7 +371,6 @@ async def run_locomo_benchmark(
             all_results.append(entry)
             results_by_category[category].append(entry)
 
-        overall_recall = _mean([r["keyword_recall"] for r in all_results])
         overall_f1 = _mean([r["f1"] for r in all_results])
         overall_bleu = _mean([r["bleu"] for r in all_results])
         overall_rouge_l = _mean([r["rouge_l"] for r in all_results])
@@ -319,10 +379,9 @@ async def run_locomo_benchmark(
         for cat, cat_results in results_by_category.items():
             by_category[cat] = {
                 "count": len(cat_results),
-                "keyword_recall": round(_mean([r["keyword_recall"] for r in cat_results]), 4),
-                "f1": _mean([r["f1"] for r in cat_results]),
-                "bleu": _mean([r["bleu"] for r in cat_results]),
-                "rouge_l": _mean([r["rouge_l"] for r in cat_results]),
+                "f1": round(_mean([r["f1"] for r in cat_results]), 4),
+                "bleu": round(_mean([r["bleu"] for r in cat_results]), 4),
+                "rouge_l": round(_mean([r["rouge_l"] for r in cat_results]), 4),
                 "latency_p50": round(
                     sorted(r["latency_ms"] for r in cat_results)[len(cat_results) // 2], 1
                 ) if cat_results else 0,
@@ -330,12 +389,12 @@ async def run_locomo_benchmark(
 
         summary = {
             "benchmark": "LoCoMo",
+            "eval_protocol": "official (stemmed F1, category-specific scoring)",
             "dialogues": len(dialogues),
             "total_files": total_files,
             "total_chunks": chunk_count,
             "total_questions": len(all_questions),
             "evaluated_questions": len(all_results),
-            "overall_keyword_recall": round(overall_recall, 4),
             "overall_f1": round(overall_f1, 4),
             "overall_bleu": round(overall_bleu, 4),
             "overall_rouge_l": round(overall_rouge_l, 4),
@@ -376,16 +435,24 @@ async def main():
 
     if "summary" in data:
         s = data["summary"]
-        print(f"\n=== LoCoMo Benchmark Results ===")
-        print(f"Dialogues: {s['dialogues']}, Questions: {s['evaluated_questions']}")
-        print(f"Curator:         {'yes' if s.get('curator') else 'no'}")
-        print(f"Keyword Recall:  {s['overall_keyword_recall']:.4f}")
-        print(f"Overall F1:      {s['overall_f1']:.4f}")
-        print(f"Overall BLEU:    {s['overall_bleu']:.4f}")
-        print(f"Overall ROUGE-L: {s['overall_rouge_l']:.4f}")
-        print(f"\nBy category:")
+        print(f"\n{'=' * 72}")
+        print(f"  LoCoMo Benchmark — Official Stemmed F1 Evaluation")
+        print(f"{'=' * 72}")
+        print(f"  Dialogues:  {s['dialogues']}   Questions: {s['evaluated_questions']}")
+        print(f"  Curator:    {'yes' if s.get('curator') else 'no'}")
+        print(f"  Protocol:   {s.get('eval_protocol', 'official')}")
+        print()
+        print(f"  ┌─────────────────────────────────────────────────────────┐")
+        print(f"  │  Overall F1:      {s['overall_f1']:.4f}                              │")
+        print(f"  │  Overall BLEU-1:  {s['overall_bleu']:.4f}                              │")
+        print(f"  │  Overall ROUGE-L: {s['overall_rouge_l']:.4f}                              │")
+        print(f"  └─────────────────────────────────────────────────────────┘")
+        print()
+        print(f"  {'Category':<18s}  {'F1':>6s}  {'BLEU':>6s}  {'ROUGE-L':>7s}  {'n':>4s}")
+        print(f"  {'-' * 18}  {'-' * 6}  {'-' * 6}  {'-' * 7}  {'-' * 4}")
         for cat, vals in s["by_category"].items():
-            print(f"  {cat:15s}: recall={vals['keyword_recall']:.4f}  F1={vals['f1']:.4f}  BLEU={vals['bleu']:.4f}  ROUGE-L={vals['rouge_l']:.4f}  (n={vals['count']})")
+            print(f"  {cat:<18s}  {vals['f1']:.4f}  {vals['bleu']:.4f}  {vals['rouge_l']:.4f}   {vals['count']:>4d}")
+        print(f"{'=' * 72}")
     else:
         print(json.dumps(data, indent=2))
 

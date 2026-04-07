@@ -4,7 +4,8 @@ FROM python:3.12-slim
 WORKDIR /workspace
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt \
+    && pip install --no-cache-dir rouge-score nltk
 
 # Default: show CLI help; compose overrides with `docker compose run ... -- ARGS`
 ENTRYPOINT ["python", "-m", "benchmarks.pipeline.evaluate"]
