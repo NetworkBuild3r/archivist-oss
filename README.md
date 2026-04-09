@@ -30,7 +30,7 @@ curl http://localhost:3100/health          # {"status":"ok"}
 
 Full Docker options (host vLLM, `/opt/appdata` volumes, overrides): [`docs/DOCKER.md`](docs/DOCKER.md).
 
-Point any MCP client at `http://localhost:3100/mcp/sse` — done. Your agents now have long-term memory with search, RBAC, knowledge graphs, and active curation out of the box.
+Point any MCP client at `http://localhost:3100/mcp` — done. Your agents now have long-term memory with search, RBAC, knowledge graphs, and active curation out of the box. Legacy SSE compatibility remains available at `http://localhost:3100/mcp/sse`.
 
 ---
 
@@ -140,21 +140,21 @@ Multi-hop and broad synthesis are where Archivist's knowledge graph pays off mos
 | **Parent enrichment** | Expands child chunks to parent context | Provides surrounding context for better synthesis |
 | **LLM refinement** | Generative synthesis of retrieved chunks | Produces coherent answers instead of raw chunk dumps |
 
-### Features
+### Competitive Positioning
 
-| Feature | Archivist |
-|---------|-----------|
-| Hybrid search (vector + BM25) | Yes (0.7/0.3 fusion) |
-| Temporal knowledge graph | Yes (SQLite + FTS5) |
-| Active curation (background) | Yes (LLM dedup, tip consolidation) |
-| Retention classes (pin/unpin) | Yes (ephemeral/standard/durable/permanent) |
-| Entity-anchored retrieval | Yes (guaranteed recall for known entities) |
-| Fact versioning (superseded_by) | Yes (auto-detects conflicting facts) |
-| Multi-agent RBAC | Yes (namespace ACLs) |
-| Cross-encoder reranking | Yes (BAAI/bge-reranker-v2-m3) |
-| Hotness scoring | Yes (freq × recency) |
-| Conflict detection | Yes (vector + LLM adjudication) |
-| Self-hosted / Apache 2.0 | Yes |
+| Feature | Archivist | Mem0 | Zep | Letta |
+|---------|-----------|------|-----|-------|
+| Hybrid search (vector + BM25) | Yes (0.7/0.3 fusion) | Vector only (free) | Graph-based | Vector |
+| Temporal knowledge graph | Yes (SQLite + FTS5) | Pro only ($249/mo) | Yes (Graphiti) | No |
+| Active curation (background) | Yes (LLM dedup, tip consolidation) | No | No | Self-managed |
+| Retention classes (pin/unpin) | Yes (ephemeral/standard/durable/permanent) | No | No | No |
+| Entity-anchored retrieval | Yes (guaranteed recall for known entities) | No | Partial | No |
+| Fact versioning (superseded_by) | Yes (auto-detects conflicting facts) | No | Temporal versioning | No |
+| Multi-agent RBAC | Yes (namespace ACLs) | No | No | Per-agent isolation |
+| Cross-encoder reranking | Yes (BAAI/bge-reranker-v2-m3) | No | No | No |
+| Hotness scoring | Yes (freq × recency) | No | Temporal decay | No |
+| Conflict detection | Yes (vector + LLM adjudication) | No | Temporal versioning | No |
+| Self-hosted / Apache 2.0 | Yes | Open core | Yes | Yes |
 
 > **Reproduce:** `docker compose --profile benchmark run --rm --entrypoint /bin/bash benchmark benchmarks/scripts/run_full_comparison.sh`
 >
@@ -210,8 +210,10 @@ curl http://localhost:3100/health
 
 Point any MCP client at:
 ```
-http://localhost:3100/mcp/sse
+http://localhost:3100/mcp
 ```
+
+Legacy SSE clients can continue using `http://localhost:3100/mcp/sse`.
 
 That's it. Your agents can now `archivist_store`, `archivist_search`, `archivist_recall`, and use all 30 tools.
 
@@ -342,7 +344,7 @@ graph TB
         Files[("Markdown Files<br/>Journal Exports<br/>+ MEMORY_ROOT")]
     end
 
-    A1 & A2 & A3 <-->|"MCP over HTTP SSE"| Router
+    A1 & A2 & A3 <-->|"MCP over HTTP"| Router
     Pipeline <--> Qdrant
     Pipeline <--> SQLite
     Curator --> SQLite
@@ -497,8 +499,9 @@ These are available alongside the MCP interface for admin, monitoring, and integ
 |----------|--------|------|-------------|
 | `/health` | GET | No | Liveness probe (Kubernetes-friendly) |
 | `/metrics` | GET | Yes | Prometheus text exposition |
-| `/mcp/sse` | GET | Yes | MCP SSE transport entrypoint |
-| `/mcp/messages/` | POST | Yes | MCP message handler |
+| `/mcp` | GET/POST/DELETE | Yes | MCP Streamable HTTP transport entrypoint (preferred) |
+| `/mcp/sse` | GET | Yes | Legacy MCP SSE transport entrypoint |
+| `/mcp/messages/` | POST | Yes | Legacy SSE message handler |
 | `/admin/invalidate` | GET/POST | Yes | Trigger TTL-based memory expiry |
 | `/admin/retrieval-logs` | GET | Yes | Export retrieval pipeline traces |
 | `/admin/dashboard` | GET | Yes | Health dashboard JSON (`?batch=true` for batch heuristic) |

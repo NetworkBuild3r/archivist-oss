@@ -80,7 +80,9 @@ parameter schemas and examples, see [CURSOR_SKILL.md](CURSOR_SKILL.md).
 | `/admin/invalidate` | POST/GET | Delete expired memories (TTL-based) |
 | `/admin/retrieval-logs` | GET | Export retrieval pipeline execution traces |
 | `/admin/dashboard` | GET | Health dashboard JSON (add `?batch=true` for batch heuristic) |
-| `/mcp/sse` | GET | MCP SSE transport entrypoint |
+| `/mcp` | GET/POST/DELETE | MCP Streamable HTTP transport entrypoint (preferred) |
+| `/mcp/sse` | GET | Legacy MCP SSE transport entrypoint |
+| `/mcp/messages/` | POST | Legacy SSE message handler |
 
 ## See Also
 
