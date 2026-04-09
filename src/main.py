@@ -138,7 +138,7 @@ async def file_watcher():
                     logger.error("Watcher delete failed for %s: %s", path, e)
 
 
-async def health(_request):
+async def handle_health(_request):
     return JSONResponse({"status": "ok", "service": "archivist", "version": "1.0.0"})
 
 
@@ -341,7 +341,7 @@ async def handle_namespace_index(request):
 
 app = Starlette(
     routes=[
-        Route("/health", health),
+        Route("/health", handle_health),
         Route("/metrics", handle_metrics),
         Route("/admin/invalidate", handle_invalidate, methods=["POST", "GET"]),
         Route("/admin/retrieval-logs", handle_retrieval_export),
