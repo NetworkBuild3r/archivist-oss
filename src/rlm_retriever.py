@@ -275,7 +275,13 @@ async def search_vectors(
     limit: int = 20,
 ) -> list[dict]:
     """Stage 1: coarse vector search in Qdrant with optional filters."""
-    query_vec = await embed_text(query)
+    try:
+        query_vec = await embed_text(query)
+    except Exception as e:
+        # embed_text already registers "embeddings" unhealthy before raising.
+        # Return [] so the pipeline can degrade to BM25-only results.
+        logger.warning("Embedding failed, skipping vector search: %s", e)
+        return []
     client = qdrant_client()
 
     must_filters = []
@@ -850,6 +856,8 @@ async def recursive_retrieve(
     except Exception as e:
         logger.error("Synthesis failed: %s", e)
         answer = extractions_text
+        # Signal to callers/operators that the answer is raw extractions, not a synthesised response.
+        _common_trace["synthesis_degraded"] = True
 
     final_result = {
         "answer": answer,

@@ -9,6 +9,7 @@ import logging
 import os
 import httpx
 from config import EMBED_URL, EMBED_API_KEY, EMBED_MODEL
+import health
 
 logger = logging.getLogger("archivist.embeddings")
 
@@ -41,13 +42,16 @@ async def embed_text(text: str, model: str = EMBED_MODEL) -> list[float]:
                 )
                 resp.raise_for_status()
                 data = resp.json()
-                return data["data"][0]["embedding"]
+                result = data["data"][0]["embedding"]
+                health.register("embeddings", healthy=True)
+                return result
         except Exception as e:
             if attempt < _MAX_RETRIES - 1:
                 delay = _RETRY_DELAYS[attempt]
                 logger.warning("Embed attempt %d failed: %s — retrying in %ds", attempt + 1, e, delay)
                 await asyncio.sleep(delay)
             else:
+                health.register("embeddings", healthy=False, detail=str(e))
                 logger.error("Embed failed after %d attempts: %s", _MAX_RETRIES, e)
                 raise
 
