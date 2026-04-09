@@ -57,7 +57,7 @@ def build_dashboard(window_days: int = 7) -> dict:
             "total_entries": cache.get("total_entries"),
             "agents": cache.get("agents"),
         },
-        # fts5 / qdrant / llm — populated via health.register from init and runtime paths
+        # fts5, qdrant, embeddings, llm — all registered via health.register from init and runtime paths
         "subsystems": health.all_status(),
     }
 

@@ -11,6 +11,7 @@ from watchfiles import awatch, Change
 
 from config import MEMORY_ROOT, MCP_PORT, QDRANT_URL, QDRANT_COLLECTION, VECTOR_DIM, ARCHIVIST_API_KEY, CURATOR_QUEUE_DRAIN_INTERVAL
 from qdrant import qdrant_client
+import health
 from graph import init_schema
 from indexer import full_index, index_file, delete_file_points
 from curator import curator_loop
@@ -56,6 +57,7 @@ def ensure_qdrant_collection():
             logger.warning("Waiting for Qdrant at %s: %s — retrying in 2s", QDRANT_URL, e)
             time.sleep(2)
     else:
+        health.register("qdrant", healthy=False, detail=f"Qdrant not reachable after 120s: {last_err}")
         raise RuntimeError(f"Qdrant not reachable at {QDRANT_URL} after 120s") from last_err
 
     assert client is not None
@@ -110,6 +112,8 @@ def ensure_qdrant_collection():
                 field_schema=schema,
             )
         logger.info("Created payload indexes for %s", QDRANT_COLLECTION)
+
+    health.register("qdrant", healthy=True)
 
 
 async def file_watcher():
