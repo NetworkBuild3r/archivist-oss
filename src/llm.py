@@ -6,6 +6,7 @@ import time
 
 import httpx
 from config import LLM_URL, LLM_MODEL, LLM_API_KEY
+import health
 import metrics as m
 
 logger = logging.getLogger("archivist.llm")
@@ -52,6 +53,7 @@ async def llm_query(
                     resp.raise_for_status()
                     result = resp.json()["choices"][0]["message"]["content"]
                     m.observe(m.LLM_DURATION, (time.monotonic() - t0) * 1000)
+                    health.register("llm", healthy=True)
                     return result
                 except httpx.HTTPStatusError as exc:
                     if json_mode and exc.response.status_code in (400, 422):
@@ -65,6 +67,7 @@ async def llm_query(
                         resp.raise_for_status()
                         result = resp.json()["choices"][0]["message"]["content"]
                         m.observe(m.LLM_DURATION, (time.monotonic() - t0) * 1000)
+                        health.register("llm", healthy=True)
                         return result
                     raise
         except Exception as e:
@@ -74,5 +77,6 @@ async def llm_query(
                 await asyncio.sleep(delay)
             else:
                 m.inc(m.LLM_ERROR)
+                health.register("llm", healthy=False, detail=str(e))
                 logger.error("LLM failed after %d attempts: %s", _MAX_RETRIES, e)
                 raise

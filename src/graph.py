@@ -205,7 +205,13 @@ def _init_fts5():
 
     Separated from init_schema() because FTS5 contentless-delete tables
     need a slightly different DDL path and tolerate 'already exists' gracefully.
+
+    On success we run a trivial read against ``memory_fts`` and register
+    ``fts5`` as healthy; on failure we register unhealthy so downstream
+    BM25 search can skip FTS without pretending the index exists.
     """
+    import health
+
     with GRAPH_WRITE_LOCK:
         conn = get_db()
         try:
@@ -215,8 +221,11 @@ def _init_fts5():
                 "tokenize='porter unicode61')"
             )
             conn.commit()
+            conn.execute("SELECT count(*) FROM memory_fts LIMIT 1")
+            health.register("fts5", healthy=True)
         except Exception as e:
-            logging.getLogger("archivist.graph").warning("FTS5 init failed (BM25 search disabled): %s", e)
+            # Downstream: search_bm25() checks is_healthy("fts5") and returns [].
+            health.register("fts5", healthy=False, detail=str(e))
         finally:
             conn.close()
 

@@ -6,6 +6,7 @@ Fusion formula: fused = VECTOR_WEIGHT * norm(vector) + BM25_WEIGHT * norm(bm25)
 import logging
 from config import BM25_ENABLED, BM25_WEIGHT, VECTOR_WEIGHT
 from graph import search_fts
+import health
 
 logger = logging.getLogger("archivist.fts")
 
@@ -22,7 +23,8 @@ def _fts5_safe_query(raw_query: str) -> str:
     safe = []
     for t in tokens:
         cleaned = t.strip('"\'()[]{}*:')
-        if cleaned and len(cleaned) >= 2:
+        # Include length-1 tokens so short queries (e.g. single-letter acronyms) are not dropped.
+        if cleaned and len(cleaned) >= 1:
             safe.append(f'"{cleaned}"')
     return " OR ".join(safe) if safe else ""
 
@@ -34,8 +36,11 @@ def search_bm25(
     memory_type: str = "",
     limit: int = 30,
 ) -> list[dict]:
-    """Run a BM25 keyword search via FTS5. Returns [] if BM25 disabled."""
-    if not BM25_ENABLED:
+    """Run a BM25 keyword search via FTS5.
+
+    Returns [] when BM25 is disabled or when FTS5 failed init (see graph._init_fts5 + health.register).
+    """
+    if not BM25_ENABLED or not health.is_healthy("fts5"):
         return []
 
     safe_q = _fts5_safe_query(query)

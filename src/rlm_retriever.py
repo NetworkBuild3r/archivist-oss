@@ -38,6 +38,7 @@ from graph_retrieval import (
     build_entity_fact_results,
 )
 from fts_search import search_bm25, merge_vector_and_bm25
+import health
 from qdrant import qdrant_client
 from tiering import select_tier
 from tokenizer import count_tokens
@@ -71,14 +72,19 @@ def _retrieval_trace(
     outcome_adjustments: int = 0,
     context_status: dict | None = None,
     bm25_hits: int = 0,
-    auto_classified_type: str = "",
-    inventory_total: int | None = None,
     entity_facts_injected: int = 0,
-    temporal_intent: str = "",
     bm25_rescue_count: int = 0,
     adaptive_widened: bool = False,
     cross_agent_capped: bool = False,
+    **extra,
 ) -> dict:
+    """Build a retrieval trace dict for observability.
+
+    Core pipeline fields are explicit parameters for type safety.
+    Additional fields (auto_subcategory, detected_topic, etc.) flow
+    through **extra so callers can add new trace keys without modifying
+    this signature.
+    """
     trace = {
         "vector_search_limit": vector_limit,
         "coarse_hits": coarse_count,
@@ -103,18 +109,16 @@ def _retrieval_trace(
     }
     if context_status:
         trace["context_status"] = context_status
-    if auto_classified_type:
-        trace["auto_classified_type"] = auto_classified_type
-    if inventory_total is not None:
-        trace["inventory_total"] = inventory_total
-    if temporal_intent:
-        trace["temporal_intent"] = temporal_intent
     if bm25_rescue_count:
         trace["bm25_rescue_count"] = bm25_rescue_count
     if adaptive_widened:
         trace["adaptive_widened"] = True
     if cross_agent_capped:
         trace["cross_agent_capped"] = True
+    # Merge caller/_trace_kw() extensions; omit empty placeholders so the trace stays compact.
+    for k, v in extra.items():
+        if v is not None and v != "" and v is not False:
+            trace[k] = v
     return trace
 
 
@@ -189,6 +193,73 @@ SYNTHESIZE_MULTI_AGENT = (
 )
 
 
+def _merge_into_results(
+    filtered: list[dict],
+    new_items: list[dict],
+    *,
+    min_score: float = 0.0,
+    preserve_top_n: int = 0,
+    tag: str = "",
+) -> tuple[list[dict], int]:
+    """Merge new_items into filtered results with dedup, floor scoring, and top-N preservation.
+
+    Centralises the merge logic used by BM25 rescue, entity fact injection,
+    and adaptive widen so each caller doesn't re-implement (and mis-implement)
+    the same pattern.
+
+    Args:
+        filtered: Existing ranked results (mutated in place for efficiency).
+        new_items: Items to merge in.
+        min_score: Floor score for new items that lack a valid score.
+        preserve_top_n: If > 0, the top N non-injected items from filtered
+                        are guaranteed to remain in the top N slots after merge.
+        tag: If set, added as a metadata key (e.g. "bm25_rescue", "entity_fact").
+
+    Returns:
+        (merged_results, count_added)
+    """
+    if not new_items:
+        return filtered, 0
+
+    winners = []
+    if preserve_top_n > 0:
+        winners = [r for r in filtered if r.get("file_type") != "entity_fact"][:preserve_top_n]
+
+    existing_ids = {r.get("id") for r in filtered if r.get("id")}
+    existing_texts = {r.get("text", "")[:100] for r in filtered}
+    added = 0
+
+    for item in new_items:
+        item_id = item.get("id")
+        item_text = item.get("text", "")[:100]
+
+        if (item_id and item_id in existing_ids) or item_text in existing_texts:
+            continue
+
+        if item.get("score", 0) < min_score:
+            item["score"] = min_score
+
+        if tag:
+            item[tag] = True
+
+        filtered.append(item)
+        if item_id:
+            existing_ids.add(item_id)
+        existing_texts.add(item_text)
+        added += 1
+
+    if added:
+        filtered.sort(key=lambda x: x.get("score", 0), reverse=True)
+
+    # Keep pre-merge top vector rows first (by object identity), then the rest — avoids a second sort undoing preservation.
+    if winners and added:
+        winner_ids = {id(w) for w in winners}
+        rest = [r for r in filtered if id(r) not in winner_ids]
+        filtered = winners + rest
+
+    return filtered, added
+
+
 async def search_vectors(
     query: str,
     agent_id: str = "",
@@ -233,13 +304,22 @@ async def search_vectors(
 
     search_filter = Filter(must=must_filters) if must_filters else None
 
-    results = client.query_points(
-        collection_name=QDRANT_COLLECTION,
-        query=query_vec,
-        query_filter=search_filter,
-        limit=limit,
-        with_payload=True,
-    ).points
+    # Degrade to [] on Qdrant/network errors so retrieval can fall back to BM25-only paths.
+    try:
+        results = client.query_points(
+            collection_name=QDRANT_COLLECTION,
+            query=query_vec,
+            query_filter=search_filter,
+            limit=limit,
+            with_payload=True,
+        ).points
+    except Exception as e:
+        health.register("qdrant", healthy=False, detail=str(e))
+        return []
+
+    # After a prior failure, mark Qdrant healthy again on first successful query.
+    if not health.is_healthy("qdrant"):
+        health.register("qdrant", healthy=True)
 
     return [
         {
@@ -543,32 +623,21 @@ async def recursive_retrieve(
             wider_coarse = apply_hotness_to_results(wider_coarse)
             wider_coarse = apply_importance_to_results(wider_coarse)
             wider_filtered = apply_retrieval_threshold(wider_coarse, effective_threshold)
-            existing_ids = {r.get("id") for r in filtered if r.get("id")}
-            for r in wider_filtered:
-                if r.get("id") and r["id"] not in existing_ids:
-                    filtered.append(r)
-                    existing_ids.add(r["id"])
-            filtered.sort(key=lambda x: x.get("score", 0), reverse=True)
+            filtered, _ = _merge_into_results(filtered, wider_filtered)
 
     # Stage 2-bm25-rescue: BM25 rescue slots (v1.9)
     if BM25_RESCUE_ENABLED and BM25_ENABLED and n_bm25 > 0:
         bm25_max = max((r.get("bm25_score", 0) for r in coarse if r.get("bm25_score")), default=0)
         if bm25_max > 0:
             rescue_threshold = bm25_max * BM25_RESCUE_MIN_SCORE_RATIO
-            existing_ids = {r.get("id") for r in filtered if r.get("id")}
-            rescued = 0
-            for r in coarse:
-                if rescued >= BM25_RESCUE_MAX_SLOTS:
-                    break
-                bm25_s = r.get("bm25_score", 0)
-                if bm25_s >= rescue_threshold and r.get("id") and r["id"] not in existing_ids:
-                    r["bm25_rescue"] = True
-                    filtered.append(r)
-                    existing_ids.add(r["id"])
-                    rescued += 1
-            if rescued:
-                n_bm25_rescue = rescued
-                filtered.sort(key=lambda x: x.get("score", 0), reverse=True)
+            rescue_candidates = [
+                r for r in coarse
+                if r.get("bm25_score", 0) >= rescue_threshold
+            ][:BM25_RESCUE_MAX_SLOTS]
+            filtered, n_bm25_rescue = _merge_into_results(
+                filtered, rescue_candidates,
+                min_score=effective_threshold, tag="bm25_rescue",
+            )
 
     # Stage 2-xagent: Cross-agent rank guards (v1.9)
     if agent_ids and len(agent_ids) > 1 and CROSS_AGENT_MAX_SHARE < 1.0 and filtered:
@@ -589,34 +658,18 @@ async def recursive_retrieve(
         filtered = guarded
 
     # Stage 2a: Entity fact injection (v1.7) — guaranteed recall for known entities
-    # Vector-first preservation (v1.8): snapshot top vector results so they
-    # are never displaced by injected entity facts.
+    # Vector-first preservation (v1.8): top vector results are never displaced.
     n_entity_facts_injected = 0
     if GRAPH_RETRIEVAL_ENABLED and detected_entities:
-        vector_preserve_n = min(5, max(limit // 2, 1))
-        vector_winners = [r for r in filtered if r.get("file_type") != "entity_fact"][:vector_preserve_n]
-
         entity_facts = build_entity_fact_results(
             detected_entities, min_score=effective_threshold + 0.05,
             as_of=date_from,
         )
         if entity_facts:
-            existing_texts = {r.get("text", "")[:100] for r in filtered}
-            for ef in entity_facts:
-                if ef["text"][:100] not in existing_texts:
-                    filtered.append(ef)
-                    existing_texts.add(ef["text"][:100])
-                    n_entity_facts_injected += 1
-            if n_entity_facts_injected:
-                filtered.sort(key=lambda x: x.get("score", 0), reverse=True)
-
-        # Re-insert vector winners that got pushed out by injections
-        if vector_winners:
-            present_texts = {r.get("text", "")[:100] for r in filtered[:limit]}
-            for vw in vector_winners:
-                if vw.get("text", "")[:100] not in present_texts:
-                    filtered.insert(0, vw)
-            filtered.sort(key=lambda x: x.get("score", 0), reverse=True)
+            filtered, n_entity_facts_injected = _merge_into_results(
+                filtered, entity_facts,
+                preserve_top_n=min(5, max(limit // 2, 1)),
+            )
 
     if not filtered:
         below = {

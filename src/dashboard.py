@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 
 from graph import get_db
 from config import QDRANT_COLLECTION
+import health
 from qdrant import qdrant_client
 
 logger = logging.getLogger("archivist.dashboard")
@@ -56,6 +57,8 @@ def build_dashboard(window_days: int = 7) -> dict:
             "total_entries": cache.get("total_entries"),
             "agents": cache.get("agents"),
         },
+        # fts5 / qdrant / llm — populated via health.register from init and runtime paths
+        "subsystems": health.all_status(),
     }
 
 
