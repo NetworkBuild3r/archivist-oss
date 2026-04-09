@@ -43,7 +43,7 @@ TOOLS: list[Tool] = [
                 },
                 "namespace": {"type": "string", "description": "Memory namespace to search (optional, auto-detect from agent_id)", "default": ""},
                 "team": {"type": "string", "description": "Filter by team (optional)", "default": ""},
-                "refine": {"type": "boolean", "description": "Use LLM refinement for higher quality (slower). Default true.", "default": True},
+                "refine": {"type": "boolean", "description": "Use LLM refinement for higher quality (slower). Default false.", "default": False},
                 "limit": {"type": "integer", "description": "Max chunks to refine/synthesize after retrieval", "default": 20},
                 "min_score": {
                     "type": "number",
@@ -308,7 +308,7 @@ async def _handle_search(arguments: dict) -> list[TextContent]:
         team=arguments.get("team", ""),
         namespace=namespace,
         limit=arguments.get("limit", 20),
-        refine=arguments.get("refine", True),
+        refine=arguments.get("refine", False),
         threshold=threshold,
         tier=arguments.get("tier", "l2"),
         date_from=arguments.get("date_from", ""),

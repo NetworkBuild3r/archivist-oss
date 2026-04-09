@@ -35,8 +35,8 @@ TOOLS: list[Tool] = [
                 "task_description": {"type": "string", "description": "What the agent was trying to accomplish"},
                 "actions": {
                     "type": "array",
-                    "items": {"type": "object"},
-                    "description": "Ordered list of actions taken, e.g. [{\"action\": \"search\", \"result\": \"found X\"}]",
+                    "items": {"oneOf": [{"type": "object"}, {"type": "string"}]},
+                    "description": "Ordered list of actions taken. Each item can be a string or an object, e.g. [\"searched for X\"] or [{\"action\": \"search\", \"result\": \"found X\"}]",
                 },
                 "outcome": {
                     "type": "string",
@@ -142,12 +142,17 @@ TOOLS: list[Tool] = [
 # ---------------------------------------------------------------------------
 
 
+def _normalize_actions(raw: list) -> list[dict]:
+    """Accept both string and dict items — normalise strings to {"action": s}."""
+    return [a if isinstance(a, dict) else {"action": str(a)} for a in raw]
+
+
 async def _handle_log_trajectory(arguments: dict) -> list[TextContent]:
     """Log a trajectory, run attribution + tip extraction."""
     result = await log_trajectory(
         agent_id=arguments["agent_id"],
         task_description=arguments["task_description"],
-        actions=arguments["actions"],
+        actions=_normalize_actions(arguments["actions"]),
         outcome=arguments["outcome"],
         outcome_score=arguments.get("outcome_score"),
         memory_ids_used=arguments.get("memory_ids_used"),

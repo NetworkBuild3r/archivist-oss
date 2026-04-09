@@ -52,6 +52,9 @@ models/
 *.bin
 *.onnx
 
+# QA checklist (local-only, not committed)
+QA_CHECKLIST.md
+
 # Infrastructure-specific operational notes (machine-specific)
 TAILSCALE_STATUS.md
 VLLM_STATUS.md

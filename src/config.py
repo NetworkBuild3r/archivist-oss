@@ -26,6 +26,13 @@ EMBED_API_KEY = os.getenv("EMBED_API_KEY", os.getenv("LLM_API_KEY", ""))
 LLM_URL = os.getenv("LLM_URL", "http://localhost:4000")
 LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
 LLM_API_KEY = os.getenv("LLM_API_KEY", "")
+# Optional: separate models for per-chunk refinement vs final synthesis (empty = LLM_MODEL for both).
+LLM_REFINE_MODEL = os.getenv("LLM_REFINE_MODEL", "").strip()
+LLM_SYNTH_MODEL = os.getenv("LLM_SYNTH_MODEL", "").strip()
+# Parallel refinement: max concurrent LLM calls for Stage 5 (minimum 1).
+LLM_REFINE_CONCURRENCY = max(1, int(os.getenv("LLM_REFINE_CONCURRENCY", "5")))
+# If top hit score is >= this, skip per-chunk LLM refinement and use tier text (0 = disabled, always refine).
+REFINE_SKIP_THRESHOLD = float(os.getenv("REFINE_SKIP_THRESHOLD", "0.0"))
 
 # ── Storage paths ─────────────────────────────────────────────────────────────
 MEMORY_ROOT = os.getenv("MEMORY_ROOT", "/data/memories")

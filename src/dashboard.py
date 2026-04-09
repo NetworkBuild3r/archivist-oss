@@ -129,7 +129,7 @@ def _qdrant_stats() -> dict:
         info = client.get_collection(QDRANT_COLLECTION)
         return {
             "total_points": info.points_count,
-            "vectors_count": info.vectors_count,
+            "indexed_vectors_count": getattr(info, "indexed_vectors_count", None),
             "status": str(info.status),
         }
     except Exception as e:
@@ -145,15 +145,14 @@ def _stale_estimate() -> dict:
         info = client.get_collection(QDRANT_COLLECTION)
         total = info.points_count or 1
 
-        expired, _ = client.scroll(
-            collection_name=QDRANT_COLLECTION,
-            scroll_filter=Filter(
-                must=[FieldCondition(key="ttl_expires_at", range=Range(lte=now_ts, gt=0))]
-            ),
-            limit=0,
-            with_payload=False,
+        stale_filter = Filter(
+            must=[FieldCondition(key="ttl_expires_at", range=Range(lte=now_ts, gt=0))]
         )
-        stale_count = len(expired) if expired else 0
+        stale_count = client.count(
+            collection_name=QDRANT_COLLECTION,
+            count_filter=stale_filter,
+            exact=False,
+        ).count
         return {"stale_count": stale_count, "total": total, "stale_pct": round(stale_count / total * 100, 1)}
     except Exception as e:
         return {"error": str(e), "stale_pct": 0}

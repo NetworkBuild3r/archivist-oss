@@ -32,13 +32,18 @@ TOOLS: list[Tool] = [
                 "messages": {
                     "type": "array",
                     "items": {
-                        "type": "object",
-                        "properties": {
-                            "role": {"type": "string"},
-                            "content": {"type": "string"},
-                        },
+                        "oneOf": [
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "role": {"type": "string"},
+                                    "content": {"type": "string"},
+                                },
+                            },
+                            {"type": "string"},
+                        ],
                     },
-                    "description": "Chat messages to count tokens for (alternative to memory_texts).",
+                    "description": "Chat messages to count tokens for (alternative to memory_texts). Each item can be a {role, content} object or a plain string.",
                 },
                 "memory_texts": {
                     "type": "array",
@@ -92,7 +97,16 @@ TOOLS: list[Tool] = [
         inputSchema={
             "type": "object",
             "properties": {
-                "uri": {"type": "string", "description": "An archivist:// URI to resolve"},
+                "uri": {
+                    "type": "string",
+                    "description": (
+                        "An archivist:// URI to resolve. "
+                        "Format: archivist://{namespace}/{resource_type}/{id} "
+                        "where resource_type is one of: memory, entity, namespace, skill. "
+                        "Examples: archivist://agents-nova/memory/abc123, "
+                        "archivist://shared/entity/42, archivist://agents-nova/skill/web_search"
+                    ),
+                },
                 "agent_id": {"type": "string", "description": "Calling agent for RBAC", "default": ""},
             },
             "required": ["uri"],
@@ -166,6 +180,10 @@ async def _handle_context_check(arguments: dict) -> list[TextContent]:
     memory_texts = arguments.get("memory_texts")
 
     if messages:
+        messages = [
+            m if isinstance(m, dict) else {"role": "user", "content": str(m)}
+            for m in messages
+        ]
         reserve = arguments.get("reserve_from_tail", 2000)
         result = check_context(messages, budget, reserve_from_tail=reserve)
     elif memory_texts:
@@ -214,11 +232,24 @@ async def _handle_resolve_uri(arguments: dict) -> list[TextContent]:
     """Resolve an archivist:// URI to the underlying resource."""
     from archivist_uri import parse_uri
 
-    uri = parse_uri(arguments["uri"])
+    raw_uri = arguments["uri"]
+    uri = parse_uri(raw_uri)
     if not uri:
+        parts = raw_uri.split("/")
+        diag = "URI must start with 'archivist://'" if not raw_uri.startswith("archivist://") else (
+            f"Could not parse resource_type from URI (got {len(parts)} segments, expected at least 5)"
+        )
         return error_response({
-            "error": "invalid_uri", "uri": arguments["uri"],
-            "hint": "Format: archivist://{namespace}/{memory|entity|namespace|skill}/{id}",
+            "error": "invalid_uri",
+            "uri": raw_uri,
+            "diagnostic": diag,
+            "expected_format": "archivist://{namespace}/{resource_type}/{resource_id}",
+            "valid_resource_types": ["memory", "entity", "namespace", "skill"],
+            "examples": [
+                "archivist://agents-nova/memory/abc123-def456",
+                "archivist://shared/entity/42",
+                "archivist://agents-nova/skill/web_search",
+            ],
         })
 
     agent_id = arguments.get("agent_id", "")

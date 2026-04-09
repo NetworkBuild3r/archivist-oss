@@ -7,12 +7,18 @@ Phase 4 (v0.7): memory_type routing.
 Phase 5 (v0.8): hot cache, retrieval trajectory logging.
 """
 
+import asyncio
 import logging
 import time
-from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchAny, Range
+from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchAny
 
 from config import (
     QDRANT_COLLECTION,
+    LLM_MODEL,
+    LLM_REFINE_MODEL,
+    LLM_SYNTH_MODEL,
+    LLM_REFINE_CONCURRENCY,
+    REFINE_SKIP_THRESHOLD,
     RETRIEVAL_THRESHOLD, RERANK_ENABLED, RERANK_MODEL, RERANK_TOP_K,
     VECTOR_SEARCH_LIMIT,
     GRAPH_RETRIEVAL_ENABLED, MULTI_HOP_DEPTH, TEMPORAL_DECAY_HALFLIFE_DAYS,
@@ -116,9 +122,14 @@ def _retrieval_trace(
     if cross_agent_capped:
         trace["cross_agent_capped"] = True
     # Merge caller/_trace_kw() extensions; omit empty placeholders so the trace stays compact.
+    # Preserve explicit False for observability booleans (otherwise refine_skipped=False is dropped).
+    _trace_keep_false = frozenset({"refine_skipped", "refine_parallel"})
     for k, v in extra.items():
-        if v is not None and v != "" and v is not False:
-            trace[k] = v
+        if v is None or v == "":
+            continue
+        if v is False and k not in _trace_keep_false:
+            continue
+        trace[k] = v
     return trace
 
 
@@ -191,6 +202,46 @@ SYNTHESIZE_MULTI_AGENT = (
     + " When several agents contributed memories, attribute each major claim to the agent "
     "(by name or id) whose memory it came from."
 )
+
+_refine_sem = asyncio.Semaphore(LLM_REFINE_CONCURRENCY)
+
+
+async def _refine_one_chunk(
+    hit: dict,
+    query: str,
+    tier: str,
+    refine_model: str,
+) -> dict | None:
+    """Run LLM refinement for one chunk. Concurrency is capped by ``_refine_sem``."""
+    async with _refine_sem:
+        context = select_tier(hit, tier)
+        if hit.get("parent_context") and tier == "l2":
+            context = f"[Parent context]\n{hit['parent_context']}\n\n[Matched chunk]\n{context}"
+
+        graph_extra = ""
+        if hit.get("graph_context"):
+            graph_extra = "\n[Graph context] " + " | ".join(hit["graph_context"][:3])
+
+        who = hit.get("agent_id") or "unknown"
+        prompt = (
+            f"Query: {query}\n\nMemory chunk (agent={who}, file={hit['file_path']}, date={hit['date']}):\n{context}{graph_extra}"
+        )
+        try:
+            extraction = await llm_query(
+                prompt, system=REFINE_SYSTEM, max_tokens=512, model=refine_model,
+            )
+            if extraction.strip().upper() != "IRRELEVANT":
+                return {
+                    "extraction": extraction.strip(),
+                    "source": hit["file_path"],
+                    "date": hit["date"],
+                    "agent_id": hit["agent_id"],
+                    "score": hit["score"],
+                    "rerank_score": hit.get("rerank_score"),
+                }
+        except Exception as e:
+            logger.warning("LLM refinement failed for chunk: %s", e)
+        return None
 
 
 def _merge_into_results(
@@ -297,10 +348,8 @@ async def search_vectors(
         must_filters.append(FieldCondition(key="namespace", match=MatchValue(value=namespace)))
     if file_type:
         must_filters.append(FieldCondition(key="file_type", match=MatchValue(value=file_type)))
-    if date_from:
-        must_filters.append(FieldCondition(key="date", match=MatchValue(value=date_from)) if date_from == date_to else FieldCondition(key="date", range=Range(gte=date_from)))
-    if date_to and date_to != date_from:
-        must_filters.append(FieldCondition(key="date", range=Range(lte=date_to)))
+    if date_from and date_from == date_to:
+        must_filters.append(FieldCondition(key="date", match=MatchValue(value=date_from)))
     if memory_type:
         must_filters.append(FieldCondition(key="memory_type", match=MatchValue(value=memory_type)))
     if topic:
@@ -308,7 +357,9 @@ async def search_vectors(
     if thought_type:
         must_filters.append(FieldCondition(key="thought_type", match=MatchValue(value=thought_type)))
 
+    _date_range_active = bool(date_from or date_to) and date_from != date_to
     search_filter = Filter(must=must_filters) if must_filters else None
+    fetch_limit = limit * 3 if _date_range_active else limit
 
     # Degrade to [] on Qdrant/network errors so retrieval can fall back to BM25-only paths.
     try:
@@ -316,7 +367,7 @@ async def search_vectors(
             collection_name=QDRANT_COLLECTION,
             query=query_vec,
             query_filter=search_filter,
-            limit=limit,
+            limit=fetch_limit,
             with_payload=True,
         ).points
     except Exception as e:
@@ -327,7 +378,7 @@ async def search_vectors(
     if not health.is_healthy("qdrant"):
         health.register("qdrant", healthy=True)
 
-    return [
+    rows = [
         {
             "id": getattr(hit, "id", ""),
             "score": hit.score,
@@ -352,6 +403,15 @@ async def search_vectors(
         }
         for hit in results
     ]
+
+    if _date_range_active:
+        if date_from:
+            rows = [r for r in rows if r["date"] >= date_from]
+        if date_to:
+            rows = [r for r in rows if r["date"] <= date_to]
+        rows = rows[:limit]
+
+    return rows
 
 
 def apply_importance_to_results(results: list[dict], weight: float | None = None) -> list[dict]:
@@ -797,35 +857,37 @@ async def recursive_retrieve(
         _attach_stage0(no_refine, stage0_inventory, auto_type, user_memory_type)
         return no_refine
 
-    # Stage 5: LLM refinement
-    refined = []
+    # Stage 5: LLM refinement (parallel + optional high-confidence skip)
     multi_agent = len({h.get("agent_id") for h in enriched if h.get("agent_id")}) > 1
-    for hit in enriched:
-        context = select_tier(hit, tier)
-        if hit.get("parent_context") and tier == "l2":
-            context = f"[Parent context]\n{hit['parent_context']}\n\n[Matched chunk]\n{context}"
+    refine_model = LLM_REFINE_MODEL or LLM_MODEL
+    synth_model = LLM_SYNTH_MODEL or LLM_MODEL
 
-        graph_extra = ""
-        if hit.get("graph_context"):
-            graph_extra = "\n[Graph context] " + " | ".join(hit["graph_context"][:3])
-
-        who = hit.get("agent_id") or "unknown"
-        prompt = (
-            f"Query: {query}\n\nMemory chunk (agent={who}, file={hit['file_path']}, date={hit['date']}):\n{context}{graph_extra}"
-        )
-        try:
-            extraction = await llm_query(prompt, system=REFINE_SYSTEM, max_tokens=512)
-            if extraction.strip().upper() != "IRRELEVANT":
-                refined.append({
-                    "extraction": extraction.strip(),
-                    "source": hit["file_path"],
-                    "date": hit["date"],
-                    "agent_id": hit["agent_id"],
-                    "score": hit["score"],
-                    "rerank_score": hit.get("rerank_score"),
-                })
-        except Exception as e:
-            logger.warning("LLM refinement failed for chunk: %s", e)
+    top_score = float(enriched[0].get("score", 0)) if enriched else 0.0
+    if REFINE_SKIP_THRESHOLD > 0 and top_score >= REFINE_SKIP_THRESHOLD:
+        refined = [
+            {
+                "extraction": select_tier(hit, tier),
+                "source": hit["file_path"],
+                "date": hit["date"],
+                "agent_id": hit["agent_id"],
+                "score": hit["score"],
+                "rerank_score": hit.get("rerank_score"),
+            }
+            for hit in enriched
+        ]
+        _common_trace["refine_skipped"] = True
+        _common_trace["refine_wall_ms"] = 0
+        _common_trace["refine_parallel"] = False
+        _common_trace["refine_model"] = refine_model
+    else:
+        t_ref0 = time.monotonic()
+        tasks = [_refine_one_chunk(hit, query, tier, refine_model) for hit in enriched]
+        results = await asyncio.gather(*tasks)
+        refined = [r for r in results if r is not None]
+        _common_trace["refine_wall_ms"] = int((time.monotonic() - t_ref0) * 1000)
+        _common_trace["refine_skipped"] = False
+        _common_trace["refine_parallel"] = True
+        _common_trace["refine_model"] = refine_model
 
     if not refined:
         no_rel = {
@@ -851,13 +913,19 @@ async def recursive_retrieve(
     synth_prompt = f"Query: {query}\n\nExtracted memories:\n{extractions_text}"
     synth_system = SYNTHESIZE_MULTI_AGENT if multi_agent else SYNTHESIZE_SYSTEM
 
+    t_synth0 = time.monotonic()
     try:
-        answer = await llm_query(synth_prompt, system=synth_system, max_tokens=1024)
+        answer = await llm_query(
+            synth_prompt, system=synth_system, max_tokens=1024, model=synth_model,
+        )
     except Exception as e:
         logger.error("Synthesis failed: %s", e)
         answer = extractions_text
         # Signal to callers/operators that the answer is raw extractions, not a synthesised response.
         _common_trace["synthesis_degraded"] = True
+    finally:
+        _common_trace["synth_wall_ms"] = int((time.monotonic() - t_synth0) * 1000)
+        _common_trace["synth_model"] = synth_model
 
     final_result = {
         "answer": answer,
