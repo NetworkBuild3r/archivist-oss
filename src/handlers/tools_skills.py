@@ -286,13 +286,13 @@ async def _handle_skill_relate(arguments: dict) -> list[TextContent]:
         return error_response({
             "error": "skill_not_found",
             "skill_name": arguments["skill_a"],
-            "hint": f"Skill '{arguments['skill_a']}' is not registered. Use archivist_skill_register to create it first.",
+            "hint": f"Skill '{arguments['skill_a']}' is not registered. Use archivist_register_skill to create it first.",
         })
     if not skill_b:
         return error_response({
             "error": "skill_not_found",
             "skill_name": arguments["skill_b"],
-            "hint": f"Skill '{arguments['skill_b']}' is not registered. Use archivist_skill_register to create it first.",
+            "hint": f"Skill '{arguments['skill_b']}' is not registered. Use archivist_register_skill to create it first.",
         })
 
     rel_id = add_skill_relation(
@@ -319,7 +319,7 @@ async def _handle_skill_dependencies(arguments: dict) -> list[TextContent]:
         return error_response({
             "error": "skill_not_found",
             "skill_name": arguments["skill_name"],
-            "hint": f"Skill '{arguments['skill_name']}' is not registered. Use archivist_skill_register to create it first.",
+            "hint": f"Skill '{arguments['skill_name']}' is not registered. Use archivist_register_skill to create it first.",
         })
 
     depth = arguments.get("depth", 1)

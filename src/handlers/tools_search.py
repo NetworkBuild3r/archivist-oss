@@ -336,7 +336,7 @@ async def _handle_recall(arguments: dict) -> list[TextContent]:
 
     entities = search_entities(entity_name)
     if not entities:
-        return error_response({"error": f"Entity '{entity_name}' not found in knowledge graph"})
+        return error_response({"error": "entity_not_found", "entity": entity_name})
 
     eid = entities[0]["id"]
     facts = get_entity_facts(eid, as_of=as_of)
@@ -374,6 +374,7 @@ async def _handle_timeline(arguments: dict) -> list[TextContent]:
     agent_id = arguments.get("agent_id", "")
     namespace = arguments.get("namespace", "")
     days = int(arguments.get("days", 14))
+    as_of = (arguments.get("as_of") or "").strip()
     caller = resolve_caller(arguments)
     if err := require_caller(caller):
         return err
@@ -392,8 +393,19 @@ async def _handle_timeline(arguments: dict) -> list[TextContent]:
                 "denied_agents": denied_list,
             })
 
-    date_from = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d") if days > 0 else ""
-    results = await search_vectors(query, agent_id=agent_id, namespace=namespace, date_from=date_from, limit=50)
+    if as_of:
+        anchor = datetime.strptime(as_of, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        date_to = as_of
+        date_from = (anchor - timedelta(days=days)).strftime("%Y-%m-%d") if days > 0 else ""
+    else:
+        now = datetime.now(timezone.utc)
+        date_to = ""
+        date_from = (now - timedelta(days=days)).strftime("%Y-%m-%d") if days > 0 else ""
+
+    results = await search_vectors(
+        query, agent_id=agent_id, namespace=namespace,
+        date_from=date_from, date_to=date_to, limit=50,
+    )
     results = [r for r in results if can_read_agent_memory(caller, r.get("agent_id", ""))]
     results.sort(key=lambda x: x.get("date", ""))
 
