@@ -7,9 +7,7 @@ tqdm>=4.66.0
 uvicorn>=0.30.0
 starlette>=0.38.0
 
-# Dev / test dependencies
-# pytest>=8.0.0
-# pytest-asyncio>=0.24.0
+# Dev / test dependencies — see requirements-test.txt (used by CI)
 # pytest-benchmark>=5.1.0
 
 # Benchmark evaluation (Tier 3 academic)
