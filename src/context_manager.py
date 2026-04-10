@@ -1,6 +1,5 @@
 """Context window management — token counting, budget checks, and message splitting.
 
-Inspired by ReMe's check_context() and pre_reasoning_hook().
 Provides the logic behind the archivist_context_check MCP tool.
 """
 

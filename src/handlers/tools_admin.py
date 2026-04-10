@@ -32,13 +32,18 @@ TOOLS: list[Tool] = [
                 "messages": {
                     "type": "array",
                     "items": {
-                        "type": "object",
-                        "properties": {
-                            "role": {"type": "string"},
-                            "content": {"type": "string"},
-                        },
+                        "oneOf": [
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "role": {"type": "string"},
+                                    "content": {"type": "string"},
+                                },
+                            },
+                            {"type": "string"},
+                        ],
                     },
-                    "description": "Chat messages to count tokens for (alternative to memory_texts).",
+                    "description": "Chat messages to count tokens for (alternative to memory_texts). Each item can be a {role, content} object or a plain string.",
                 },
                 "memory_texts": {
                     "type": "array",
@@ -92,8 +97,18 @@ TOOLS: list[Tool] = [
         inputSchema={
             "type": "object",
             "properties": {
-                "uri": {"type": "string", "description": "An archivist:// URI to resolve"},
+                "uri": {
+                    "type": "string",
+                    "description": (
+                        "An archivist:// URI to resolve. "
+                        "Format: archivist://{namespace}/{resource_type}/{id} "
+                        "where resource_type is one of: memory, entity, namespace, skill. "
+                        "Examples: archivist://agents-nova/memory/abc123, "
+                        "archivist://shared/entity/42, archivist://agents-nova/skill/web_search"
+                    ),
+                },
                 "agent_id": {"type": "string", "description": "Calling agent for RBAC", "default": ""},
+                "caller_agent_id": {"type": "string", "description": "Original caller agent (overrides agent_id for RBAC)", "default": ""},
             },
             "required": ["uri"],
         },
@@ -139,7 +154,7 @@ TOOLS: list[Tool] = [
         description=(
             "Recommend a safe batch size based on memory health signals. "
             "Considers conflict rate, stale memory %, cache hit rate, and degraded skills. "
-            "Inspired by Batch Size Gravity — when health degrades, use smaller batches."
+            "When health degrades, use smaller batches."
         ),
         inputSchema={
             "type": "object",
@@ -147,6 +162,50 @@ TOOLS: list[Tool] = [
                 "window_days": {"type": "integer", "description": "Analysis window in days", "default": 7},
             },
             "required": [],
+        },
+    ),
+    Tool(
+        name="archivist_backup",
+        description=(
+            "Create, list, or restore memory snapshots. Snapshots include Qdrant vectors "
+            "and SQLite graph data for disaster recovery and agent migration."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["create", "list", "restore", "delete", "export_agent", "import_agent"],
+                    "description": "Action to perform",
+                },
+                "snapshot_id": {
+                    "type": "string",
+                    "description": "Snapshot ID (required for restore/delete)",
+                    "default": "",
+                },
+                "label": {
+                    "type": "string",
+                    "description": "Optional label for the snapshot (used with create)",
+                    "default": "",
+                },
+                "target": {
+                    "type": "string",
+                    "enum": ["all", "qdrant", "sqlite"],
+                    "description": "What to restore (default: all)",
+                    "default": "all",
+                },
+                "agent_id": {
+                    "type": "string",
+                    "description": "Agent ID for export_agent action",
+                    "default": "",
+                },
+                "file": {
+                    "type": "string",
+                    "description": "NDJSON file path for import_agent action",
+                    "default": "",
+                },
+            },
+            "required": ["action"],
         },
     ),
 ]
@@ -166,6 +225,10 @@ async def _handle_context_check(arguments: dict) -> list[TextContent]:
     memory_texts = arguments.get("memory_texts")
 
     if messages:
+        messages = [
+            m if isinstance(m, dict) else {"role": "user", "content": str(m)}
+            for m in messages
+        ]
         reserve = arguments.get("reserve_from_tail", 2000)
         result = check_context(messages, budget, reserve_from_tail=reserve)
     elif memory_texts:
@@ -214,26 +277,40 @@ async def _handle_resolve_uri(arguments: dict) -> list[TextContent]:
     """Resolve an archivist:// URI to the underlying resource."""
     from archivist_uri import parse_uri
 
-    uri = parse_uri(arguments["uri"])
+    raw_uri = arguments["uri"]
+    uri = parse_uri(raw_uri)
     if not uri:
+        parts = raw_uri.split("/")
+        diag = "URI must start with 'archivist://'" if not raw_uri.startswith("archivist://") else (
+            f"Could not parse resource_type from URI (got {len(parts)} segments, expected at least 5)"
+        )
         return error_response({
-            "error": "invalid_uri", "uri": arguments["uri"],
-            "hint": "Format: archivist://{namespace}/{memory|entity|namespace|skill}/{id}",
+            "error": "invalid_uri",
+            "uri": raw_uri,
+            "diagnostic": diag,
+            "expected_format": "archivist://{namespace}/{resource_type}/{resource_id}",
+            "valid_resource_types": ["memory", "entity", "namespace", "skill"],
+            "examples": [
+                "archivist://agents-nova/memory/abc123-def456",
+                "archivist://shared/entity/42",
+                "archivist://agents-nova/skill/web_search",
+            ],
         })
 
     agent_id = arguments.get("agent_id", "")
+    caller_agent_id = arguments.get("caller_agent_id", "")
 
     if uri.is_memory:
         from .tools_search import _handle_deref
-        return await _handle_deref({"memory_id": uri.resource_id, "agent_id": agent_id})
+        return await _handle_deref({"memory_id": uri.resource_id, "agent_id": agent_id, "caller_agent_id": caller_agent_id})
 
     if uri.is_entity:
         from .tools_search import _handle_recall
-        return await _handle_recall({"entity": uri.resource_id, "agent_id": agent_id, "namespace": uri.namespace})
+        return await _handle_recall({"entity": uri.resource_id, "agent_id": agent_id, "caller_agent_id": caller_agent_id, "namespace": uri.namespace})
 
     if uri.is_namespace:
         from .tools_search import _handle_index
-        return await _handle_index({"agent_id": agent_id, "namespace": uri.namespace})
+        return await _handle_index({"agent_id": agent_id, "caller_agent_id": caller_agent_id, "namespace": uri.namespace})
 
     if uri.is_skill:
         skill = find_skill(uri.resource_id)
@@ -275,6 +352,64 @@ async def _handle_batch_heuristic(arguments: dict) -> list[TextContent]:
     return success_response(result)
 
 
+async def _handle_backup(arguments: dict) -> list[TextContent]:
+    """Create, list, restore, or delete memory snapshots."""
+    from backup_manager import (
+        create_snapshot, list_snapshots, restore_snapshot,
+        delete_snapshot, prune_snapshots, export_agent, import_agent,
+    )
+
+    action = arguments.get("action", "")
+
+    if action == "create":
+        label = arguments.get("label", "")
+        result = create_snapshot(label=label)
+        prune_snapshots()
+        return success_response(result)
+
+    if action == "list":
+        snapshots = list_snapshots()
+        return success_response({"snapshots": snapshots, "count": len(snapshots)})
+
+    if action == "restore":
+        snapshot_id = arguments.get("snapshot_id", "").strip()
+        if not snapshot_id:
+            return error_response({"error": "snapshot_id is required for restore"})
+        target = arguments.get("target", "all")
+        try:
+            result = restore_snapshot(snapshot_id, target=target)
+            return success_response(result)
+        except (FileNotFoundError, ValueError) as e:
+            return error_response({"error": str(e)})
+
+    if action == "delete":
+        snapshot_id = arguments.get("snapshot_id", "").strip()
+        if not snapshot_id:
+            return error_response({"error": "snapshot_id is required for delete"})
+        if delete_snapshot(snapshot_id):
+            return success_response({"deleted": snapshot_id})
+        return error_response({"error": "snapshot not found"})
+
+    if action == "export_agent":
+        agent_id = arguments.get("agent_id", "").strip()
+        if not agent_id:
+            return error_response({"error": "agent_id is required for export_agent"})
+        result = export_agent(agent_id)
+        return success_response(result)
+
+    if action == "import_agent":
+        file_path = arguments.get("file", "").strip()
+        if not file_path:
+            return error_response({"error": "file path is required for import_agent"})
+        try:
+            result = import_agent(file_path)
+            return success_response(result)
+        except FileNotFoundError as e:
+            return error_response({"error": str(e)})
+
+    return error_response({"error": f"Unknown action: {action}"})
+
+
 # ---------------------------------------------------------------------------
 # Handler registry
 # ---------------------------------------------------------------------------
@@ -287,4 +422,5 @@ HANDLERS: dict[str, object] = {
     "archivist_retrieval_logs": _handle_retrieval_logs,
     "archivist_health_dashboard": _handle_health_dashboard,
     "archivist_batch_heuristic": _handle_batch_heuristic,
+    "archivist_backup": _handle_backup,
 }

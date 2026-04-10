@@ -26,6 +26,13 @@ EMBED_API_KEY = os.getenv("EMBED_API_KEY", os.getenv("LLM_API_KEY", ""))
 LLM_URL = os.getenv("LLM_URL", "http://localhost:4000")
 LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
 LLM_API_KEY = os.getenv("LLM_API_KEY", "")
+# Optional: separate models for per-chunk refinement vs final synthesis (empty = LLM_MODEL for both).
+LLM_REFINE_MODEL = os.getenv("LLM_REFINE_MODEL", "").strip()
+LLM_SYNTH_MODEL = os.getenv("LLM_SYNTH_MODEL", "").strip()
+# Parallel refinement: max concurrent LLM calls for Stage 5 (minimum 1).
+LLM_REFINE_CONCURRENCY = max(1, int(os.getenv("LLM_REFINE_CONCURRENCY", "5")))
+# If top hit score is >= this, skip per-chunk LLM refinement and use tier text (0 = disabled, always refine).
+REFINE_SKIP_THRESHOLD = float(os.getenv("REFINE_SKIP_THRESHOLD", "0.0"))
 
 # ── Storage paths ─────────────────────────────────────────────────────────────
 MEMORY_ROOT = os.getenv("MEMORY_ROOT", "/data/memories")
@@ -72,6 +79,16 @@ HOT_CACHE_TTL_SECONDS = int(os.getenv("HOT_CACHE_TTL_SECONDS", "600"))
 TRAJECTORY_EXPORT_ENABLED = _env_bool("TRAJECTORY_EXPORT_ENABLED")
 TRAJECTORY_EXPORT_MAX = int(os.getenv("TRAJECTORY_EXPORT_MAX", "200"))
 
+# ── Observability (v0.9) ──────────────────────────────────────────────────────
+METRICS_ENABLED = _env_bool("METRICS_ENABLED", "true")
+DEFAULT_CONSISTENCY = os.getenv("DEFAULT_CONSISTENCY", "eventual")
+# Slow-path warnings (0 = disabled). Logs one line when a step exceeds the threshold (ms).
+SLOW_EMBED_MS = float(os.getenv("SLOW_EMBED_MS", "0"))
+SLOW_QDRANT_MS = float(os.getenv("SLOW_QDRANT_MS", "0"))
+SLOW_LLM_MS = float(os.getenv("SLOW_LLM_MS", "0"))
+# Optional: append one JSON object per TTL invalidation run (see REFERENCE.md).
+ARCHIVIST_INVALIDATION_EXPORT_PATH = os.getenv("ARCHIVIST_INVALIDATION_EXPORT_PATH", "").strip()
+
 # ── Webhooks (v0.9) ─────────────────────────────────────────────────────────
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").strip()
 WEBHOOK_TIMEOUT = float(os.getenv("WEBHOOK_TIMEOUT", "5"))
@@ -86,6 +103,25 @@ CURATOR_QUEUE_DRAIN_INTERVAL = int(os.getenv("CURATOR_QUEUE_DRAIN_INTERVAL", "30
 HOTNESS_WEIGHT = float(os.getenv("HOTNESS_WEIGHT", "0.15"))
 HOTNESS_HALFLIFE_DAYS = int(os.getenv("HOTNESS_HALFLIFE_DAYS", "7"))
 IMPORTANCE_WEIGHT = float(os.getenv("IMPORTANCE_WEIGHT", "0.10"))
+
+# ── Entity injection tuning (v1.8 — needle regression fix) ──────────────────
+MAX_ENTITY_FACT_INJECTIONS = int(os.getenv("MAX_ENTITY_FACT_INJECTIONS", "15"))
+ENTITY_SPECIFICITY_MAX_MENTIONS = int(os.getenv("ENTITY_SPECIFICITY_MAX_MENTIONS", "20"))
+
+# ── Temporal intent & adaptive retrieval (v1.9 — recall improvements) ────────
+TEMPORAL_INTENT_ENABLED = _env_bool("TEMPORAL_INTENT_ENABLED")
+TEMPORAL_HISTORICAL_HALFLIFE_MULTIPLIER = float(os.getenv("TEMPORAL_HISTORICAL_HALFLIFE_MULTIPLIER", "10"))
+BM25_RESCUE_ENABLED = _env_bool("BM25_RESCUE_ENABLED")
+BM25_RESCUE_MIN_SCORE_RATIO = float(os.getenv("BM25_RESCUE_MIN_SCORE_RATIO", "0.6"))
+BM25_RESCUE_MAX_SLOTS = int(os.getenv("BM25_RESCUE_MAX_SLOTS", "3"))
+ADAPTIVE_VECTOR_LIMIT_ENABLED = _env_bool("ADAPTIVE_VECTOR_LIMIT_ENABLED")
+ADAPTIVE_VECTOR_MIN_RESULTS = int(os.getenv("ADAPTIVE_VECTOR_MIN_RESULTS", "3"))
+ADAPTIVE_VECTOR_LIMIT_MULTIPLIER = float(os.getenv("ADAPTIVE_VECTOR_LIMIT_MULTIPLIER", "3"))
+CROSS_AGENT_MAX_SHARE = float(os.getenv("CROSS_AGENT_MAX_SHARE", "0.6"))
+
+# ── Topic routing (v1.10 — keyword-based pre-vector filter) ──────────────
+TOPIC_ROUTING_ENABLED = _env_bool("TOPIC_ROUTING_ENABLED")
+TOPIC_MAP_PATH = os.getenv("TOPIC_MAP_PATH", "")
 
 # ── Retention classes (v1.7 — "never forget" pinning) ────────────────────────
 VALID_RETENTION_CLASSES = ("ephemeral", "standard", "durable", "permanent")
@@ -108,15 +144,43 @@ CURATOR_EXTRACT_SKIP_SEGMENTS: list[str] = [
     if p.strip()
 ]
 
-# ── Memory awareness — Stage 0 query classification (v1.6 — MemCollab-inspired) ─
+# ── Memory awareness — Stage 0 query classification (v1.6) ───────────────────
 QUERY_CLASSIFICATION_ENABLED = _env_bool("QUERY_CLASSIFICATION_ENABLED")
 
-# ── BM25 / FTS5 hybrid search (v1.2 — ReMe-inspired) ────────────────────────
+# ── BM25 / FTS5 hybrid search (v1.2) ─────────────────────────────────────────
 BM25_ENABLED = _env_bool("BM25_ENABLED")
 BM25_WEIGHT = float(os.getenv("BM25_WEIGHT", "0.3"))
 VECTOR_WEIGHT = float(os.getenv("VECTOR_WEIGHT", "0.7"))
 
-# ── Context window management (v1.1 — ReMe-inspired) ────────────────────────
+# ── Needle-finding: query expansion + dynamic threshold (v1.10) ──────────────
+QUERY_EXPANSION_ENABLED = _env_bool("QUERY_EXPANSION_ENABLED", "false")
+QUERY_EXPANSION_COUNT = int(os.getenv("QUERY_EXPANSION_COUNT", "3"))
+QUERY_EXPANSION_MODEL = os.getenv("QUERY_EXPANSION_MODEL", "").strip()
+DYNAMIC_THRESHOLD_ENABLED = _env_bool("DYNAMIC_THRESHOLD_ENABLED", "false")
+
+# ── Contextual chunk augmentation (v1.10 — index-time enrichment) ────────────
+CONTEXTUAL_AUGMENTATION_ENABLED = _env_bool("CONTEXTUAL_AUGMENTATION_ENABLED", "false")
+
+# ── HNSW tuning (v1.10 — recall over speed) ─────────────────────────────────
+QDRANT_HNSW_M = int(os.getenv("QDRANT_HNSW_M", "32"))
+QDRANT_HNSW_EF_CONSTRUCT = int(os.getenv("QDRANT_HNSW_EF_CONSTRUCT", "256"))
+QDRANT_SEARCH_EF = int(os.getenv("QDRANT_SEARCH_EF", "256"))
+
+# ── Enterprise scaling (v1.10) ───────────────────────────────────────────────
+NAMESPACE_SHARDING_ENABLED = _env_bool("NAMESPACE_SHARDING_ENABLED", "false")
+SINGLE_COLLECTION_MODE = _env_bool("SINGLE_COLLECTION_MODE", "true")
+CACHE_BACKEND = os.getenv("CACHE_BACKEND", "memory").lower()  # "memory" or "redis"
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+REDIS_KEY_PREFIX = os.getenv("REDIS_KEY_PREFIX", "archivist:")
+LATENCY_BUDGET_MS = int(os.getenv("LATENCY_BUDGET_MS", "500"))
+
+# ── Backup & restore (v1.10) ──────────────────────────────────────────────────
+BACKUP_DIR = os.getenv("BACKUP_DIR", "/data/archivist/backups")
+BACKUP_RETENTION_COUNT = int(os.getenv("BACKUP_RETENTION_COUNT", "5"))
+BACKUP_INCLUDE_FILES = _env_bool("BACKUP_INCLUDE_FILES", "false")
+BACKUP_PRE_PRUNE = _env_bool("BACKUP_PRE_PRUNE", "false")
+
+# ── Context window management (v1.1) ─────────────────────────────────────────
 DEFAULT_CONTEXT_BUDGET = int(os.getenv("DEFAULT_CONTEXT_BUDGET", "128000"))
 
 # ── Journal exports (v1.5 — human-readable markdown alongside Qdrant) ────────

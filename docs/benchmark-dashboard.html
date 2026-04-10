@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Archivist — Pipeline Benchmark Dashboard</title>
+<title>Archivist — Benchmark Dashboard</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
 <style>
   :root {
@@ -17,8 +17,10 @@
     --accent3: #fdcb6e;
     --accent4: #e17055;
     --accent5: #55efc4;
+    --accent6: #a29bfe;
     --green: #00b894;
     --red: #d63031;
+    --stuffing: #f97316;
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
@@ -32,423 +34,375 @@
   h2 { font-size: 1.2rem; font-weight: 600; margin-bottom: 1rem; color: var(--muted); }
   h3 { font-size: 1rem; font-weight: 600; margin-bottom: 0.75rem; }
   .subtitle { color: var(--muted); font-size: 0.95rem; margin-bottom: 2rem; }
-
+  .tab-bar {
+    display: flex; gap: 0.5rem; margin-bottom: 1.5rem;
+  }
+  .tab-bar button {
+    background: var(--surface); color: var(--muted); border: 1px solid var(--border);
+    border-radius: 8px; padding: 0.5rem 1.25rem; cursor: pointer; font-size: 0.9rem;
+    transition: all 0.2s;
+  }
+  .tab-bar button.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .tab-bar button:hover:not(.active) { border-color: var(--accent); color: var(--text); }
+  .tab-content { display: none; }
+  .tab-content.active { display: block; }
   .kpi-row {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
     gap: 1rem;
     margin-bottom: 2rem;
   }
   .kpi-card {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 1.25rem;
-    text-align: center;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 1.25rem; text-align: center;
   }
   .kpi-value {
-    font-size: 2rem;
-    font-weight: 700;
+    font-size: 1.8rem; font-weight: 700;
     background: linear-gradient(135deg, var(--accent), var(--accent2));
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
   }
   .kpi-label { font-size: 0.85rem; color: var(--muted); margin-top: 0.25rem; }
   .kpi-detail { font-size: 0.75rem; color: var(--muted); margin-top: 0.15rem; }
-
   .charts-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 1.5rem;
-    margin-bottom: 2rem;
+    display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-bottom: 2rem;
   }
   .chart-card {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 1.5rem;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 1.5rem;
   }
-  .chart-card.full-width {
-    grid-column: 1 / -1;
-  }
+  .chart-card.full-width { grid-column: 1 / -1; }
   canvas { max-height: 350px; }
-
-  table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 0.9rem;
-  }
-  th, td {
-    padding: 0.65rem 1rem;
-    text-align: left;
-    border-bottom: 1px solid var(--border);
-  }
-  th {
-    color: var(--muted);
-    font-weight: 600;
-    font-size: 0.8rem;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-  }
+  table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+  th, td { padding: 0.65rem 1rem; text-align: left; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; }
   tr:hover td { background: rgba(108, 92, 231, 0.05); }
-
   .bar-inline {
-    display: inline-block;
-    height: 6px;
-    border-radius: 3px;
-    background: var(--accent);
-    vertical-align: middle;
-    margin-left: 0.5rem;
+    display: inline-block; height: 6px; border-radius: 3px;
+    background: var(--accent); vertical-align: middle; margin-left: 0.5rem;
   }
-
+  .load-section {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    padding: 1.5rem; margin-bottom: 2rem; text-align: center;
+  }
+  .load-section input[type="file"] { display: none; }
+  .load-btn {
+    background: var(--accent); color: #fff; border: none; border-radius: 8px;
+    padding: 0.6rem 1.5rem; cursor: pointer; font-size: 0.9rem; margin: 0 0.5rem;
+  }
+  .load-btn:hover { opacity: 0.9; }
   .footer {
-    text-align: center;
-    color: var(--muted);
-    font-size: 0.8rem;
-    margin-top: 2rem;
-    padding-top: 1rem;
-    border-top: 1px solid var(--border);
+    text-align: center; color: var(--muted); font-size: 0.8rem;
+    margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--border);
   }
-
-  @media (max-width: 900px) {
-    .charts-grid { grid-template-columns: 1fr; }
-    body { padding: 1rem; }
-  }
+  @media (max-width: 900px) { .charts-grid { grid-template-columns: 1fr; } body { padding: 1rem; } }
 </style>
 </head>
 <body>
-<h1>Archivist Pipeline Benchmark</h1>
-<p class="subtitle">~110 queries (legacy corpus) x 7 pipeline variants — dual-track presets: <code>generate_corpus.py --preset small|medium|large</code> + <code>evaluate.py --memory-scale</code> / <code>--scale-sweep</code> — see <a href="BENCHMARKS.md" style="color:var(--accent2);">BENCHMARKS.md</a></p>
+<h1>Archivist Benchmark Dashboard</h1>
+<p class="subtitle">
+  Pipeline ablation, context stuffing vs Archivist, and academic benchmark scores.
+  Load JSON results or use the built-in defaults.
+</p>
 
-<div class="kpi-row">
-  <div class="kpi-card">
-    <div class="kpi-value">89.2%</div>
-    <div class="kpi-label">Recall@5 (vector only)</div>
-    <div class="kpi-detail">Baseline retrieval accuracy</div>
+<div class="load-section">
+  <label class="load-btn" for="fileInput">Load JSON Results</label>
+  <input type="file" id="fileInput" accept=".json" multiple>
+  <span style="color:var(--muted);font-size:0.85rem;margin-left:1rem;">
+    Drop <code>full_comparison.json</code>, <code>longmemeval_results.json</code>, etc.
+  </span>
+</div>
+
+<div class="tab-bar">
+  <button class="active" onclick="switchTab('internal')">Internal Benchmarks</button>
+  <button onclick="switchTab('academic')">Academic Benchmarks</button>
+  <button onclick="switchTab('comparison')">Archivist vs Stuffing</button>
+</div>
+
+<!-- TAB 1: Internal Benchmarks -->
+<div id="tab-internal" class="tab-content active">
+  <div class="kpi-row" id="kpi-internal"></div>
+  <div class="charts-grid">
+    <div class="chart-card full-width"><h3>Recall@5 Across Scales</h3><canvas id="scaleRecall"></canvas></div>
+    <div class="chart-card"><h3>Recall by Query Type (Stress)</h3><canvas id="queryTypeRecall"></canvas></div>
+    <div class="chart-card"><h3>Latency by Scale</h3><canvas id="latencyScale"></canvas></div>
   </div>
-  <div class="kpi-card">
-    <div class="kpi-value">87.7%</div>
-    <div class="kpi-label">Recall@5 (full pipeline)</div>
-    <div class="kpi-detail">With temporal awareness</div>
-  </div>
-  <div class="kpi-card">
-    <div class="kpi-value">99.0%</div>
-    <div class="kpi-label">Single-hop Recall</div>
-    <div class="kpi-detail">Direct factual lookups</div>
-  </div>
-  <div class="kpi-card">
-    <div class="kpi-value">100%</div>
-    <div class="kpi-label">Temporal Query Recall</div>
-    <div class="kpi-detail">Time-aware retrieval</div>
-  </div>
-  <div class="kpi-card">
-    <div class="kpi-value">727 ms</div>
-    <div class="kpi-label">Best p50 Latency</div>
-    <div class="kpi-detail">Vector + BM25 fusion</div>
-  </div>
-  <div class="kpi-card">
-    <div class="kpi-value">6</div>
-    <div class="kpi-label">Query Types Tested</div>
-    <div class="kpi-detail">Single-hop to adversarial</div>
+  <div class="chart-card full-width" style="margin-bottom:2rem">
+    <h3>Query Type Breakdown</h3>
+    <table><thead><tr>
+      <th>Query Type</th><th>Count</th><th>Recall</th><th></th><th>MRR</th><th>p50 ms</th>
+    </tr></thead><tbody id="queryTypeBody"></tbody></table>
   </div>
 </div>
 
-<div class="charts-grid">
-  <div class="chart-card full-width">
-    <h3>Pipeline Ablation: Recall@5 by Stage</h3>
-    <canvas id="ablationChart"></canvas>
+<!-- TAB 2: Academic Benchmarks -->
+<div id="tab-academic" class="tab-content">
+  <div class="kpi-row" id="kpi-academic"></div>
+  <div class="chart-card full-width" style="margin-bottom:2rem">
+    <h3>Academic Benchmark Scores</h3>
+    <table><thead><tr>
+      <th>Benchmark</th><th>Metric</th><th>Archivist</th>
+    </tr></thead><tbody id="academicBody"></tbody></table>
   </div>
-
-  <div class="chart-card">
-    <h3>Recall by Query Type</h3>
-    <canvas id="queryTypeRecall"></canvas>
-  </div>
-
-  <div class="chart-card">
-    <h3>MRR by Query Type</h3>
-    <canvas id="queryTypeMRR"></canvas>
-  </div>
-
-  <div class="chart-card">
-    <h3>Latency vs Recall Tradeoff</h3>
-    <canvas id="latencyRecall"></canvas>
-  </div>
-
-  <div class="chart-card">
-    <h3>p50 Latency by Variant (ms)</h3>
-    <canvas id="latencyChart"></canvas>
+  <div id="academicPlaceholder" style="text-align:center;color:var(--muted);padding:2rem;">
+    No academic benchmark results loaded. Run the adapters and load the JSON files:<br>
+    <code>python -m benchmarks.academic.longmemeval.adapter --data-file data/longmemeval/longmemeval_s_cleaned.json</code>
   </div>
 </div>
 
-<div class="chart-card full-width" style="margin-bottom: 2rem;">
-  <h3>Full Results Table</h3>
-  <table>
-    <thead>
-      <tr>
-        <th>Variant</th>
-        <th>Recall@5</th>
-        <th>Recall@10</th>
-        <th>MRR</th>
-        <th>p50 Latency</th>
-        <th>p95 Latency</th>
-        <th>Tokens/Query</th>
-      </tr>
-    </thead>
-    <tbody id="resultsBody"></tbody>
-  </table>
-</div>
-
-<div class="chart-card full-width" style="margin-bottom: 2rem;">
-  <h3>Query Type Breakdown (Full Pipeline)</h3>
-  <table>
-    <thead>
-      <tr>
-        <th>Query Type</th>
-        <th>Count</th>
-        <th>Recall</th>
-        <th></th>
-        <th>MRR</th>
-        <th>p50 Latency</th>
-      </tr>
-    </thead>
-    <tbody id="queryTypeBody"></tbody>
-  </table>
+<!-- TAB 3: Comparison -->
+<div id="tab-comparison" class="tab-content">
+  <div class="kpi-row" id="kpi-comparison"></div>
+  <div class="charts-grid">
+    <div class="chart-card full-width"><h3>Context Stuffing vs Archivist: Recall by Scale</h3><canvas id="comparisonRecall"></canvas></div>
+    <div class="chart-card"><h3>Tokens Per Query</h3><canvas id="comparisonTokens"></canvas></div>
+    <div class="chart-card"><h3>Query Latency (p50)</h3><canvas id="comparisonLatency"></canvas></div>
+  </div>
+  <div class="chart-card full-width" style="margin-bottom:2rem">
+    <h3>Break-Even Table</h3>
+    <table><thead><tr>
+      <th>Scale</th><th>Files</th><th>Tokens</th><th>Fits?</th><th>Stuffing Recall</th><th>Archivist Recall</th><th>Delta</th><th>Speed</th>
+    </tr></thead><tbody id="breakEvenBody"></tbody></table>
+  </div>
 </div>
 
 <div class="footer">
-  Generated from pipeline ablation benchmark &mdash; Archivist v1.5 &mdash;
-  <span id="timestamp"></span>
+  Archivist v1.10 &mdash; <span id="timestamp"></span> &mdash;
+  <a href="BENCHMARKS.md" style="color:var(--accent2);">Full docs</a>
 </div>
 
 <script>
-const DATA = {
-  summaries: [
-    {variant:"vector_only",recall_at_5:0.8917,recall_at_10:0.8917,mrr:0.7352,latency_p50_ms:793.8,latency_p95_ms:943.4,latency_mean_ms:805.3,avg_tokens_per_query:4462},
-    {variant:"plus_bm25",recall_at_5:0.8917,recall_at_10:0.8917,mrr:0.7352,latency_p50_ms:727.0,latency_p95_ms:885.6,latency_mean_ms:744.2,avg_tokens_per_query:4462},
-    {variant:"plus_graph",recall_at_5:0.8917,recall_at_10:0.8917,mrr:0.7352,latency_p50_ms:747.4,latency_p95_ms:814.8,latency_mean_ms:750.8,avg_tokens_per_query:4462},
-    {variant:"plus_temporal",recall_at_5:0.8767,recall_at_10:0.8767,mrr:0.7033,latency_p50_ms:779.0,latency_p95_ms:966.9,latency_mean_ms:804.2,avg_tokens_per_query:4631},
-    {variant:"plus_hotness",recall_at_5:0.8767,recall_at_10:0.8767,mrr:0.7033,latency_p50_ms:730.4,latency_p95_ms:907.2,latency_mean_ms:754.9,avg_tokens_per_query:4631},
-    {variant:"plus_rerank",recall_at_5:0.8767,recall_at_10:0.8767,mrr:0.7033,latency_p50_ms:766.3,latency_p95_ms:908.3,latency_mean_ms:780.0,avg_tokens_per_query:4631},
-    {variant:"full_pipeline",recall_at_5:0.8767,recall_at_10:0.8767,mrr:0.7033,latency_p50_ms:823.2,latency_p95_ms:1048.7,latency_mean_ms:836.2,avg_tokens_per_query:4631},
-  ],
-  queryTypes: {
-    single_hop:{count:50,recall:0.99,mrr:0.785,latency_p50:805.3},
-    multi_hop:{count:10,recall:0.575,mrr:0.716,latency_p50:810.8},
-    temporal:{count:5,recall:1.0,mrr:0.867,latency_p50:871.0},
-    adversarial:{count:5,recall:0.4,mrr:0.2,latency_p50:962.9},
-    agent_scoped:{count:5,recall:0.833,mrr:0.667,latency_p50:986.7},
-    broad:{count:25,recall:0.85,mrr:0.611,latency_p50:769.8},
-  }
-};
-
-const LABELS = {
-  vector_only: "Vector Only",
-  plus_bm25: "+ BM25",
-  plus_graph: "+ Graph",
-  plus_temporal: "+ Temporal",
-  plus_hotness: "+ Hotness",
-  plus_rerank: "+ Rerank",
-  full_pipeline: "Full Pipeline",
-};
 
 const QT_LABELS = {
-  single_hop: "Single-hop",
-  multi_hop: "Multi-hop",
-  temporal: "Temporal",
-  adversarial: "Adversarial",
-  agent_scoped: "Agent-scoped",
-  broad: "Broad",
+  single_hop: "Single-hop", multi_hop: "Multi-hop", temporal: "Temporal",
+  adversarial: "Adversarial", agent_scoped: "Agent-scoped", broad: "Broad",
+  contradiction: "Contradiction", needle: "Needle"
 };
 
 const COLORS = {
-  accent: "#6c5ce7",
-  accent2: "#00cec9",
-  accent3: "#fdcb6e",
-  accent4: "#e17055",
-  accent5: "#55efc4",
-  accent6: "#a29bfe",
+  accent: "#6c5ce7", accent2: "#00cec9", accent3: "#fdcb6e", accent4: "#e17055",
+  accent5: "#55efc4", accent6: "#a29bfe", stuffing: "#f97316"
 };
 
 Chart.defaults.color = "#8b8fa3";
 Chart.defaults.borderColor = "#2a2d3a";
 Chart.defaults.font.family = "Inter, -apple-system, sans-serif";
 
-// Pipeline Ablation Chart
-new Chart(document.getElementById("ablationChart"), {
-  type: "bar",
-  data: {
-    labels: DATA.summaries.map(s => LABELS[s.variant]),
-    datasets: [{
-      label: "Recall@5",
-      data: DATA.summaries.map(s => (s.recall_at_5 * 100).toFixed(1)),
-      backgroundColor: DATA.summaries.map((_, i) => i === DATA.summaries.length - 1 ? COLORS.accent2 : COLORS.accent),
-      borderRadius: 6,
-      barPercentage: 0.7,
-    }]
-  },
-  options: {
-    responsive: true,
-    plugins: {
-      legend: { display: false },
-      tooltip: { callbacks: { label: ctx => `Recall@5: ${ctx.raw}%` } }
-    },
-    scales: {
-      y: { min: 80, max: 95, title: { display: true, text: "Recall@5 (%)" }, grid: { color: "#1f2233" } },
-      x: { grid: { display: false } }
-    }
-  }
-});
+let state = { internal: null, academic: {}, stuffing: null, archivist: null };
+const charts = {};
 
-// Query Type Recall
-const qtKeys = Object.keys(DATA.queryTypes);
-new Chart(document.getElementById("queryTypeRecall"), {
-  type: "bar",
-  data: {
-    labels: qtKeys.map(k => QT_LABELS[k]),
-    datasets: [{
-      label: "Recall",
-      data: qtKeys.map(k => (DATA.queryTypes[k].recall * 100).toFixed(1)),
-      backgroundColor: [COLORS.accent5, COLORS.accent, COLORS.accent2, COLORS.accent4, COLORS.accent3, COLORS.accent6],
-      borderRadius: 6,
-      barPercentage: 0.65,
-    }]
-  },
-  options: {
-    responsive: true,
-    indexAxis: "y",
-    plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => `${ctx.raw}%` } } },
-    scales: {
-      x: { min: 0, max: 100, title: { display: true, text: "Recall (%)" }, grid: { color: "#1f2233" } },
-      y: { grid: { display: false } }
-    }
-  }
-});
+function switchTab(name) {
+  document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+  document.querySelectorAll('.tab-bar button').forEach(el => el.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  event.target.classList.add('active');
+}
 
-// Query Type MRR
-new Chart(document.getElementById("queryTypeMRR"), {
-  type: "bar",
-  data: {
-    labels: qtKeys.map(k => QT_LABELS[k]),
-    datasets: [{
-      label: "MRR",
-      data: qtKeys.map(k => DATA.queryTypes[k].mrr.toFixed(3)),
-      backgroundColor: [COLORS.accent5, COLORS.accent, COLORS.accent2, COLORS.accent4, COLORS.accent3, COLORS.accent6],
-      borderRadius: 6,
-      barPercentage: 0.65,
-    }]
-  },
-  options: {
-    responsive: true,
-    indexAxis: "y",
-    plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => `MRR: ${ctx.raw}` } } },
-    scales: {
-      x: { min: 0, max: 1.0, title: { display: true, text: "Mean Reciprocal Rank" }, grid: { color: "#1f2233" } },
-      y: { grid: { display: false } }
-    }
-  }
-});
+function loadFullComparison(data) {
+  state.stuffing = data.stuffing_summaries || [];
+  state.archivist = data.archivist_summaries || [];
+  renderInternal();
+  renderComparison();
+}
 
-// Latency vs Recall scatter
-new Chart(document.getElementById("latencyRecall"), {
-  type: "scatter",
-  data: {
-    datasets: [{
-      label: "Pipeline Variants",
-      data: DATA.summaries.map(s => ({ x: s.latency_p50_ms, y: s.recall_at_5 * 100 })),
-      backgroundColor: DATA.summaries.map((_, i) => i === DATA.summaries.length - 1 ? COLORS.accent2 : COLORS.accent),
-      pointRadius: 8,
-      pointHoverRadius: 12,
-    }]
-  },
-  options: {
-    responsive: true,
-    plugins: {
-      legend: { display: false },
-      tooltip: {
-        callbacks: {
-          label: (ctx) => {
-            const s = DATA.summaries[ctx.dataIndex];
-            return `${LABELS[s.variant]}: ${ctx.parsed.y.toFixed(1)}% @ ${ctx.parsed.x.toFixed(0)}ms`;
-          }
-        }
-      }
-    },
-    scales: {
-      x: { title: { display: true, text: "p50 Latency (ms)" }, grid: { color: "#1f2233" } },
-      y: { min: 85, max: 92, title: { display: true, text: "Recall@5 (%)" }, grid: { color: "#1f2233" } }
-    }
+function loadAcademic(data) {
+  if (data.summary) {
+    const bench = data.summary.benchmark || "Unknown";
+    state.academic[bench] = data.summary;
+    renderAcademic();
   }
-});
+}
 
-// Latency bar chart
-new Chart(document.getElementById("latencyChart"), {
-  type: "bar",
-  data: {
-    labels: DATA.summaries.map(s => LABELS[s.variant]),
-    datasets: [
-      {
-        label: "p50",
-        data: DATA.summaries.map(s => s.latency_p50_ms),
-        backgroundColor: COLORS.accent,
-        borderRadius: 6,
-        barPercentage: 0.65,
-      },
-      {
-        label: "p95",
-        data: DATA.summaries.map(s => s.latency_p95_ms),
-        backgroundColor: COLORS.accent4,
-        borderRadius: 6,
-        barPercentage: 0.65,
-      }
-    ]
-  },
-  options: {
-    responsive: true,
-    plugins: { legend: { position: "top" } },
-    scales: {
-      y: { title: { display: true, text: "Latency (ms)" }, grid: { color: "#1f2233" } },
-      x: { grid: { display: false } }
-    }
-  }
-});
+function renderInternal() {
+  const arch = state.archivist || [];
+  if (!arch.length) return;
 
-// Results table
-const tbody = document.getElementById("resultsBody");
-DATA.summaries.forEach(s => {
-  const tr = document.createElement("tr");
-  const isFull = s.variant === "full_pipeline";
-  tr.innerHTML = `
-    <td style="${isFull ? 'font-weight:700;color:var(--accent2)' : ''}">${LABELS[s.variant]}</td>
-    <td>${(s.recall_at_5 * 100).toFixed(1)}%</td>
-    <td>${(s.recall_at_10 * 100).toFixed(1)}%</td>
-    <td>${s.mrr.toFixed(4)}</td>
-    <td>${s.latency_p50_ms.toFixed(0)} ms</td>
-    <td>${s.latency_p95_ms.toFixed(0)} ms</td>
-    <td>${s.avg_tokens_per_query.toFixed(0)}</td>
+  const fp = arch.filter(s => s.variant === 'full_pipeline');
+  const kpi = document.getElementById('kpi-internal');
+  const best = fp.reduce((a, b) => (a.recall_at_5 || 0) > (b.recall_at_5 || 0) ? a : b, {});
+  const queryTypes = Object.keys(best.by_query_type || {}).length;
+  kpi.innerHTML = `
+    <div class="kpi-card"><div class="kpi-value">${((best.recall_at_5||0)*100).toFixed(1)}%</div><div class="kpi-label">Best Recall@5</div><div class="kpi-detail">${best.memory_scale||''} / full_pipeline</div></div>
+    <div class="kpi-card"><div class="kpi-value">${(best.latency_p50_ms||0).toFixed(0)}ms</div><div class="kpi-label">p50 Latency</div></div>
+    <div class="kpi-card"><div class="kpi-value">${(best.avg_tokens_per_query||0).toFixed(0)}</div><div class="kpi-label">Tokens/Query</div></div>
+    <div class="kpi-card"><div class="kpi-value">${queryTypes}</div><div class="kpi-label">Query Types</div></div>
   `;
-  tbody.appendChild(tr);
-});
 
-// Query type table
-const qtBody = document.getElementById("queryTypeBody");
-qtKeys.forEach(k => {
-  const qt = DATA.queryTypes[k];
-  const tr = document.createElement("tr");
-  const barW = Math.round(qt.recall * 200);
-  tr.innerHTML = `
-    <td>${QT_LABELS[k]}</td>
-    <td>${qt.count}</td>
-    <td>${(qt.recall * 100).toFixed(1)}%</td>
-    <td><span class="bar-inline" style="width:${barW}px;background:${qt.recall > 0.8 ? 'var(--green)' : qt.recall > 0.5 ? 'var(--accent3)' : 'var(--red)'}"></span></td>
-    <td>${qt.mrr.toFixed(3)}</td>
-    <td>${qt.latency_p50.toFixed(0)} ms</td>
+  // Scale recall chart
+  const scales = [...new Set(arch.map(s => s.memory_scale))];
+  const voData = scales.map(sc => { const m = arch.find(s => s.memory_scale === sc && s.variant === 'vector_only'); return m ? m.recall_at_5 * 100 : 0; });
+  const fpData = scales.map(sc => { const m = fp.find(s => s.memory_scale === sc); return m ? m.recall_at_5 * 100 : 0; });
+
+  if (charts.scaleRecall) charts.scaleRecall.destroy();
+  charts.scaleRecall = new Chart(document.getElementById('scaleRecall'), {
+    type: 'bar', data: {
+      labels: scales, datasets: [
+        { label: 'vector_only', data: voData, backgroundColor: COLORS.accent, borderRadius: 6 },
+        { label: 'full_pipeline', data: fpData, backgroundColor: COLORS.accent2, borderRadius: 6 }
+      ]
+    }, options: { responsive: true, scales: { y: { min: 70, max: 100, title: { display: true, text: 'Recall@5 (%)' }, grid: { color: '#1f2233' } }, x: { grid: { display: false } } } }
+  });
+
+  // Query type table
+  const stressArch = fp.find(s => s.memory_scale === 'stress') || fp[fp.length - 1] || {};
+  const qt = stressArch.by_query_type || {};
+  const body = document.getElementById('queryTypeBody');
+  body.innerHTML = '';
+  for (const [k, v] of Object.entries(qt)) {
+    const barW = Math.round(v.recall * 200);
+    const color = v.recall > 0.8 ? 'var(--green)' : v.recall > 0.5 ? 'var(--accent3)' : 'var(--red)';
+    body.innerHTML += `<tr><td>${QT_LABELS[k]||k}</td><td>${v.count}</td><td>${(v.recall*100).toFixed(1)}%</td><td><span class="bar-inline" style="width:${barW}px;background:${color}"></span></td><td>${v.mrr.toFixed(3)}</td><td>${v.latency_p50.toFixed(0)}</td></tr>`;
+  }
+
+  // Query type recall chart
+  const qtKeys = Object.keys(qt);
+  if (charts.queryTypeRecall) charts.queryTypeRecall.destroy();
+  charts.queryTypeRecall = new Chart(document.getElementById('queryTypeRecall'), {
+    type: 'bar', data: {
+      labels: qtKeys.map(k => QT_LABELS[k]||k),
+      datasets: [{ data: qtKeys.map(k => qt[k].recall*100), backgroundColor: [COLORS.accent5, COLORS.accent, COLORS.accent2, COLORS.accent4, COLORS.accent3, COLORS.accent6, COLORS.accent, COLORS.accent4], borderRadius: 6 }]
+    }, options: { responsive: true, indexAxis: 'y', plugins: { legend: { display: false } }, scales: { x: { min: 0, max: 100, grid: { color: '#1f2233' } }, y: { grid: { display: false } } } }
+  });
+
+  // Latency chart
+  if (charts.latencyScale) charts.latencyScale.destroy();
+  charts.latencyScale = new Chart(document.getElementById('latencyScale'), {
+    type: 'bar', data: {
+      labels: scales,
+      datasets: [
+        { label: 'p50', data: scales.map(sc => { const m = fp.find(s=>s.memory_scale===sc); return m?m.latency_p50_ms:0; }), backgroundColor: COLORS.accent, borderRadius: 6 },
+        { label: 'p95', data: scales.map(sc => { const m = fp.find(s=>s.memory_scale===sc); return m?m.latency_p95_ms:0; }), backgroundColor: COLORS.accent4, borderRadius: 6 }
+      ]
+    }, options: { responsive: true, scales: { y: { title: { display: true, text: 'ms' }, grid: { color: '#1f2233' } }, x: { grid: { display: false } } } }
+  });
+}
+
+function renderComparison() {
+  const stuff = state.stuffing || [];
+  const arch = (state.archivist || []).filter(s => s.variant === 'full_pipeline');
+  if (!stuff.length || !arch.length) return;
+
+  const scales = stuff.map(s => s.memory_scale);
+  const kpi = document.getElementById('kpi-comparison');
+  const stressS = stuff.find(s => s.memory_scale === 'stress') || {};
+  const stressA = arch.find(s => s.memory_scale === 'stress') || {};
+  kpi.innerHTML = `
+    <div class="kpi-card"><div class="kpi-value">${((stressA.recall_at_5||0)*100).toFixed(1)}%</div><div class="kpi-label">Archivist @ Stress</div></div>
+    <div class="kpi-card"><div class="kpi-value">${((stressS.recall||0)*100).toFixed(1)}%</div><div class="kpi-label">Stuffing @ Stress</div></div>
+    <div class="kpi-card"><div class="kpi-value">${stressS.latency_p50_ms ? (stressS.latency_p50_ms / (stressA.latency_p50_ms||1)).toFixed(0)+'×' : '—'}</div><div class="kpi-label">Speed Advantage</div></div>
+    <div class="kpi-card"><div class="kpi-value">${stressS.corpus_tokens && stressA.avg_tokens_per_query ? (stressS.corpus_tokens / stressA.avg_tokens_per_query).toFixed(0)+'×' : '—'}</div><div class="kpi-label">Token Savings</div></div>
   `;
-  qtBody.appendChild(tr);
+
+  // Comparison recall chart
+  if (charts.comparisonRecall) charts.comparisonRecall.destroy();
+  charts.comparisonRecall = new Chart(document.getElementById('comparisonRecall'), {
+    type: 'bar', data: {
+      labels: scales, datasets: [
+        { label: 'Context Stuffing', data: stuff.map(s=>(s.recall||0)*100), backgroundColor: COLORS.stuffing, borderRadius: 6 },
+        { label: 'Archivist', data: scales.map(sc => { const m = arch.find(s=>s.memory_scale===sc); return m?(m.recall_at_5||0)*100:0; }), backgroundColor: COLORS.accent2, borderRadius: 6 }
+      ]
+    }, options: { responsive: true, scales: { y: { min: 60, max: 100, title: { display: true, text: 'Recall (%)' }, grid: { color: '#1f2233' } }, x: { grid: { display: false } } } }
+  });
+
+  // Tokens chart
+  if (charts.comparisonTokens) charts.comparisonTokens.destroy();
+  charts.comparisonTokens = new Chart(document.getElementById('comparisonTokens'), {
+    type: 'line', data: {
+      labels: scales, datasets: [
+        { label: 'Stuffing', data: stuff.map(s=>s.corpus_tokens||0), borderColor: COLORS.stuffing, backgroundColor: COLORS.stuffing+'30', fill: true, tension: 0.3 },
+        { label: 'Archivist', data: scales.map(sc => { const m = arch.find(s=>s.memory_scale===sc); return m?m.avg_tokens_per_query:0; }), borderColor: COLORS.accent2, backgroundColor: COLORS.accent2+'30', fill: true, tension: 0.3 }
+      ]
+    }, options: { responsive: true, scales: { y: { title: { display: true, text: 'Tokens/Query' }, grid: { color: '#1f2233' } }, x: { grid: { display: false } } } }
+  });
+
+  // Latency comparison
+  if (charts.comparisonLatency) charts.comparisonLatency.destroy();
+  charts.comparisonLatency = new Chart(document.getElementById('comparisonLatency'), {
+    type: 'bar', data: {
+      labels: scales, datasets: [
+        { label: 'Stuffing p50', data: stuff.map(s=>s.latency_p50_ms||0), backgroundColor: COLORS.stuffing, borderRadius: 6 },
+        { label: 'Archivist p50', data: scales.map(sc => { const m = arch.find(s=>s.memory_scale===sc); return m?m.latency_p50_ms:0; }), backgroundColor: COLORS.accent2, borderRadius: 6 }
+      ]
+    }, options: { responsive: true, scales: { y: { title: { display: true, text: 'ms' }, grid: { color: '#1f2233' } }, x: { grid: { display: false } } } }
+  });
+
+  // Break-even table
+  const body = document.getElementById('breakEvenBody');
+  body.innerHTML = '';
+  scales.forEach(sc => {
+    const s = stuff.find(x => x.memory_scale === sc) || {};
+    const a = arch.find(x => x.memory_scale === sc) || {};
+    const delta = ((a.recall_at_5||0) - (s.recall||0)) * 100;
+    const speed = s.latency_p50_ms && a.latency_p50_ms ? (s.latency_p50_ms / a.latency_p50_ms).toFixed(0) + '×' : '—';
+    body.innerHTML += `<tr>
+      <td>${sc}</td><td>${s.file_count||'—'}</td><td>${(s.corpus_tokens||0).toLocaleString()}</td>
+      <td>${s.corpus_overflow ? '⚠️ OVERFLOW' : '✅ YES'}</td>
+      <td>${((s.recall||0)*100).toFixed(1)}%</td>
+      <td style="font-weight:700;color:var(--accent2)">${((a.recall_at_5||0)*100).toFixed(1)}%</td>
+      <td style="color:${delta>=0?'var(--green)':'var(--red)'}">${delta>=0?'+':''}${delta.toFixed(1)}%</td>
+      <td>${speed} faster</td>
+    </tr>`;
+  });
+}
+
+function renderAcademic() {
+  const benchmarks = state.academic;
+  const keys = Object.keys(benchmarks);
+  const placeholder = document.getElementById('academicPlaceholder');
+  const body = document.getElementById('academicBody');
+  const kpi = document.getElementById('kpi-academic');
+
+  if (!keys.length) { placeholder.style.display = ''; return; }
+  placeholder.style.display = 'none';
+
+  body.innerHTML = '';
+  kpi.innerHTML = '';
+
+  keys.forEach(name => {
+    const s = benchmarks[name];
+    const recall = s.overall_keyword_recall || s.overall_f1 || 0;
+    kpi.innerHTML += `<div class="kpi-card"><div class="kpi-value">${(recall*100).toFixed(1)}%</div><div class="kpi-label">${name}</div><div class="kpi-detail">${s.evaluated_questions||'?'} questions</div></div>`;
+    body.innerHTML += `<tr>
+      <td style="font-weight:600">${name}</td>
+      <td>${s.overall_keyword_recall ? 'Keyword Recall' : 'F1'}</td>
+      <td style="font-weight:700;color:var(--accent2)">${(recall*100).toFixed(1)}%</td>
+    </tr>`;
+  });
+}
+
+// File input handler
+document.getElementById('fileInput').addEventListener('change', async (e) => {
+  for (const file of e.target.files) {
+    try {
+      const text = await file.text();
+      const data = JSON.parse(text);
+      if (data.stuffing_summaries || data.archivist_summaries) loadFullComparison(data);
+      else if (data.summary) loadAcademic(data);
+    } catch (err) { console.error('Failed to load', file.name, err); }
+  }
 });
 
-document.getElementById("timestamp").textContent = new Date().toLocaleDateString("en-US", {
-  year: "numeric", month: "long", day: "numeric",
-});
+// Load default data (same as last benchmark run)
+const DEFAULT_DATA = {
+  stuffing_summaries: [
+    {memory_scale:"small",file_count:56,corpus_tokens:8681,corpus_overflow:false,recall:0.8003,latency_p50_ms:3285.3},
+    {memory_scale:"medium",file_count:253,corpus_tokens:24262,corpus_overflow:false,recall:0.8476,latency_p50_ms:5879.8},
+    {memory_scale:"large",file_count:543,corpus_tokens:44351,corpus_overflow:true,recall:0.8062,latency_p50_ms:6949.7},
+    {memory_scale:"stress",file_count:1523,corpus_tokens:108847,corpus_overflow:true,recall:0.8368,latency_p50_ms:7005.6}
+  ],
+  archivist_summaries: [
+    {variant:"vector_only",memory_scale:"small",recall_at_5:0.9291,latency_p50_ms:52.7,latency_p95_ms:80.1,avg_tokens_per_query:5982,by_query_type:{single_hop:{count:50,recall:1.0,mrr:0.722,latency_p50:57},multi_hop:{count:10,recall:0.75,mrr:0.75,latency_p50:51},temporal:{count:5,recall:1.0,mrr:1.0,latency_p50:51},adversarial:{count:5,recall:0.4,mrr:0.2,latency_p50:55},agent_scoped:{count:5,recall:0.883,mrr:0.647,latency_p50:48},broad:{count:30,recall:0.95,mrr:0.831,latency_p50:52}}},
+    {variant:"full_pipeline",memory_scale:"small",recall_at_5:0.9408,latency_p50_ms:69.4,latency_p95_ms:92.1,avg_tokens_per_query:6302,by_query_type:{single_hop:{count:50,recall:1.0,mrr:0.682,latency_p50:67},multi_hop:{count:10,recall:0.8,mrr:0.592,latency_p50:80},temporal:{count:5,recall:1.0,mrr:0.687,latency_p50:67},adversarial:{count:5,recall:0.4,mrr:0.2,latency_p50:77},agent_scoped:{count:5,recall:0.933,mrr:0.673,latency_p50:75},broad:{count:30,recall:0.967,mrr:0.744,latency_p50:65}}},
+    {variant:"vector_only",memory_scale:"medium",recall_at_5:0.8876,latency_p50_ms:50.7,latency_p95_ms:69.3,avg_tokens_per_query:5244,by_query_type:{single_hop:{count:50,recall:0.983,mrr:0.727,latency_p50:50},multi_hop:{count:10,recall:0.725,mrr:0.725,latency_p50:52},temporal:{count:5,recall:0.8,mrr:0.733,latency_p50:45},adversarial:{count:5,recall:0.4,mrr:0.2,latency_p50:60},agent_scoped:{count:5,recall:0.883,mrr:0.8,latency_p50:55},contradiction:{count:2,recall:1.0,mrr:1.0,latency_p50:50},needle:{count:2,recall:1.0,mrr:1.0,latency_p50:44},broad:{count:30,recall:0.864,mrr:0.638,latency_p50:52}}},
+    {variant:"full_pipeline",memory_scale:"medium",recall_at_5:0.9029,latency_p50_ms:83.2,latency_p95_ms:152.7,avg_tokens_per_query:5638,by_query_type:{single_hop:{count:50,recall:1.0,mrr:0.723,latency_p50:79},multi_hop:{count:10,recall:0.775,mrr:0.708,latency_p50:99},temporal:{count:5,recall:1.0,mrr:0.64,latency_p50:78},adversarial:{count:5,recall:0.4,mrr:0.05,latency_p50:108},agent_scoped:{count:5,recall:0.933,mrr:0.633,latency_p50:94},contradiction:{count:2,recall:1.0,mrr:1.0,latency_p50:144},needle:{count:2,recall:0.0,mrr:0.0,latency_p50:120},broad:{count:30,recall:0.9,mrr:0.584,latency_p50:80}}},
+    {variant:"vector_only",memory_scale:"large",recall_at_5:0.8853,latency_p50_ms:52.5,latency_p95_ms:74.7,avg_tokens_per_query:4912,by_query_type:{single_hop:{count:50,recall:0.955,mrr:0.725,latency_p50:52},multi_hop:{count:10,recall:0.725,mrr:0.737,latency_p50:63},temporal:{count:5,recall:1.0,mrr:0.867,latency_p50:52},adversarial:{count:5,recall:0.4,mrr:0.2,latency_p50:65},agent_scoped:{count:5,recall:1.0,mrr:1.0,latency_p50:61},contradiction:{count:2,recall:0.9,mrr:1.0,latency_p50:67},needle:{count:3,recall:1.0,mrr:1.0,latency_p50:48},broad:{count:30,recall:0.853,mrr:0.661,latency_p50:51}}},
+    {variant:"full_pipeline",memory_scale:"large",recall_at_5:0.9068,latency_p50_ms:110.1,latency_p95_ms:235.1,avg_tokens_per_query:5423,by_query_type:{single_hop:{count:50,recall:1.0,mrr:0.831,latency_p50:107},multi_hop:{count:10,recall:0.8,mrr:0.933,latency_p50:133},temporal:{count:5,recall:1.0,mrr:1.0,latency_p50:123},adversarial:{count:5,recall:0.4,mrr:0.2,latency_p50:165},agent_scoped:{count:5,recall:1.0,mrr:0.54,latency_p50:127},contradiction:{count:2,recall:1.0,mrr:1.0,latency_p50:192},needle:{count:3,recall:0.333,mrr:0.333,latency_p50:120},broad:{count:30,recall:0.892,mrr:0.784,latency_p50:98}}},
+    {variant:"vector_only",memory_scale:"stress",recall_at_5:0.8245,latency_p50_ms:51.4,latency_p95_ms:69.1,avg_tokens_per_query:4787,by_query_type:{single_hop:{count:50,recall:0.882,mrr:0.711,latency_p50:56},multi_hop:{count:10,recall:0.825,mrr:0.783,latency_p50:55},temporal:{count:5,recall:0.88,mrr:0.9,latency_p50:57},adversarial:{count:5,recall:0.4,mrr:0.2,latency_p50:46},agent_scoped:{count:5,recall:0.883,mrr:0.9,latency_p50:48},contradiction:{count:2,recall:0.9,mrr:1.0,latency_p50:56},needle:{count:3,recall:1.0,mrr:1.0,latency_p50:45},broad:{count:30,recall:0.758,mrr:0.645,latency_p50:48}}},
+    {variant:"full_pipeline",memory_scale:"stress",recall_at_5:0.897,latency_p50_ms:159,latency_p95_ms:389.9,avg_tokens_per_query:5293,by_query_type:{single_hop:{count:50,recall:0.99,mrr:0.802,latency_p50:146},multi_hop:{count:10,recall:0.775,mrr:0.864,latency_p50:220},temporal:{count:5,recall:1.0,mrr:0.617,latency_p50:147},adversarial:{count:5,recall:0.4,mrr:0.2,latency_p50:239},agent_scoped:{count:5,recall:0.833,mrr:0.6,latency_p50:177},contradiction:{count:2,recall:1.0,mrr:1.0,latency_p50:304},needle:{count:3,recall:0.333,mrr:0.333,latency_p50:154},broad:{count:30,recall:0.908,mrr:0.657,latency_p50:157}}}
+  ]
+};
+
+loadFullComparison(DEFAULT_DATA);
+document.getElementById("timestamp").textContent = new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
 </script>
 </body>
 </html>

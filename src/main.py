@@ -2,15 +2,22 @@
 
 import asyncio
 from contextlib import asynccontextmanager
+import json
 import logging
 import os
 import sys
 import time
+from datetime import datetime, timezone
 
 from watchfiles import awatch, Change
 
-from config import MEMORY_ROOT, MCP_PORT, QDRANT_URL, QDRANT_COLLECTION, VECTOR_DIM, ARCHIVIST_API_KEY, CURATOR_QUEUE_DRAIN_INTERVAL
+from config import (
+    MEMORY_ROOT, MCP_PORT, QDRANT_URL, QDRANT_COLLECTION, VECTOR_DIM, ARCHIVIST_API_KEY,
+    CURATOR_QUEUE_DRAIN_INTERVAL, ARCHIVIST_INVALIDATION_EXPORT_PATH,
+    QDRANT_HNSW_M, QDRANT_HNSW_EF_CONSTRUCT,
+)
 from qdrant import qdrant_client
+import health
 from graph import init_schema
 from indexer import full_index, index_file, delete_file_points
 from curator import curator_loop
@@ -24,6 +31,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.routing import Mount, Route
 from starlette.responses import JSONResponse, PlainTextResponse
 from mcp.server.sse import SseServerTransport
+from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 
 logging.basicConfig(
     level=logging.INFO,
@@ -40,7 +48,7 @@ def ensure_qdrant_collection():
     before qdrant is listening; avoids brittle image-specific healthchecks).
     """
     from qdrant_client import QdrantClient
-    from qdrant_client.models import VectorParams, Distance, PayloadSchemaType
+    from qdrant_client.models import VectorParams, Distance, PayloadSchemaType, HnswConfigDiff
 
     deadline = time.monotonic() + 120
     last_err: Exception | None = None
@@ -56,6 +64,7 @@ def ensure_qdrant_collection():
             logger.warning("Waiting for Qdrant at %s: %s — retrying in 2s", QDRANT_URL, e)
             time.sleep(2)
     else:
+        health.register("qdrant", healthy=False, detail=f"Qdrant not reachable after 120s: {last_err}")
         raise RuntimeError(f"Qdrant not reachable at {QDRANT_URL} after 120s") from last_err
 
     assert client is not None
@@ -82,8 +91,15 @@ def ensure_qdrant_collection():
         client.create_collection(
             collection_name=QDRANT_COLLECTION,
             vectors_config=VectorParams(size=VECTOR_DIM, distance=Distance.COSINE),
+            hnsw_config=HnswConfigDiff(
+                m=QDRANT_HNSW_M,
+                ef_construct=QDRANT_HNSW_EF_CONSTRUCT,
+            ),
         )
-        logger.info("Created Qdrant collection '%s' (%d-dim)", QDRANT_COLLECTION, VECTOR_DIM)
+        logger.info(
+            "Created Qdrant collection '%s' (%d-dim, HNSW m=%d ef_construct=%d)",
+            QDRANT_COLLECTION, VECTOR_DIM, QDRANT_HNSW_M, QDRANT_HNSW_EF_CONSTRUCT,
+        )
 
         for field, schema in [
             ("agent_id", PayloadSchemaType.KEYWORD),
@@ -101,6 +117,8 @@ def ensure_qdrant_collection():
             ("importance_score", PayloadSchemaType.FLOAT),
             ("memory_type", PayloadSchemaType.KEYWORD),
             ("retention_class", PayloadSchemaType.KEYWORD),
+            ("topic", PayloadSchemaType.KEYWORD),
+            ("thought_type", PayloadSchemaType.KEYWORD),
         ]:
             client.create_payload_index(
                 collection_name=QDRANT_COLLECTION,
@@ -108,6 +126,8 @@ def ensure_qdrant_collection():
                 field_schema=schema,
             )
         logger.info("Created payload indexes for %s", QDRANT_COLLECTION)
+
+    health.register("qdrant", healthy=True)
 
 
 async def file_watcher():
@@ -132,17 +152,19 @@ async def file_watcher():
                     logger.error("Watcher delete failed for %s: %s", path, e)
 
 
-async def health(_request):
+async def handle_health(_request):
     return JSONResponse({"status": "ok", "service": "archivist", "version": "1.0.0"})
 
 
 async def handle_invalidate(_request):
     """Endpoint to delete expired memories (TTL-based)."""
-    from qdrant_client import QdrantClient
+    import metrics as met
+
     from qdrant_client.models import Filter, FieldCondition, Range
 
+    t0 = time.monotonic()
     now_ts = int(time.time())
-    client = qdrant_client(timeout=60)
+    client = qdrant_client()
 
     try:
         expired = client.scroll(
@@ -154,13 +176,19 @@ async def handle_invalidate(_request):
             with_payload=True,
         )
 
-        point_ids = [p.id for p in expired[0]]
+        points = expired[0]
+        point_ids = [p.id for p in points]
+        sample = [str(x) for x in point_ids[:5]]
+        sample_ns = []
+        for p in points[:5]:
+            pl = getattr(p, "payload", None) or {}
+            sample_ns.append(str(pl.get("namespace", "") or ""))
+
         if point_ids:
             client.delete(
                 collection_name=QDRANT_COLLECTION,
                 points_selector=point_ids,
             )
-            logger.info("Invalidation: deleted %d expired memories", len(point_ids))
 
             from audit import log_memory_event
             for pid in point_ids:
@@ -173,10 +201,36 @@ async def handle_invalidate(_request):
                     version=0,
                     metadata={"trigger": "invalidation", "reason": "ttl_expired"},
                 )
-        else:
-            logger.info("Invalidation: no expired memories found")
+        dur_ms = round((time.monotonic() - t0) * 1000, 1)
+        n = len(point_ids)
+        met.observe(met.INVALIDATE_DURATION, dur_ms)
+        met.inc(met.INVALIDATE_COUNT, value=float(n))
 
-        return JSONResponse({"invalidated": len(point_ids)})
+        logger.info(
+            "invalidation.complete count=%d duration_ms=%.1f sample_ids=%s sample_namespaces=%s",
+            n,
+            dur_ms,
+            sample,
+            sample_ns,
+        )
+
+        if ARCHIVIST_INVALIDATION_EXPORT_PATH:
+            try:
+                line = {
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "count": n,
+                    "duration_ms": dur_ms,
+                    "sample_ids": sample,
+                    "sample_namespaces": sample_ns,
+                    "reason": "ttl_expired",
+                }
+                with open(ARCHIVIST_INVALIDATION_EXPORT_PATH, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(line, ensure_ascii=False) + "\n")
+                    f.flush()
+            except OSError as ex:
+                logger.warning("invalidation export append failed: %s", ex)
+
+        return JSONResponse({"invalidated": n})
     except Exception as e:
         logger.error("Invalidation failed: %s", e)
         return JSONResponse({"error": str(e)}, status_code=500)
@@ -221,16 +275,22 @@ async def _startup():
 @asynccontextmanager
 async def lifespan(_app: Starlette):
     """Starlette ≥0.37 lifespan (replaces deprecated on_startup / on_shutdown)."""
-    await _startup()
     try:
-        yield
+        global streamable_http_session_manager
+        streamable_http_session_manager = _create_streamable_http_session_manager()
+        async with streamable_http_session_manager.run():
+            await _startup()
+            try:
+                yield
+            finally:
+                for t in _background_tasks:
+                    if not t.done():
+                        t.cancel()
+                if _background_tasks:
+                    await asyncio.gather(*_background_tasks, return_exceptions=True)
+                _background_tasks.clear()
     finally:
-        for t in _background_tasks:
-            if not t.done():
-                t.cancel()
-        if _background_tasks:
-            await asyncio.gather(*_background_tasks, return_exceptions=True)
-        _background_tasks.clear()
+        streamable_http_session_manager = None
 
 
 async def curator_queue_drain_loop():
@@ -256,6 +316,44 @@ async def run_initial_index():
 
 
 sse_transport = SseServerTransport("/mcp/messages/")
+streamable_http_session_manager: StreamableHTTPSessionManager | None = None
+
+
+def _create_streamable_http_session_manager() -> StreamableHTTPSessionManager:
+    """Create a fresh Streamable HTTP session manager for each app lifespan."""
+    return StreamableHTTPSessionManager(server, json_response=True)
+
+
+class SseASGIApp:
+    async def __call__(self, scope, receive, send):
+        from observability import reset_request_id, set_request_id_from_scope
+
+        token = set_request_id_from_scope(scope)
+        try:
+            async with sse_transport.connect_sse(scope, receive, send) as streams:
+                await server.run(
+                    streams[0], streams[1], server.create_initialization_options()
+                )
+        finally:
+            reset_request_id(token)
+
+
+class StreamableHTTPASGIApp:
+    async def __call__(self, scope, receive, send):
+        from observability import reset_request_id, set_request_id_from_scope
+
+        token = set_request_id_from_scope(scope)
+        try:
+            manager = streamable_http_session_manager
+            if manager is None:
+                raise RuntimeError("Streamable HTTP session manager is not initialized")
+            await manager.handle_request(scope, receive, send)
+        finally:
+            reset_request_id(token)
+
+
+sse_app = SseASGIApp()
+streamable_http_app = StreamableHTTPASGIApp()
 
 
 class ArchivistAuthMiddleware(BaseHTTPMiddleware):
@@ -272,15 +370,6 @@ class ArchivistAuthMiddleware(BaseHTTPMiddleware):
         if not ok:
             return JSONResponse({"error": "unauthorized"}, status_code=401)
         return await call_next(request)
-
-
-async def handle_sse(request):
-    async with sse_transport.connect_sse(
-        request.scope, request.receive, request._send
-    ) as streams:
-        await server.run(
-            streams[0], streams[1], server.create_initialization_options()
-        )
 
 
 async def handle_retrieval_export(request):
@@ -334,15 +423,124 @@ async def handle_namespace_index(request):
     return PlainTextResponse(text, media_type="text/markdown; charset=utf-8")
 
 
+# ── Backup / restore admin endpoints ─────────────────────────────────────────
+
+async def handle_backup_create(request):
+    """POST /admin/backup — create a memory snapshot."""
+    from backup_manager import create_snapshot, prune_snapshots
+
+    label = request.query_params.get("label", "")
+    try:
+        result = create_snapshot(label=label)
+        prune_snapshots()
+        return JSONResponse(result)
+    except Exception as e:
+        logger.error("Backup creation failed: %s", e)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+async def handle_backup_list(_request):
+    """GET /admin/backups — list available snapshots."""
+    from backup_manager import list_snapshots
+    snapshots = list_snapshots()
+    return JSONResponse({"snapshots": snapshots, "count": len(snapshots)})
+
+
+async def handle_backup_restore(request):
+    """POST /admin/restore — restore from a snapshot."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "JSON body required with snapshot_id"}, status_code=400)
+
+    snapshot_id = body.get("snapshot_id", "").strip()
+    if not snapshot_id:
+        return JSONResponse({"error": "snapshot_id is required"}, status_code=400)
+
+    target = body.get("target", "all")
+    if target not in ("all", "qdrant", "sqlite"):
+        return JSONResponse({"error": "target must be 'all', 'qdrant', or 'sqlite'"}, status_code=400)
+
+    from backup_manager import restore_snapshot
+    try:
+        result = restore_snapshot(snapshot_id, target=target)
+        return JSONResponse(result)
+    except FileNotFoundError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=409)
+    except Exception as e:
+        logger.error("Restore failed: %s", e)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+async def handle_backup_delete(request):
+    """DELETE /admin/backup/{snapshot_id} — delete a specific snapshot."""
+    snapshot_id = request.path_params.get("snapshot_id", "").strip()
+    if not snapshot_id:
+        return JSONResponse({"error": "snapshot_id required"}, status_code=400)
+
+    from backup_manager import delete_snapshot
+    if delete_snapshot(snapshot_id):
+        return JSONResponse({"deleted": snapshot_id})
+    return JSONResponse({"error": "snapshot not found"}, status_code=404)
+
+
+async def handle_agent_export(request):
+    """POST /admin/export-agent — export all memories for a single agent."""
+    agent_id = request.query_params.get("agent_id", "").strip()
+    if not agent_id:
+        return JSONResponse({"error": "agent_id query parameter required"}, status_code=400)
+
+    from backup_manager import export_agent
+    try:
+        result = export_agent(agent_id)
+        return JSONResponse(result)
+    except Exception as e:
+        logger.error("Agent export failed: %s", e)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+async def handle_agent_import(request):
+    """POST /admin/import-agent — import agent memories from NDJSON file."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "JSON body required with file path"}, status_code=400)
+
+    ndjson_path = body.get("file", "").strip()
+    if not ndjson_path:
+        return JSONResponse({"error": "file path is required"}, status_code=400)
+
+    dry_run = body.get("dry_run", False)
+
+    from backup_manager import import_agent
+    try:
+        result = import_agent(ndjson_path, dry_run=dry_run)
+        return JSONResponse(result)
+    except FileNotFoundError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+    except Exception as e:
+        logger.error("Agent import failed: %s", e)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 app = Starlette(
     routes=[
-        Route("/health", health),
+        Route("/health", handle_health),
         Route("/metrics", handle_metrics),
         Route("/admin/invalidate", handle_invalidate, methods=["POST", "GET"]),
         Route("/admin/retrieval-logs", handle_retrieval_export),
         Route("/admin/dashboard", handle_dashboard),
         Route("/admin/namespace-index", handle_namespace_index, methods=["GET"]),
-        Route("/mcp/sse", endpoint=handle_sse),
+        Route("/admin/backup", handle_backup_create, methods=["POST"]),
+        Route("/admin/backups", handle_backup_list, methods=["GET"]),
+        Route("/admin/restore", handle_backup_restore, methods=["POST"]),
+        Route("/admin/backup/{snapshot_id}", handle_backup_delete, methods=["DELETE"]),
+        Route("/admin/export-agent", handle_agent_export, methods=["POST"]),
+        Route("/admin/import-agent", handle_agent_import, methods=["POST"]),
+        Route("/mcp", endpoint=streamable_http_app, methods=["GET", "POST", "DELETE"]),
+        Route("/mcp/sse", endpoint=sse_app, methods=["GET"]),
         Mount("/mcp/messages/", app=sse_transport.handle_post_message),
     ],
     middleware=[Middleware(ArchivistAuthMiddleware)],

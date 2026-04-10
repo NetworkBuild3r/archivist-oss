@@ -8,10 +8,13 @@ __pycache__/
 # Environment
 .env
 .env.local
+.venv/
+venv/
 
 # IDE
 .vscode/
 .idea/
+.cursor/
 *.swp
 *.swo
 
@@ -48,3 +51,12 @@ benchmarks/fixtures/corpus_stress/
 models/
 *.bin
 *.onnx
+
+# QA checklist (local-only, not committed)
+QA_CHECKLIST.md
+
+# Infrastructure-specific operational notes (machine-specific)
+TAILSCALE_STATUS.md
+VLLM_STATUS.md
+docs/TAILSCALE_SETUP.md
+monitor-*.sh

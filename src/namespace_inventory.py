@@ -16,6 +16,7 @@ from graph import get_db
 logger = logging.getLogger("archivist.inventory")
 
 INVENTORY_TTL_SECONDS = 60
+_INVENTORY_CACHE_MAX = 256
 
 _lock = threading.Lock()
 _cache: dict[str, tuple[float, "NamespaceInventory"]] = {}
@@ -155,4 +156,13 @@ def get_inventory(namespace: str) -> NamespaceInventory:
     fresh = _fetch_inventory(namespace)
     with _lock:
         _cache[namespace] = (now, fresh)
+        if len(_cache) > _INVENTORY_CACHE_MAX:
+            expired = [k for k, (ts, _) in _cache.items()
+                       if now - ts > INVENTORY_TTL_SECONDS]
+            for k in expired:
+                del _cache[k]
+            if len(_cache) > _INVENTORY_CACHE_MAX:
+                oldest = sorted(_cache.items(), key=lambda kv: kv[1][0])
+                for k, _ in oldest[:len(oldest) // 2]:
+                    del _cache[k]
     return fresh

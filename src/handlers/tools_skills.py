@@ -283,9 +283,17 @@ async def _handle_skill_relate(arguments: dict) -> list[TextContent]:
     skill_b = _resolve_skill(arguments["skill_b"], arguments.get("provider_b", ""))
 
     if not skill_a:
-        return error_response({"error": "skill_not_found", "skill_name": arguments["skill_a"]})
+        return error_response({
+            "error": "skill_not_found",
+            "skill_name": arguments["skill_a"],
+            "hint": f"Skill '{arguments['skill_a']}' is not registered. Use archivist_register_skill to create it first.",
+        })
     if not skill_b:
-        return error_response({"error": "skill_not_found", "skill_name": arguments["skill_b"]})
+        return error_response({
+            "error": "skill_not_found",
+            "skill_name": arguments["skill_b"],
+            "hint": f"Skill '{arguments['skill_b']}' is not registered. Use archivist_register_skill to create it first.",
+        })
 
     rel_id = add_skill_relation(
         skill_a_id=skill_a["id"],
@@ -308,7 +316,11 @@ async def _handle_skill_dependencies(arguments: dict) -> list[TextContent]:
     """Return the dependency/relation graph for a skill."""
     skill = _resolve_skill(arguments["skill_name"], arguments.get("provider", ""))
     if not skill:
-        return error_response({"error": "skill_not_found", "skill_name": arguments["skill_name"]})
+        return error_response({
+            "error": "skill_not_found",
+            "skill_name": arguments["skill_name"],
+            "hint": f"Skill '{arguments['skill_name']}' is not registered. Use archivist_register_skill to create it first.",
+        })
 
     depth = arguments.get("depth", 1)
     relations = get_skill_relations(skill["id"], depth=depth)

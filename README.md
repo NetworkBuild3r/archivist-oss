@@ -7,7 +7,7 @@
 Vector search + knowledge graph + active curation — one MCP endpoint.</p>
 
 <p align="center">
-  <a href="#quick-start"><strong>Quick Start</strong></a> · <a href="#how-it-works"><strong>How It Works</strong></a> · <a href="#benchmarks"><strong>Benchmarks</strong></a> · <a href="#mcp-tools-30"><strong>30 MCP Tools</strong></a> · <a href="#configuration-reference"><strong>Config</strong></a> · <a href="#architecture-deep-dive"><strong>Architecture</strong></a> · <a href="docs/ROADMAP.md"><strong>Roadmap</strong></a>
+  <a href="#quick-start"><strong>Quick Start</strong></a> · <a href="#openclaw-and-agent-workspace-layout"><strong>OpenClaw Layout</strong></a> · <a href="#how-it-works"><strong>How It Works</strong></a> · <a href="#benchmarks"><strong>Benchmarks</strong></a> · <a href="#mcp-tools-30"><strong>30 MCP Tools</strong></a> · <a href="#configuration-reference"><strong>Config</strong></a> · <a href="#architecture-deep-dive"><strong>Architecture</strong></a> · <a href="docs/ROADMAP.md"><strong>Roadmap</strong></a>
 </p>
 
 <p align="center">
@@ -30,7 +30,7 @@ curl http://localhost:3100/health          # {"status":"ok"}
 
 Full Docker options (host vLLM, `/opt/appdata` volumes, overrides): [`docs/DOCKER.md`](docs/DOCKER.md).
 
-Point any MCP client at `http://localhost:3100/mcp/sse` — done. Your agents now have long-term memory with search, RBAC, knowledge graphs, and active curation out of the box.
+Point any MCP client at `http://localhost:3100/mcp` — done. Your agents now have long-term memory with search, RBAC, knowledge graphs, and active curation out of the box. Legacy SSE compatibility remains available at `http://localhost:3100/mcp/sse`.
 
 ---
 
@@ -210,8 +210,10 @@ curl http://localhost:3100/health
 
 Point any MCP client at:
 ```
-http://localhost:3100/mcp/sse
+http://localhost:3100/mcp
 ```
+
+Legacy SSE clients can continue using `http://localhost:3100/mcp/sse`.
 
 That's it. Your agents can now `archivist_store`, `archivist_search`, `archivist_recall`, and use all 30 tools.
 
@@ -233,6 +235,57 @@ namespaces:
 ```
 
 Without it, Archivist runs in **permissive mode** — all agents can read/write everything. Fine for single-user or dev setups.
+
+---
+
+## OpenClaw and agent workspace layout
+
+OpenClaw (and similar) agents often keep large markdown trees under the workspace. **Archivist is the right place for durable, searchable memory** — not scattered `.md` files that must be context-stuffed on every turn. Use local files for *identity and routing*; use Archivist for *everything you need to remember*.
+
+### Recommended core files (minimal, non-redundant)
+
+Keep these **small**. Long procedural history, facts, and team knowledge belong in Archivist after migration.
+
+| File | Role |
+|------|------|
+| **`SOUL.md`** | Voice, values, reasoning style — static personality only. |
+| **`IDENTITY.md`** | Who this agent is, scope, team boundaries — no encyclopedic memory here. |
+| **`MEMORY.md`** | **Pointer file only**: state that long-term memory lives in **Archivist** (MCP). List namespaces you use, when to `archivist_search` vs `archivist_recall`, and retention expectations. Do not duplicate facts that are already stored. |
+| **`memory_index.md`** | **Table of contents** for *your* head: topics, projects, namespaces, and “where to look first” (e.g. “infra hosts → namespace `ops`”, “user prefs → namespace `user`”). Update when you add major new areas of knowledge — it is a map, not a dump. |
+| **`USER.md`** | Lightweight defaults; **defer durable user-specific facts** to Archivist (`archivist_store` / search under the right namespace) so they survive compaction and retrievals stay precise. |
+| **`TOOLS.md`** (or skills) | How you use tools, including Archivist MCP tools — not a second memory store. |
+
+**Principle:** If it must survive past this session and be findable under load, it should be **indexed in Archivist**, with `memory_index.md` telling *you* which namespace or topic to query — not a growing pile of markdown.
+
+### Migration prompt (copy-paste for the agent)
+
+Use this when you want an OpenClaw agent to **refactor its own workspace** to rely on Archivist:
+
+```text
+You are migrating this workspace to use Archivist as the system of record for long-term memory.
+
+1) Inventory: Find every markdown file under this workspace that contains durable facts, procedures, credentials references, user preferences, or team knowledge (not just SOUL/IDENTITY stubs).
+
+2) Ingest: For each substantive file or section, store the content in Archivist using the appropriate namespace and agent_id via archivist_store (or the project’s bulk path if configured). Prefer clear titles and tags. Do not delete local files until content is successfully stored and you have verified retrieval with archivist_search.
+
+3) Core files: Ensure these exist and stay minimal:
+   - SOUL.md — personality only.
+   - IDENTITY.md — role and scope only.
+   - MEMORY.md — explicitly states that Archivist is your long-term memory; how to search and store; which namespaces you use.
+   - memory_index.md — a short table of contents: topics, namespaces, and where to search first (update as you add domains).
+   - USER.md — defer durable user facts to Archivist; keep only quick defaults here.
+   - TOOLS.md (or equivalent) — includes how you use Archivist MCP tools.
+
+4) Deduplicate: Edit SOUL, IDENTITY, MEMORY, USER, and TOOLS to remove long-form facts now living in Archivist. The goal is a lean workspace optimized for execution with your team — not duplicate encyclopedias.
+
+5) Verify: Run a few archivist_search queries that match how you actually work; update memory_index.md if gaps appear.
+
+Execute this migration methodically and report what was ingested and what was trimmed.
+```
+
+### Why this beats “more markdown”
+
+Raw MD trees **do not scale**: they blow the context window, repeat facts, and drift. Archivist gives **hybrid retrieval** (vector + BM25 + graph), RBAC, and a curator — so agents stay fast and consistent. Your `memory_index.md` is the **human/agent-readable index**; Archivist is the **machine-indexed store**.
 
 ---
 
@@ -342,7 +395,7 @@ graph TB
         Files[("Markdown Files<br/>Journal Exports<br/>+ MEMORY_ROOT")]
     end
 
-    A1 & A2 & A3 <-->|"MCP over HTTP SSE"| Router
+    A1 & A2 & A3 <-->|"MCP over HTTP"| Router
     Pipeline <--> Qdrant
     Pipeline <--> SQLite
     Curator --> SQLite
@@ -497,8 +550,9 @@ These are available alongside the MCP interface for admin, monitoring, and integ
 |----------|--------|------|-------------|
 | `/health` | GET | No | Liveness probe (Kubernetes-friendly) |
 | `/metrics` | GET | Yes | Prometheus text exposition |
-| `/mcp/sse` | GET | Yes | MCP SSE transport entrypoint |
-| `/mcp/messages/` | POST | Yes | MCP message handler |
+| `/mcp` | GET/POST/DELETE | Yes | MCP Streamable HTTP transport entrypoint (preferred) |
+| `/mcp/sse` | GET | Yes | Legacy MCP SSE transport entrypoint |
+| `/mcp/messages/` | POST | Yes | Legacy SSE message handler |
 | `/admin/invalidate` | GET/POST | Yes | Trigger TTL-based memory expiry |
 | `/admin/retrieval-logs` | GET | Yes | Export retrieval pipeline traces |
 | `/admin/dashboard` | GET | Yes | Health dashboard JSON (`?batch=true` for batch heuristic) |

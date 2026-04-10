@@ -17,16 +17,22 @@ import argparse
 import json
 import os
 import random
+import re
 from datetime import date, timedelta
 
 CORPUS_DIR = os.path.join(os.path.dirname(__file__), "corpus")
 QUESTIONS_PATH = os.path.join(os.path.dirname(__file__), "questions.json")
 
-# Needle fact for large/medium corpora (unique string for haystack tests)
+# Needle facts for large/medium corpora (unique strings for haystack tests)
 NEEDLE_SECRET = (
     "ArchivistNeedleV1: the approved production backup window is exactly 04:15 UTC every Sunday; "
     "no other window is authorized."
 )
+NEEDLE_NUMERIC = "The fleet-wide memory budget ceiling is exactly 47,392 MiB per node, enforced by cgroup v2."
+NEEDLE_NAME = "The on-call DBA for Q2 2026 is Dr. Ramona Vex (employee ID RV-8834), reachable at +1-555-0142."
+NEEDLE_CONFIG = "ARCHIVIST_MAX_VECTOR_BATCH=256 ARCHIVIST_REINDEX_CRON='15 3 * * 6' ARCHIVIST_SHARD_KEY=murmur3"
+NEEDLE_IP = "The canary egress gateway is 198.51.100.73:8443 with TLS fingerprint sha256:a1b2c3d4e5f6."
+NEEDLE_CROSS_AGENT = "Project Obsidian launch date is 2026-07-14; budget approved at $2.4M by CFO on 2026-03-01."
 CONTRADICTION_FACT_A = (
     "Monitoring SLO (authoritative Feb 2026): API p99 latency must stay under 200ms at all times."
 )
@@ -280,11 +286,13 @@ def _generate_questions() -> list[dict]:
         {"query": "What happened on 2025-02-15?",
          "expected_keywords": ["DNS", "misconfiguration", "downtime", "45 minutes"],
          "expected_answer": "On 2025-02-15, a DNS misconfiguration caused 45 minutes of downtime.",
-         "topic": "incident", "query_type": "temporal", "difficulty": "easy"},
+         "topic": "incident", "query_type": "temporal", "difficulty": "easy",
+         "date_from": "2025-02-15", "date_to": "2025-02-15"},
         {"query": "What are the most recent changes to the deployment pipeline?",
          "expected_keywords": ["ArgoCD", "staging", "automated", "sync"],
          "expected_answer": "Deployment uses ArgoCD with automated sync enabled for staging.",
-         "topic": "cicd", "query_type": "temporal", "difficulty": "medium"},
+         "topic": "cicd", "query_type": "temporal", "difficulty": "medium",
+         "namespace": "pipeline"},
         {"query": "What is the current state of production Kubernetes?",
          "expected_keywords": ["v1.29", "12 nodes", "us-east-1"],
          "expected_answer": "The production Kubernetes cluster runs v1.29 across 12 nodes in us-east-1.",
@@ -333,27 +341,27 @@ def _generate_questions() -> list[dict]:
          "expected_keywords": ["$47,000", "budget", "cloud spend"],
          "expected_answer": "Monthly cloud spend is $47,000 with a target to reduce to $40,000 by Q3.",
          "topic": "cost", "query_type": "agent_scoped", "difficulty": "medium",
-         "agent_filter": "chief"},
+         "agent_filter": "chief", "caller_agent_id": "chief", "namespace": "chief"},
         {"query": "What does gitbob know about the CI pipeline?",
          "expected_keywords": ["GitLab CI", "15-minute", "timeout"],
          "expected_answer": "The CI pipeline runs on GitLab CI with a 15-minute timeout per job.",
          "topic": "cicd", "query_type": "agent_scoped", "difficulty": "medium",
-         "agent_filter": "gitbob"},
+         "agent_filter": "gitbob", "caller_agent_id": "gitbob", "namespace": "pipeline"},
         {"query": "What monitoring information has grafgreg recorded?",
          "expected_keywords": ["Prometheus", "Grafana", "SLO", "dashboard"],
          "expected_answer": "Prometheus scrapes metrics every 15 seconds from all services.",
          "topic": "monitoring", "query_type": "agent_scoped", "difficulty": "medium",
-         "agent_filter": "grafgreg"},
+         "agent_filter": "grafgreg", "caller_agent_id": "grafgreg", "namespace": "monitoring"},
         {"query": "What deployments has argo managed?",
          "expected_keywords": ["ArgoCD", "sync", "staging", "rollback"],
          "expected_answer": "Deployment uses ArgoCD with automated sync enabled for staging.",
          "topic": "cicd", "query_type": "agent_scoped", "difficulty": "medium",
-         "agent_filter": "argo"},
+         "agent_filter": "argo", "caller_agent_id": "argo", "namespace": "deployer"},
         {"query": "What has securitysam flagged about authentication?",
          "expected_keywords": ["JWT", "Vault", "RBAC", "OPA"],
          "expected_answer": "JWT tokens expire after 1 hour with refresh tokens valid for 7 days.",
          "topic": "security", "query_type": "agent_scoped", "difficulty": "medium",
-         "agent_filter": "securitysam"},
+         "agent_filter": "securitysam", "caller_agent_id": "securitysam", "namespace": "shared"},
     ]
     for sq in agent_scope_questions:
         qid += 1
@@ -386,6 +394,7 @@ def _generate_questions() -> list[dict]:
         questions.append({"id": qid, **cq})
 
     needle_questions = [
+        # ── Original backup window needle (3 variants) ──
         {
             "query": "What is the exact approved production backup window (time and day)?",
             "expected_keywords": ["ArchivistNeedleV1", "04:15", "Sunday", "UTC"],
@@ -415,6 +424,163 @@ def _generate_questions() -> list[dict]:
             "tags": ["needle"],
             "scales": ["large"],
             "difficulty": "medium",
+        },
+        # ── Paraphrased needle (different words, same target) ──
+        {
+            "query": "When is the scheduled maintenance window for production systems?",
+            "expected_keywords": ["04:15", "Sunday"],
+            "expected_answer": NEEDLE_SECRET,
+            "topic": "operations",
+            "query_type": "needle",
+            "tags": ["needle", "paraphrase"],
+            "scales": ["medium", "large"],
+            "difficulty": "hard",
+        },
+        {
+            "query": "What day and time are backups authorized to run?",
+            "expected_keywords": ["04:15", "Sunday", "UTC"],
+            "expected_answer": NEEDLE_SECRET,
+            "topic": "operations",
+            "query_type": "needle",
+            "tags": ["needle", "paraphrase"],
+            "scales": ["large"],
+            "difficulty": "hard",
+        },
+        # ── Numeric needle ──
+        {
+            "query": "What is the per-node memory budget ceiling in MiB?",
+            "expected_keywords": ["47,392", "MiB", "cgroup"],
+            "expected_answer": NEEDLE_NUMERIC,
+            "topic": "operations",
+            "query_type": "needle",
+            "tags": ["needle", "numeric"],
+            "scales": ["medium", "large"],
+            "difficulty": "hard",
+        },
+        {
+            "query": "fleet memory limit per node",
+            "expected_keywords": ["47,392", "MiB"],
+            "expected_answer": NEEDLE_NUMERIC,
+            "topic": "operations",
+            "query_type": "needle",
+            "tags": ["needle", "numeric"],
+            "scales": ["large"],
+            "difficulty": "medium",
+        },
+        # ── Name needle (person/contact) ──
+        {
+            "query": "Who is the on-call DBA for Q2 2026 and what is their contact number?",
+            "expected_keywords": ["Ramona Vex", "RV-8834", "555-0142"],
+            "expected_answer": NEEDLE_NAME,
+            "topic": "operations",
+            "query_type": "needle",
+            "tags": ["needle", "name"],
+            "scales": ["medium", "large"],
+            "difficulty": "hard",
+        },
+        {
+            "query": "DBA on-call rotation Q2",
+            "expected_keywords": ["Ramona Vex"],
+            "expected_answer": NEEDLE_NAME,
+            "topic": "operations",
+            "query_type": "needle",
+            "tags": ["needle", "name"],
+            "scales": ["large"],
+            "difficulty": "medium",
+        },
+        # ── Configuration needle (env vars/settings) ──
+        {
+            "query": "What is the ARCHIVIST_MAX_VECTOR_BATCH setting and the reindex cron schedule?",
+            "expected_keywords": ["256", "15 3 * * 6", "murmur3"],
+            "expected_answer": NEEDLE_CONFIG,
+            "topic": "operations",
+            "query_type": "needle",
+            "tags": ["needle", "config"],
+            "scales": ["medium", "large"],
+            "difficulty": "hard",
+        },
+        {
+            "query": "archivist reindex cron schedule production",
+            "expected_keywords": ["15 3 * * 6"],
+            "expected_answer": NEEDLE_CONFIG,
+            "topic": "operations",
+            "query_type": "needle",
+            "tags": ["needle", "config"],
+            "scales": ["large"],
+            "difficulty": "medium",
+        },
+        # ── IP/network needle ──
+        {
+            "query": "What is the canary egress gateway IP and port?",
+            "expected_keywords": ["198.51.100.73", "8443"],
+            "expected_answer": NEEDLE_IP,
+            "topic": "operations",
+            "query_type": "needle",
+            "tags": ["needle", "network"],
+            "scales": ["medium", "large"],
+            "difficulty": "hard",
+        },
+        {
+            "query": "canary gateway TLS fingerprint",
+            "expected_keywords": ["198.51.100.73", "a1b2c3d4e5f6"],
+            "expected_answer": NEEDLE_IP,
+            "topic": "operations",
+            "query_type": "needle",
+            "tags": ["needle", "network"],
+            "scales": ["large"],
+            "difficulty": "hard",
+        },
+        # ── Cross-agent needle (stored by ops-planning, queried generically) ──
+        {
+            "query": "When is Project Obsidian launching and what is the approved budget?",
+            "expected_keywords": ["2026-07-14", "$2.4M"],
+            "expected_answer": NEEDLE_CROSS_AGENT,
+            "topic": "operations",
+            "query_type": "needle",
+            "tags": ["needle", "cross_agent"],
+            "scales": ["medium", "large"],
+            "difficulty": "hard",
+        },
+        {
+            "query": "Project Obsidian launch date",
+            "expected_keywords": ["2026-07-14"],
+            "expected_answer": NEEDLE_CROSS_AGENT,
+            "topic": "operations",
+            "query_type": "needle",
+            "tags": ["needle", "cross_agent"],
+            "scales": ["large"],
+            "difficulty": "medium",
+        },
+        # ── Temporal needle (specific date context) ──
+        {
+            "query": "What capacity planning decision was made on 2026-02-11?",
+            "expected_keywords": ["47,392", "MiB"],
+            "expected_answer": NEEDLE_NUMERIC,
+            "topic": "operations",
+            "query_type": "needle",
+            "tags": ["needle", "temporal"],
+            "scales": ["large"],
+            "difficulty": "hard",
+        },
+        {
+            "query": "What network configuration was documented on March 18, 2026?",
+            "expected_keywords": ["198.51.100.73", "canary"],
+            "expected_answer": NEEDLE_IP,
+            "topic": "operations",
+            "query_type": "needle",
+            "tags": ["needle", "temporal"],
+            "scales": ["large"],
+            "difficulty": "hard",
+        },
+        {
+            "query": "Who was assigned as DBA contact in late February 2026?",
+            "expected_keywords": ["Ramona Vex"],
+            "expected_answer": NEEDLE_NAME,
+            "topic": "operations",
+            "query_type": "needle",
+            "tags": ["needle", "temporal", "name"],
+            "scales": ["large"],
+            "difficulty": "hard",
         },
     ]
     for nq in needle_questions:
@@ -456,7 +622,6 @@ def _fact_to_question(fact: str, topic: str) -> str:
 
 def _extract_keywords(fact: str) -> list[str]:
     """Pull key terms from a fact for keyword matching evaluation."""
-    import re
     numbers = re.findall(r'\d+[\d,.]*%?', fact)
     proper_nouns = re.findall(r'[A-Z][a-z]+(?:\s[A-Z][a-z]+)*', fact)
     return (numbers + proper_nouns)[:5]
@@ -503,6 +668,39 @@ def _write_needle_file(corpus_root: str) -> None:
             "## Canonical window\n\n"
             f"{NEEDLE_SECRET}\n\n"
             "Unrelated filler: Kubernetes PostgreSQL ArgoCD monitoring deployment pipeline.\n"
+        )
+    with open(os.path.join(ndir, "2026-02-11-capacity-limits.md"), "w", encoding="utf-8") as f:
+        f.write(
+            "# Capacity planning\n\n**Agent:** needleagent\n**Date:** 2026-02-11\n\n"
+            f"## Memory budget\n\n{NEEDLE_NUMERIC}\n\n"
+            "General notes: disk IOPS, network throughput, CPU scheduling.\n"
+        )
+    with open(os.path.join(ndir, "2026-02-25-oncall-roster.md"), "w", encoding="utf-8") as f:
+        f.write(
+            "# On-call roster Q2\n\n**Agent:** needleagent\n**Date:** 2026-02-25\n\n"
+            f"## DBA rotation\n\n{NEEDLE_NAME}\n\n"
+            "Backup contacts: ops-team@company.com, #incident-room Slack.\n"
+        )
+    with open(os.path.join(ndir, "2026-03-05-archivist-tuning.md"), "w", encoding="utf-8") as f:
+        f.write(
+            "# Archivist production tuning\n\n**Agent:** needleagent\n**Date:** 2026-03-05\n\n"
+            f"## Env overrides\n\n{NEEDLE_CONFIG}\n\n"
+            "Applied after the v1.9 rollout to reduce reindex contention.\n"
+        )
+    with open(os.path.join(ndir, "2026-03-18-network-edge.md"), "w", encoding="utf-8") as f:
+        f.write(
+            "# Edge network config\n\n**Agent:** needleagent\n**Date:** 2026-03-18\n\n"
+            f"## Canary gateway\n\n{NEEDLE_IP}\n\n"
+            "Used for pre-production traffic mirroring from us-west-2.\n"
+        )
+    # Cross-agent needle: stored by a different agent
+    odir = os.path.join(corpus_root, "agents", "ops-planning")
+    os.makedirs(odir, exist_ok=True)
+    with open(os.path.join(odir, "2026-03-01-project-obsidian.md"), "w", encoding="utf-8") as f:
+        f.write(
+            "# Project Obsidian planning\n\n**Agent:** ops-planning\n**Date:** 2026-03-01\n\n"
+            f"## Launch details\n\n{NEEDLE_CROSS_AGENT}\n\n"
+            "Stakeholders: engineering, product, finance.\n"
         )
 
 
@@ -660,11 +858,8 @@ def main():
         nfiles = generate_legacy_corpus(CORPUS_DIR)
         print(f"Generated {nfiles} corpus files in {CORPUS_DIR}")
 
-    if args.write_questions or not args.preset:
-        if not args.corpus_only:
-            _write_questions_file()
-    elif args.corpus_only:
-        pass
+    if (args.write_questions or not args.preset) and not args.corpus_only:
+        _write_questions_file()
 
 
 if __name__ == "__main__":

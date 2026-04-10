@@ -24,6 +24,8 @@ _lock = threading.Lock()
 
 # agent_id → OrderedDict[(cache_key) → (timestamp, value)]
 _agent_caches: dict[str, OrderedDict] = {}
+_MAX_AGENT_IDS = 256
+_last_agent_prune = 0.0
 
 
 def _cache_key(query: str, namespace: str = "", tier: str = "l2",
@@ -54,6 +56,18 @@ def get(agent_id: str, query: str, namespace: str = "", tier: str = "l2",
         return value
 
 
+def _prune_stale_agents_locked(now: float) -> None:
+    """Remove agent_id entries where all cached results have expired."""
+    global _last_agent_prune
+    if now - _last_agent_prune < 60:
+        return
+    _last_agent_prune = now
+    empty = [aid for aid, cache in _agent_caches.items()
+             if not cache or all(now - ts > HOT_CACHE_TTL_SECONDS for ts, _ in cache.values())]
+    for aid in empty:
+        del _agent_caches[aid]
+
+
 def put(agent_id: str, query: str, result: dict, namespace: str = "",
         tier: str = "l2", memory_type: str = "", extra: str = "") -> None:
     """Store a result in the hot cache, evicting LRU entries if needed."""
@@ -61,12 +75,15 @@ def put(agent_id: str, query: str, result: dict, namespace: str = "",
         return
 
     key = _cache_key(query, namespace, tier, memory_type, extra)
+    now = time.time()
     with _lock:
         cache = _agent_caches.setdefault(agent_id, OrderedDict())
-        cache[key] = (time.time(), result)
+        cache[key] = (now, result)
         cache.move_to_end(key)
         while len(cache) > HOT_CACHE_MAX_PER_AGENT:
             cache.popitem(last=False)
+        if len(_agent_caches) > _MAX_AGENT_IDS:
+            _prune_stale_agents_locked(now)
 
 
 def invalidate_namespace(namespace: str) -> int:

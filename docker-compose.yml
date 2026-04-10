@@ -16,6 +16,11 @@
 #   docker compose --profile benchmark run --rm benchmark --no-refine --output .benchmarks/pipeline.json
 # Set EMBED_URL in .env to http://host.docker.internal:8000 (or your embedding container IP).
 #
+# Academic suite (LongMemEval / LoCoMo / HaluMem) — same network as Qwen (openclaw-vllm-corp extra_hosts):
+#   bash benchmarks/scripts/run_academic_benchmarks_docker.sh
+#   bash benchmarks/scripts/run_academic_benchmarks_docker.sh --limit 50 --no-curator
+# Do not commit .env (gitignored); use .env.example as the template only.
+#
 # Data under Docker volumes by default; use docker-compose.override.example.yml to bind /opt/appdata.
 
 name: archivist
@@ -100,6 +105,7 @@ services:
       RETRIEVAL_THRESHOLD: ${RETRIEVAL_THRESHOLD:-0.65}
     volumes:
       - archivist-data:/data
+      - archivist-backups:/data/archivist/backups
       - ${MEMORY_DIR:-./sample-memories}:/data/memories:ro
     depends_on:
       - qdrant
@@ -120,6 +126,7 @@ services:
 
 volumes:
   archivist-data:
+  archivist-backups:
   qdrant-storage:
   tailscale-state:
 

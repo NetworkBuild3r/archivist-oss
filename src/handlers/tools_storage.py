@@ -20,6 +20,9 @@ from qdrant import qdrant_client
 from rbac import get_namespace_for_agent, get_namespace_config
 from text_utils import compute_memory_checksum
 from archivist_uri import memory_uri
+from pre_extractor import pre_extract
+from collection_router import ensure_collection, collection_for, collections_for_query
+from contextual_augment import augment_chunk
 import hot_cache
 import journal
 import metrics as m
@@ -65,6 +68,13 @@ TOOLS: list[Tool] = [
                     "enum": ["experience", "skill", "general"],
                     "description": "Tag this memory as an experience (I did X), skill (how to do X), or general. Default general.",
                     "default": "general",
+                },
+                "thought_type": {
+                    "type": "string",
+                    "enum": ["decision", "lesson", "constraint", "insight",
+                             "preference", "milestone", "correction", "general"],
+                    "description": "Semantic thought type for precise filtering. Auto-detected if omitted.",
+                    "default": "",
                 },
                 "force_skip_conflict_check": {
                     "type": "boolean",
@@ -249,13 +259,27 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
         eid = upsert_entity(agent_id, "agent", retention_class=retention)
         add_fact(eid, text, f"explicit/{agent_id}", agent_id, retention_class=retention)
 
-    vec = await embed_text(text)
+    embed_input = text
+    from config import CONTEXTUAL_AUGMENTATION_ENABLED
+    if CONTEXTUAL_AUGMENTATION_ENABLED:
+        embed_input = augment_chunk(
+            text,
+            agent_id=agent_id,
+            file_path=f"explicit/{agent_id}",
+            date=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        )
+    vec = await embed_text(embed_input)
     client = qdrant_client()
     pid = str(uuid.uuid4())
     now = datetime.now(timezone.utc)
     checksum = compute_memory_checksum(text, agent_id, namespace)
 
     ttl_expires_at = compute_ttl(namespace, importance=importance)
+
+    thought_type = (arguments.get("thought_type") or "").strip()
+    if not thought_type:
+        hints = pre_extract(text)
+        thought_type = hints.get("thought_type", "general")
 
     payload = {
         "agent_id": agent_id,
@@ -272,14 +296,16 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
         "importance_score": importance,
         "retention_class": retention,
         "memory_type": arguments.get("memory_type", "general"),
+        "thought_type": thought_type,
     }
     if retention in ("durable", "permanent"):
         ttl_expires_at = None
     if ttl_expires_at is not None:
         payload["ttl_expires_at"] = ttl_expires_at
 
+    _coll = ensure_collection(namespace)
     client.upsert(
-        collection_name=QDRANT_COLLECTION,
+        collection_name=_coll,
         points=[PointStruct(id=pid, vector=vec, payload=payload)],
     )
 
@@ -370,10 +396,11 @@ async def _handle_compress(arguments: dict) -> list[TextContent]:
     client = qdrant_client()
     texts: list[tuple[str, str]] = []
     source_agent_ids: list[str] = []
+    _colls = collections_for_query("")
     for mid in memory_ids:
         try:
             points = client.retrieve(
-                collection_name=QDRANT_COLLECTION, ids=[mid], with_payload=True,
+                collection_name=_colls[0], ids=[mid], with_payload=True,
             )
             if points:
                 pl = points[0].payload or {}
@@ -463,12 +490,13 @@ async def _handle_pin(arguments: dict) -> list[TextContent]:
     pinned = []
 
     if memory_id:
+        _pin_coll = collection_for(namespace)
         client = qdrant_client()
         try:
-            points = client.retrieve(collection_name=QDRANT_COLLECTION, ids=[memory_id], with_payload=True)
+            points = client.retrieve(collection_name=_pin_coll, ids=[memory_id], with_payload=True)
             if points:
                 client.set_payload(
-                    collection_name=QDRANT_COLLECTION,
+                    collection_name=_pin_coll,
                     payload={"retention_class": "permanent", "importance_score": 1.0},
                     points=[memory_id],
                 )
@@ -533,10 +561,11 @@ async def _handle_unpin(arguments: dict) -> list[TextContent]:
     unpinned = []
 
     if memory_id:
+        _unpin_coll = collection_for(namespace)
         client = qdrant_client()
         try:
             client.set_payload(
-                collection_name=QDRANT_COLLECTION,
+                collection_name=_unpin_coll,
                 payload={"retention_class": "standard", "importance_score": 0.5},
                 points=[memory_id],
             )

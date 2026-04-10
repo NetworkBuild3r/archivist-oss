@@ -1,9 +1,9 @@
 """Health dashboard and batch-size heuristic — aggregates operational metrics
 across memory, skills, retrieval, and conflicts for a single-pane view.
 
-The batch heuristic is inspired by the Batch Size Gravity article: when
-memory health degrades (high conflict rate, stale memories, low retrieval
-quality), recommend smaller batches / more frequent checkpoints.
+The batch heuristic: when memory health degrades (high conflict rate, stale
+memories, low retrieval quality), recommend smaller batches / more frequent
+checkpoints.
 """
 
 import logging
@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 
 from graph import get_db
 from config import QDRANT_COLLECTION
+import health
 from qdrant import qdrant_client
 
 logger = logging.getLogger("archivist.dashboard")
@@ -56,6 +57,8 @@ def build_dashboard(window_days: int = 7) -> dict:
             "total_entries": cache.get("total_entries"),
             "agents": cache.get("agents"),
         },
+        # fts5, qdrant, embeddings, llm — all registered via health.register from init and runtime paths
+        "subsystems": health.all_status(),
     }
 
 
@@ -122,11 +125,11 @@ def batch_heuristic(window_days: int = 7) -> dict:
 
 def _qdrant_stats() -> dict:
     try:
-        client = qdrant_client(timeout=10)
+        client = qdrant_client()
         info = client.get_collection(QDRANT_COLLECTION)
         return {
             "total_points": info.points_count,
-            "vectors_count": info.vectors_count,
+            "indexed_vectors_count": getattr(info, "indexed_vectors_count", None),
             "status": str(info.status),
         }
     except Exception as e:
@@ -136,21 +139,20 @@ def _qdrant_stats() -> dict:
 def _stale_estimate() -> dict:
     try:
         from qdrant_client.models import Filter, FieldCondition, Range
-        client = qdrant_client(timeout=10)
+        client = qdrant_client()
         now_ts = int(time.time())
 
         info = client.get_collection(QDRANT_COLLECTION)
         total = info.points_count or 1
 
-        expired, _ = client.scroll(
-            collection_name=QDRANT_COLLECTION,
-            scroll_filter=Filter(
-                must=[FieldCondition(key="ttl_expires_at", range=Range(lte=now_ts, gt=0))]
-            ),
-            limit=0,
-            with_payload=False,
+        stale_filter = Filter(
+            must=[FieldCondition(key="ttl_expires_at", range=Range(lte=now_ts, gt=0))]
         )
-        stale_count = len(expired) if expired else 0
+        stale_count = client.count(
+            collection_name=QDRANT_COLLECTION,
+            count_filter=stale_filter,
+            exact=False,
+        ).count
         return {"stale_count": stale_count, "total": total, "stale_pct": round(stale_count / total * 100, 1)}
     except Exception as e:
         return {"error": str(e), "stale_pct": 0}

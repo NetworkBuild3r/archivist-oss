@@ -2,13 +2,17 @@
 
 import hashlib
 import os
+import re
 import json
 import logging
 import asyncio
+import time
 from datetime import datetime, timezone, timedelta
 
+import metrics as m
+
 from config import (
-    MEMORY_ROOT, CURATOR_INTERVAL_MINUTES, TEAM_MAP,
+    MEMORY_ROOT, CURATOR_INTERVAL_MINUTES,
     CURATOR_EXTRACT_PREFIXES, CURATOR_EXTRACT_SKIP_SEGMENTS,
     CURATOR_TIP_BUDGET,
     DURABLE_ENTITY_TYPES,
@@ -22,6 +26,8 @@ from indexer import index_file
 from hotness import batch_update_hotness
 from text_utils import strip_fences, extract_agent_id_from_path
 from trajectory import consolidate_tips
+from compressed_index import cache_wake_up
+from pre_extractor import pre_extract
 
 logger = logging.getLogger("archivist.curator")
 
@@ -31,8 +37,13 @@ EXTRACT_SYSTEM = (
     "- entities: [{name, type}] (people, systems, tools, concepts, places). "
     "Use specific types: person, host, server, service, credential, organization, cluster, "
     "database, network, user, tool, concept, place, project.\n"
-    "- facts: [{entity_name, fact}] (durable facts about entities — paraphrase in short plain text; "
-    "NEVER paste raw code, JSON, YAML, or markdown from the source)\n"
+    "- facts: [{entity_name, fact, valid_from, valid_until}] (durable facts about entities — "
+    "paraphrase in short plain text; NEVER paste raw code, JSON, YAML, or markdown from the source). "
+    "Include valid_from (ISO date YYYY-MM-DD) when the text indicates when the fact became true "
+    '(e.g. "as of", "starting from", "since", "deployed on"). '
+    "Include valid_until when the text indicates the fact is no longer true "
+    '(e.g. "until", "ended", "deprecated", "replaced by"). '
+    "Omit these fields (or use empty string) when no temporal marker is present.\n"
     "- relationships: [{source, target, type, evidence}] (connections between entities)\n"
     "- decisions: [text] (decisions made)\n"
     "- lessons: [text] (lessons learned)\n"
@@ -56,11 +67,29 @@ def should_extract_knowledge(rel_path: str) -> bool:
 
 
 async def extract_knowledge(text: str, agent_id: str, source_file: str) -> dict | None:
-    """Use LLM to extract structured knowledge from a memory note."""
+    """Use LLM to extract structured knowledge from a memory note.
+
+    Runs a deterministic pre-extraction pass first to provide hints to the LLM,
+    reducing hallucination and token spend (two-pass approach).
+    """
     if len(text.strip()) < 50:
         return None
 
-    prompt = f"Agent: {agent_id}\nSource: {source_file}\n\nMemory note:\n{text[:3000]}"
+    hints = pre_extract(text, source_file)
+    hint_lines = []
+    if hints["entities"]:
+        hint_lines.append(f"Pre-extracted entities: {json.dumps(hints['entities'][:20])}")
+    if hints["dates"]:
+        hint_lines.append(f"Detected dates: {hints['dates']}")
+    if hints["thought_type"] != "general":
+        hint_lines.append(f"Detected thought type: {hints['thought_type']}")
+    hint_block = "\n".join(hint_lines)
+
+    prompt = (
+        f"Agent: {agent_id}\nSource: {source_file}\n\n"
+        + (f"{hint_block}\n\n" if hint_block else "")
+        + f"Memory note:\n{text[:3000]}"
+    )
     try:
         raw = await llm_query(
             prompt, system=EXTRACT_SYSTEM, max_tokens=1024, json_mode=True,
@@ -99,23 +128,34 @@ async def process_extraction(data: dict, agent_id: str, source_file: str):
             entity_retention[name.lower()] = rc
             upsert_entity(name, etype, agent_id, retention_class=rc)
 
+    file_date = ""
+    m = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", source_file)
+    if m:
+        file_date = m.group(1)
+
     for fact in data.get("facts", []):
         ename = fact.get("entity_name", "").strip()
         ftext = fact.get("fact", "").strip()
         if ename and ftext:
             rc = entity_retention.get(ename.lower(), "standard")
             eid = upsert_entity(ename, retention_class=rc)
-            add_fact(eid, ftext, source_file, agent_id, retention_class=rc)
+            vf = (fact.get("valid_from") or "").strip()
+            vu = (fact.get("valid_until") or "").strip()
+            if not vf and file_date:
+                vf = file_date
+            add_fact(eid, ftext, source_file, agent_id, retention_class=rc,
+                     valid_from=vf, valid_until=vu)
 
     for rel in data.get("relationships", []):
         src = rel.get("source", "").strip()
         tgt = rel.get("target", "").strip()
         rtype = rel.get("type", "related_to").strip()
         evidence = rel.get("evidence", "").strip()
+        provenance = rel.get("provenance", "inferred").strip()
         if src and tgt:
             sid = upsert_entity(src)
             tid = upsert_entity(tgt)
-            add_relationship(sid, tid, rtype, evidence, agent_id)
+            add_relationship(sid, tid, rtype, evidence, agent_id, provenance=provenance)
 
 
 def _file_checksum(text: str) -> str:
@@ -177,8 +217,7 @@ async def curate_cycle():
                 logger.error("Curator failed on %s: %s", filepath, e)
 
     set_curator_state("last_curate_time", now.isoformat())
-    logger.info("Curator cycle complete: %d files processed, %d skipped (unchanged)", processed, skipped_unchanged)
-    return processed
+    return {"processed": processed, "skipped": skipped_unchanged}
 
 
 async def extract_all_agent_memories() -> int:
@@ -241,7 +280,7 @@ async def reinforce_durable_entities():
         logger.info("Reinforced %d durable/permanent entities, %d relationships", reinforced, rels_boosted)
 
 
-async def decay_old_entries():
+async def decay_old_entries() -> dict[str, int]:
     """Soft-delete graph entries based on age and superseded status.
 
     Rules:
@@ -249,6 +288,8 @@ async def decay_old_entries():
     - superseded standard/ephemeral facts: decay after 30 days
     - non-superseded standard facts: decay after 90 days
     - ephemeral facts: decay after 30 days regardless
+
+    Returns counts for observability (curator.cycle summary).
     """
     with GRAPH_WRITE_LOCK:
         conn = get_db()
@@ -282,6 +323,44 @@ async def decay_old_entries():
             "Decayed %d facts (%d aged 90d, %d superseded/ephemeral 30d; durable/permanent preserved)",
             total, aged_out, superseded_out,
         )
+    return {"aged_out": aged_out, "superseded_out": superseded_out, "total": total}
+
+
+def _refresh_wake_up_caches() -> int:
+    """Re-build wake-up context for each active namespace.
+
+    Scans memory_chunks for distinct (namespace, agent_id) pairs and
+    pre-computes the wake-up payload so the MCP tool returns instantly.
+
+    Returns the number of namespace/agent pairs refreshed.
+    """
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT namespace, agent_id FROM memory_chunks "
+            "WHERE namespace != '' LIMIT 50"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    refreshed = 0
+    seen: set[str] = set()
+    for row in rows:
+        ns = row["namespace"]
+        aid = row["agent_id"]
+        key = f"{ns}:{aid}"
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            cache_wake_up(ns, agent_id=aid)
+            refreshed += 1
+        except Exception as e:
+            logger.debug("Wake-up cache failed for %s/%s: %s", ns, aid, e)
+
+    if refreshed:
+        logger.info("Refreshed wake-up context for %d namespace/agent pairs", refreshed)
+    return refreshed
 
 
 async def curator_loop():
@@ -292,10 +371,15 @@ async def curator_loop():
     logger.info("Curator loop started (interval: %d min)", CURATOR_INTERVAL_MINUTES)
     while True:
         try:
-            await curate_cycle()
+            t_iter = time.monotonic()
+            cc = await curate_cycle()
+            files_processed = cc["processed"]
+            files_skipped = cc["skipped"]
             await reinforce_durable_entities()
-            await decay_old_entries()
+            decay = await decay_old_entries()
+            facts_decayed = decay["total"]
 
+            n_hot = 0
             try:
                 n_hot = batch_update_hotness()
                 if n_hot:
@@ -303,12 +387,34 @@ async def curator_loop():
             except Exception as e:
                 logger.warning("Hotness update failed (non-fatal): %s", e)
 
+            tips_merged = 0
             try:
                 tip_result = await consolidate_tips(budget=CURATOR_TIP_BUDGET)
-                if tip_result.get("consolidated", 0):
-                    logger.info("Tip consolidation: %d clusters merged", tip_result["consolidated"])
+                tips_merged = int(tip_result.get("consolidated", 0) or 0)
+                if tips_merged:
+                    logger.info("Tip consolidation: %d clusters merged", tips_merged)
             except Exception as e:
                 logger.warning("Tip consolidation failed (non-fatal): %s", e)
+
+            wake_pairs = 0
+            try:
+                wake_pairs = _refresh_wake_up_caches()
+            except Exception as e:
+                logger.warning("Wake-up cache refresh failed (non-fatal): %s", e)
+
+            dur_ms = round((time.monotonic() - t_iter) * 1000, 1)
+            m.observe(m.CURATOR_CYCLE_DURATION, dur_ms)
+            logger.info(
+                "curator.cycle complete=1 files_processed=%d skipped=%d facts_decayed=%d "
+                "hotness_updated=%d tips_merged=%d wake_pairs=%d duration_ms=%.1f",
+                files_processed,
+                files_skipped,
+                facts_decayed,
+                n_hot,
+                tips_merged,
+                wake_pairs,
+                dur_ms,
+            )
 
             backoff_sec = base_interval
         except Exception as e:

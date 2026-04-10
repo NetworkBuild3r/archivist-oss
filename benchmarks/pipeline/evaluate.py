@@ -29,6 +29,11 @@ Usage:
     python -m benchmarks.pipeline.evaluate --scale-sweep --variants vector_only,full_pipeline \\
         --no-refine --compare-stuffing --output .benchmarks/breakeven.json
 
+    # Progress bar (tqdm) + checkpoint (``--output`` → sibling ``*.run_state.json``):
+    python -m benchmarks.pipeline.evaluate --memory-scale medium --variants full_pipeline \\
+        --output .benchmarks/full_medium.json
+    # Milestone logs instead of bar: add ``--no-progress-bar --progress-pct 10``
+
     # Single variant:
     python -m benchmarks.pipeline.evaluate --variant vector_only
 """
@@ -139,7 +144,7 @@ VARIANTS = {
     "plus_rerank": {
         "BM25_ENABLED": "true",
         "GRAPH_RETRIEVAL_ENABLED": "true",
-        "RERANK_ENABLED": "false",
+        "RERANK_ENABLED": "true",
         "HOTNESS_WEIGHT": "0.15",
         "TEMPORAL_DECAY_HALFLIFE_DAYS": "365",
         "RETRIEVAL_THRESHOLD": "0.2",
@@ -151,6 +156,17 @@ VARIANTS = {
         "HOTNESS_WEIGHT": "0.15",
         "TEMPORAL_DECAY_HALFLIFE_DAYS": "365",
         "RETRIEVAL_THRESHOLD": "0.2",
+    },
+    "full_pipeline_rerank": {
+        "BM25_ENABLED": "true",
+        "GRAPH_RETRIEVAL_ENABLED": "true",
+        "RERANK_ENABLED": "true",
+        "HOTNESS_WEIGHT": "0.15",
+        "TEMPORAL_DECAY_HALFLIFE_DAYS": "365",
+        "RETRIEVAL_THRESHOLD": "0.2",
+        "TEMPORAL_INTENT_ENABLED": "true",
+        "BM25_RESCUE_ENABLED": "true",
+        "ADAPTIVE_VECTOR_LIMIT_ENABLED": "true",
     },
 }
 
@@ -279,8 +295,19 @@ async def index_corpus(corpus_dir: str):
     return count
 
 
-async def run_variant(variant_name: str, questions: list[dict], refine: bool) -> dict:
+async def run_variant(
+    variant_name: str,
+    questions: list[dict],
+    refine: bool,
+    *,
+    progress_pct_step: int = 10,
+    checkpoint_path: str | None = None,
+    memory_scale: str | None = None,
+    use_progress_bar: bool = True,
+) -> dict:
     """Run all questions against a pipeline variant and collect metrics."""
+    from benchmarks.pipeline.run_progress import ProgressTracker
+
     _apply_variant(variant_name)
 
     import importlib
@@ -302,55 +329,81 @@ async def run_variant(variant_name: str, questions: list[dict], refine: bool) ->
     recall_at_10 = []
     mrr_scores = []
 
-    for q in questions:
-        t0 = time.monotonic()
-        try:
-            result = await recursive_retrieve(
-                query=q["query"],
-                namespace="",
-                limit=10,
-                refine=refine,
-                tier="l2",
+    progress = ProgressTracker(
+        total=len(questions),
+        phase=variant_name,
+        memory_scale=memory_scale,
+        pct_step=progress_pct_step,
+        checkpoint_path=checkpoint_path,
+        use_progress_bar=use_progress_bar,
+    )
+
+    try:
+        for q in questions:
+            t0 = time.monotonic()
+            q_namespace = q.get("namespace", "")
+            q_agent_id = q.get("caller_agent_id", "")
+            q_date_from = q.get("date_from", "")
+            q_date_to = q.get("date_to", "")
+            try:
+                result = await recursive_retrieve(
+                    query=q["query"],
+                    namespace=q_namespace,
+                    agent_id=q_agent_id,
+                    limit=10,
+                    refine=refine,
+                    tier="l2",
+                    date_from=q_date_from,
+                    date_to=q_date_to,
+                )
+            except Exception as e:
+                logger.warning("Query %d failed: %s", q["id"], e)
+                result = {"answer": "", "sources": [], "retrieval_trace": {}}
+            elapsed_ms = (time.monotonic() - t0) * 1000
+            latencies.append(elapsed_ms)
+
+            answer_text = result.get("answer", "")
+            sources = result.get("sources", [])
+            trace = result.get("retrieval_trace", {})
+
+            token_cost = count_tokens(answer_text) if answer_text else 0
+            for s in sources:
+                token_cost += count_tokens(str(s))
+            token_costs.append(token_cost)
+
+            kw_recall = _keyword_recall(
+                answer_text + " " + " ".join(str(s) for s in sources),
+                q.get("expected_keywords", []),
             )
-        except Exception as e:
-            logger.warning("Query %d failed: %s", q["id"], e)
-            result = {"answer": "", "sources": [], "retrieval_trace": {}}
-        elapsed_ms = (time.monotonic() - t0) * 1000
-        latencies.append(elapsed_ms)
+            recall_at_5.append(min(kw_recall, 1.0))
 
-        answer_text = result.get("answer", "")
-        sources = result.get("sources", [])
-        trace = result.get("retrieval_trace", {})
+            full_text = answer_text + " " + " ".join(str(s) for s in sources[:10])
+            kw_recall_10 = _keyword_recall(full_text, q.get("expected_keywords", []))
+            recall_at_10.append(min(kw_recall_10, 1.0))
 
-        token_cost = count_tokens(answer_text) if answer_text else 0
-        for s in sources:
-            token_cost += count_tokens(str(s))
-        token_costs.append(token_cost)
+            rr = _reciprocal_rank(sources, q.get("expected_answer", ""))
+            mrr_scores.append(rr)
 
-        kw_recall = _keyword_recall(
-            answer_text + " " + " ".join(str(s) for s in sources),
-            q.get("expected_keywords", []),
-        )
-        recall_at_5.append(min(kw_recall, 1.0))
+            results.append({
+                "question_id": q["id"],
+                "query": q["query"],
+                "query_type": q.get("query_type", ""),
+                "latency_ms": round(elapsed_ms, 1),
+                "token_cost": token_cost,
+                "keyword_recall": round(kw_recall, 3),
+                "reciprocal_rank": round(rr, 3),
+                "sources_count": len(sources),
+                "trace": trace,
+            })
 
-        full_text = answer_text + " " + " ".join(str(s) for s in sources[:10])
-        kw_recall_10 = _keyword_recall(full_text, q.get("expected_keywords", []))
-        recall_at_10.append(min(kw_recall_10, 1.0))
-
-        rr = _reciprocal_rank(sources, q.get("expected_answer", ""))
-        mrr_scores.append(rr)
-
-        results.append({
-            "question_id": q["id"],
-            "query": q["query"],
-            "query_type": q.get("query_type", ""),
-            "latency_ms": round(elapsed_ms, 1),
-            "token_cost": token_cost,
-            "keyword_recall": round(kw_recall, 3),
-            "reciprocal_rank": round(rr, 3),
-            "sources_count": len(sources),
-            "trace": trace,
-        })
+            progress.step(
+                len(results),
+                results=results,
+                rolling_recall=statistics.mean(recall_at_5),
+                rolling_mrr=statistics.mean(mrr_scores),
+            )
+    finally:
+        progress.close()
 
     summary = {
         "variant": variant_name,
@@ -589,6 +642,65 @@ def format_full_comparison_table(
     return "\n".join(lines)
 
 
+_FIXTURE_GLOSSARY = {
+    "kubernetes": {"type": "technology", "aliases": ["k8s"]},
+    "prometheus": {"type": "tool"},
+    "grafana": {"type": "tool"},
+    "argocd": {"type": "tool", "aliases": ["argo cd"]},
+    "gitlab ci": {"type": "tool", "aliases": ["gitlab"]},
+    "postgresql": {"type": "database", "aliases": ["postgres"]},
+    "redis": {"type": "database"},
+    "vault": {"type": "tool", "aliases": ["hashicorp vault"]},
+    "istio": {"type": "technology"},
+    "rabbitmq": {"type": "tool"},
+    "pagerduty": {"type": "tool"},
+    "karpenter": {"type": "tool"},
+    "flyway": {"type": "tool"},
+    "pgbouncer": {"type": "tool"},
+    "playwright": {"type": "tool"},
+    "thanos": {"type": "tool"},
+    "etcd": {"type": "database"},
+    "chief": {"type": "agent"},
+    "gitbob": {"type": "agent"},
+    "grafgreg": {"type": "agent"},
+    "argo": {"type": "agent"},
+    "kubekate": {"type": "agent"},
+    "securitysam": {"type": "agent"},
+    "needleagent": {"type": "agent"},
+}
+
+
+def _seed_graph_from_fixtures(corpus_dir: str):
+    """Deterministic graph population from a known glossary — no LLM calls.
+
+    Seeds entities + stub facts so graph-dependent retrieval paths activate
+    during benchmarks without requiring a full curator run.
+    """
+    from graph import upsert_entity, add_fact, init_schema
+    init_schema()
+
+    for name, meta in _FIXTURE_GLOSSARY.items():
+        eid = upsert_entity(name, meta["type"])
+        add_fact(eid, f"{name} is a {meta['type']} in the benchmark corpus", "benchmark/fixtures", "benchmark")
+        for alias in meta.get("aliases", []):
+            upsert_entity(alias, meta["type"])
+
+    import glob as _glob
+    md_files = _glob.glob(os.path.join(corpus_dir, "**", "*.md"), recursive=True)
+    for fpath in md_files[:50]:
+        try:
+            with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+                text = f.read(2000).lower()
+        except Exception:
+            continue
+        rel = os.path.relpath(fpath, corpus_dir)
+        for name, meta in _FIXTURE_GLOSSARY.items():
+            if name in text:
+                eid = upsert_entity(name, meta["type"])
+                snippet = text[:200].replace("\n", " ").strip()
+                add_fact(eid, f"Referenced in {rel}: {snippet[:120]}", rel, "benchmark")
+
+
 async def _run_benchmark_session(
     *,
     corpus_dir: str,
@@ -598,6 +710,7 @@ async def _run_benchmark_session(
     skip_index: bool,
     run_curator: bool,
     memory_scale: str | None,
+    **kwargs,
 ) -> tuple[dict, list[dict]]:
     """Index (optional), curator (optional), run variants; return (all_results, all_summaries)."""
     import importlib
@@ -619,12 +732,28 @@ async def _run_benchmark_session(
         n = await curator.extract_all_agent_memories()
         logger.info("Curator finished: %d files extracted", n)
 
+    warm_graph = kwargs.get("warm_graph", False)
+    if warm_graph and not run_curator:
+        _seed_graph_from_fixtures(corpus_dir)
+        logger.info("Warm graph seeded from fixture glossary")
+
     all_results = {}
     all_summaries = []
 
+    progress_pct_step = int(kwargs.get("progress_pct_step", 10))
+    checkpoint_path = kwargs.get("checkpoint_path")
+    use_progress_bar = kwargs.get("use_progress_bar", True)
     for variant in variant_names:
         logger.info("=== Variant: %s ===", variant)
-        data = await run_variant(variant, questions, refine=refine)
+        data = await run_variant(
+            variant,
+            questions,
+            refine=refine,
+            progress_pct_step=progress_pct_step,
+            checkpoint_path=checkpoint_path,
+            memory_scale=memory_scale,
+            use_progress_bar=use_progress_bar,
+        )
         all_results[variant] = data
         summary = dict(data["summary"])
         if memory_scale:
@@ -680,6 +809,11 @@ async def main():
         help="After indexing, run LLM graph extraction on all agent markdown (costs tokens)",
     )
     parser.add_argument(
+        "--warm-graph",
+        action="store_true",
+        help="Seed the KG from a deterministic fixture glossary (no LLM cost; cheaper than --run-curator)",
+    )
+    parser.add_argument(
         "--scale-sweep",
         action="store_true",
         help="Run the same variants for small, medium, large presets (re-indexes each time)",
@@ -712,9 +846,34 @@ async def main():
             "conversation history, and tool overhead already consuming part of the window."
         ),
     )
+    parser.add_argument(
+        "--progress-pct",
+        type=int,
+        default=10,
+        metavar="N",
+        help="With --no-progress-bar: log every N%% (10, 20, …) plus ETA; default 10",
+    )
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default=None,
+        help="Atomic JSON checkpoint path for partial per-query results (default: <output>.run_state.json if --output)",
+    )
+    parser.add_argument(
+        "--no-checkpoint",
+        action="store_true",
+        help="Disable checkpoint file even when --output is set",
+    )
+    parser.add_argument(
+        "--no-progress-bar",
+        action="store_true",
+        help="Disable tqdm progress bar; use milestone PROGRESS log lines instead (see --progress-pct)",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
     questions_path = args.questions or QUESTIONS_PATH
     with open(questions_path, "r", encoding="utf-8") as f:
@@ -728,6 +887,21 @@ async def main():
         else ([args.variant] if args.variant else list(VARIANTS.keys()))
     )
     refine = not args.no_refine
+
+    checkpoint_path: str | None = None
+    if not args.no_checkpoint:
+        if args.checkpoint:
+            checkpoint_path = args.checkpoint
+        elif args.output:
+            from benchmarks.pipeline.run_progress import default_checkpoint_path
+
+            checkpoint_path = default_checkpoint_path(args.output)
+
+    progress_kwargs = {
+        "progress_pct_step": max(1, args.progress_pct),
+        "checkpoint_path": checkpoint_path,
+        "use_progress_bar": not args.no_progress_bar,
+    }
 
     if args.scale_sweep:
         by_scale = {}
@@ -755,6 +929,8 @@ async def main():
                     questions=qs,
                     context_budget=args.context_budget,
                     call_llm=args.stuffing_call_llm,
+                    memory_scale=scale,
+                    **progress_kwargs,
                 )
                 stuffing_summary = stuffing_data["summary"]
                 stuffing_summary["memory_scale"] = scale
@@ -775,6 +951,8 @@ async def main():
                 skip_index=args.skip_index,
                 run_curator=args.run_curator,
                 memory_scale=scale,
+                warm_graph=args.warm_graph,
+                **progress_kwargs,
             )
             by_scale[scale] = {
                 "summaries": summaries,
@@ -838,6 +1016,8 @@ async def main():
             questions=questions,
             context_budget=args.context_budget,
             call_llm=args.stuffing_call_llm,
+            memory_scale=args.memory_scale,
+            **progress_kwargs,
         )
         single_stuffing_summary = stuffing_data["summary"]
         if args.memory_scale:
@@ -857,7 +1037,9 @@ async def main():
         refine=refine,
         skip_index=args.skip_index,
         run_curator=args.run_curator,
+        warm_graph=args.warm_graph,
         memory_scale=args.memory_scale,
+        **progress_kwargs,
     )
 
     print("\n" + format_table(all_summaries))

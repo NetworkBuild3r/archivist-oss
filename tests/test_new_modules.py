@@ -150,12 +150,11 @@ class TestFTSSearch:
 
         assert _fts5_safe_query("") == ""
 
-    @pytest.mark.asyncio
-    async def test_search_bm25_disabled(self, monkeypatch):
+    def test_search_bm25_disabled(self, monkeypatch):
         monkeypatch.setattr("fts_search.BM25_ENABLED", False)
         from fts_search import search_bm25
 
-        results = await search_bm25("test query")
+        results = search_bm25("test query")
         assert results == []
 
     def test_merge_vector_and_bm25_empty_bm25(self):
@@ -172,7 +171,8 @@ class TestFTSSearch:
         bm25 = [{"qdrant_id": "a", "bm25_score": 5.0, "text": "t1"}]
         result = merge_vector_and_bm25(vec, bm25)
         assert len(result) >= 1
-        assert result[0]["score"] > 0.9 * 0.7  # vector contrib + bm25 contrib
+        # RRF fusion: item appears in both rankings so score should be positive
+        assert result[0]["score"] > 0
 
 
 class TestEntityExtraction:

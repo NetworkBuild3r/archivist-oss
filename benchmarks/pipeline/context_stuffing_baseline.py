@@ -180,6 +180,11 @@ async def run_stuffing_baseline(
     context_budget: int,
     model: str | None = None,
     call_llm: bool = True,
+    *,
+    progress_pct_step: int = 10,
+    checkpoint_path: str | None = None,
+    memory_scale: str | None = None,
+    use_progress_bar: bool = True,
 ) -> dict:
     """Run all questions through the context stuffing baseline.
 
@@ -191,7 +196,12 @@ async def run_stuffing_baseline(
         call_llm: if False, skip actual LLM calls (token-count-only mode for fast overflow detection).
 
     Returns a dict with summary metrics and per-question results.
+
+    Optional ``progress_pct_step`` / ``checkpoint_path`` enable milestone logs and
+    atomic ``*.run_state.json`` checkpoints (same contract as ``evaluate.run_variant``).
     """
+    from benchmarks.pipeline.run_progress import ProgressTracker
+
     memories = load_all_memories(corpus_dir)
     corpus_tokens = count_corpus_tokens(memories)
     file_count = len(memories)
@@ -212,46 +222,65 @@ async def run_stuffing_baseline(
     mrr_scores = []
     overflow_count = 0
 
-    for q in questions:
-        if call_llm:
-            result = await stuff_and_query(q["query"], memories, context_budget, model=model)
-        else:
-            # Token-count-only: no LLM call — use overflow flag and empty answer.
-            _, tokens_used, overflow, files_included = _build_stuffed_prompt(
-                q["query"], memories, context_budget
-            )
-            result = {
-                "answer": "",
-                "tokens_used": tokens_used,
-                "overflow": overflow,
-                "files_included": files_included,
+    progress = ProgressTracker(
+        total=len(questions),
+        phase="stuffing",
+        memory_scale=memory_scale,
+        pct_step=progress_pct_step,
+        checkpoint_path=checkpoint_path,
+        use_progress_bar=use_progress_bar,
+    )
+
+    try:
+        for q in questions:
+            if call_llm:
+                result = await stuff_and_query(q["query"], memories, context_budget, model=model)
+            else:
+                # Token-count-only: no LLM call — use overflow flag and empty answer.
+                _, tokens_used, overflow, files_included = _build_stuffed_prompt(
+                    q["query"], memories, context_budget
+                )
+                result = {
+                    "answer": "",
+                    "tokens_used": tokens_used,
+                    "overflow": overflow,
+                    "files_included": files_included,
+                    "files_total": file_count,
+                    "latency_ms": 0.0,
+                }
+
+            if result["overflow"]:
+                overflow_count += 1
+
+            evals = _eval_stuffing_result(result, q)
+            recall_scores.append(evals["keyword_recall"])
+            mrr_scores.append(evals["mrr"])
+            if result["latency_ms"] > 0:
+                latencies.append(result["latency_ms"])
+
+            results.append({
+                "question_id": q["id"],
+                "query": q["query"],
+                "query_type": q.get("query_type", ""),
+                "latency_ms": result["latency_ms"],
+                "tokens_used": result["tokens_used"],
+                "overflow": result["overflow"],
+                "files_included": result["files_included"],
                 "files_total": file_count,
-                "latency_ms": 0.0,
-            }
+                "keyword_recall": evals["keyword_recall"],
+                "mrr": evals["mrr"],
+                "answer_tokens": evals["answer_tokens"],
+                "llm_called": call_llm,
+            })
 
-        if result["overflow"]:
-            overflow_count += 1
-
-        evals = _eval_stuffing_result(result, q)
-        recall_scores.append(evals["keyword_recall"])
-        mrr_scores.append(evals["mrr"])
-        if result["latency_ms"] > 0:
-            latencies.append(result["latency_ms"])
-
-        results.append({
-            "question_id": q["id"],
-            "query": q["query"],
-            "query_type": q.get("query_type", ""),
-            "latency_ms": result["latency_ms"],
-            "tokens_used": result["tokens_used"],
-            "overflow": result["overflow"],
-            "files_included": result["files_included"],
-            "files_total": file_count,
-            "keyword_recall": evals["keyword_recall"],
-            "mrr": evals["mrr"],
-            "answer_tokens": evals["answer_tokens"],
-            "llm_called": call_llm,
-        })
+            progress.step(
+                len(results),
+                results=results,
+                rolling_recall=statistics.mean(recall_scores) if recall_scores else 0.0,
+                rolling_mrr=statistics.mean(mrr_scores) if mrr_scores else 0.0,
+            )
+    finally:
+        progress.close()
 
     # Aggregate per-query-type metrics (same pattern as run_variant in evaluate.py)
     by_type: dict = {}
