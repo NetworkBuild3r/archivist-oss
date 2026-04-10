@@ -19,6 +19,7 @@ from config import (
     CHILD_CHUNK_SIZE, CHILD_CHUNK_OVERLAP,
     TIERED_CONTEXT_ENABLED,
     BM25_ENABLED, TOPIC_ROUTING_ENABLED,
+    CONTEXTUAL_AUGMENTATION_ENABLED,
 )
 from chunking import chunk_text, chunk_text_hierarchical
 from embeddings import embed_batch
@@ -29,6 +30,8 @@ from text_utils import extract_agent_id_from_path, compute_memory_checksum
 from tiering import generate_tiers
 from topic_detector import detect_topics
 from pre_extractor import pre_extract
+from collection_router import ensure_collection, collections_for_query
+from contextual_augment import augment_chunk
 import metrics as _metrics
 
 logger = logging.getLogger("archivist.indexer")
@@ -149,6 +152,17 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
                     tier_map[c["id"]] = await generate_tiers(c["content"])
 
         contents = [c["content"] for c in hier_chunks]
+        if CONTEXTUAL_AUGMENTATION_ENABLED:
+            contents = [
+                augment_chunk(
+                    c["content"],
+                    agent_id=meta.get("agent_id", ""),
+                    file_path=meta.get("file_path", ""),
+                    date=meta.get("date", ""),
+                    topic="",
+                )
+                for c in hier_chunks
+            ]
         vectors = await embed_batch(contents)
 
         points = []
@@ -189,7 +203,18 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
         if not chunks:
             return 0
 
-        vectors = await embed_batch(chunks)
+        embed_texts = chunks
+        if CONTEXTUAL_AUGMENTATION_ENABLED:
+            embed_texts = [
+                augment_chunk(
+                    c,
+                    agent_id=meta.get("agent_id", ""),
+                    file_path=meta.get("file_path", ""),
+                    date=meta.get("date", ""),
+                )
+                for c in chunks
+            ]
+        vectors = await embed_batch(embed_texts)
 
         points = []
         for i, (chunk, vec) in enumerate(zip(chunks, vectors)):
@@ -216,7 +241,8 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
             points.append(PointStruct(id=pid, vector=vec, payload=payload))
 
     if points:
-        client.upsert(collection_name=QDRANT_COLLECTION, points=points)
+        _coll = ensure_collection(meta.get("namespace", ""))
+        client.upsert(collection_name=_coll, points=points)
         _metrics.inc(_metrics.INDEX_CHUNKS, value=len(points))
 
         if BM25_ENABLED:
@@ -242,12 +268,16 @@ async def delete_file_points(filepath: str):
     """Remove all points for a given file path from Qdrant and FTS5."""
     rel = os.path.relpath(filepath, MEMORY_ROOT)
     client = qdrant_client()
-    client.delete(
-        collection_name=QDRANT_COLLECTION,
-        points_selector=Filter(
-            must=[FieldCondition(key="file_path", match=MatchValue(value=rel))]
-        ),
-    )
+    for _coll in collections_for_query(""):
+        try:
+            client.delete(
+                collection_name=_coll,
+                points_selector=Filter(
+                    must=[FieldCondition(key="file_path", match=MatchValue(value=rel))]
+                ),
+            )
+        except Exception:
+            pass
     if BM25_ENABLED:
         delete_fts_chunks_by_file(rel)
 

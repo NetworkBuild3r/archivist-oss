@@ -14,6 +14,7 @@ from watchfiles import awatch, Change
 from config import (
     MEMORY_ROOT, MCP_PORT, QDRANT_URL, QDRANT_COLLECTION, VECTOR_DIM, ARCHIVIST_API_KEY,
     CURATOR_QUEUE_DRAIN_INTERVAL, ARCHIVIST_INVALIDATION_EXPORT_PATH,
+    QDRANT_HNSW_M, QDRANT_HNSW_EF_CONSTRUCT,
 )
 from qdrant import qdrant_client
 import health
@@ -47,7 +48,7 @@ def ensure_qdrant_collection():
     before qdrant is listening; avoids brittle image-specific healthchecks).
     """
     from qdrant_client import QdrantClient
-    from qdrant_client.models import VectorParams, Distance, PayloadSchemaType
+    from qdrant_client.models import VectorParams, Distance, PayloadSchemaType, HnswConfigDiff
 
     deadline = time.monotonic() + 120
     last_err: Exception | None = None
@@ -90,8 +91,15 @@ def ensure_qdrant_collection():
         client.create_collection(
             collection_name=QDRANT_COLLECTION,
             vectors_config=VectorParams(size=VECTOR_DIM, distance=Distance.COSINE),
+            hnsw_config=HnswConfigDiff(
+                m=QDRANT_HNSW_M,
+                ef_construct=QDRANT_HNSW_EF_CONSTRUCT,
+            ),
         )
-        logger.info("Created Qdrant collection '%s' (%d-dim)", QDRANT_COLLECTION, VECTOR_DIM)
+        logger.info(
+            "Created Qdrant collection '%s' (%d-dim, HNSW m=%d ef_construct=%d)",
+            QDRANT_COLLECTION, VECTOR_DIM, QDRANT_HNSW_M, QDRANT_HNSW_EF_CONSTRUCT,
+        )
 
         for field, schema in [
             ("agent_id", PayloadSchemaType.KEYWORD),

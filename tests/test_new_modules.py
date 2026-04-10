@@ -171,7 +171,8 @@ class TestFTSSearch:
         bm25 = [{"qdrant_id": "a", "bm25_score": 5.0, "text": "t1"}]
         result = merge_vector_and_bm25(vec, bm25)
         assert len(result) >= 1
-        assert result[0]["score"] > 0.9 * 0.7  # vector contrib + bm25 contrib
+        # RRF fusion: item appears in both rankings so score should be positive
+        assert result[0]["score"] > 0
 
 
 class TestEntityExtraction:

@@ -108,6 +108,7 @@ TOOLS: list[Tool] = [
                     ),
                 },
                 "agent_id": {"type": "string", "description": "Calling agent for RBAC", "default": ""},
+                "caller_agent_id": {"type": "string", "description": "Original caller agent (overrides agent_id for RBAC)", "default": ""},
             },
             "required": ["uri"],
         },
@@ -253,18 +254,19 @@ async def _handle_resolve_uri(arguments: dict) -> list[TextContent]:
         })
 
     agent_id = arguments.get("agent_id", "")
+    caller_agent_id = arguments.get("caller_agent_id", "")
 
     if uri.is_memory:
         from .tools_search import _handle_deref
-        return await _handle_deref({"memory_id": uri.resource_id, "agent_id": agent_id})
+        return await _handle_deref({"memory_id": uri.resource_id, "agent_id": agent_id, "caller_agent_id": caller_agent_id})
 
     if uri.is_entity:
         from .tools_search import _handle_recall
-        return await _handle_recall({"entity": uri.resource_id, "agent_id": agent_id, "namespace": uri.namespace})
+        return await _handle_recall({"entity": uri.resource_id, "agent_id": agent_id, "caller_agent_id": caller_agent_id, "namespace": uri.namespace})
 
     if uri.is_namespace:
         from .tools_search import _handle_index
-        return await _handle_index({"agent_id": agent_id, "namespace": uri.namespace})
+        return await _handle_index({"agent_id": agent_id, "caller_agent_id": caller_agent_id, "namespace": uri.namespace})
 
     if uri.is_skill:
         skill = find_skill(uri.resource_id)

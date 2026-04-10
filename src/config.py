@@ -152,6 +152,28 @@ BM25_ENABLED = _env_bool("BM25_ENABLED")
 BM25_WEIGHT = float(os.getenv("BM25_WEIGHT", "0.3"))
 VECTOR_WEIGHT = float(os.getenv("VECTOR_WEIGHT", "0.7"))
 
+# ── Needle-finding: query expansion + dynamic threshold (v1.10) ──────────────
+QUERY_EXPANSION_ENABLED = _env_bool("QUERY_EXPANSION_ENABLED", "false")
+QUERY_EXPANSION_COUNT = int(os.getenv("QUERY_EXPANSION_COUNT", "3"))
+QUERY_EXPANSION_MODEL = os.getenv("QUERY_EXPANSION_MODEL", "").strip()
+DYNAMIC_THRESHOLD_ENABLED = _env_bool("DYNAMIC_THRESHOLD_ENABLED", "false")
+
+# ── Contextual chunk augmentation (v1.10 — index-time enrichment) ────────────
+CONTEXTUAL_AUGMENTATION_ENABLED = _env_bool("CONTEXTUAL_AUGMENTATION_ENABLED", "false")
+
+# ── HNSW tuning (v1.10 — recall over speed) ─────────────────────────────────
+QDRANT_HNSW_M = int(os.getenv("QDRANT_HNSW_M", "32"))
+QDRANT_HNSW_EF_CONSTRUCT = int(os.getenv("QDRANT_HNSW_EF_CONSTRUCT", "256"))
+QDRANT_SEARCH_EF = int(os.getenv("QDRANT_SEARCH_EF", "256"))
+
+# ── Enterprise scaling (v1.10) ───────────────────────────────────────────────
+NAMESPACE_SHARDING_ENABLED = _env_bool("NAMESPACE_SHARDING_ENABLED", "false")
+SINGLE_COLLECTION_MODE = _env_bool("SINGLE_COLLECTION_MODE", "true")
+CACHE_BACKEND = os.getenv("CACHE_BACKEND", "memory").lower()  # "memory" or "redis"
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+REDIS_KEY_PREFIX = os.getenv("REDIS_KEY_PREFIX", "archivist:")
+LATENCY_BUDGET_MS = int(os.getenv("LATENCY_BUDGET_MS", "500"))
+
 # ── Context window management (v1.1) ─────────────────────────────────────────
 DEFAULT_CONTEXT_BUDGET = int(os.getenv("DEFAULT_CONTEXT_BUDGET", "128000"))
 

@@ -10,7 +10,7 @@ Phase 5 (v0.8): hot cache, retrieval trajectory logging.
 import asyncio
 import logging
 import time
-from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchAny
+from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchAny, SearchParams
 
 from config import (
     QDRANT_COLLECTION,
@@ -31,11 +31,15 @@ from config import (
     ADAPTIVE_VECTOR_LIMIT_ENABLED, ADAPTIVE_VECTOR_MIN_RESULTS, ADAPTIVE_VECTOR_LIMIT_MULTIPLIER,
     CROSS_AGENT_MAX_SHARE,
     TOPIC_ROUTING_ENABLED,
+    QUERY_EXPANSION_ENABLED, QUERY_EXPANSION_COUNT, QUERY_EXPANSION_MODEL,
+    DYNAMIC_THRESHOLD_ENABLED,
+    QDRANT_SEARCH_EF, LATENCY_BUDGET_MS,
 )
-from embeddings import embed_text
+from embeddings import embed_text, embed_batch
 from llm import llm_query
 from memory_fusion import dedupe_vector_hits
-from retrieval_filters import apply_retrieval_threshold
+from retrieval_filters import apply_retrieval_threshold, apply_dynamic_threshold
+from rank_fusion import rrf_merge
 from graph_retrieval import (
     extract_entity_mentions,
     graph_context_for_entities,
@@ -54,6 +58,11 @@ from trajectory import get_outcome_adjustments
 from hotness import apply_hotness_to_results
 from query_intent import classify_temporal_intent
 from topic_detector import detect_query_topic
+from ranker import ltr_available, rank_results as ltr_rank_results
+from collection_router import collection_for
+from latency_budget import LatencyBudget
+from query_expansion import expand_query
+from hyde import is_needle_query, generate_hypothetical_document
 import hot_cache
 import retrieval_log
 import metrics as m
@@ -115,6 +124,8 @@ def _retrieval_trace(
         "tier": tier,
         "outcome_adjustments": outcome_adjustments,
     }
+    if extra.get("stage_timings"):
+        trace["stage_timings"] = extra.pop("stage_timings")
     if context_status:
         trace["context_status"] = context_status
     if bm25_rescue_count:
@@ -369,15 +380,18 @@ async def search_vectors(
     search_filter = Filter(must=must_filters) if must_filters else None
     fetch_limit = limit * 3 if _date_range_active else limit
 
+    _target_collection = collection_for(namespace)
+
     # Degrade to [] on Qdrant/network errors so retrieval can fall back to BM25-only paths.
     t_q = time.monotonic()
     try:
         results = client.query_points(
-            collection_name=QDRANT_COLLECTION,
+            collection_name=_target_collection,
             query=query_vec,
             query_filter=search_filter,
             limit=fetch_limit,
             with_payload=True,
+            search_params=SearchParams(hnsw_ef=QDRANT_SEARCH_EF),
         ).points
     except Exception as e:
         qdur_ms = (time.monotonic() - t_q) * 1000
@@ -470,10 +484,13 @@ async def enrich_with_parent(results: list[dict]) -> list[dict]:
     if not parent_ids:
         return results
 
+    ns = next((r.get("namespace", "") for r in results if r.get("parent_id")), "")
+    _coll = collection_for(ns)
+
     client = qdrant_client()
     try:
         parents = client.retrieve(
-            collection_name=QDRANT_COLLECTION,
+            collection_name=_coll,
             ids=list(parent_ids),
             with_payload=True,
         )
@@ -504,6 +521,7 @@ async def recursive_retrieve(
     date_to: str = "",
     max_tokens: int | None = None,
     memory_type: str = "",
+    _is_retry: bool = False,
 ) -> dict:
     """Full RLM pipeline: coarse → dedupe → graph augment → temporal decay → threshold → rerank → parent → refine → synthesize."""
     t0 = time.monotonic()
@@ -511,6 +529,10 @@ async def recursive_retrieve(
     stage0_inventory = None
     auto_type = ""
     auto_subcategory = ""
+    # Only user-specified memory_type is used as a hard filter on
+    # vector/BM25 search.  Auto-classified type is recorded for tracing
+    # and scoring but must NOT narrow the search or it silently drops
+    # memories stored under a different type (the "general" recall bug).
     effective_memory_type = memory_type
     if QUERY_CLASSIFICATION_ENABLED and not memory_type:
         if namespace:
@@ -518,8 +540,6 @@ async def recursive_retrieve(
         auto_type, auto_subcategory = await classify_query_full(
             query, inventory=stage0_inventory,
         )
-        if auto_type:
-            effective_memory_type = auto_type
 
     temporal_intent = ""
     if TEMPORAL_INTENT_ENABLED:
@@ -551,6 +571,12 @@ async def recursive_retrieve(
             "bm25_rescue_count": n_bm25_rescue,
             "adaptive_widened": was_adaptive_widened,
             "cross_agent_capped": was_cross_agent_capped,
+            "query_expansion_variants": n_expansion_variants,
+            "dynamic_threshold_enabled": DYNAMIC_THRESHOLD_ENABLED,
+            "ltr_used": _ltr_used,
+            "hyde_used": _hyde_used,
+            "iterative_retry": _is_retry,
+            "latency_budget_ms": _budget.remaining_ms(),
         }
 
     cache_extra = f"{agent_id}|{','.join(agent_ids or [])}|{team}|{date_from}|{date_to}|{limit}|{refine}"
@@ -579,61 +605,115 @@ async def recursive_retrieve(
         m.observe(m.SEARCH_DURATION, elapsed)
         return out
 
-    # Embed the query once; reuse the vector for topic fallback and adaptive widen.
+    _budget = LatencyBudget()
+
+    # ── Stage timings (ms) for retrieval trace ──
+    _stage_timings: dict[str, float] = {}
+    n_expansion_variants = 0
+    _ltr_used = False
+    _hyde_used = False
+
+    # ── Multi-query expansion + embedding (v1.10) ──
+    # Budget-gated: expansion requires ~150ms LLM call
+    _t_embed = time.monotonic()
+    query_variants: list[str] = [query]
+    if QUERY_EXPANSION_ENABLED and _budget.can_afford(150):
+        try:
+            query_variants = await expand_query(
+                query,
+                count=QUERY_EXPANSION_COUNT,
+                model=QUERY_EXPANSION_MODEL,
+            )
+            n_expansion_variants = len(query_variants) - 1
+        except Exception as e:
+            logger.warning("Query expansion failed: %s — using original query", e)
+
+    # ── HyDE: hypothetical document embedding for needle queries (v1.10) ──
+    # Budget-gated: HyDE requires ~100ms LLM call
+    hyde_doc: str | None = None
+    if not _is_retry and is_needle_query(query) and _budget.can_afford(100):
+        try:
+            hyde_doc = await generate_hypothetical_document(query)
+            if hyde_doc:
+                query_variants.append(hyde_doc)
+                _hyde_used = True
+        except Exception as e:
+            logger.warning("HyDE failed: %s", e)
+
+    # Embed all query variants in parallel (cache deduplicates repeat embeds)
+    query_vecs: list[list[float] | None] = []
     try:
-        _cached_query_vec = await embed_text(query)
+        query_vecs = await embed_batch(query_variants)
     except Exception as e:
-        logger.warning("Embedding failed, skipping vector search: %s", e)
-        _cached_query_vec = None
+        logger.warning("Embedding failed: %s — skipping vector search", e)
+        query_vecs = [None] * len(query_variants)
+    _cached_query_vec = query_vecs[0] if query_vecs else None
+    _stage_timings["embed_ms"] = round((time.monotonic() - _t_embed) * 1000, 1)
 
-    # Stage 1: Coarse vector search (wide recall)
-    # Topic routing: try topic-filtered search first, fall back if too few results
-    coarse = await search_vectors(
-        query,
-        agent_id=agent_id,
-        agent_ids=agent_ids,
-        team=team,
-        namespace=namespace,
-        date_from=date_from,
-        date_to=date_to,
-        memory_type=effective_memory_type,
-        topic=detected_topic,
-        limit=vector_limit,
-        _query_vec=_cached_query_vec,
-    ) if _cached_query_vec is not None else []
-    if detected_topic and len(coarse) < ADAPTIVE_VECTOR_MIN_RESULTS:
-        topic_fallback_used = True
-        coarse = await search_vectors(
-            query,
-            agent_id=agent_id,
-            agent_ids=agent_ids,
-            team=team,
-            namespace=namespace,
-            date_from=date_from,
-            date_to=date_to,
-            memory_type=effective_memory_type,
-            topic="",
-            limit=vector_limit,
-            _query_vec=_cached_query_vec,
-        ) if _cached_query_vec is not None else []
-    n_coarse = len(coarse)
+    # Stage 1: Parallel retrieval — vector + BM25 run concurrently (v1.10 12c)
+    _t_vec = time.monotonic()
+    _vec_common = dict(
+        agent_id=agent_id, agent_ids=agent_ids, team=team,
+        namespace=namespace, date_from=date_from, date_to=date_to,
+        memory_type=effective_memory_type, limit=vector_limit,
+    )
 
-    # Stage 1-bm25: BM25 keyword search + fusion (v1.2)
-    n_bm25 = 0
-    if BM25_ENABLED:
-        bm25_hits = search_bm25(
-            query,
+    async def _search_one(q: str, vec: list[float] | None, topic: str = "") -> list[dict]:
+        if vec is None:
+            return []
+        return await search_vectors(q, **_vec_common, topic=topic, _query_vec=vec)
+
+    async def _bm25_async() -> list[dict]:
+        """Wrap synchronous BM25/SQLite search for concurrent execution."""
+        if not BM25_ENABLED:
+            return []
+        return await asyncio.to_thread(
+            search_bm25, query,
             namespace=namespace,
             agent_id=agent_id if not agent_ids else "",
             memory_type=effective_memory_type,
             limit=vector_limit,
         )
-        n_bm25 = len(bm25_hits)
-        if bm25_hits:
-            coarse = merge_vector_and_bm25(coarse, bm25_hits)
+
+    # Launch ALL search paths concurrently: vector variants + BM25
+    vec_tasks = [_search_one(q, v, detected_topic) for q, v in zip(query_variants, query_vecs)]
+    all_tasks = vec_tasks + [_bm25_async()]
+    all_results = await asyncio.gather(*all_tasks)
+
+    vec_results = list(all_results[:len(vec_tasks)])
+    bm25_hits = all_results[len(vec_tasks)]
+
+    # If topic-filtered primary returned too few, retry without topic filter
+    if detected_topic and len(vec_results[0]) < ADAPTIVE_VECTOR_MIN_RESULTS and _cached_query_vec:
+        topic_fallback_used = True
+        vec_results[0] = await search_vectors(
+            query, **_vec_common, topic="", _query_vec=_cached_query_vec,
+        )
+
+    # Merge all vector variant results via RRF
+    non_empty_rankings = [r for r in vec_results if r]
+    if len(non_empty_rankings) > 1:
+        coarse = rrf_merge(non_empty_rankings, k=60)
+        for r in coarse:
+            if "score" not in r or r.get("rrf_score", 0) > r.get("score", 0):
+                r["score"] = r["rrf_score"]
+    elif non_empty_rankings:
+        coarse = non_empty_rankings[0]
+    else:
+        coarse = []
+
+    _stage_timings["vector_ms"] = round((time.monotonic() - _t_vec) * 1000, 1)
+    n_coarse = len(coarse)
+
+    # Merge BM25 results (already retrieved in parallel above)
+    n_bm25 = len(bm25_hits)
+    if bm25_hits:
+        coarse = merge_vector_and_bm25(coarse, bm25_hits)
+    _stage_timings["bm25_ms"] = round((time.monotonic() - _t_vec) * 1000, 1)
 
     # Stage 1a: Graph augmentation (v0.5)
     detected_entities: list[dict] = []
+    _t_graph = time.monotonic()
     if GRAPH_RETRIEVAL_ENABLED:
         entities = extract_entity_mentions(query)
         detected_entities = entities
@@ -646,6 +726,7 @@ async def recursive_retrieve(
             n_graph_items = len(graph_items)
             if graph_items:
                 coarse = merge_graph_context_into_results(coarse, graph_items)
+    _stage_timings["graph_ms"] = round((time.monotonic() - _t_graph) * 1000, 1)
 
     if not coarse:
         empty = {
@@ -666,11 +747,15 @@ async def recursive_retrieve(
                 graph_context_items=n_graph_items,
                 tier=tier,
                 bm25_hits=n_bm25,
+                stage_timings=_stage_timings,
                 **_trace_kw(),
             ),
         }
         _attach_stage0(empty, stage0_inventory, auto_type, user_memory_type)
         return empty
+
+    # ── Post-retrieval processing (dedupe → threshold → rerank → enrich) ──
+    _t_post = time.monotonic()
 
     # Stage 1b: Dedupe (important when merging multi-agent results)
     coarse = dedupe_vector_hits(coarse)
@@ -684,14 +769,20 @@ async def recursive_retrieve(
         )
         temporal_applied = True
 
-    # Stage 1d: Hotness scoring (v1.0)
-    coarse = apply_hotness_to_results(coarse)
+    # Stage 1d–1e: Scoring — LTR model (v1.10) or hand-tuned pipeline
+    _ltr_used = False
+    if ltr_available():
+        coarse = ltr_rank_results(coarse)
+        _ltr_used = True
+    else:
+        coarse = apply_hotness_to_results(coarse)
+        coarse = apply_importance_to_results(coarse)
 
-    # Stage 1e: Importance scoring (v1.7)
-    coarse = apply_importance_to_results(coarse)
-
-    # Stage 2: Threshold filter (Phase 1)
-    filtered = apply_retrieval_threshold(coarse, effective_threshold)
+    # Stage 2: Threshold filter (Phase 1, dynamic v1.10)
+    if DYNAMIC_THRESHOLD_ENABLED:
+        filtered = apply_dynamic_threshold(coarse, effective_threshold)
+    else:
+        filtered = apply_retrieval_threshold(coarse, effective_threshold)
 
     # Stage 2-rescue: Adaptive vector limit (v1.9)
     if (ADAPTIVE_VECTOR_LIMIT_ENABLED
@@ -764,6 +855,7 @@ async def recursive_retrieve(
             )
 
     if not filtered:
+        _stage_timings["postprocess_ms"] = round((time.monotonic() - _t_post) * 1000, 1)
         below = {
             "status": "below_threshold",
             "answer": "",
@@ -786,6 +878,7 @@ async def recursive_retrieve(
                 temporal_decay_applied=temporal_applied,
                 tier=tier,
                 bm25_hits=n_bm25,
+                stage_timings=_stage_timings,
                 **_trace_kw(),
             ),
         }
@@ -812,6 +905,41 @@ async def recursive_retrieve(
     # Stage 3: Rerank (Phase 1)
     reranked = _apply_rerank(query, filtered)
     n_rerank = len(reranked)
+
+    # Stage 3a: Iterative retrieval — auto-reformulate on low-confidence (v1.10)
+    # Budget-gated: retry requires another full pipeline pass (~200ms)
+    _ITERATIVE_THRESHOLD = 0.45
+    if (not _is_retry
+            and reranked
+            and max(r.get("score", 0) for r in reranked) < _ITERATIVE_THRESHOLD
+            and _budget.can_afford(200)):
+        try:
+            snippets = " | ".join(
+                (r.get("text", "") or "")[:80] for r in reranked[:3]
+            )
+            reformulated = await llm_query(
+                f"The search query '{query}' returned low-relevance results: [{snippets}]. "
+                "Suggest a single, better search query to find the answer. Return ONLY the query.",
+                system="You are a search query optimizer. Return only the improved query, nothing else.",
+                max_tokens=64,
+                model=LLM_REFINE_MODEL or LLM_MODEL,
+                stage="iterative_retrieval",
+            )
+            reformulated = reformulated.strip().strip('"').strip("'")
+            if reformulated and reformulated.lower() != query.lower():
+                logger.debug("Iterative retrieval: reformulated %r -> %r", query, reformulated)
+                _stage_timings["postprocess_ms"] = round((time.monotonic() - _t_post) * 1000, 1)
+                return await recursive_retrieve(
+                    reformulated,
+                    agent_id=agent_id, agent_ids=agent_ids, team=team,
+                    namespace=namespace, limit=limit, refine=refine,
+                    threshold=threshold, tier=tier,
+                    date_from=date_from, date_to=date_to,
+                    max_tokens=max_tokens, memory_type=memory_type,
+                    _is_retry=True,
+                )
+        except Exception as e:
+            logger.debug("Iterative retrieval reformulation failed: %s", e)
 
     # Stage 4: Parent-child enrichment (Phase 1)
     enriched = await enrich_with_parent(reranked)
@@ -848,6 +976,8 @@ async def recursive_retrieve(
         "hint": "compress" if budget_tokens and budget_used_pct > 80 else "ok",
     }
 
+    _stage_timings["postprocess_ms"] = round((time.monotonic() - _t_post) * 1000, 1)
+
     _common_trace = dict(
         vector_limit=vector_limit,
         coarse_count=n_coarse,
@@ -865,6 +995,7 @@ async def recursive_retrieve(
         outcome_adjustments=n_outcome_adj,
         context_status=_ctx_status,
         bm25_hits=n_bm25,
+        stage_timings=_stage_timings,
         **_trace_kw(),
     )
 

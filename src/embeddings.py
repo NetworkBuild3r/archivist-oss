@@ -5,13 +5,18 @@ Set EMBED_PROVIDER=nvidia in .env to enable NVIDIA-specific payload.
 
 Uses a long-lived httpx.AsyncClient so TCP connections (and TLS sessions)
 are reused across calls instead of paying setup cost per embedding.
+
+Includes an in-process LRU+TTL cache so repeated / multi-query searches
+avoid redundant embedding API round-trips (~50-200ms each).
 """
 
 import asyncio
 import logging
 import os
+import threading
 import time
 import httpx
+from collections import OrderedDict
 from config import EMBED_URL, EMBED_API_KEY, EMBED_MODEL
 import health
 import metrics as m
@@ -26,6 +31,42 @@ _IS_NVIDIA = os.getenv("EMBED_PROVIDER", "").lower() == "nvidia" or "nvidia" in 
 
 _embed_client: httpx.AsyncClient | None = None
 
+# ── Embedding vector cache (v1.10) ──────────────────────────────────────────
+_EMBED_CACHE_MAX = 2048
+_EMBED_CACHE_TTL = 3600  # 1 hour
+_embed_cache: OrderedDict[str, tuple[float, list[float]]] = OrderedDict()
+_embed_cache_lock = threading.Lock()
+EMBED_CACHE_HITS = "embed_cache_hits_total"
+EMBED_CACHE_MISSES = "embed_cache_misses_total"
+
+
+def _cache_key(text: str, model: str) -> str:
+    import hashlib
+    return hashlib.sha256(f"{model}:{text}".encode()).hexdigest()[:24]
+
+
+def _cache_get(text: str, model: str) -> list[float] | None:
+    key = _cache_key(text, model)
+    with _embed_cache_lock:
+        entry = _embed_cache.get(key)
+        if entry is None:
+            return None
+        ts, vec = entry
+        if time.monotonic() - ts > _EMBED_CACHE_TTL:
+            _embed_cache.pop(key, None)
+            return None
+        _embed_cache.move_to_end(key)
+        return list(vec)
+
+
+def _cache_put(text: str, model: str, vec: list[float]) -> None:
+    key = _cache_key(text, model)
+    with _embed_cache_lock:
+        _embed_cache[key] = (time.monotonic(), list(vec))
+        _embed_cache.move_to_end(key)
+        while len(_embed_cache) > _EMBED_CACHE_MAX:
+            _embed_cache.popitem(last=False)
+
 
 def _get_embed_client() -> httpx.AsyncClient:
     global _embed_client
@@ -38,9 +79,21 @@ def _get_embed_client() -> httpx.AsyncClient:
 
 
 async def embed_text(text: str, model: str = EMBED_MODEL) -> list[float]:
-    """Embed a single text string, returning a float vector."""
+    """Embed a single text string, returning a float vector.
+
+    Results are cached in-process (LRU + 1h TTL) so multi-query
+    expansion, adaptive-widen, and topic-fallback avoid redundant
+    API calls.
+    """
     if len(text) > _MAX_EMBED_CHARS:
         text = text[:_MAX_EMBED_CHARS]
+
+    cached = _cache_get(text, model)
+    if cached is not None:
+        m.inc(EMBED_CACHE_HITS)
+        return cached
+
+    m.inc(EMBED_CACHE_MISSES)
     client = _get_embed_client()
     for attempt in range(_MAX_RETRIES):
         try:
@@ -66,6 +119,7 @@ async def embed_text(text: str, model: str = EMBED_MODEL) -> list[float]:
             m.observe(m.EMBED_DURATION, dur_ms)
             slow_embed_check(dur_ms)
             health.register("embeddings", healthy=True)
+            _cache_put(text, model, result)
             return result
         except Exception as e:
             if attempt < _MAX_RETRIES - 1:

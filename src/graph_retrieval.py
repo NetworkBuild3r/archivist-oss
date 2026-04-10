@@ -76,10 +76,15 @@ def extract_entity_mentions(query: str) -> list[dict]:
     return results
 
 
+_MAX_GRAPH_CONTEXT_ITEMS = 50
+
+
 def graph_context_for_entities(entity_ids: list[int], depth: int = 1) -> list[dict]:
     """Gather facts and relationships for a set of entities up to `depth` hops.
 
     Uses bulk queries per hop to avoid N+1 DB round-trips.
+    Capped at ``_MAX_GRAPH_CONTEXT_ITEMS`` total items to prevent
+    graph-heavy queries from flooding the coarse result set.
     """
     visited: set[int] = set()
     frontier = list(entity_ids)
@@ -106,6 +111,8 @@ def graph_context_for_entities(entity_ids: list[int], depth: int = 1) -> list[di
                     "source_file": f.get("source_file", ""),
                     "hop": hop,
                 })
+                if len(context_items) >= _MAX_GRAPH_CONTEXT_ITEMS:
+                    return context_items
 
             for r in all_rels.get(eid, []):
                 context_items.append({
@@ -117,6 +124,8 @@ def graph_context_for_entities(entity_ids: list[int], depth: int = 1) -> list[di
                     "agent_id": r.get("agent_id", ""),
                     "hop": hop,
                 })
+                if len(context_items) >= _MAX_GRAPH_CONTEXT_ITEMS:
+                    return context_items
                 other = r["target_entity_id"] if r["source_entity_id"] == eid else r["source_entity_id"]
                 if other not in visited:
                     next_frontier.append(other)
@@ -175,6 +184,9 @@ def apply_temporal_decay(
     return results
 
 
+_MAX_GRAPH_SYNTHETIC_HITS = 20
+
+
 def merge_graph_context_into_results(
     vector_results: list[dict],
     graph_items: list[dict],
@@ -183,7 +195,9 @@ def merge_graph_context_into_results(
     """Blend graph-sourced context into vector results.
 
     Graph items that match an existing vector hit (same source file) boost its score.
-    New graph-only items are appended as synthetic hits.
+    New graph-only items are appended as synthetic hits (capped at
+    ``_MAX_GRAPH_SYNTHETIC_HITS`` to prevent graph-heavy queries from
+    dominating the coarse result set).
     """
     w = weight if weight is not None else GRAPH_RETRIEVAL_WEIGHT
 
@@ -194,6 +208,7 @@ def merge_graph_context_into_results(
             file_index[fp] = i
 
     added: set[str] = set()
+    n_synthetic = 0
     for gi in graph_items:
         src = gi.get("source_file", "")
         text = gi.get("text", gi.get("evidence", ""))
@@ -207,10 +222,13 @@ def merge_graph_context_into_results(
                 vector_results[idx]["graph_context"] = []
             vector_results[idx]["graph_context"].append(text[:300])
         else:
+            if n_synthetic >= _MAX_GRAPH_SYNTHETIC_HITS:
+                continue
             dedup_key = f"{gi.get('type', '')}:{text[:80]}"
             if dedup_key in added:
                 continue
             added.add(dedup_key)
+            n_synthetic += 1
             vector_results.append({
                 "id": "",
                 "score": w,
