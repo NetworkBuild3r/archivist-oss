@@ -3,6 +3,9 @@
 Exposes counters, histograms, and gauges via GET /metrics in the standard
 text exposition format. No external dependency required — pure-Python
 implementation that any Prometheus scraper can consume.
+
+Histograms use pre-aggregated bucket counters (not raw sample lists) so
+memory is O(buckets × label-sets) regardless of request volume.
 """
 
 import threading
@@ -14,9 +17,9 @@ _lock = threading.Lock()
 # ── Counters ─────────────────────────────────────────────────────────────────
 _counters: dict[str, float] = defaultdict(float)
 
-# ── Histograms (store individual observations) ───────────────────────────────
-_histogram_obs: dict[str, list[float]] = defaultdict(list)
+# ── Histograms (pre-aggregated bucket counts) ────────────────────────────────
 _HISTOGRAM_BUCKETS = [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, float("inf")]
+_histogram_buckets: dict[str, list[int]] = {}
 
 # ── Gauges ───────────────────────────────────────────────────────────────────
 _gauges: dict[str, float] = {}
@@ -30,10 +33,16 @@ def inc(name: str, labels: dict | None = None, value: float = 1.0):
 
 
 def observe(name: str, value: float, labels: dict | None = None):
-    """Record a histogram observation."""
+    """Record a histogram observation (O(buckets), constant memory)."""
     key = _key(name, labels)
     with _lock:
-        _histogram_obs[key].append(value)
+        buckets = _histogram_buckets.get(key)
+        if buckets is None:
+            buckets = [0] * len(_HISTOGRAM_BUCKETS)
+            _histogram_buckets[key] = buckets
+        for i, boundary in enumerate(_HISTOGRAM_BUCKETS):
+            if value <= boundary:
+                buckets[i] += 1
     inc(f"{name}_count", labels)
     inc(f"{name}_sum", labels, value)
 
@@ -61,7 +70,7 @@ def _key(name: str, labels: dict | None) -> str:
 def render() -> str:
     """Render all metrics in Prometheus text exposition format."""
     lines = []
-    seen_names = set()
+    seen_names: set[str] = set()
 
     with _lock:
         for key, val in sorted(_counters.items()):
@@ -78,20 +87,21 @@ def render() -> str:
                 seen_names.add(base)
             lines.append(f"{key} {val}")
 
-        for key, observations in sorted(_histogram_obs.items()):
+        for key, buckets in sorted(_histogram_buckets.items()):
             base = key.split("{")[0]
             if base not in seen_names:
                 lines.append(f"# TYPE {base} histogram")
                 seen_names.add(base)
             label_part = key[len(base):]
-            for bucket in _HISTOGRAM_BUCKETS:
-                count = sum(1 for o in observations if o <= bucket)
-                le_label = f'+Inf' if bucket == float("inf") else str(bucket)
+            cumulative = 0
+            for i, boundary in enumerate(_HISTOGRAM_BUCKETS):
+                cumulative += buckets[i]
+                le_label = '+Inf' if boundary == float("inf") else str(boundary)
                 if label_part:
                     inner = label_part[1:-1]
-                    lines.append(f'{base}_bucket{{{inner},le="{le_label}"}} {count}')
+                    lines.append(f'{base}_bucket{{{inner},le="{le_label}"}} {cumulative}')
                 else:
-                    lines.append(f'{base}_bucket{{le="{le_label}"}} {count}')
+                    lines.append(f'{base}_bucket{{le="{le_label}"}} {cumulative}')
 
     lines.append("")
     return "\n".join(lines)
@@ -119,3 +129,12 @@ CURATOR_DEDUP_DECISION = "archivist_curator_dedup_decisions_total"
 CURATOR_TIP_CONSOLIDATIONS = "archivist_curator_tip_consolidations_total"
 CURATOR_LLM_CALLS = "archivist_curator_llm_calls_total"
 CURATOR_DRAIN_DURATION = "archivist_curator_drain_duration_ms"
+
+# ── MCP tool observability (v1.10) ───────────────────────────────────────────
+TOOL_DURATION = "archivist_mcp_tool_duration_ms"
+TOOL_ERRORS = "archivist_mcp_tool_errors_total"
+EMBED_DURATION = "archivist_embed_duration_ms"
+QDRANT_QUERY_DURATION = "archivist_qdrant_query_duration_ms"
+INVALIDATE_DURATION = "archivist_invalidate_duration_ms"
+INVALIDATE_COUNT = "archivist_invalidate_count_total"
+CURATOR_CYCLE_DURATION = "archivist_curator_cycle_duration_ms"

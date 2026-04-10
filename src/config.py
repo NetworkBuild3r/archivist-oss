@@ -82,6 +82,12 @@ TRAJECTORY_EXPORT_MAX = int(os.getenv("TRAJECTORY_EXPORT_MAX", "200"))
 # ── Observability (v0.9) ──────────────────────────────────────────────────────
 METRICS_ENABLED = _env_bool("METRICS_ENABLED", "true")
 DEFAULT_CONSISTENCY = os.getenv("DEFAULT_CONSISTENCY", "eventual")
+# Slow-path warnings (0 = disabled). Logs one line when a step exceeds the threshold (ms).
+SLOW_EMBED_MS = float(os.getenv("SLOW_EMBED_MS", "0"))
+SLOW_QDRANT_MS = float(os.getenv("SLOW_QDRANT_MS", "0"))
+SLOW_LLM_MS = float(os.getenv("SLOW_LLM_MS", "0"))
+# Optional: append one JSON object per TTL invalidation run (see REFERENCE.md).
+ARCHIVIST_INVALIDATION_EXPORT_PATH = os.getenv("ARCHIVIST_INVALIDATION_EXPORT_PATH", "").strip()
 
 # ── Webhooks (v0.9) ─────────────────────────────────────────────────────────
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").strip()

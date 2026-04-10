@@ -14,7 +14,7 @@ def _seed_metrics(n_observations: int):
     import metrics
 
     metrics._counters.clear()
-    metrics._histogram_obs.clear()
+    metrics._histogram_buckets.clear()
     metrics._gauges.clear()
 
     for i in range(n_observations):
@@ -44,7 +44,7 @@ def test_metrics_render_cold(benchmark):
     import metrics
 
     metrics._counters.clear()
-    metrics._histogram_obs.clear()
+    metrics._histogram_buckets.clear()
     metrics._gauges.clear()
     metrics.inc("archivist_search_total", value=1)
 
@@ -64,5 +64,5 @@ def test_metrics_observe_throughput(benchmark):
     """Measure histogram observe throughput (hot path on every request)."""
     import metrics
 
-    metrics._histogram_obs.clear()
+    metrics._histogram_buckets.clear()
     benchmark(metrics.observe, "archivist_search_duration_ms", 42.5)

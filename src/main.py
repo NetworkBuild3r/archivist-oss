@@ -2,14 +2,19 @@
 
 import asyncio
 from contextlib import asynccontextmanager
+import json
 import logging
 import os
 import sys
 import time
+from datetime import datetime, timezone
 
 from watchfiles import awatch, Change
 
-from config import MEMORY_ROOT, MCP_PORT, QDRANT_URL, QDRANT_COLLECTION, VECTOR_DIM, ARCHIVIST_API_KEY, CURATOR_QUEUE_DRAIN_INTERVAL
+from config import (
+    MEMORY_ROOT, MCP_PORT, QDRANT_URL, QDRANT_COLLECTION, VECTOR_DIM, ARCHIVIST_API_KEY,
+    CURATOR_QUEUE_DRAIN_INTERVAL, ARCHIVIST_INVALIDATION_EXPORT_PATH,
+)
 from qdrant import qdrant_client
 import health
 from graph import init_schema
@@ -145,10 +150,13 @@ async def handle_health(_request):
 
 async def handle_invalidate(_request):
     """Endpoint to delete expired memories (TTL-based)."""
+    import metrics as met
+
     from qdrant_client.models import Filter, FieldCondition, Range
 
+    t0 = time.monotonic()
     now_ts = int(time.time())
-    client = qdrant_client(timeout=60)
+    client = qdrant_client()
 
     try:
         expired = client.scroll(
@@ -160,13 +168,19 @@ async def handle_invalidate(_request):
             with_payload=True,
         )
 
-        point_ids = [p.id for p in expired[0]]
+        points = expired[0]
+        point_ids = [p.id for p in points]
+        sample = [str(x) for x in point_ids[:5]]
+        sample_ns = []
+        for p in points[:5]:
+            pl = getattr(p, "payload", None) or {}
+            sample_ns.append(str(pl.get("namespace", "") or ""))
+
         if point_ids:
             client.delete(
                 collection_name=QDRANT_COLLECTION,
                 points_selector=point_ids,
             )
-            logger.info("Invalidation: deleted %d expired memories", len(point_ids))
 
             from audit import log_memory_event
             for pid in point_ids:
@@ -179,10 +193,36 @@ async def handle_invalidate(_request):
                     version=0,
                     metadata={"trigger": "invalidation", "reason": "ttl_expired"},
                 )
-        else:
-            logger.info("Invalidation: no expired memories found")
+        dur_ms = round((time.monotonic() - t0) * 1000, 1)
+        n = len(point_ids)
+        met.observe(met.INVALIDATE_DURATION, dur_ms)
+        met.inc(met.INVALIDATE_COUNT, value=float(n))
 
-        return JSONResponse({"invalidated": len(point_ids)})
+        logger.info(
+            "invalidation.complete count=%d duration_ms=%.1f sample_ids=%s sample_namespaces=%s",
+            n,
+            dur_ms,
+            sample,
+            sample_ns,
+        )
+
+        if ARCHIVIST_INVALIDATION_EXPORT_PATH:
+            try:
+                line = {
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "count": n,
+                    "duration_ms": dur_ms,
+                    "sample_ids": sample,
+                    "sample_namespaces": sample_ns,
+                    "reason": "ttl_expired",
+                }
+                with open(ARCHIVIST_INVALIDATION_EXPORT_PATH, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(line, ensure_ascii=False) + "\n")
+                    f.flush()
+            except OSError as ex:
+                logger.warning("invalidation export append failed: %s", ex)
+
+        return JSONResponse({"invalidated": n})
     except Exception as e:
         logger.error("Invalidation failed: %s", e)
         return JSONResponse({"error": str(e)}, status_code=500)
@@ -278,18 +318,30 @@ def _create_streamable_http_session_manager() -> StreamableHTTPSessionManager:
 
 class SseASGIApp:
     async def __call__(self, scope, receive, send):
-        async with sse_transport.connect_sse(scope, receive, send) as streams:
-            await server.run(
-                streams[0], streams[1], server.create_initialization_options()
-            )
+        from observability import reset_request_id, set_request_id_from_scope
+
+        token = set_request_id_from_scope(scope)
+        try:
+            async with sse_transport.connect_sse(scope, receive, send) as streams:
+                await server.run(
+                    streams[0], streams[1], server.create_initialization_options()
+                )
+        finally:
+            reset_request_id(token)
 
 
 class StreamableHTTPASGIApp:
     async def __call__(self, scope, receive, send):
-        manager = streamable_http_session_manager
-        if manager is None:
-            raise RuntimeError("Streamable HTTP session manager is not initialized")
-        await manager.handle_request(scope, receive, send)
+        from observability import reset_request_id, set_request_id_from_scope
+
+        token = set_request_id_from_scope(scope)
+        try:
+            manager = streamable_http_session_manager
+            if manager is None:
+                raise RuntimeError("Streamable HTTP session manager is not initialized")
+            await manager.handle_request(scope, receive, send)
+        finally:
+            reset_request_id(token)
 
 
 sse_app = SseASGIApp()

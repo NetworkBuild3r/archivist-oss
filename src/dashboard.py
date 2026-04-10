@@ -125,7 +125,7 @@ def batch_heuristic(window_days: int = 7) -> dict:
 
 def _qdrant_stats() -> dict:
     try:
-        client = qdrant_client(timeout=10)
+        client = qdrant_client()
         info = client.get_collection(QDRANT_COLLECTION)
         return {
             "total_points": info.points_count,
@@ -139,7 +139,7 @@ def _qdrant_stats() -> dict:
 def _stale_estimate() -> dict:
     try:
         from qdrant_client.models import Filter, FieldCondition, Range
-        client = qdrant_client(timeout=10)
+        client = qdrant_client()
         now_ts = int(time.time())
 
         info = client.get_collection(QDRANT_COLLECTION)

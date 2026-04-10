@@ -62,6 +62,8 @@ python -m benchmarks.pipeline.evaluate --output .benchmarks/pipeline.json
 python -m benchmarks.pipeline.evaluate --no-refine --skip-index --output .benchmarks/pipeline.json
 ```
 
+**Progress and partial results:** With `--output`, the harness writes an atomic checkpoint beside the JSON (e.g. `.benchmarks/full_medium.run_state.json`) after each query. By default a **tqdm** progress bar on stderr updates each query (rolling R/MRR in the postfix). Use `--no-progress-bar` to fall back to milestone `PROGRESS` log lines every `--progress-pct` (default 10). Use `--checkpoint /path/state.json` explicitly, or `--no-checkpoint` to disable the file. HTTP client request spam is suppressed (`httpx` / `httpcore` at WARNING).
+
 ### Dual-track corpus (small / medium / large)
 
 Regenerate questions (adds `needle`, `contradiction`, `tags`, `scales` fields):

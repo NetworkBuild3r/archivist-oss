@@ -62,9 +62,11 @@ def schema_guard(ddl: str):
             return
         with GRAPH_WRITE_LOCK:
             conn = get_db()
-            conn.executescript(ddl)
-            conn.commit()
-            conn.close()
+            try:
+                conn.executescript(ddl)
+                conn.commit()
+            finally:
+                conn.close()
         _ensure.applied = True
 
     def _reset():
@@ -356,29 +358,29 @@ def upsert_entity(name: str, entity_type: str = "unknown", agent_id: str = "",
     now = datetime.now(timezone.utc).isoformat()
     with GRAPH_WRITE_LOCK:
         conn = get_db()
-        cur = conn.execute(
-            "SELECT id, mention_count, retention_class FROM entities WHERE name = ? COLLATE NOCASE",
-            (name,),
-        )
-        row = cur.fetchone()
-        if row:
-            existing_rc = row["retention_class"] if "retention_class" in row.keys() else "standard"
-            new_rc = retention_class if _RETENTION_RANK.get(retention_class, 1) > _RETENTION_RANK.get(existing_rc, 1) else existing_rc
-            conn.execute(
-                "UPDATE entities SET last_seen=?, mention_count=mention_count+1, retention_class=? WHERE id=?",
-                (now, new_rc, row["id"]),
+        try:
+            cur = conn.execute(
+                "SELECT id, mention_count, retention_class FROM entities WHERE name = ? COLLATE NOCASE",
+                (name,),
+            )
+            row = cur.fetchone()
+            if row:
+                existing_rc = row["retention_class"] if "retention_class" in row.keys() else "standard"
+                new_rc = retention_class if _RETENTION_RANK.get(retention_class, 1) > _RETENTION_RANK.get(existing_rc, 1) else existing_rc
+                conn.execute(
+                    "UPDATE entities SET last_seen=?, mention_count=mention_count+1, retention_class=? WHERE id=?",
+                    (now, new_rc, row["id"]),
+                )
+                conn.commit()
+                return row["id"]
+            cur = conn.execute(
+                "INSERT INTO entities (name, entity_type, first_seen, last_seen, retention_class) VALUES (?,?,?,?,?)",
+                (name, entity_type, now, now, retention_class),
             )
             conn.commit()
+            return cur.lastrowid
+        finally:
             conn.close()
-            return row["id"]
-        cur = conn.execute(
-            "INSERT INTO entities (name, entity_type, first_seen, last_seen, retention_class) VALUES (?,?,?,?,?)",
-            (name, entity_type, now, now, retention_class),
-        )
-        conn.commit()
-        eid = cur.lastrowid
-        conn.close()
-        return eid
 
 
 def add_relationship(source_id: int, target_id: int, rel_type: str, evidence: str,
@@ -422,42 +424,44 @@ def add_fact(entity_id: int, fact_text: str, source_file: str = "",
 
     with GRAPH_WRITE_LOCK:
         conn = get_db()
-        cur = conn.execute(
-            "INSERT INTO facts (entity_id, fact_text, source_file, agent_id, created_at, "
-            "retention_class, valid_from, valid_until) "
-            "VALUES (?,?,?,?,?,?,?,?)",
-            (entity_id, fact_text, source_file, agent_id, now, retention_class,
-             valid_from, valid_until),
-        )
-        conn.commit()
-        fid = cur.lastrowid
+        try:
+            cur = conn.execute(
+                "INSERT INTO facts (entity_id, fact_text, source_file, agent_id, created_at, "
+                "retention_class, valid_from, valid_until) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (entity_id, fact_text, source_file, agent_id, now, retention_class,
+                 valid_from, valid_until),
+            )
+            conn.commit()
+            fid = cur.lastrowid
 
-        if new_words:
-            old_facts = conn.execute(
-                "SELECT id, fact_text FROM facts "
-                "WHERE entity_id=? AND is_active=1 AND id!=? AND superseded_by IS NULL",
-                (entity_id, fid),
-            ).fetchall()
+            if new_words:
+                old_facts = conn.execute(
+                    "SELECT id, fact_text FROM facts "
+                    "WHERE entity_id=? AND is_active=1 AND id!=? AND superseded_by IS NULL",
+                    (entity_id, fid),
+                ).fetchall()
 
-            superseded_ids = []
-            for old in old_facts:
-                old_words = _word_set(old["fact_text"])
-                if not old_words:
-                    continue
-                overlap = len(new_words & old_words) / max(len(old_words), 1)
-                if overlap >= 0.6:
-                    superseded_ids.append(old["id"])
+                superseded_ids = []
+                for old in old_facts:
+                    old_words = _word_set(old["fact_text"])
+                    if not old_words:
+                        continue
+                    overlap = len(new_words & old_words) / max(len(old_words), 1)
+                    if overlap >= 0.6:
+                        superseded_ids.append(old["id"])
 
-            if superseded_ids:
-                placeholders = ",".join("?" for _ in superseded_ids)
-                conn.execute(
-                    f"UPDATE facts SET superseded_by=? WHERE id IN ({placeholders})",
-                    [fid] + superseded_ids,
-                )
-                conn.commit()
+                if superseded_ids:
+                    placeholders = ",".join("?" for _ in superseded_ids)
+                    conn.execute(
+                        f"UPDATE facts SET superseded_by=? WHERE id IN ({placeholders})",
+                        [fid] + superseded_ids,
+                    )
+                    conn.commit()
 
-        conn.close()
-        return fid
+            return fid
+        finally:
+            conn.close()
 
 
 def invalidate_fact(fact_id: int, ended: str = ""):
@@ -518,20 +522,22 @@ def add_entity_alias(entity_id: int, alias: str):
         return
     with GRAPH_WRITE_LOCK:
         conn = get_db()
-        row = conn.execute("SELECT aliases FROM entities WHERE id=?", (entity_id,)).fetchone()
-        if row:
-            try:
-                current = _json.loads(row["aliases"])
-            except Exception:
-                current = []
-            if norm not in current:
-                current.append(norm)
-                conn.execute(
-                    "UPDATE entities SET aliases=? WHERE id=?",
-                    (_json.dumps(current), entity_id),
-                )
-                conn.commit()
-        conn.close()
+        try:
+            row = conn.execute("SELECT aliases FROM entities WHERE id=?", (entity_id,)).fetchone()
+            if row:
+                try:
+                    current = _json.loads(row["aliases"])
+                except Exception:
+                    current = []
+                if norm not in current:
+                    current.append(norm)
+                    conn.execute(
+                        "UPDATE entities SET aliases=? WHERE id=?",
+                        (_json.dumps(current), entity_id),
+                    )
+                    conn.commit()
+        finally:
+            conn.close()
 
 
 def get_entity_by_id(entity_id: int) -> dict | None:
@@ -597,6 +603,65 @@ def get_entity_relationships(entity_id: int) -> list[dict]:
             (entity_id, entity_id),
         )
         return [dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def get_entity_facts_bulk(entity_ids: list[int], as_of: str = "") -> dict[int, list[dict]]:
+    """Fetch active, non-superseded facts for multiple entities in one query."""
+    if not entity_ids:
+        return {}
+    conn = get_db()
+    try:
+        placeholders = ",".join("?" for _ in entity_ids)
+        base = (
+            f"SELECT * FROM facts WHERE entity_id IN ({placeholders}) "
+            "AND is_active=1 AND superseded_by IS NULL"
+        )
+        params: list = list(entity_ids)
+        if as_of:
+            base += " AND (valid_from = '' OR valid_from <= ?)"
+            params.append(as_of)
+            base += " AND (valid_until = '' OR valid_until > ?)"
+            params.append(as_of)
+        base += " ORDER BY entity_id, created_at DESC"
+        cur = conn.execute(base, params)
+        result: dict[int, list[dict]] = {eid: [] for eid in entity_ids}
+        for r in cur.fetchall():
+            d = dict(r)
+            d["is_current"] = True
+            result.setdefault(d["entity_id"], []).append(d)
+        return result
+    finally:
+        conn.close()
+
+
+def get_entity_relationships_bulk(entity_ids: list[int]) -> dict[int, list[dict]]:
+    """Fetch relationships for multiple entities in one query."""
+    if not entity_ids:
+        return {}
+    conn = get_db()
+    try:
+        placeholders = ",".join("?" for _ in entity_ids)
+        params = list(entity_ids) + list(entity_ids)
+        cur = conn.execute(
+            f"""SELECT r.*, e1.name AS source_name, e2.name AS target_name
+                FROM relationships r
+                JOIN entities e1 ON r.source_entity_id=e1.id
+                JOIN entities e2 ON r.target_entity_id=e2.id
+                WHERE r.source_entity_id IN ({placeholders})
+                   OR r.target_entity_id IN ({placeholders})
+                ORDER BY r.updated_at DESC""",
+            params,
+        )
+        result: dict[int, list[dict]] = {eid: [] for eid in entity_ids}
+        for r in cur.fetchall():
+            d = dict(r)
+            if d["source_entity_id"] in result:
+                result[d["source_entity_id"]].append(d)
+            if d["target_entity_id"] in result and d["target_entity_id"] != d["source_entity_id"]:
+                result[d["target_entity_id"]].append(d)
+        return result
     finally:
         conn.close()
 

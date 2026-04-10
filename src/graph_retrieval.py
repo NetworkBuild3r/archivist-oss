@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 
 from graph import (
     search_entities, get_entity_facts, get_entity_relationships,
+    get_entity_facts_bulk, get_entity_relationships_bulk,
     get_entity_by_id, _normalize,
 )
 from config import (
@@ -76,20 +77,26 @@ def extract_entity_mentions(query: str) -> list[dict]:
 
 
 def graph_context_for_entities(entity_ids: list[int], depth: int = 1) -> list[dict]:
-    """Gather facts and relationships for a set of entities up to `depth` hops."""
+    """Gather facts and relationships for a set of entities up to `depth` hops.
+
+    Uses bulk queries per hop to avoid N+1 DB round-trips.
+    """
     visited: set[int] = set()
     frontier = list(entity_ids)
     context_items: list[dict] = []
 
     for hop in range(depth):
-        next_frontier: list[int] = []
-        for eid in frontier:
-            if eid in visited:
-                continue
-            visited.add(eid)
+        unvisited = [eid for eid in frontier if eid not in visited]
+        if not unvisited:
+            break
+        visited.update(unvisited)
 
-            facts = get_entity_facts(eid)
-            for f in facts:
+        all_facts = get_entity_facts_bulk(unvisited)
+        all_rels = get_entity_relationships_bulk(unvisited)
+
+        next_frontier: list[int] = []
+        for eid in unvisited:
+            for f in all_facts.get(eid, []):
                 context_items.append({
                     "type": "fact",
                     "entity_id": eid,
@@ -100,8 +107,7 @@ def graph_context_for_entities(entity_ids: list[int], depth: int = 1) -> list[di
                     "hop": hop,
                 })
 
-            rels = get_entity_relationships(eid)
-            for r in rels:
+            for r in all_rels.get(eid, []):
                 context_items.append({
                     "type": "relationship",
                     "source": r.get("source_name", ""),
@@ -116,8 +122,6 @@ def graph_context_for_entities(entity_ids: list[int], depth: int = 1) -> list[di
                     next_frontier.append(other)
 
         frontier = next_frontier
-        if not frontier:
-            break
 
     return context_items
 
@@ -296,19 +300,23 @@ def build_entity_fact_results(
 
     Capped to ``max_injected`` (default from config) to prevent
     dilution of vector results for queries that match many entities.
+
+    Uses a single bulk query for all entity facts instead of N queries.
     """
     cap = max_injected if max_injected is not None else MAX_ENTITY_FACT_INJECTIONS
     results: list[dict] = []
     seen_texts: set[str] = set()
 
-    for entity in entities:
-        eid = entity["id"]
-        facts = get_entity_facts(eid, as_of=as_of)
-        retention = entity.get("retention_class", "standard")
+    eids = [e["id"] for e in entities]
+    all_facts = get_entity_facts_bulk(eids, as_of=as_of)
+    entity_map = {e["id"]: e for e in entities}
 
+    for eid in eids:
+        entity = entity_map[eid]
+        retention = entity.get("retention_class", "standard")
         score_boost = 0.05 if retention in ("durable", "permanent") else 0.0
 
-        for f in facts:
+        for f in all_facts.get(eid, []):
             text_key = f["fact_text"][:100]
             if text_key in seen_texts:
                 continue

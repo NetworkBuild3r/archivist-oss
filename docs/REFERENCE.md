@@ -84,6 +84,22 @@ parameter schemas and examples, see [CURSOR_SKILL.md](CURSOR_SKILL.md).
 | `/mcp/sse` | GET | Legacy MCP SSE transport entrypoint |
 | `/mcp/messages/` | POST | Legacy SSE message handler |
 
+## Timeout troubleshooting
+
+Slow or hanging requests can come from **downstream dependencies** (embedding API, Qdrant, LLM) or from **infrastructure in front of Archivist** (reverse proxies, gateways, MCP bridges). Archivist logs dependency timings in Prometheus histograms (`archivist_embed_duration_ms`, `archivist_qdrant_query_duration_ms`, `archivist_llm_duration_ms`) and MCP tool duration (`archivist_mcp_tool_duration_ms`). When you set `SLOW_EMBED_MS`, `SLOW_QDRANT_MS`, or `SLOW_LLM_MS` (milliseconds; `0` disables), a **`slow_path`** warning is emitted if a step exceeds the threshold (includes `request_id` when present).
+
+If the client reports **`ETIMEDOUT`** or similar before Archivist logs complete, treat the **gateway or client** as first suspect: increase timeouts, inspect gateway logs, and correlate with **`X-Request-ID`** (Archivist accepts this header on MCP HTTP transports and propagates it into logs and tool lines). Full root-cause analysis usually requires gateway-side logs; Archivist does not duplicate them here.
+
+## Pruning and TTL (vector store)
+
+The **`/admin/invalidate`** endpoint scans Qdrant for points whose `ttl_expires_at` payload is in the past, deletes those vectors, and appends matching rows to the **immutable audit log** (`delete` actions with `reason: ttl_expired`). The HTTP response returns `{"invalidated": N}`. Logs include a structured line `invalidation.complete` with `count`, `duration_ms`, and samples of point IDs and namespaces.
+
+**Optional export:** set **`ARCHIVIST_INVALIDATION_EXPORT_PATH`** to a file path to append **one JSON object per invalidation run** (not per point), e.g. `count`, `sample_ids`, `sample_namespaces`, `duration_ms`, `reason`. Operators should rotate or truncate this file (logrotate, sidecar shipper) on long-lived clusters; full memory text is not written (IDs/namespaces only).
+
+## Curator vs vector TTL
+
+The background **`curator.cycle`** log line (one per successful loop) summarizes file processing, graph fact decay, hotness scoring, tip consolidation, and wake-up cache refreshes. **Graph decay** (`facts_decayed`) soft-deactivates old or superseded facts in SQLite; **vector TTL** is enforced separately via `/admin/invalidate` and payload `ttl_expires_at`. They address different layers: the graph ages knowledge; Qdrant TTL removes embedded chunks after expiry.
+
 ## See Also
 
 - [CURSOR_SKILL.md](CURSOR_SKILL.md) — full parameter schemas and examples

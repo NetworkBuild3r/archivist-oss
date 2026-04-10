@@ -26,11 +26,32 @@
 #   VARIANTS         — comma-separated evaluate.py variants (default: vector_only,full_pipeline)
 #   SCALES           — space-separated scales to run (default: "small medium large stress")
 #   SKIP_CORPUS_GEN  — set to 1 to skip corpus generation if already present
+#
+# With --output, evaluate.py auto-writes per-scale checkpoints: .benchmarks/full_<scale>.run_state.json
+# Pass extra evaluate.py flags after the script name, e.g.:
+#   ./benchmarks/scripts/run_full_comparison.sh --progress-pct 5 --no-checkpoint
+#
+# Script-only flags (not passed to evaluate.py):
+#   -d, --debug   — enable bash trace (set -x) for troubleshooting
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
+
+EVAL_EXTRA=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -d|--debug)
+            set -x
+            shift
+            ;;
+        *)
+            EVAL_EXTRA+=("$1")
+            shift
+            ;;
+    esac
+done
 
 FIXTURES_DIR="benchmarks/fixtures"
 OUT_DIR=".benchmarks"
@@ -49,6 +70,7 @@ echo "  LLM calls      : YES (stuffing + curator extraction)"
 echo "  Variants       : ${VARIANTS}"
 echo "  Scales         : ${SCALES}"
 echo "  Output dir     : ${OUT_DIR}/"
+echo "  Checkpoints    : ${OUT_DIR}/full_<scale>.run_state.json (use --no-checkpoint to disable)"
 echo "======================================================="
 echo ""
 
@@ -88,7 +110,7 @@ for scale in $SCALES; do
         --context-budget "$CONTEXT_BUDGET" \
         --print-slices \
         --output "$out_file" \
-        "$@"
+        "${EVAL_EXTRA[@]}"
 
     echo ""
     echo "  Results written: ${out_file}"

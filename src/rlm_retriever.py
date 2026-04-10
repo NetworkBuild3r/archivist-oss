@@ -45,6 +45,8 @@ from graph_retrieval import (
 )
 from fts_search import search_bm25, merge_vector_and_bm25
 import health
+import metrics as m
+from observability import slow_qdrant_check
 from qdrant import qdrant_client
 from tiering import select_tier
 from tokenizer import count_tokens
@@ -228,7 +230,7 @@ async def _refine_one_chunk(
         )
         try:
             extraction = await llm_query(
-                prompt, system=REFINE_SYSTEM, max_tokens=512, model=refine_model,
+                prompt, system=REFINE_SYSTEM, max_tokens=512, model=refine_model, stage="refine",
             )
             if extraction.strip().upper() != "IRRELEVANT":
                 return {
@@ -324,15 +326,21 @@ async def search_vectors(
     topic: str = "",
     thought_type: str = "",
     limit: int = 20,
+    _query_vec: list[float] | None = None,
 ) -> list[dict]:
-    """Stage 1: coarse vector search in Qdrant with optional filters."""
-    try:
-        query_vec = await embed_text(query)
-    except Exception as e:
-        # embed_text already registers "embeddings" unhealthy before raising.
-        # Return [] so the pipeline can degrade to BM25-only results.
-        logger.warning("Embedding failed, skipping vector search: %s", e)
-        return []
+    """Stage 1: coarse vector search in Qdrant with optional filters.
+
+    Pass ``_query_vec`` to reuse a pre-computed embedding and avoid
+    redundant calls to the embedding API (topic fallback, adaptive widen).
+    """
+    if _query_vec is not None:
+        query_vec = _query_vec
+    else:
+        try:
+            query_vec = await embed_text(query)
+        except Exception as e:
+            logger.warning("Embedding failed, skipping vector search: %s", e)
+            return []
     client = qdrant_client()
 
     must_filters = []
@@ -362,6 +370,7 @@ async def search_vectors(
     fetch_limit = limit * 3 if _date_range_active else limit
 
     # Degrade to [] on Qdrant/network errors so retrieval can fall back to BM25-only paths.
+    t_q = time.monotonic()
     try:
         results = client.query_points(
             collection_name=QDRANT_COLLECTION,
@@ -371,8 +380,15 @@ async def search_vectors(
             with_payload=True,
         ).points
     except Exception as e:
+        qdur_ms = (time.monotonic() - t_q) * 1000
+        m.observe(m.QDRANT_QUERY_DURATION, qdur_ms)
+        slow_qdrant_check(qdur_ms)
         health.register("qdrant", healthy=False, detail=str(e))
         return []
+
+    qdur_ms = (time.monotonic() - t_q) * 1000
+    m.observe(m.QDRANT_QUERY_DURATION, qdur_ms)
+    slow_qdrant_check(qdur_ms)
 
     # After a prior failure, mark Qdrant healthy again on first successful query.
     if not health.is_healthy("qdrant"):
@@ -563,6 +579,13 @@ async def recursive_retrieve(
         m.observe(m.SEARCH_DURATION, elapsed)
         return out
 
+    # Embed the query once; reuse the vector for topic fallback and adaptive widen.
+    try:
+        _cached_query_vec = await embed_text(query)
+    except Exception as e:
+        logger.warning("Embedding failed, skipping vector search: %s", e)
+        _cached_query_vec = None
+
     # Stage 1: Coarse vector search (wide recall)
     # Topic routing: try topic-filtered search first, fall back if too few results
     coarse = await search_vectors(
@@ -576,7 +599,8 @@ async def recursive_retrieve(
         memory_type=effective_memory_type,
         topic=detected_topic,
         limit=vector_limit,
-    )
+        _query_vec=_cached_query_vec,
+    ) if _cached_query_vec is not None else []
     if detected_topic and len(coarse) < ADAPTIVE_VECTOR_MIN_RESULTS:
         topic_fallback_used = True
         coarse = await search_vectors(
@@ -590,7 +614,8 @@ async def recursive_retrieve(
             memory_type=effective_memory_type,
             topic="",
             limit=vector_limit,
-        )
+            _query_vec=_cached_query_vec,
+        ) if _cached_query_vec is not None else []
     n_coarse = len(coarse)
 
     # Stage 1-bm25: BM25 keyword search + fusion (v1.2)
@@ -677,6 +702,7 @@ async def recursive_retrieve(
             query, agent_id=agent_id, agent_ids=agent_ids, team=team,
             namespace=namespace, date_from=date_from, date_to=date_to,
             memory_type=effective_memory_type, limit=wider_limit,
+            _query_vec=_cached_query_vec,
         )
         if len(wider_coarse) > n_coarse:
             was_adaptive_widened = True
@@ -916,7 +942,7 @@ async def recursive_retrieve(
     t_synth0 = time.monotonic()
     try:
         answer = await llm_query(
-            synth_prompt, system=synth_system, max_tokens=1024, model=synth_model,
+            synth_prompt, system=synth_system, max_tokens=1024, model=synth_model, stage="synth",
         )
     except Exception as e:
         logger.error("Synthesis failed: %s", e)

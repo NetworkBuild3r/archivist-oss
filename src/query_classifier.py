@@ -35,8 +35,22 @@ SUBCATEGORY_TO_TOPIC: dict[str, str] = {
 }
 
 CLASSIFIER_CACHE_TTL_SECONDS = 120
+_CLASSIFIER_CACHE_MAX_ENTRIES = 2048
 _lock = threading.Lock()
 _classifier_cache: dict[tuple[str, str], tuple[float, str, str]] = {}
+
+
+def _sweep_expired_locked(now: float) -> None:
+    """Remove expired entries under the lock. Called when the cache is too large."""
+    expired = [k for k, (ts, _, _) in _classifier_cache.items()
+               if now - ts > CLASSIFIER_CACHE_TTL_SECONDS]
+    for k in expired:
+        del _classifier_cache[k]
+    if len(_classifier_cache) > _CLASSIFIER_CACHE_MAX_ENTRIES:
+        # Still too large after sweeping expired: drop oldest half
+        by_age = sorted(_classifier_cache.items(), key=lambda kv: kv[1][0])
+        for k, _ in by_age[:len(by_age) // 2]:
+            del _classifier_cache[k]
 
 
 def _query_hash(query: str) -> str:
@@ -185,6 +199,8 @@ async def classify_query(
 
         with _lock:
             _classifier_cache[cache_key] = (now, primary, subcategory)
+            if len(_classifier_cache) > _CLASSIFIER_CACHE_MAX_ENTRIES:
+                _sweep_expired_locked(now)
 
         return primary
     else:
@@ -192,6 +208,8 @@ async def classify_query(
         if primary and primary in VALID_TYPES:
             with _lock:
                 _classifier_cache[cache_key] = (now, primary, _sub)
+                if len(_classifier_cache) > _CLASSIFIER_CACHE_MAX_ENTRIES:
+                    _sweep_expired_locked(now)
             return primary
         return ""
 
@@ -256,6 +274,8 @@ async def classify_query_full(
 
         with _lock:
             _classifier_cache[cache_key] = (now, primary, subcategory)
+            if len(_classifier_cache) > _CLASSIFIER_CACHE_MAX_ENTRIES:
+                _sweep_expired_locked(now)
 
         return (primary, subcategory)
     else:
@@ -263,6 +283,8 @@ async def classify_query_full(
         if ht and ht in VALID_TYPES:
             with _lock:
                 _classifier_cache[cache_key] = (now, ht, hs)
+                if len(_classifier_cache) > _CLASSIFIER_CACHE_MAX_ENTRIES:
+                    _sweep_expired_locked(now)
             return (ht, hs)
         return ("", "")
 

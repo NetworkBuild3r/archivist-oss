@@ -6,7 +6,10 @@ import re
 import json
 import logging
 import asyncio
+import time
 from datetime import datetime, timezone, timedelta
+
+import metrics as m
 
 from config import (
     MEMORY_ROOT, CURATOR_INTERVAL_MINUTES,
@@ -214,8 +217,7 @@ async def curate_cycle():
                 logger.error("Curator failed on %s: %s", filepath, e)
 
     set_curator_state("last_curate_time", now.isoformat())
-    logger.info("Curator cycle complete: %d files processed, %d skipped (unchanged)", processed, skipped_unchanged)
-    return processed
+    return {"processed": processed, "skipped": skipped_unchanged}
 
 
 async def extract_all_agent_memories() -> int:
@@ -278,7 +280,7 @@ async def reinforce_durable_entities():
         logger.info("Reinforced %d durable/permanent entities, %d relationships", reinforced, rels_boosted)
 
 
-async def decay_old_entries():
+async def decay_old_entries() -> dict[str, int]:
     """Soft-delete graph entries based on age and superseded status.
 
     Rules:
@@ -286,6 +288,8 @@ async def decay_old_entries():
     - superseded standard/ephemeral facts: decay after 30 days
     - non-superseded standard facts: decay after 90 days
     - ephemeral facts: decay after 30 days regardless
+
+    Returns counts for observability (curator.cycle summary).
     """
     with GRAPH_WRITE_LOCK:
         conn = get_db()
@@ -319,13 +323,16 @@ async def decay_old_entries():
             "Decayed %d facts (%d aged 90d, %d superseded/ephemeral 30d; durable/permanent preserved)",
             total, aged_out, superseded_out,
         )
+    return {"aged_out": aged_out, "superseded_out": superseded_out, "total": total}
 
 
-def _refresh_wake_up_caches():
+def _refresh_wake_up_caches() -> int:
     """Re-build wake-up context for each active namespace.
 
     Scans memory_chunks for distinct (namespace, agent_id) pairs and
     pre-computes the wake-up payload so the MCP tool returns instantly.
+
+    Returns the number of namespace/agent pairs refreshed.
     """
     conn = get_db()
     try:
@@ -353,6 +360,7 @@ def _refresh_wake_up_caches():
 
     if refreshed:
         logger.info("Refreshed wake-up context for %d namespace/agent pairs", refreshed)
+    return refreshed
 
 
 async def curator_loop():
@@ -363,10 +371,15 @@ async def curator_loop():
     logger.info("Curator loop started (interval: %d min)", CURATOR_INTERVAL_MINUTES)
     while True:
         try:
-            await curate_cycle()
+            t_iter = time.monotonic()
+            cc = await curate_cycle()
+            files_processed = cc["processed"]
+            files_skipped = cc["skipped"]
             await reinforce_durable_entities()
-            await decay_old_entries()
+            decay = await decay_old_entries()
+            facts_decayed = decay["total"]
 
+            n_hot = 0
             try:
                 n_hot = batch_update_hotness()
                 if n_hot:
@@ -374,17 +387,34 @@ async def curator_loop():
             except Exception as e:
                 logger.warning("Hotness update failed (non-fatal): %s", e)
 
+            tips_merged = 0
             try:
                 tip_result = await consolidate_tips(budget=CURATOR_TIP_BUDGET)
-                if tip_result.get("consolidated", 0):
-                    logger.info("Tip consolidation: %d clusters merged", tip_result["consolidated"])
+                tips_merged = int(tip_result.get("consolidated", 0) or 0)
+                if tips_merged:
+                    logger.info("Tip consolidation: %d clusters merged", tips_merged)
             except Exception as e:
                 logger.warning("Tip consolidation failed (non-fatal): %s", e)
 
+            wake_pairs = 0
             try:
-                _refresh_wake_up_caches()
+                wake_pairs = _refresh_wake_up_caches()
             except Exception as e:
                 logger.warning("Wake-up cache refresh failed (non-fatal): %s", e)
+
+            dur_ms = round((time.monotonic() - t_iter) * 1000, 1)
+            m.observe(m.CURATOR_CYCLE_DURATION, dur_ms)
+            logger.info(
+                "curator.cycle complete=1 files_processed=%d skipped=%d facts_decayed=%d "
+                "hotness_updated=%d tips_merged=%d wake_pairs=%d duration_ms=%.1f",
+                files_processed,
+                files_skipped,
+                facts_decayed,
+                n_hot,
+                tips_merged,
+                wake_pairs,
+                dur_ms,
+            )
 
             backoff_sec = base_interval
         except Exception as e:

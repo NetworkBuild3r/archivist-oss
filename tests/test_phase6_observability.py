@@ -13,7 +13,7 @@ def test_metrics_counter():
     import metrics as m
     m._counters.clear()
     m._gauges.clear()
-    m._histogram_obs.clear()
+    m._histogram_buckets.clear()
 
     m.inc(m.SEARCH_TOTAL)
     m.inc(m.SEARCH_TOTAL)
@@ -28,7 +28,7 @@ def test_metrics_histogram():
     import metrics as m
     m._counters.clear()
     m._gauges.clear()
-    m._histogram_obs.clear()
+    m._histogram_buckets.clear()
 
     m.observe(m.SEARCH_DURATION, 50)
     m.observe(m.SEARCH_DURATION, 150)
@@ -44,7 +44,7 @@ def test_metrics_gauge():
     import metrics as m
     m._counters.clear()
     m._gauges.clear()
-    m._histogram_obs.clear()
+    m._histogram_buckets.clear()
 
     m.gauge_set("archivist_cache_size", 42)
     text = m.render()
@@ -59,7 +59,7 @@ def test_metrics_render_format():
     import metrics as m
     m._counters.clear()
     m._gauges.clear()
-    m._histogram_obs.clear()
+    m._histogram_buckets.clear()
 
     m.inc("archivist_test_counter")
     text = m.render()

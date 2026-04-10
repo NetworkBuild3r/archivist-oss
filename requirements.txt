@@ -3,6 +3,7 @@ qdrant-client>=1.13.0
 httpx>=0.28.0
 watchfiles>=1.0.0
 pyyaml>=6.0
+tqdm>=4.66.0
 uvicorn>=0.30.0
 starlette>=0.38.0
 
@@ -23,3 +24,8 @@ starlette>=0.38.0
 # Uncomment to enable RERANK_ENABLED=true
 # sentence-transformers>=3.0.0
 # torch>=2.0.0
+
+# Optional: OpenTelemetry tracing (set OTEL_EXPORTER_OTLP_ENDPOINT; see observability.py)
+# opentelemetry-api>=1.20.0
+# opentelemetry-sdk>=1.20.0
+# opentelemetry-exporter-otlp>=1.20.0
