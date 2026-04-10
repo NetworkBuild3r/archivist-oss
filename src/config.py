@@ -174,6 +174,12 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 REDIS_KEY_PREFIX = os.getenv("REDIS_KEY_PREFIX", "archivist:")
 LATENCY_BUDGET_MS = int(os.getenv("LATENCY_BUDGET_MS", "500"))
 
+# ── Backup & restore (v1.10) ──────────────────────────────────────────────────
+BACKUP_DIR = os.getenv("BACKUP_DIR", "/data/archivist/backups")
+BACKUP_RETENTION_COUNT = int(os.getenv("BACKUP_RETENTION_COUNT", "5"))
+BACKUP_INCLUDE_FILES = _env_bool("BACKUP_INCLUDE_FILES", "false")
+BACKUP_PRE_PRUNE = _env_bool("BACKUP_PRE_PRUNE", "false")
+
 # ── Context window management (v1.1) ─────────────────────────────────────────
 DEFAULT_CONTEXT_BUDGET = int(os.getenv("DEFAULT_CONTEXT_BUDGET", "128000"))
 

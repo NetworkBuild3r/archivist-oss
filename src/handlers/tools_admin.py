@@ -164,6 +164,50 @@ TOOLS: list[Tool] = [
             "required": [],
         },
     ),
+    Tool(
+        name="archivist_backup",
+        description=(
+            "Create, list, or restore memory snapshots. Snapshots include Qdrant vectors "
+            "and SQLite graph data for disaster recovery and agent migration."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["create", "list", "restore", "delete", "export_agent", "import_agent"],
+                    "description": "Action to perform",
+                },
+                "snapshot_id": {
+                    "type": "string",
+                    "description": "Snapshot ID (required for restore/delete)",
+                    "default": "",
+                },
+                "label": {
+                    "type": "string",
+                    "description": "Optional label for the snapshot (used with create)",
+                    "default": "",
+                },
+                "target": {
+                    "type": "string",
+                    "enum": ["all", "qdrant", "sqlite"],
+                    "description": "What to restore (default: all)",
+                    "default": "all",
+                },
+                "agent_id": {
+                    "type": "string",
+                    "description": "Agent ID for export_agent action",
+                    "default": "",
+                },
+                "file": {
+                    "type": "string",
+                    "description": "NDJSON file path for import_agent action",
+                    "default": "",
+                },
+            },
+            "required": ["action"],
+        },
+    ),
 ]
 
 # ---------------------------------------------------------------------------
@@ -308,6 +352,64 @@ async def _handle_batch_heuristic(arguments: dict) -> list[TextContent]:
     return success_response(result)
 
 
+async def _handle_backup(arguments: dict) -> list[TextContent]:
+    """Create, list, restore, or delete memory snapshots."""
+    from backup_manager import (
+        create_snapshot, list_snapshots, restore_snapshot,
+        delete_snapshot, prune_snapshots, export_agent, import_agent,
+    )
+
+    action = arguments.get("action", "")
+
+    if action == "create":
+        label = arguments.get("label", "")
+        result = create_snapshot(label=label)
+        prune_snapshots()
+        return success_response(result)
+
+    if action == "list":
+        snapshots = list_snapshots()
+        return success_response({"snapshots": snapshots, "count": len(snapshots)})
+
+    if action == "restore":
+        snapshot_id = arguments.get("snapshot_id", "").strip()
+        if not snapshot_id:
+            return error_response({"error": "snapshot_id is required for restore"})
+        target = arguments.get("target", "all")
+        try:
+            result = restore_snapshot(snapshot_id, target=target)
+            return success_response(result)
+        except (FileNotFoundError, ValueError) as e:
+            return error_response({"error": str(e)})
+
+    if action == "delete":
+        snapshot_id = arguments.get("snapshot_id", "").strip()
+        if not snapshot_id:
+            return error_response({"error": "snapshot_id is required for delete"})
+        if delete_snapshot(snapshot_id):
+            return success_response({"deleted": snapshot_id})
+        return error_response({"error": "snapshot not found"})
+
+    if action == "export_agent":
+        agent_id = arguments.get("agent_id", "").strip()
+        if not agent_id:
+            return error_response({"error": "agent_id is required for export_agent"})
+        result = export_agent(agent_id)
+        return success_response(result)
+
+    if action == "import_agent":
+        file_path = arguments.get("file", "").strip()
+        if not file_path:
+            return error_response({"error": "file path is required for import_agent"})
+        try:
+            result = import_agent(file_path)
+            return success_response(result)
+        except FileNotFoundError as e:
+            return error_response({"error": str(e)})
+
+    return error_response({"error": f"Unknown action: {action}"})
+
+
 # ---------------------------------------------------------------------------
 # Handler registry
 # ---------------------------------------------------------------------------
@@ -320,4 +422,5 @@ HANDLERS: dict[str, object] = {
     "archivist_retrieval_logs": _handle_retrieval_logs,
     "archivist_health_dashboard": _handle_health_dashboard,
     "archivist_batch_heuristic": _handle_batch_heuristic,
+    "archivist_backup": _handle_backup,
 }

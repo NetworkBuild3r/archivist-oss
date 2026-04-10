@@ -423,6 +423,108 @@ async def handle_namespace_index(request):
     return PlainTextResponse(text, media_type="text/markdown; charset=utf-8")
 
 
+# ── Backup / restore admin endpoints ─────────────────────────────────────────
+
+async def handle_backup_create(request):
+    """POST /admin/backup — create a memory snapshot."""
+    from backup_manager import create_snapshot, prune_snapshots
+
+    label = request.query_params.get("label", "")
+    try:
+        result = create_snapshot(label=label)
+        prune_snapshots()
+        return JSONResponse(result)
+    except Exception as e:
+        logger.error("Backup creation failed: %s", e)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+async def handle_backup_list(_request):
+    """GET /admin/backups — list available snapshots."""
+    from backup_manager import list_snapshots
+    snapshots = list_snapshots()
+    return JSONResponse({"snapshots": snapshots, "count": len(snapshots)})
+
+
+async def handle_backup_restore(request):
+    """POST /admin/restore — restore from a snapshot."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "JSON body required with snapshot_id"}, status_code=400)
+
+    snapshot_id = body.get("snapshot_id", "").strip()
+    if not snapshot_id:
+        return JSONResponse({"error": "snapshot_id is required"}, status_code=400)
+
+    target = body.get("target", "all")
+    if target not in ("all", "qdrant", "sqlite"):
+        return JSONResponse({"error": "target must be 'all', 'qdrant', or 'sqlite'"}, status_code=400)
+
+    from backup_manager import restore_snapshot
+    try:
+        result = restore_snapshot(snapshot_id, target=target)
+        return JSONResponse(result)
+    except FileNotFoundError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=409)
+    except Exception as e:
+        logger.error("Restore failed: %s", e)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+async def handle_backup_delete(request):
+    """DELETE /admin/backup/{snapshot_id} — delete a specific snapshot."""
+    snapshot_id = request.path_params.get("snapshot_id", "").strip()
+    if not snapshot_id:
+        return JSONResponse({"error": "snapshot_id required"}, status_code=400)
+
+    from backup_manager import delete_snapshot
+    if delete_snapshot(snapshot_id):
+        return JSONResponse({"deleted": snapshot_id})
+    return JSONResponse({"error": "snapshot not found"}, status_code=404)
+
+
+async def handle_agent_export(request):
+    """POST /admin/export-agent — export all memories for a single agent."""
+    agent_id = request.query_params.get("agent_id", "").strip()
+    if not agent_id:
+        return JSONResponse({"error": "agent_id query parameter required"}, status_code=400)
+
+    from backup_manager import export_agent
+    try:
+        result = export_agent(agent_id)
+        return JSONResponse(result)
+    except Exception as e:
+        logger.error("Agent export failed: %s", e)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+async def handle_agent_import(request):
+    """POST /admin/import-agent — import agent memories from NDJSON file."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "JSON body required with file path"}, status_code=400)
+
+    ndjson_path = body.get("file", "").strip()
+    if not ndjson_path:
+        return JSONResponse({"error": "file path is required"}, status_code=400)
+
+    dry_run = body.get("dry_run", False)
+
+    from backup_manager import import_agent
+    try:
+        result = import_agent(ndjson_path, dry_run=dry_run)
+        return JSONResponse(result)
+    except FileNotFoundError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+    except Exception as e:
+        logger.error("Agent import failed: %s", e)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 app = Starlette(
     routes=[
         Route("/health", handle_health),
@@ -431,6 +533,12 @@ app = Starlette(
         Route("/admin/retrieval-logs", handle_retrieval_export),
         Route("/admin/dashboard", handle_dashboard),
         Route("/admin/namespace-index", handle_namespace_index, methods=["GET"]),
+        Route("/admin/backup", handle_backup_create, methods=["POST"]),
+        Route("/admin/backups", handle_backup_list, methods=["GET"]),
+        Route("/admin/restore", handle_backup_restore, methods=["POST"]),
+        Route("/admin/backup/{snapshot_id}", handle_backup_delete, methods=["DELETE"]),
+        Route("/admin/export-agent", handle_agent_export, methods=["POST"]),
+        Route("/admin/import-agent", handle_agent_import, methods=["POST"]),
         Route("/mcp", endpoint=streamable_http_app, methods=["GET", "POST", "DELETE"]),
         Route("/mcp/sse", endpoint=sse_app, methods=["GET"]),
         Mount("/mcp/messages/", app=sse_transport.handle_post_message),

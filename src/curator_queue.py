@@ -145,6 +145,32 @@ def _apply_merge(payload: dict):
     pass  # placeholder: full merge logic lives in merge.py
 
 
+_last_pre_prune_snapshot: float = 0.0
+_PRE_PRUNE_DEBOUNCE_SECONDS = 300
+
+
+def _maybe_pre_prune_snapshot() -> None:
+    """Create a backup snapshot before destructive operations (debounced)."""
+    global _last_pre_prune_snapshot
+    from config import BACKUP_PRE_PRUNE
+
+    if not BACKUP_PRE_PRUNE:
+        return
+
+    now = time.time()
+    if now - _last_pre_prune_snapshot < _PRE_PRUNE_DEBOUNCE_SECONDS:
+        return
+
+    _last_pre_prune_snapshot = now
+    try:
+        from backup_manager import create_snapshot, prune_snapshots
+        create_snapshot(label="pre-prune")
+        prune_snapshots()
+        logger.info("Pre-prune backup snapshot created")
+    except Exception as e:
+        logger.warning("Pre-prune snapshot failed (non-blocking): %s", e)
+
+
 def _apply_delete(payload: dict):
     """Delete a Qdrant point."""
     from config import QDRANT_COLLECTION
@@ -153,6 +179,8 @@ def _apply_delete(payload: dict):
     memory_ids = payload.get("memory_ids", [])
     if not memory_ids:
         return
+
+    _maybe_pre_prune_snapshot()
 
     client = qdrant_client()
     try:

@@ -105,6 +105,7 @@ services:
       RETRIEVAL_THRESHOLD: ${RETRIEVAL_THRESHOLD:-0.65}
     volumes:
       - archivist-data:/data
+      - archivist-backups:/data/archivist/backups
       - ${MEMORY_DIR:-./sample-memories}:/data/memories:ro
     depends_on:
       - qdrant
@@ -125,6 +126,7 @@ services:
 
 volumes:
   archivist-data:
+  archivist-backups:
   qdrant-storage:
   tailscale-state:
 
