@@ -3,8 +3,10 @@
 Phase 1 addition: hierarchical parent-child chunking for richer retrieval context.
 """
 
+import asyncio
 import os
 import re
+import uuid
 import hashlib
 import logging
 from datetime import datetime, timezone, timedelta
@@ -23,13 +25,13 @@ from config import (
 )
 from chunking import chunk_text, chunk_text_hierarchical
 from embeddings import embed_batch
-from graph import upsert_fts_chunk, delete_fts_chunks_by_file
+from graph import upsert_fts_chunk, delete_fts_chunks_by_file, upsert_entity, add_fact, register_needle_tokens
 from qdrant import qdrant_client
 from rbac import get_namespace_for_agent, get_namespace_config
 from text_utils import extract_agent_id_from_path, compute_memory_checksum
 from tiering import generate_tiers
 from topic_detector import detect_topics
-from pre_extractor import pre_extract
+from pre_extractor import pre_extract, extract_needle_entities
 from collection_router import ensure_collection, collections_for_query
 from contextual_augment import augment_chunk
 import metrics as _metrics
@@ -152,8 +154,9 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
                     tier_map[c["id"]] = await generate_tiers(c["content"])
 
         contents = [c["content"] for c in hier_chunks]
+        augmented_contents = contents
         if CONTEXTUAL_AUGMENTATION_ENABLED:
-            contents = [
+            augmented_contents = [
                 augment_chunk(
                     c["content"],
                     agent_id=meta.get("agent_id", ""),
@@ -163,9 +166,10 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
                 )
                 for c in hier_chunks
             ]
-        vectors = await embed_batch(contents)
+        vectors = await embed_batch(augmented_contents)
 
         points = []
+        _hints_by_id: dict[str, dict] = {}
         for i, (chunk_meta, vec) in enumerate(zip(hier_chunks, vectors)):
             pid = chunk_meta["id"] if chunk_meta["id"] else _point_id(filepath, i)
             checksum = compute_memory_checksum(chunk_meta["content"], meta["agent_id"], meta["namespace"])
@@ -177,10 +181,12 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
 
             topics = detect_topics(chunk_meta["content"]) if TOPIC_ROUTING_ENABLED else []
             hints = pre_extract(chunk_meta["content"])
+            _hints_by_id[pid] = hints
             payload = {
                 **meta,
                 "chunk_index": i,
                 "text": chunk_meta["content"],
+                "text_augmented": augmented_contents[i] if CONTEXTUAL_AUGMENTATION_ENABLED else "",
                 "l0": tiers.get("l0", ""),
                 "l1": tiers.get("l1", ""),
                 "parent_id": chunk_meta["parent_id"],
@@ -204,8 +210,9 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
             return 0
 
         embed_texts = chunks
+        augmented_flat: list[str] = []
         if CONTEXTUAL_AUGMENTATION_ENABLED:
-            embed_texts = [
+            augmented_flat = [
                 augment_chunk(
                     c,
                     agent_id=meta.get("agent_id", ""),
@@ -214,19 +221,23 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
                 )
                 for c in chunks
             ]
+            embed_texts = augmented_flat
         vectors = await embed_batch(embed_texts)
 
         points = []
+        _hints_by_id: dict[str, dict] = {}
         for i, (chunk, vec) in enumerate(zip(chunks, vectors)):
             pid = _point_id(filepath, i)
             checksum = compute_memory_checksum(chunk, meta["agent_id"], meta["namespace"])
 
             topics = detect_topics(chunk) if TOPIC_ROUTING_ENABLED else []
             hints = pre_extract(chunk)
+            _hints_by_id[pid] = hints
             payload = {
                 **meta,
                 "chunk_index": i,
                 "text": chunk,
+                "text_augmented": augmented_flat[i] if augmented_flat else "",
                 "topic": topics[0] if topics else "",
                 "thought_type": hints.get("thought_type", "general"),
                 "version": 1,
@@ -257,6 +268,83 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
                     date=p.payload.get("date", ""),
                     memory_type=p.payload.get("memory_type", "general"),
                 )
+
+        _agent = meta.get("agent_id", "")
+        _src_file = meta.get("file_path", "")
+        _seen_entity_names: set[str] = set()
+        for p in points:
+            if not p.payload.get("is_parent", False):
+                continue
+            _hints = _hints_by_id.get(str(p.id), {})
+            _needle_ents = extract_needle_entities(p.payload.get("text", ""))
+            for ent in _hints.get("entities", []) + _needle_ents:
+                ename = ent["name"].strip()
+                if ename and ename not in _seen_entity_names:
+                    _seen_entity_names.add(ename)
+                    etype = ent.get("type", "unknown")
+                    _eid = upsert_entity(ename, etype)
+                    add_fact(_eid, p.payload.get("text", "")[:200], _src_file, _agent)
+
+        for p in points:
+            register_needle_tokens(
+                str(p.id), p.payload.get("text", ""),
+                namespace=meta.get("namespace", ""),
+                agent_id=_agent,
+            )
+
+        # Reverse HyDE: generate hypothetical questions for parent chunks (parallel)
+        from config import REVERSE_HYDE_ENABLED
+        if REVERSE_HYDE_ENABLED:
+            from hyde import generate_reverse_hyde_questions
+            _rh_semaphore = asyncio.Semaphore(3)
+            _parent_points = [p for p in points if p.payload.get("is_parent", False)]
+
+            async def _gen_rh_for_point(p):
+                async with _rh_semaphore:
+                    try:
+                        _rh_qs = await generate_reverse_hyde_questions(p.payload.get("text", ""))
+                        if not _rh_qs:
+                            return []
+                        _rh_vecs = await embed_batch(_rh_qs)
+                        result = []
+                        for qi, (q, qv) in enumerate(zip(_rh_qs, _rh_vecs)):
+                            _q_id = str(uuid.uuid4())
+                            result.append(PointStruct(
+                                id=_q_id,
+                                vector=qv,
+                                payload={
+                                    **meta,
+                                    "text": p.payload.get("text", ""),
+                                    "chunk_index": 0,
+                                    "file_type": "reverse_hyde",
+                                    "source_memory_id": str(p.id),
+                                    "is_reverse_hyde": True,
+                                    "reverse_hyde_question": q,
+                                    "parent_id": str(p.id),
+                                    "is_parent": False,
+                                    "importance_score": 0.5,
+                                    "retention_class": "standard",
+                                    "version": 1,
+                                },
+                            ))
+                        return result
+                    except Exception as e:
+                        logger.warning("Reverse HyDE failed for chunk %s: %s", p.id, e)
+                        return []
+
+            _rh_batches = await asyncio.gather(
+                *[_gen_rh_for_point(p) for p in _parent_points],
+                return_exceptions=True,
+            )
+            _rh_points = []
+            for batch in _rh_batches:
+                if isinstance(batch, BaseException):
+                    logger.warning("Reverse HyDE gather error: %s", batch)
+                    continue
+                _rh_points.extend(batch)
+            if _rh_points:
+                client.upsert(collection_name=_coll, points=_rh_points)
+                _metrics.inc(_metrics.INDEX_CHUNKS, value=len(_rh_points))
 
         logger.info("Indexed %s: %d chunks (ns=%s, hierarchical=%s, fts=%s)",
                      meta["file_path"], len(points), meta["namespace"], hierarchical, BM25_ENABLED)

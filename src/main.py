@@ -119,6 +119,7 @@ def ensure_qdrant_collection():
             ("retention_class", PayloadSchemaType.KEYWORD),
             ("topic", PayloadSchemaType.KEYWORD),
             ("thought_type", PayloadSchemaType.KEYWORD),
+            ("text", PayloadSchemaType.TEXT),
         ]:
             client.create_payload_index(
                 collection_name=QDRANT_COLLECTION,
@@ -153,7 +154,7 @@ async def file_watcher():
 
 
 async def handle_health(_request):
-    return JSONResponse({"status": "ok", "service": "archivist", "version": "1.0.0"})
+    return JSONResponse({"status": "ok", "service": "archivist", "version": "1.11.0"})
 
 
 async def handle_invalidate(_request):
@@ -185,22 +186,11 @@ async def handle_invalidate(_request):
             sample_ns.append(str(pl.get("namespace", "") or ""))
 
         if point_ids:
-            client.delete(
-                collection_name=QDRANT_COLLECTION,
-                points_selector=point_ids,
-            )
-
-            from audit import log_memory_event
-            for pid in point_ids:
-                await log_memory_event(
-                    agent_id="system",
-                    action="delete",
-                    memory_id=str(pid),
-                    namespace="",
-                    text_hash="",
-                    version=0,
-                    metadata={"trigger": "invalidation", "reason": "ttl_expired"},
-                )
+            from memory_lifecycle import delete_memory_complete
+            for pid in points:
+                pl = getattr(pid, "payload", None) or {}
+                ns = str(pl.get("namespace", "") or "")
+                await delete_memory_complete(str(pid.id), ns)
         dur_ms = round((time.monotonic() - t0) * 1000, 1)
         n = len(point_ids)
         met.observe(met.INVALIDATE_DURATION, dur_ms)
@@ -250,7 +240,7 @@ def _log_task_exception(task: asyncio.Task):
 
 async def _startup():
     """Run on app startup: init DB, load RBAC, ensure Qdrant collection, start background tasks."""
-    logger.info("Archivist v1.0.0 starting up...")
+    logger.info("Archivist v1.11.0 starting up...")
 
     init_schema()
     logger.info("Graph schema initialized")
@@ -298,7 +288,7 @@ async def curator_queue_drain_loop():
     logger.info("Curator queue drain loop started (interval: %ds)", CURATOR_QUEUE_DRAIN_INTERVAL)
     while True:
         try:
-            applied = drain_curator_queue(limit=50)
+            applied = await drain_curator_queue(limit=50)
             if applied:
                 logger.info("Curator queue: drained %d operations", len(applied))
         except Exception as e:

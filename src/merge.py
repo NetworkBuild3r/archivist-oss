@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from qdrant_client.models import PointStruct
 
 from config import QDRANT_COLLECTION, MEMORY_ROOT
+from collection_router import collection_for
 from embeddings import embed_text
 from llm import llm_query
 from qdrant import qdrant_client
@@ -86,10 +87,9 @@ async def merge_memories(
         points=[PointStruct(id=merged_id, vector=vec, payload=merged_payload)],
     )
 
-    client.delete(
-        collection_name=QDRANT_COLLECTION,
-        points_selector=memory_ids,
-    )
+    from memory_lifecycle import delete_memory_complete
+    for mid in memory_ids:
+        await delete_memory_complete(mid, ns, collection=collection_for(ns))
 
     version = record_version(
         merged_id, agent_id, checksum, "merge",

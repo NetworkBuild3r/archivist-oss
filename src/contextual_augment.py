@@ -55,3 +55,16 @@ def augment_chunk(
     if parts:
         return "\n".join(parts) + "\n---\n" + text
     return text
+
+
+def strip_augmentation_header(text: str) -> str:
+    """Extract the raw content from augmented text by removing the metadata header.
+
+    The header is separated from content by a ``---\\n`` delimiter.
+    If no delimiter is found, the text is returned unchanged.
+    """
+    sep = "\n---\n"
+    idx = text.find(sep)
+    if idx == -1:
+        return text
+    return text[idx + len(sep):]

@@ -1,6 +1,8 @@
 """MCP tool handlers — memory storage, merge, and compression."""
 
+import asyncio
 import json
+import time
 import uuid
 import logging
 from datetime import datetime, timezone
@@ -8,8 +10,8 @@ from datetime import datetime, timezone
 from mcp.types import Tool, TextContent
 from qdrant_client.models import PointStruct
 
-from embeddings import embed_text
-from graph import upsert_entity, add_fact
+from embeddings import embed_text, embed_batch
+from graph import upsert_entity, add_fact, register_needle_tokens, upsert_fts_chunk
 from config import (
     QDRANT_COLLECTION, TEAM_MAP,
     CONFLICT_CHECK_ON_STORE, CONFLICT_BLOCK_ON_STORE,
@@ -20,9 +22,10 @@ from qdrant import qdrant_client
 from rbac import get_namespace_for_agent, get_namespace_config
 from text_utils import compute_memory_checksum
 from archivist_uri import memory_uri
-from pre_extractor import pre_extract
+from pre_extractor import pre_extract, extract_needle_entities
 from collection_router import ensure_collection, collection_for, collections_for_query
 from contextual_augment import augment_chunk
+from chunking import _extract_needle_micro_chunks
 import hot_cache
 import journal
 import metrics as m
@@ -192,6 +195,7 @@ TOOLS: list[Tool] = [
 
 
 async def _handle_store(arguments: dict) -> list[TextContent]:
+    _t_store = time.monotonic()
     text = arguments["text"]
     agent_id = arguments["agent_id"]
     namespace = arguments.get("namespace", "") or get_namespace_for_agent(agent_id)
@@ -253,11 +257,23 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
 
     for ename in entity_names:
         eid = upsert_entity(ename.strip(), retention_class=retention)
-        add_fact(eid, text, f"explicit/{agent_id}", agent_id, retention_class=retention)
+        add_fact(eid, text[:200], f"explicit/{agent_id}", agent_id, retention_class=retention)
 
     if not entity_names:
         eid = upsert_entity(agent_id, "agent", retention_class=retention)
-        add_fact(eid, text, f"explicit/{agent_id}", agent_id, retention_class=retention)
+        add_fact(eid, text[:200], f"explicit/{agent_id}", agent_id, retention_class=retention)
+
+        _auto_hints = pre_extract(text)
+        _auto_entities = _auto_hints.get("entities", [])
+        _needle_entities = extract_needle_entities(text)
+        for ent in _auto_entities + _needle_entities:
+            ename = ent["name"].strip()
+            if ename and ename != agent_id:
+                etype = ent.get("type", "unknown")
+                _eid = upsert_entity(ename, etype, retention_class=retention)
+                add_fact(_eid, text[:200], f"explicit/{agent_id}", agent_id, retention_class=retention)
+    else:
+        _auto_hints = pre_extract(text)
 
     embed_input = text
     from config import CONTEXTUAL_AUGMENTATION_ENABLED
@@ -278,8 +294,7 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
 
     thought_type = (arguments.get("thought_type") or "").strip()
     if not thought_type:
-        hints = pre_extract(text)
-        thought_type = hints.get("thought_type", "general")
+        thought_type = _auto_hints.get("thought_type", "general")
 
     payload = {
         "agent_id": agent_id,
@@ -311,7 +326,6 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
 
     from config import BM25_ENABLED
     if BM25_ENABLED:
-        from graph import upsert_fts_chunk
         upsert_fts_chunk(
             qdrant_id=pid,
             text=text,
@@ -322,6 +336,114 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
             date=payload["date"],
             memory_type=arguments.get("memory_type", "general"),
         )
+
+    register_needle_tokens(pid, text, namespace=namespace, agent_id=agent_id)
+
+    # Generate micro-chunks for high-specificity tokens (IPs, crons, UUIDs, etc.)
+    _micro_chunks = _extract_needle_micro_chunks(text)
+    if _micro_chunks:
+        from config import MAX_MICRO_CHUNKS_PER_MEMORY
+        _micro_chunks = _micro_chunks[:MAX_MICRO_CHUNKS_PER_MEMORY]
+        _micro_embed_inputs = _micro_chunks
+        if CONTEXTUAL_AUGMENTATION_ENABLED:
+            _micro_embed_inputs = [
+                augment_chunk(mc, agent_id=agent_id, file_path=f"explicit/{agent_id}",
+                              date=now.strftime("%Y-%m-%d"))
+                for mc in _micro_chunks
+            ]
+        _micro_vecs = await embed_batch(_micro_embed_inputs)
+        _micro_points = []
+        for mi, (mc, mv) in enumerate(zip(_micro_chunks, _micro_vecs)):
+            _mc_id = str(uuid.uuid4())
+            _mc_payload = {
+                "agent_id": agent_id,
+                "text": mc,
+                "file_path": f"explicit/{agent_id}",
+                "file_type": "explicit",
+                "date": now.strftime("%Y-%m-%d"),
+                "team": TEAM_MAP.get(agent_id, "unknown"),
+                "chunk_index": mi + 1,
+                "namespace": namespace,
+                "version": 1,
+                "consistency_level": consistency,
+                "importance_score": importance,
+                "retention_class": retention,
+                "memory_type": arguments.get("memory_type", "general"),
+                "thought_type": thought_type,
+                "parent_id": pid,
+                "is_parent": False,
+            }
+            if retention in ("durable", "permanent"):
+                pass
+            elif ttl_expires_at is not None:
+                _mc_payload["ttl_expires_at"] = ttl_expires_at
+            _micro_points.append(PointStruct(id=_mc_id, vector=mv, payload=_mc_payload))
+
+            if BM25_ENABLED:
+                upsert_fts_chunk(
+                    qdrant_id=_mc_id, text=mc,
+                    file_path=f"explicit/{agent_id}", chunk_index=mi + 1,
+                    agent_id=agent_id, namespace=namespace,
+                    date=now.strftime("%Y-%m-%d"),
+                    memory_type=arguments.get("memory_type", "general"),
+                )
+            register_needle_tokens(_mc_id, mc, namespace=namespace, agent_id=agent_id)
+
+        if _micro_points:
+            client.upsert(collection_name=_coll, points=_micro_points)
+
+    # Reverse HyDE: fire-and-forget — generate hypothetical questions in background
+    from config import REVERSE_HYDE_ENABLED
+    if REVERSE_HYDE_ENABLED:
+        async def _reverse_hyde_background():
+            from hyde import generate_reverse_hyde_questions
+            _rh_questions = await generate_reverse_hyde_questions(text)
+            if not _rh_questions:
+                return
+            _rh_vecs = await embed_batch(_rh_questions)
+            _rh_points = []
+            for qi, (q, qv) in enumerate(zip(_rh_questions, _rh_vecs)):
+                _q_id = str(uuid.uuid4())
+                _rh_points.append(PointStruct(
+                    id=_q_id,
+                    vector=qv,
+                    payload={
+                        "agent_id": agent_id,
+                        "text": text,
+                        "file_path": f"explicit/{agent_id}",
+                        "file_type": "reverse_hyde",
+                        "date": now.strftime("%Y-%m-%d"),
+                        "team": TEAM_MAP.get(agent_id, "unknown"),
+                        "chunk_index": 0,
+                        "namespace": namespace,
+                        "version": 1,
+                        "importance_score": importance,
+                        "retention_class": retention,
+                        "memory_type": arguments.get("memory_type", "general"),
+                        "thought_type": thought_type,
+                        "source_memory_id": pid,
+                        "is_reverse_hyde": True,
+                        "reverse_hyde_question": q,
+                    },
+                ))
+            if _rh_points:
+                client.upsert(collection_name=_coll, points=_rh_points)
+            logger.info(
+                "reverse_hyde.background_complete",
+                extra={"memory_id": pid, "question_count": len(_rh_questions)},
+            )
+
+        def _rh_done(task: asyncio.Task):
+            if task.cancelled():
+                return
+            exc = task.exception()
+            if exc:
+                logger.warning("Reverse HyDE background task failed for %s: %s", pid, exc)
+
+        _rh_task = asyncio.create_task(
+            _reverse_hyde_background(), name=f"reverse_hyde_{pid}"
+        )
+        _rh_task.add_done_callback(_rh_done)
 
     from audit import log_memory_event
     await log_memory_event(
@@ -348,6 +470,20 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
         text=text,
         memory_type=arguments.get("memory_type", "general"),
         importance=importance,
+    )
+
+    logger.info(
+        "store_pipeline.complete",
+        extra={
+            "memory_id": pid,
+            "namespace": namespace,
+            "agent_id": agent_id,
+            "chunk_count": 1,
+            "micro_chunk_count": len(_micro_chunks),
+            "entity_count": len(entity_names) if entity_names else 1,
+            "reverse_hyde_queued": REVERSE_HYDE_ENABLED,
+            "duration_ms": int((time.monotonic() - _t_store) * 1000),
+        },
     )
 
     return success_response({

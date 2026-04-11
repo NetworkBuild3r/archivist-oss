@@ -1,6 +1,27 @@
 # Archivist Roadmap
 
-## Current: v1.5.0 (Journal exports & review fixes)
+## Current: v1.11.0 (Needle retrieval v2 + audit hardening)
+
+### ✅ v1.11.0 — Needle retrieval v2, delete cascade hardening, observability
+
+**Breaking change:** `delete_memory_complete()` now enumerates child Qdrant points via `scroll()` before deletion. Callers that mock `qdrant_client` in tests must add `client.scroll.return_value = ([], None)` to their fixtures.
+
+#### Needle retrieval v2 (v1.10 features, production-hardened in v1.11)
+- **Deterministic needle registry** — O(1) lookup for IPs, UUIDs, cron expressions, ticket IDs, and port numbers via SQLite `needle_registry` table with composite `(token, namespace)` index.
+- **Reverse HyDE (write-time questions)** — At store/index time, LLM generates hypothetical questions the content would answer. These question embeddings live in vector space alongside user queries for dramatically better needle recall.
+- **API micro-chunking** — High-specificity tokens (IPs, UUIDs, etc.) get 200-char focused micro-chunks with their own embeddings, capped at `MAX_MICRO_CHUNKS_PER_MEMORY` (default 5).
+- **Entity auto-extraction** — Deterministic regex + backtick/bold entity extraction feeds the knowledge graph at write time, not just curator-time.
+- **Contextual augmentation** — Metadata headers prepended to chunks before embedding (Anthropic "Contextual Retrieval" pattern). Raw text preserved for FTS5 to prevent IDF dilution.
+- **Uniform result types** — `ResultCandidate` dataclass + `RetrievalSource` enum ensure all retrieval sources (vector, BM25, literal, registry, graph) flow through the same RRF → threshold → reranker pipeline. No hardcoded score bypasses.
+- **Multi-query expansion** — Queries expanded into semantic variants, each embedded and searched independently, results fused via RRF.
+- **Embedding cache** — In-process LRU+TTL cache with immutable tuple storage (no defensive copies).
+
+#### v1.11.0 audit fixes (post-implementation hardening)
+- **Delete cascade: child artifact cleanup** — `delete_memory_complete()` now enumerates micro-chunk and reverse HyDE point IDs via Qdrant `scroll()` BEFORE deleting them, then cleans up FTS5 entries and needle registry rows for each child. Previously, only the primary memory's FTS5/registry rows were deleted, leaving orphaned micro-chunk and reverse HyDE entries in SQLite.
+- **Indexer gather resilience** — `asyncio.gather()` for parallel reverse HyDE generation now uses `return_exceptions=True`. Previously, an unhandled exception from one concurrent LLM call could cancel all others despite the internal try/except guard.
+- **Structured observability** — `store_pipeline.complete` and `retrieval_pipeline.complete` structured log events with per-operation metrics. Feature flag summary logged at startup via `config.feature_flags`.
+- **DRY needle patterns** — `NEEDLE_PATTERNS` consolidated to single source in `chunking.py`. Imported by `graph.py`, `pre_extractor.py`, and all consumers.
+- **FTS5 IDF quality** — All `upsert_fts_chunk` calls now pass raw text (not augmented text with metadata headers), preventing BM25 IDF dilution.
 
 ### ✅ v1.5.0 — Journal exports & post-deploy review fixes
 - **Markdown journal exports** — New `journal.py` module writes daily `YYYY-MM-DD.md` files to `JOURNAL_DIR` on every `archivist_store`. Human-readable, greppable, editable. Secondary to Qdrant — losing the journal has no effect on retrieval. Config: `JOURNAL_ENABLED` (default true), `JOURNAL_DIR` (default `/data/archivist/journal`).

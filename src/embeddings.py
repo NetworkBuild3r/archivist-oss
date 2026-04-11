@@ -26,7 +26,7 @@ logger = logging.getLogger("archivist.embeddings")
 
 _MAX_RETRIES = 3
 _RETRY_DELAYS = [1, 2, 4]
-_MAX_EMBED_CHARS = 1200
+_MAX_EMBED_CHARS = 2400
 _IS_NVIDIA = os.getenv("EMBED_PROVIDER", "").lower() == "nvidia" or "nvidia" in EMBED_URL.lower()
 
 _embed_client: httpx.AsyncClient | None = None
@@ -34,7 +34,7 @@ _embed_client: httpx.AsyncClient | None = None
 # ── Embedding vector cache (v1.10) ──────────────────────────────────────────
 _EMBED_CACHE_MAX = 2048
 _EMBED_CACHE_TTL = 3600  # 1 hour
-_embed_cache: OrderedDict[str, tuple[float, list[float]]] = OrderedDict()
+_embed_cache: OrderedDict[str, tuple[float, tuple[float, ...]]] = OrderedDict()
 _embed_cache_lock = threading.Lock()
 EMBED_CACHE_HITS = "embed_cache_hits_total"
 EMBED_CACHE_MISSES = "embed_cache_misses_total"
@@ -45,7 +45,7 @@ def _cache_key(text: str, model: str) -> str:
     return hashlib.sha256(f"{model}:{text}".encode()).hexdigest()[:24]
 
 
-def _cache_get(text: str, model: str) -> list[float] | None:
+def _cache_get(text: str, model: str) -> tuple[float, ...] | None:
     key = _cache_key(text, model)
     with _embed_cache_lock:
         entry = _embed_cache.get(key)
@@ -56,13 +56,13 @@ def _cache_get(text: str, model: str) -> list[float] | None:
             _embed_cache.pop(key, None)
             return None
         _embed_cache.move_to_end(key)
-        return list(vec)
+        return vec
 
 
 def _cache_put(text: str, model: str, vec: list[float]) -> None:
     key = _cache_key(text, model)
     with _embed_cache_lock:
-        _embed_cache[key] = (time.monotonic(), list(vec))
+        _embed_cache[key] = (time.monotonic(), tuple(vec))
         _embed_cache.move_to_end(key)
         while len(_embed_cache) > _EMBED_CACHE_MAX:
             _embed_cache.popitem(last=False)

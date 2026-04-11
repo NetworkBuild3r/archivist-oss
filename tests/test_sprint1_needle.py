@@ -160,7 +160,7 @@ class TestEmbeddingCache:
         vec = [0.1, 0.2, 0.3]
         _cache_put("hello world", "test-model", vec)
         cached = _cache_get("hello world", "test-model")
-        assert cached == vec
+        assert cached == vec or cached == tuple(vec)
 
     def test_cache_miss_returns_none(self):
         from embeddings import _cache_get

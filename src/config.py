@@ -4,8 +4,11 @@ All values have sensible defaults for local / docker-compose development.
 Override via .env or environment variables in production.
 """
 
+import logging
 import os
 import yaml
+
+logger = logging.getLogger("archivist.config")
 
 
 def _env_bool(key: str, default: str = "true") -> bool:
@@ -153,13 +156,20 @@ BM25_WEIGHT = float(os.getenv("BM25_WEIGHT", "0.3"))
 VECTOR_WEIGHT = float(os.getenv("VECTOR_WEIGHT", "0.7"))
 
 # ── Needle-finding: query expansion + dynamic threshold (v1.10) ──────────────
-QUERY_EXPANSION_ENABLED = _env_bool("QUERY_EXPANSION_ENABLED", "false")
+QUERY_EXPANSION_ENABLED = _env_bool("QUERY_EXPANSION_ENABLED", "true")
 QUERY_EXPANSION_COUNT = int(os.getenv("QUERY_EXPANSION_COUNT", "3"))
 QUERY_EXPANSION_MODEL = os.getenv("QUERY_EXPANSION_MODEL", "").strip()
-DYNAMIC_THRESHOLD_ENABLED = _env_bool("DYNAMIC_THRESHOLD_ENABLED", "false")
+DYNAMIC_THRESHOLD_ENABLED = _env_bool("DYNAMIC_THRESHOLD_ENABLED", "true")
 
 # ── Contextual chunk augmentation (v1.10 — index-time enrichment) ────────────
-CONTEXTUAL_AUGMENTATION_ENABLED = _env_bool("CONTEXTUAL_AUGMENTATION_ENABLED", "false")
+CONTEXTUAL_AUGMENTATION_ENABLED = _env_bool("CONTEXTUAL_AUGMENTATION_ENABLED", "true")
+
+# ── Reverse HyDE: write-time question generation (v2.0) ──────────────────────
+REVERSE_HYDE_ENABLED = _env_bool("REVERSE_HYDE_ENABLED", "true")
+REVERSE_HYDE_QUESTIONS_PER_CHUNK = int(os.getenv("REVERSE_HYDE_QUESTIONS_PER_CHUNK", "3"))
+
+# ── Micro-chunk limits (v1.10 — prevent unbounded store latency) ─────────────
+MAX_MICRO_CHUNKS_PER_MEMORY = int(os.getenv("MAX_MICRO_CHUNKS_PER_MEMORY", "5"))
 
 # ── HNSW tuning (v1.10 — recall over speed) ─────────────────────────────────
 QDRANT_HNSW_M = int(os.getenv("QDRANT_HNSW_M", "32"))
@@ -225,3 +235,43 @@ def _load_team_map() -> dict[str, str]:
 
 
 TEAM_MAP: dict[str, str] = _load_team_map()
+
+
+# ── Feature flag summary (logged at startup) ─────────────────────────────────
+def _log_feature_flags() -> None:
+    """Log all feature flags once at import time for operational visibility."""
+    flags = {
+        "BM25_ENABLED": BM25_ENABLED,
+        "QUERY_EXPANSION_ENABLED": QUERY_EXPANSION_ENABLED,
+        "DYNAMIC_THRESHOLD_ENABLED": DYNAMIC_THRESHOLD_ENABLED,
+        "CONTEXTUAL_AUGMENTATION_ENABLED": CONTEXTUAL_AUGMENTATION_ENABLED,
+        "REVERSE_HYDE_ENABLED": REVERSE_HYDE_ENABLED,
+        "GRAPH_RETRIEVAL_ENABLED": GRAPH_RETRIEVAL_ENABLED,
+        "TIERED_CONTEXT_ENABLED": TIERED_CONTEXT_ENABLED,
+        "HOT_CACHE_ENABLED": HOT_CACHE_ENABLED,
+        "RERANK_ENABLED": RERANK_ENABLED,
+        "TOPIC_ROUTING_ENABLED": TOPIC_ROUTING_ENABLED,
+        "TEMPORAL_INTENT_ENABLED": TEMPORAL_INTENT_ENABLED,
+        "BM25_RESCUE_ENABLED": BM25_RESCUE_ENABLED,
+        "ADAPTIVE_VECTOR_LIMIT_ENABLED": ADAPTIVE_VECTOR_LIMIT_ENABLED,
+        "NAMESPACE_SHARDING_ENABLED": NAMESPACE_SHARDING_ENABLED,
+        "SINGLE_COLLECTION_MODE": SINGLE_COLLECTION_MODE,
+        "QUERY_CLASSIFICATION_ENABLED": QUERY_CLASSIFICATION_ENABLED,
+        "CONFLICT_CHECK_ON_STORE": CONFLICT_CHECK_ON_STORE,
+        "JOURNAL_ENABLED": JOURNAL_ENABLED,
+        "METRICS_ENABLED": METRICS_ENABLED,
+    }
+    enabled = [k for k, v in flags.items() if v]
+    disabled = [k for k, v in flags.items() if not v]
+    logger.info(
+        "config.feature_flags",
+        extra={
+            "enabled": enabled,
+            "disabled": disabled,
+            "enabled_count": len(enabled),
+            "disabled_count": len(disabled),
+        },
+    )
+
+
+_log_feature_flags()

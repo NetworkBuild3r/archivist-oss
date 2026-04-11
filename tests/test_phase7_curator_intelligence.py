@@ -44,18 +44,20 @@ class TestCuratorQueue:
         assert s["pending"] >= 2
         assert s["total"] >= 2
 
-    def test_drain_applies_ops(self):
+    @pytest.mark.asyncio
+    async def test_drain_applies_ops(self):
         from curator_queue import enqueue, drain, stats
         enqueue("skip_store", {"reason": "test"})
-        applied = drain(limit=10)
+        applied = await drain(limit=10)
         assert len(applied) >= 1
         assert applied[0]["status"] == "applied"
         s = stats()
         assert s["pending"] == 0
 
-    def test_drain_empty_returns_empty(self):
+    @pytest.mark.asyncio
+    async def test_drain_empty_returns_empty(self):
         from curator_queue import drain
-        applied = drain(limit=10)
+        applied = await drain(limit=10)
         assert applied == []
 
 

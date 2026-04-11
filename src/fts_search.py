@@ -1,11 +1,13 @@
 """BM25/FTS5 hybrid search — keyword retrieval fused with vector results.
 
 v1.10: Dual-mode BM25 (AND + OR), stopword filtering, RRF fusion.
+v1.11: Non-stemmed exact table for identifier/IP token matching.
 """
 
 import logging
+import re
 from config import BM25_ENABLED, BM25_WEIGHT, VECTOR_WEIGHT
-from graph import search_fts
+from graph import search_fts, search_fts_exact
 from rank_fusion import rrf_merge
 import health
 
@@ -23,6 +25,15 @@ _STOPWORDS = frozenset({
     "what", "which", "who", "whom", "how", "when", "where", "why",
     "all", "each", "every", "any", "some",
 })
+
+_EXACT_TOKEN_RE = re.compile(
+    r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}"   # IP addresses
+    r"|[A-Z]{2,}-\d{4,}"                       # ticket/employee IDs
+    r"|[0-9a-f]{8}-[0-9a-f]{4}"                # UUID prefix
+    r"|:\d{2,5}\b"                              # port numbers
+    r"|[\d,]+\s*(?:MiB|GiB|KiB|ms|KB|MB|GB)",  # numeric with units
+    re.I,
+)
 
 
 def _clean_token(t: str) -> str:
@@ -121,6 +132,19 @@ def search_bm25(
                 rankings.append(phrase_hits)
         except Exception:
             pass
+
+    if _EXACT_TOKEN_RE.search(query):
+        exact_q = _fts5_safe_query(query)
+        if exact_q:
+            try:
+                exact_hits = search_fts_exact(
+                    query=exact_q, namespace=namespace, agent_id=agent_id,
+                    memory_type=memory_type, limit=limit,
+                )
+                if exact_hits:
+                    rankings.append(exact_hits)
+            except Exception:
+                pass
 
     if not rankings:
         return []

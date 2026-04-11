@@ -12,7 +12,7 @@ Vector search + knowledge graph + active curation — one MCP endpoint.</p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="License" />
-  <img src="https://img.shields.io/badge/version-v1.7.0-brightgreen" alt="Version" />
+  <img src="https://img.shields.io/badge/version-v1.11.0-brightgreen" alt="Version" />
   <img src="https://img.shields.io/badge/protocol-MCP-purple" alt="MCP" />
   <img src="https://img.shields.io/badge/models-any%20OpenAI--compatible-orange" alt="Models" />
 </p>
@@ -31,6 +31,18 @@ curl http://localhost:3100/health          # {"status":"ok"}
 Full Docker options (host vLLM, `/opt/appdata` volumes, overrides): [`docs/DOCKER.md`](docs/DOCKER.md).
 
 Point any MCP client at `http://localhost:3100/mcp` — done. Your agents now have long-term memory with search, RBAC, knowledge graphs, and active curation out of the box. Legacy SSE compatibility remains available at `http://localhost:3100/mcp/sse`.
+
+---
+
+## What's New in v1.11
+
+**Needle Retrieval v2** — structured tokens (IPs, UUIDs, cron expressions, ticket IDs) now have **100% deterministic recall** via a dedicated registry, write-time question embeddings (Reverse HyDE), and focused micro-chunk vectors. Combined with uniform result typing and RRF fusion, needle-in-the-haystack queries that previously required luck now reliably surface.
+
+**Delete cascade hardening** — deleting a memory now fully cleans up all derived artifacts: micro-chunk FTS5 entries, reverse HyDE FTS5 entries, and per-child needle registry rows. Previously these were orphaned on delete.
+
+**Structured observability** — every store and retrieval operation emits a structured log event with per-stage metrics. Feature flags are logged at startup for instant configuration visibility.
+
+See [`CHANGELOG.md`](CHANGELOG.md) for the full list including breaking changes.
 
 ---
 
@@ -203,7 +215,7 @@ This starts:
 
 ```bash
 curl http://localhost:3100/health
-# {"status": "ok", "service": "archivist", "version": "1.0.0"}
+# {"status": "ok", "service": "archivist", "version": "1.11.0"}
 ```
 
 ### 4. Connect your agents
@@ -426,8 +438,14 @@ The codebase is organized by domain:
 | `graph_retrieval.py` | Hybrid vector+graph, temporal decay, multi-hop |
 | `fts_search.py` | BM25 search + vector/BM25 score fusion |
 | `indexer.py` | File chunking, embedding, Qdrant + FTS5 dual-write |
-| `embeddings.py` | Embedding API client |
+| `embeddings.py` | Embedding API client with LRU+TTL cache |
 | `llm.py` | LLM API client |
+| `memory_lifecycle.py` | Unified delete/archive cascade (7 artifact types) |
+| `result_types.py` | `ResultCandidate` dataclass, `RetrievalSource` enum |
+| `contextual_augment.py` | Chunk metadata augmentation for embedding enrichment |
+| `chunking.py` | Text chunking (flat, hierarchical, needle micro-chunks) |
+| `pre_extractor.py` | Deterministic entity/date/thought-type extraction |
+| `hyde.py` | HyDE + Reverse HyDE (write-time question generation) |
 | **Memory Intelligence** | |
 | `curator.py` | Background entity extraction loop |
 | `curator_queue.py` | Write-ahead queue for deferred curation ops |
@@ -470,10 +488,14 @@ The codebase is organized by domain:
 | `importance_score` | float | 0.0-1.0 retention score |
 | `ttl_expires_at` | integer | Unix timestamp for expiry |
 | `checksum` | keyword | Content hash for dedup |
+| `source_memory_id` | keyword | Parent memory for reverse HyDE vectors |
+| `is_reverse_hyde` | bool | Reverse HyDE question embedding flag |
+| `reverse_hyde_question` | text | The generated question (for debugging) |
+| `thought_type` | keyword | Semantic classification (decision/lesson/insight/...) |
 
 **SQLite tables (17):**
 
-`entities`, `relationships`, `facts`, `memory_chunks`, `memory_fts` (FTS5), `curator_state`, `audit_log`, `memory_versions`, `trajectories`, `tips`, `annotations`, `ratings`, `memory_outcomes`, `skills`, `skill_versions`, `skill_lessons`, `skill_events`, `retrieval_logs`, `curator_queue`, `memory_hotness`, `skill_relations`
+`entities`, `relationships`, `facts`, `memory_chunks`, `memory_fts` (FTS5), `memory_fts_exact` (FTS5), `needle_registry`, `curator_state`, `audit_log`, `memory_versions`, `trajectories`, `tips`, `annotations`, `ratings`, `memory_outcomes`, `skills`, `skill_versions`, `skill_lessons`, `skill_events`, `retrieval_logs`, `curator_queue`, `memory_hotness`, `skill_relations`
 
 ### Three-Layer Memory Hierarchy
 
@@ -660,6 +682,7 @@ Archivist is integration and execution on top of public work from the agent-memo
 
 | Document | Covers |
 |----------|--------|
+| [`CHANGELOG.md`](CHANGELOG.md) | Version history, breaking changes, migration notes |
 | [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) | Three-tier benchmark results, reproduction steps, competitive comparison |
 | [`docs/DOCKER.md`](docs/DOCKER.md) | Docker Compose stack, host vLLM + cloud LLM, `/opt/appdata` volumes |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Module map, data flow diagrams, storage schema, per-version operational notes |

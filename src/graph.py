@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 
 from config import SQLITE_PATH
+from chunking import NEEDLE_PATTERNS
 
 # Serialize writes — WAL allows concurrent readers; writers must not race.
 GRAPH_WRITE_LOCK = threading.Lock()
@@ -203,14 +204,18 @@ def _migrate_schema():
 
 
 def _init_fts5():
-    """Create the FTS5 virtual table if it doesn't already exist.
+    """Create the FTS5 virtual tables if they don't already exist.
 
     Separated from init_schema() because FTS5 contentless-delete tables
     need a slightly different DDL path and tolerate 'already exists' gracefully.
 
-    On success we run a trivial read against ``memory_fts`` and register
-    ``fts5`` as healthy; on failure we register unhealthy so downstream
-    BM25 search can skip FTS without pretending the index exists.
+    Creates two tables:
+      - ``memory_fts``: Porter-stemmed for recall-oriented BM25 search.
+      - ``memory_fts_exact``: Non-stemmed (unicode61 only) for exact token matching
+        of identifiers, IPs, cron expressions, etc.
+
+    On success we run a trivial read and register ``fts5`` as healthy;
+    on failure we register unhealthy so downstream BM25 search can skip FTS.
     """
     import health
 
@@ -222,11 +227,16 @@ def _init_fts5():
                 "USING fts5(text, content='memory_chunks', content_rowid='rowid', "
                 "tokenize='porter unicode61')"
             )
+            conn.execute(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts_exact "
+                "USING fts5(text, content='memory_chunks', content_rowid='rowid', "
+                "tokenize='unicode61')"
+            )
             conn.commit()
             conn.execute("SELECT count(*) FROM memory_fts LIMIT 1")
+            conn.execute("SELECT count(*) FROM memory_fts_exact LIMIT 1")
             health.register("fts5", healthy=True)
         except Exception as e:
-            # Downstream: search_bm25() checks is_healthy("fts5") and returns [].
             health.register("fts5", healthy=False, detail=str(e))
         finally:
             conn.close()
@@ -242,7 +252,7 @@ def upsert_fts_chunk(
     date: str = "",
     memory_type: str = "general",
 ):
-    """Insert or replace a chunk in memory_chunks and sync to FTS5 index."""
+    """Insert or replace a chunk in memory_chunks and sync to both FTS5 indexes."""
     with GRAPH_WRITE_LOCK:
         conn = get_db()
         try:
@@ -254,6 +264,13 @@ def upsert_fts_chunk(
                     "INSERT INTO memory_fts(memory_fts, rowid, text) VALUES('delete', ?, ?)",
                     (old["rowid"], old["text"]),
                 )
+                try:
+                    conn.execute(
+                        "INSERT INTO memory_fts_exact(memory_fts_exact, rowid, text) VALUES('delete', ?, ?)",
+                        (old["rowid"], old["text"]),
+                    )
+                except Exception:
+                    pass
                 conn.execute("DELETE FROM memory_chunks WHERE qdrant_id = ?", (qdrant_id,))
 
             conn.execute(
@@ -266,12 +283,43 @@ def upsert_fts_chunk(
                 "INSERT INTO memory_fts (rowid, text) VALUES (?, ?)",
                 (rowid, text),
             )
+            try:
+                conn.execute(
+                    "INSERT INTO memory_fts_exact (rowid, text) VALUES (?, ?)",
+                    (rowid, text),
+                )
+            except Exception:
+                pass
             conn.commit()
         except Exception as e:
             logging.getLogger("archivist.graph").warning("FTS upsert failed for %s: %s", qdrant_id, e)
             conn.rollback()
         finally:
             conn.close()
+
+
+def _delete_fts_rows(conn, rows):
+    """Delete FTS5 shadow-table entries for the given memory_chunks rows.
+
+    Best-effort — FTS5 extension may be unavailable.
+    """
+    for row in rows:
+        try:
+            conn.execute(
+                "INSERT INTO memory_fts (memory_fts, rowid, text) VALUES ('delete', ?, "
+                "(SELECT text FROM memory_chunks WHERE rowid = ?))",
+                (row["rowid"], row["rowid"]),
+            )
+        except Exception:
+            pass
+        try:
+            conn.execute(
+                "INSERT INTO memory_fts_exact (memory_fts_exact, rowid, text) VALUES ('delete', ?, "
+                "(SELECT text FROM memory_chunks WHERE rowid = ?))",
+                (row["rowid"], row["rowid"]),
+            )
+        except Exception:
+            pass
 
 
 def delete_fts_chunks_by_file(file_path: str):
@@ -286,20 +334,37 @@ def delete_fts_chunks_by_file(file_path: str):
             rows = conn.execute(
                 "SELECT rowid FROM memory_chunks WHERE file_path = ?", (file_path,)
             ).fetchall()
-            for row in rows:
-                try:
-                    conn.execute(
-                        "INSERT INTO memory_fts (memory_fts, rowid, text) VALUES ('delete', ?, "
-                        "(SELECT text FROM memory_chunks WHERE rowid = ?))",
-                        (row["rowid"], row["rowid"]),
-                    )
-                except Exception:
-                    pass  # FTS5 unavailable — still delete the chunks row
+            _delete_fts_rows(conn, rows)
             conn.execute("DELETE FROM memory_chunks WHERE file_path = ?", (file_path,))
             conn.commit()
         except Exception as e:
             logging.getLogger("archivist.graph").warning("FTS delete failed for %s: %s", file_path, e)
             conn.rollback()
+        finally:
+            conn.close()
+
+
+def delete_fts_chunks_by_qdrant_id(qdrant_id: str) -> int:
+    """Remove FTS5 entries and memory_chunks rows for a single Qdrant point ID.
+
+    Returns the number of deleted memory_chunks rows.
+    """
+    with GRAPH_WRITE_LOCK:
+        conn = get_db()
+        try:
+            rows = conn.execute(
+                "SELECT rowid FROM memory_chunks WHERE qdrant_id = ?", (qdrant_id,)
+            ).fetchall()
+            _delete_fts_rows(conn, rows)
+            cur = conn.execute("DELETE FROM memory_chunks WHERE qdrant_id = ?", (qdrant_id,))
+            conn.commit()
+            return cur.rowcount
+        except Exception as e:
+            logging.getLogger("archivist.graph").warning(
+                "FTS delete by qdrant_id failed for %s: %s", qdrant_id, e,
+            )
+            conn.rollback()
+            return 0
         finally:
             conn.close()
 
@@ -345,6 +410,52 @@ def search_fts(query: str, namespace: str = "", agent_id: str = "",
         return results
     except Exception as e:
         logging.getLogger("archivist.graph").warning("FTS search failed: %s", e)
+        return []
+    finally:
+        conn.close()
+
+
+def search_fts_exact(query: str, namespace: str = "", agent_id: str = "",
+                     memory_type: str = "", limit: int = 30) -> list[dict]:
+    """Non-stemmed BM25 search via memory_fts_exact for exact token matching."""
+    conn = get_db()
+    try:
+        where_clauses = []
+        params: list = []
+
+        if namespace:
+            where_clauses.append("mc.namespace = ?")
+            params.append(namespace)
+        if agent_id:
+            where_clauses.append("mc.agent_id = ?")
+            params.append(agent_id)
+        if memory_type:
+            where_clauses.append("mc.memory_type = ?")
+            params.append(memory_type)
+
+        where_sql = (" AND " + " AND ".join(where_clauses)) if where_clauses else ""
+
+        sql = (
+            "SELECT mc.qdrant_id, mc.file_path, mc.chunk_index, mc.agent_id, "
+            "mc.namespace, mc.date, mc.memory_type, mc.text, "
+            "rank AS bm25_rank "
+            "FROM memory_fts_exact "
+            "JOIN memory_chunks mc ON memory_fts_exact.rowid = mc.rowid "
+            f"WHERE memory_fts_exact MATCH ? {where_sql} "
+            "ORDER BY rank "
+            f"LIMIT ?"
+        )
+        params = [query] + params + [limit]
+
+        cur = conn.execute(sql, params)
+        results = []
+        for row in cur.fetchall():
+            r = dict(row)
+            r["bm25_score"] = -r.pop("bm25_rank", 0)
+            results.append(r)
+        return results
+    except Exception as e:
+        logging.getLogger("archivist.graph").warning("FTS exact search failed: %s", e)
         return []
     finally:
         conn.close()
@@ -685,3 +796,110 @@ def set_curator_state(key: str, value: str):
         )
         conn.commit()
         conn.close()
+
+
+# ── Deterministic needle registry (v2.0 — 100% recall for structured tokens) ─
+
+_ensure_needle_registry = schema_guard("""
+    CREATE TABLE IF NOT EXISTS needle_registry (
+        token TEXT NOT NULL,
+        memory_id TEXT NOT NULL,
+        namespace TEXT NOT NULL DEFAULT '',
+        agent_id TEXT NOT NULL DEFAULT '',
+        chunk_text TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (token, memory_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_needle_token ON needle_registry(token);
+    CREATE INDEX IF NOT EXISTS idx_needle_token_ns ON needle_registry(token, namespace);
+""")
+
+
+def register_needle_tokens(memory_id: str, text: str, namespace: str = "", agent_id: str = ""):
+    """Extract and register high-specificity tokens from text for O(1) lookup."""
+    _ensure_needle_registry()
+    tokens: set[str] = set()
+    for pat in NEEDLE_PATTERNS:
+        for mt in pat.finditer(text):
+            tok = mt.group().strip()
+            if tok and len(tok) >= 3:
+                tokens.add(tok)
+    if not tokens:
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    snippet = text[:500]
+    with GRAPH_WRITE_LOCK:
+        conn = get_db()
+        try:
+            for tok in tokens:
+                conn.execute(
+                    "INSERT OR REPLACE INTO needle_registry "
+                    "(token, memory_id, namespace, agent_id, chunk_text, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (tok, memory_id, namespace, agent_id, snippet, now),
+                )
+            conn.commit()
+        except Exception as e:
+            logging.getLogger("archivist.graph").warning("Needle registry insert failed: %s", e)
+            conn.rollback()
+        finally:
+            conn.close()
+
+
+def lookup_needle_tokens(query: str, namespace: str = "", agent_id: str = "") -> list[dict]:
+    """Find exact token matches in the needle registry. O(1) per token."""
+    _ensure_needle_registry()
+    tokens: set[str] = set()
+    for pat in NEEDLE_PATTERNS:
+        for mt in pat.finditer(query):
+            tok = mt.group().strip()
+            if tok and len(tok) >= 3:
+                tokens.add(tok)
+    if not tokens:
+        return []
+    conn = get_db()
+    try:
+        results: list[dict] = []
+        seen_ids: set[str] = set()
+        for tok in tokens:
+            where = "WHERE token = ?"
+            params: list = [tok]
+            if namespace:
+                where += " AND namespace = ?"
+                params.append(namespace)
+            if agent_id:
+                where += " AND agent_id = ?"
+                params.append(agent_id)
+            cur = conn.execute(f"SELECT * FROM needle_registry {where}", params)
+            for row in cur.fetchall():
+                r = dict(row)
+                if r["memory_id"] not in seen_ids:
+                    seen_ids.add(r["memory_id"])
+                    results.append(r)
+        return results
+    except Exception as e:
+        logging.getLogger("archivist.graph").warning("Needle registry lookup failed: %s", e)
+        return []
+    finally:
+        conn.close()
+
+
+def delete_needle_tokens_by_memory(memory_id: str) -> int:
+    """Remove all registry entries for a given memory ID.
+
+    Returns the number of rows deleted.
+    """
+    _ensure_needle_registry()
+    with GRAPH_WRITE_LOCK:
+        conn = get_db()
+        try:
+            cur = conn.execute("DELETE FROM needle_registry WHERE memory_id = ?", (memory_id,))
+            conn.commit()
+            return cur.rowcount
+        except Exception as e:
+            logging.getLogger("archivist.graph").warning(
+                "Needle registry delete failed for %s: %s", memory_id, e,
+            )
+            return 0
+        finally:
+            conn.close()
