@@ -48,7 +48,7 @@ def ensure_qdrant_collection():
     before qdrant is listening; avoids brittle image-specific healthchecks).
     """
     from qdrant_client import QdrantClient
-    from qdrant_client.models import VectorParams, Distance, PayloadSchemaType, HnswConfigDiff
+    from qdrant_client.models import VectorParams, Distance, PayloadSchemaType, HnswConfigDiff, OptimizersConfigDiff
 
     deadline = time.monotonic() + 120
     last_err: Exception | None = None
@@ -86,6 +86,14 @@ def ensure_qdrant_collection():
                 "Qdrant collection '%s' exists: %d points (%d-dim)",
                 QDRANT_COLLECTION, info.points_count, current_dim,
             )
+            try:
+                client.update_collection(
+                    collection_name=QDRANT_COLLECTION,
+                    optimizers_config=OptimizersConfigDiff(indexing_threshold=0),
+                )
+                logger.info("Applied indexing_threshold=0 to existing collection '%s'", QDRANT_COLLECTION)
+            except Exception as e:
+                logger.warning("Failed to update optimizers_config on '%s': %s", QDRANT_COLLECTION, e)
 
     if needs_create:
         client.create_collection(
@@ -95,9 +103,10 @@ def ensure_qdrant_collection():
                 m=QDRANT_HNSW_M,
                 ef_construct=QDRANT_HNSW_EF_CONSTRUCT,
             ),
+            optimizers_config=OptimizersConfigDiff(indexing_threshold=0),
         )
         logger.info(
-            "Created Qdrant collection '%s' (%d-dim, HNSW m=%d ef_construct=%d)",
+            "Created Qdrant collection '%s' (%d-dim, HNSW m=%d ef_construct=%d, indexing_threshold=0)",
             QDRANT_COLLECTION, VECTOR_DIM, QDRANT_HNSW_M, QDRANT_HNSW_EF_CONSTRUCT,
         )
 

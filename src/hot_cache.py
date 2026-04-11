@@ -16,7 +16,7 @@ import threading
 import time
 from collections import OrderedDict
 
-from config import HOT_CACHE_ENABLED, HOT_CACHE_MAX_PER_AGENT, HOT_CACHE_TTL_SECONDS
+from config import HOT_CACHE_ENABLED, HOT_CACHE_MAX_PER_AGENT, HOT_CACHE_TTL_SECONDS, WRITE_FENCE_WINDOW_S
 
 logger = logging.getLogger("archivist.cache")
 
@@ -26,6 +26,43 @@ _lock = threading.Lock()
 _agent_caches: dict[str, OrderedDict] = {}
 _MAX_AGENT_IDS = 256
 _last_agent_prune = 0.0
+
+# Write-fence: track recent writes per namespace for read-your-own-write.
+# Process-local — in multi-worker uvicorn, each worker maintains its own dict.
+# Cross-worker coherence requires shared state (Redis) if workers > 1.
+_recent_writes: dict[str, float] = {}  # namespace -> monotonic timestamp
+
+
+def mark_write(namespace: str) -> None:
+    """Record that a write just happened for *namespace*.
+
+    Called at the TOP of the store path (before Qdrant upsert) so the search
+    path can skip the cache during the write-fence window.
+
+    Prunes stale entries to prevent unbounded growth.
+    """
+    now = time.monotonic()
+    with _lock:
+        _recent_writes[namespace] = now
+        stale = [k for k, v in _recent_writes.items() if now - v > WRITE_FENCE_WINDOW_S * 10]
+        for k in stale:
+            del _recent_writes[k]
+
+
+def namespace_recently_written(namespace: str, window_s: float | None = None) -> bool:
+    """Return True if *namespace* had a write within the last *window_s* seconds.
+
+    For fleet-wide queries (``namespace=""``), returns True if ANY namespace
+    was written recently, since a fleet-wide cached result could contain data
+    from any namespace.
+    """
+    if window_s is None:
+        window_s = WRITE_FENCE_WINDOW_S
+    now = time.monotonic()
+    with _lock:
+        if not namespace:
+            return any((now - ts) < window_s for ts in _recent_writes.values())
+        return (now - _recent_writes.get(namespace, 0)) < window_s
 
 
 def _cache_key(query: str, namespace: str = "", tier: str = "l2",
@@ -87,7 +124,11 @@ def put(agent_id: str, query: str, result: dict, namespace: str = "",
 
 
 def invalidate_namespace(namespace: str) -> int:
-    """Evict all cache entries whose namespace matches. Called on writes."""
+    """Evict all cache entries whose namespace matches OR were fleet-wide.
+
+    A fleet-wide cached result (empty ``_cache_namespace``) may contain stale
+    data from any namespace, so writes must also evict those entries.
+    """
     if not HOT_CACHE_ENABLED:
         return 0
 
@@ -97,13 +138,13 @@ def invalidate_namespace(namespace: str) -> int:
             to_remove = []
             for key, (ts, value) in cache.items():
                 cached_ns = value.get("_cache_namespace", "")
-                if cached_ns == namespace:
+                if cached_ns == namespace or cached_ns == "":
                     to_remove.append(key)
             for key in to_remove:
                 del cache[key]
                 evicted += 1
     if evicted:
-        logger.debug("Cache invalidation: evicted %d entries for namespace %s", evicted, namespace)
+        logger.debug("Cache invalidation: evicted %d entries for namespace=%s (incl. fleet-wide)", evicted, namespace)
     try:
         import namespace_inventory
 

@@ -197,6 +197,13 @@ DEFAULT_CONTEXT_BUDGET = int(os.getenv("DEFAULT_CONTEXT_BUDGET", "128000"))
 JOURNAL_ENABLED = _env_bool("JOURNAL_ENABLED")
 JOURNAL_DIR = os.getenv("JOURNAL_DIR", "/data/archivist/journal")
 
+# ── Needle recall v3 tuning (v1.12) ──────────────────────────────────────────
+WRITE_FENCE_WINDOW_S = float(os.getenv("WRITE_FENCE_WINDOW_S", "2.0"))
+FRESHNESS_BOOST_FACTOR = float(os.getenv("FRESHNESS_BOOST_FACTOR", "1.3"))
+FRESHNESS_WINDOW_S = float(os.getenv("FRESHNESS_WINDOW_S", "60"))
+BM25_RESCUE_FLOOR = float(os.getenv("BM25_RESCUE_FLOOR", "0.2"))
+BM25_RESCUE_MIN_ABSOLUTE = float(os.getenv("BM25_RESCUE_MIN_ABSOLUTE", "0.3"))
+
 # ── Server ────────────────────────────────────────────────────────────────────
 MCP_PORT = int(os.getenv("MCP_PORT", "3100"))
 
@@ -270,6 +277,11 @@ def _log_feature_flags() -> None:
             "disabled": disabled,
             "enabled_count": len(enabled),
             "disabled_count": len(disabled),
+            "WRITE_FENCE_WINDOW_S": WRITE_FENCE_WINDOW_S,
+            "FRESHNESS_BOOST_FACTOR": FRESHNESS_BOOST_FACTOR,
+            "FRESHNESS_WINDOW_S": FRESHNESS_WINDOW_S,
+            "BM25_RESCUE_FLOOR": BM25_RESCUE_FLOOR,
+            "BM25_RESCUE_MIN_ABSOLUTE": BM25_RESCUE_MIN_ABSOLUTE,
         },
     )
 

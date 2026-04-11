@@ -156,6 +156,7 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
         contents = [c["content"] for c in hier_chunks]
         augmented_contents = contents
         if CONTEXTUAL_AUGMENTATION_ENABLED:
+            _hints_for_augment = [pre_extract(c["content"]) for c in hier_chunks]
             augmented_contents = [
                 augment_chunk(
                     c["content"],
@@ -163,8 +164,9 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
                     file_path=meta.get("file_path", ""),
                     date=meta.get("date", ""),
                     topic="",
+                    hints=h,
                 )
-                for c in hier_chunks
+                for c, h in zip(hier_chunks, _hints_for_augment)
             ]
         vectors = await embed_batch(augmented_contents)
 
@@ -180,7 +182,7 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
                 tiers = tier_map.get(chunk_meta["parent_id"], {})
 
             topics = detect_topics(chunk_meta["content"]) if TOPIC_ROUTING_ENABLED else []
-            hints = pre_extract(chunk_meta["content"])
+            hints = _hints_for_augment[i] if CONTEXTUAL_AUGMENTATION_ENABLED else pre_extract(chunk_meta["content"])
             _hints_by_id[pid] = hints
             payload = {
                 **meta,
@@ -212,14 +214,16 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
         embed_texts = chunks
         augmented_flat: list[str] = []
         if CONTEXTUAL_AUGMENTATION_ENABLED:
+            _hints_flat = [pre_extract(c) for c in chunks]
             augmented_flat = [
                 augment_chunk(
                     c,
                     agent_id=meta.get("agent_id", ""),
                     file_path=meta.get("file_path", ""),
                     date=meta.get("date", ""),
+                    hints=h,
                 )
-                for c in chunks
+                for c, h in zip(chunks, _hints_flat)
             ]
             embed_texts = augmented_flat
         vectors = await embed_batch(embed_texts)
@@ -231,7 +235,7 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
             checksum = compute_memory_checksum(chunk, meta["agent_id"], meta["namespace"])
 
             topics = detect_topics(chunk) if TOPIC_ROUTING_ENABLED else []
-            hints = pre_extract(chunk)
+            hints = _hints_flat[i] if CONTEXTUAL_AUGMENTATION_ENABLED else pre_extract(chunk)
             _hints_by_id[pid] = hints
             payload = {
                 **meta,
