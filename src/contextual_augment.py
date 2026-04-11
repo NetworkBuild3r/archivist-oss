@@ -18,16 +18,12 @@ def augment_chunk(
     date: str = "",
     topic: str = "",
     thought_type: str = "",
-    hints: dict | None = None,
 ) -> str:
     """Prepend a contextual header to chunk text for embedding.
 
     The header includes structured metadata (agent, file, date, topic)
     and key phrases extracted deterministically from the text.
     The original text follows after a separator.
-
-    When *hints* (the result of ``pre_extract(text)``) is supplied, the
-    function reuses it instead of calling ``pre_extract`` again.
     """
     parts: list[str] = []
 
@@ -46,8 +42,7 @@ def augment_chunk(
     if meta_fields:
         parts.append("[" + " | ".join(meta_fields) + "]")
 
-    if hints is None:
-        hints = pre_extract(text)
+    hints = pre_extract(text)
     entities = hints.get("entities", [])
     if entities:
         names = [e["name"] for e in entities[:8]]

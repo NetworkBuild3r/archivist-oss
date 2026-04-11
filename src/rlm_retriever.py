@@ -10,7 +10,6 @@ Phase 5 (v0.8): hot cache, retrieval trajectory logging.
 import asyncio
 import logging
 import time
-from datetime import datetime, timezone
 from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchAny, MatchText, SearchParams
 
 from config import (
@@ -35,8 +34,6 @@ from config import (
     QUERY_EXPANSION_ENABLED, QUERY_EXPANSION_COUNT, QUERY_EXPANSION_MODEL,
     DYNAMIC_THRESHOLD_ENABLED,
     QDRANT_SEARCH_EF, LATENCY_BUDGET_MS,
-    FRESHNESS_BOOST_FACTOR, FRESHNESS_WINDOW_S,
-    BM25_RESCUE_FLOOR, BM25_RESCUE_MIN_ABSOLUTE,
 )
 from embeddings import embed_text, embed_batch
 from llm import llm_query
@@ -677,15 +674,8 @@ async def recursive_retrieve(
         }
 
     cache_extra = f"{agent_id}|{','.join(agent_ids or [])}|{team}|{date_from}|{date_to}|{limit}|{refine}"
-    if hot_cache.namespace_recently_written(namespace):
-        cached = None
-        logger.debug(
-            "cache.skipped_write_fence",
-            extra={"namespace": namespace, "query": query[:80]},
-        )
-    else:
-        cached = hot_cache.get(agent_id or "fleet", query, namespace=namespace,
-                               tier=tier, memory_type=effective_memory_type, extra=cache_extra)
+    cached = hot_cache.get(agent_id or "fleet", query, namespace=namespace,
+                           tier=tier, memory_type=effective_memory_type, extra=cache_extra)
     if cached is not None:
         elapsed = int((time.monotonic() - t0) * 1000)
         out = dict(cached)
@@ -733,7 +723,6 @@ async def recursive_retrieve(
 
         if _raw_registry:
             _reg_candidates = [ResultCandidate.from_registry_hit(rh) for rh in _raw_registry]
-            _reg_created_at_map = {rh.get("memory_id", ""): rh.get("created_at", "") for rh in _raw_registry}
 
             _reg_ids = [c.id for c in _reg_candidates if c.id]
             if _reg_ids:
@@ -765,7 +754,6 @@ async def recursive_retrieve(
             _registry_hits = [c.to_dict() for c in _reg_candidates]
             for rh in _registry_hits:
                 rh["needle_registry_hit"] = True
-                rh["created_at"] = _reg_created_at_map.get(rh.get("id", ""), "")
     except Exception as e:
         logger.debug("Needle registry lookup failed: %s", e)
 
@@ -961,34 +949,6 @@ async def recursive_retrieve(
         )
         temporal_applied = True
 
-    # Stage 1c½: Freshness boost for recently-stored needle registry hits (v1.12)
-    # Applied post-RRF so the multiplicative boost affects the score used by the
-    # dynamic threshold.  The reranker (if enabled) re-scores independently, so
-    # this boost only matters for threshold passage — which is the desired behaviour
-    # for read-your-own-write scenarios.
-    _freshness_boosted = 0
-    _now_utc = datetime.now(timezone.utc)
-    for r in coarse:
-        if r.get("needle_registry_hit") and r.get("created_at"):
-            try:
-                _created = datetime.fromisoformat(r["created_at"])
-                _age_s = (_now_utc - _created).total_seconds()
-                if 0 <= _age_s < FRESHNESS_WINDOW_S:
-                    _pre = r["score"]
-                    r["score"] *= FRESHNESS_BOOST_FACTOR
-                    _freshness_boosted += 1
-                    logger.debug(
-                        "scoring.freshness_boost_applied",
-                        extra={
-                            "memory_id": r.get("id", ""),
-                            "age_seconds": round(_age_s, 1),
-                            "score_before": round(_pre, 4),
-                            "score_after": round(r["score"], 4),
-                        },
-                    )
-            except (ValueError, TypeError):
-                pass
-
     # Stage 1d–1e: Scoring — LTR model (v1.10) or hand-tuned pipeline
     _ltr_used = False
     if ltr_available():
@@ -1028,9 +988,8 @@ async def recursive_retrieve(
             wider_filtered = apply_retrieval_threshold(wider_coarse, effective_threshold)
             filtered, _ = _merge_into_results(filtered, wider_filtered)
 
-    # Stage 2-bm25-rescue: BM25 rescue slots (v1.9, needle-boosted v1.11, vector-empty boost v1.12)
+    # Stage 2-bm25-rescue: BM25 rescue slots (v1.9, needle-boosted v1.11)
     if BM25_RESCUE_ENABLED and BM25_ENABLED and n_bm25 > 0:
-        _vector_empty = n_coarse == 0
         bm25_max = max((r.get("bm25_score", 0) for r in coarse if r.get("bm25_score")), default=0)
         if bm25_max > 0:
             rescue_threshold = bm25_max * BM25_RESCUE_MIN_SCORE_RATIO
@@ -1039,31 +998,10 @@ async def recursive_retrieve(
                 r for r in coarse
                 if r.get("bm25_score", 0) >= rescue_threshold
             ][:rescue_slots]
-            if _vector_empty:
-                if bm25_max >= BM25_RESCUE_MIN_ABSOLUTE:
-                    filtered, n_bm25_rescue = _merge_into_results(
-                        filtered, rescue_candidates,
-                        min_score=BM25_RESCUE_FLOOR, tag="bm25_rescue_full",
-                    )
-                    logger.debug(
-                        "bm25.rescue_vector_empty",
-                        extra={
-                            "bm25_max": round(bm25_max, 4),
-                            "rescue_floor": BM25_RESCUE_FLOOR,
-                            "candidates": len(rescue_candidates),
-                            "rescued": n_bm25_rescue,
-                        },
-                    )
-                else:
-                    logger.debug(
-                        "bm25.rescue_skipped_low_score",
-                        extra={"bm25_max": round(bm25_max, 4), "min_required": BM25_RESCUE_MIN_ABSOLUTE},
-                    )
-            else:
-                filtered, n_bm25_rescue = _merge_into_results(
-                    filtered, rescue_candidates,
-                    min_score=effective_threshold, tag="bm25_rescue",
-                )
+            filtered, n_bm25_rescue = _merge_into_results(
+                filtered, rescue_candidates,
+                min_score=effective_threshold, tag="bm25_rescue",
+            )
 
     # Stage 2-xagent: Cross-agent rank guards (v1.9)
     if agent_ids and len(agent_ids) > 1 and CROSS_AGENT_MAX_SHARE < 1.0 and filtered:

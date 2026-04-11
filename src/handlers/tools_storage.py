@@ -204,8 +204,6 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
     retention = arguments.get("retention_class", "standard")
     force_skip = bool(arguments.get("force_skip_conflict_check", False))
 
-    hot_cache.mark_write(namespace)
-
     if retention == "permanent":
         importance = max(importance, 1.0)
 
@@ -285,7 +283,6 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
             agent_id=agent_id,
             file_path=f"explicit/{agent_id}",
             date=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-            hints=_auto_hints,
         )
     vec = await embed_text(embed_input)
     client = qdrant_client()

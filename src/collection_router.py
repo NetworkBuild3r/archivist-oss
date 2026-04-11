@@ -83,14 +83,13 @@ def ensure_collection(namespace: str) -> str:
         return QDRANT_COLLECTION
 
     if name not in existing:
-        from qdrant_client.models import VectorParams, Distance, HnswConfigDiff, PayloadSchemaType, OptimizersConfigDiff
+        from qdrant_client.models import VectorParams, Distance, HnswConfigDiff, PayloadSchemaType
 
         try:
             client.create_collection(
                 collection_name=name,
                 vectors_config=VectorParams(size=VECTOR_DIM, distance=Distance.COSINE),
                 hnsw_config=HnswConfigDiff(m=QDRANT_HNSW_M, ef_construct=QDRANT_HNSW_EF_CONSTRUCT),
-                optimizers_config=OptimizersConfigDiff(indexing_threshold=0),
             )
             for field, schema in [
                 ("agent_id", PayloadSchemaType.KEYWORD),
