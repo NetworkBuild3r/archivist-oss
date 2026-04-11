@@ -15,8 +15,8 @@
 # Usage (from repo root):
 #   ./benchmarks/scripts/run_full_comparison.sh
 #
-# Recommended (inside Docker — Qdrant and Tailscale already running):
-#   docker compose up -d qdrant tailscale
+# Recommended (inside Docker — Qdrant already running):
+#   docker compose up -d qdrant
 #   docker compose --profile benchmark build benchmark
 #   docker compose --profile benchmark run --rm --entrypoint /bin/bash benchmark \
 #     benchmarks/scripts/run_full_comparison.sh

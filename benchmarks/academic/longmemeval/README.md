@@ -49,7 +49,7 @@ python -m benchmarks.academic.longmemeval.adapter \
     --data-file data/longmemeval/longmemeval_s_cleaned.json \
     --ablation --output .benchmarks/longmemeval_ablation.json
 
-# Docker (uses compose Qwen/Qdrant/Tailscale):
+# Docker (uses compose benchmark profile + Qdrant):
 bash benchmarks/scripts/run_academic_benchmarks_docker.sh --limit 50
 ```
 

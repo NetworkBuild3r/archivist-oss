@@ -5,7 +5,7 @@
 # Usage:
 #   bash benchmarks/scripts/run_academic_benchmarks.sh [--limit N] [--no-curator] [--no-refine]
 #
-# From Docker (recommended when LLM host only resolves inside compose, e.g. Qwen / Tailscale):
+# From Docker (recommended when LLM/embed run on the host and you use compose networking):
 #   bash benchmarks/scripts/run_academic_benchmarks_docker.sh
 #   bash benchmarks/scripts/run_academic_benchmarks_docker.sh --limit 50
 #

@@ -8,8 +8,8 @@
 # Usage (from repo root):
 #   ./benchmarks/scripts/run_breakeven_comparison.sh
 #
-# Run inside Docker (recommended — Qdrant and Tailscale already running):
-#   docker compose up -d qdrant tailscale
+# Run inside Docker (recommended — Qdrant already running):
+#   docker compose up -d qdrant
 #   docker compose --profile benchmark run --rm benchmark \
 #     /bin/bash benchmarks/scripts/run_breakeven_comparison.sh
 #

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Run the academic benchmark suite inside the compose "benchmark" container so
-# LLM_URL hostnames (e.g. openclaw-vllm-corp → Qwen via extra_hosts on tailscale)
-# and QDRANT_URL=http://qdrant:6333 match the same network namespace as archivist.
+# LLM_URL / EMBED_URL (e.g. host.docker.internal) and QDRANT_URL=http://qdrant:6333
+# resolve consistently on the compose network.
 #
 # Prerequisites:
 #   cp .env.example .env   # keep .env local only — it is gitignored
-#   docker compose up -d qdrant tailscale
-#   Set LLM_URL / OPENCLAW_VLLM_TSIP / BENCHMARK_EMBED_URL in .env as needed.
+#   docker compose up -d qdrant
+#   Set LLM_URL, BENCHMARK_EMBED_URL, etc. in .env as needed.
 #
 # Usage (from repo root):
 #   bash benchmarks/scripts/run_academic_benchmarks_docker.sh

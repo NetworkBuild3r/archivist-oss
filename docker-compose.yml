@@ -6,52 +6,25 @@
 #
 # Embeddings on the host (e.g. vLLM :8000) from inside the archivist container:
 #   EMBED_URL=http://host.docker.internal:8000
-# LiteLLM / proxy over Tailscale (configured via .env), often :80 from home k3s:
-#   LLM_URL=http://openclaw-vllm-corp
-#   OPENCLAW_VLLM_TSIP=<100.x from: docker exec ... tailscale status | grep openclaw>
+# Remote or local LLM (any OpenAI-compatible URL):
+#   LLM_URL=http://host.docker.internal:11434
+#   LLM_URL=https://api.openai.com
 #
-# Benchmark in Docker (Qdrant + Tailscale in this compose; embeddings on host / other compose; LLM remote):
-#   docker compose up -d qdrant tailscale
+# Benchmark in Docker (Qdrant + archivist network; use host.docker.internal for LLM/embed on host):
+#   docker compose up -d qdrant
 #   docker compose --profile benchmark build benchmark
 #   docker compose --profile benchmark run --rm benchmark --no-refine --output .benchmarks/pipeline.json
-# Set EMBED_URL in .env to http://host.docker.internal:8000 (or your embedding container IP).
 #
-# Academic suite (LongMemEval / LoCoMo / HaluMem) — same network as Qwen (openclaw-vllm-corp extra_hosts):
+# Academic suite (LongMemEval / LoCoMo / HaluMem):
 #   bash benchmarks/scripts/run_academic_benchmarks_docker.sh
-#   bash benchmarks/scripts/run_academic_benchmarks_docker.sh --limit 50 --no-curator
 # Do not commit .env (gitignored); use .env.example as the template only.
 #
-# Data under Docker volumes by default; use docker-compose.override.example.yml to bind /opt/appdata.
+# Data under Docker volumes by default; use docker-compose.override.example.yml to bind host paths.
 
 name: archivist
 
 services:
-  tailscale:
-    image: tailscale/tailscale:latest
-    hostname: archivist-tailscale
-    # Docker's resolver (127.0.0.11) does not use Tailscale Magic DNS; map the peer hostname to its
-    # Tailscale IP. Update OPENCLAW_VLLM_TSIP in .env if this machine's 100.x address changes.
-    extra_hosts:
-      - "openclaw-vllm-corp:${OPENCLAW_VLLM_TSIP:-100.89.207.109}"
-      # Reach host from containers sharing this network (embedding vLLM on host or published port).
-      - "host.docker.internal:host-gateway"
-    ports:
-      - "${MCP_PORT:-3100}:3100"
-    environment:
-      - TS_AUTHKEY=${TS_AUTHKEY}
-      - TS_STATE_DIR=/var/lib/tailscale
-      - TS_USERSPACE=false
-    volumes:
-      - tailscale-state:/var/lib/tailscale
-      - /dev/net/tun:/dev/net/tun
-    cap_add:
-      - NET_ADMIN
-      - SYS_MODULE
-    networks:
-      - archivist-net
-    restart: unless-stopped
-
-  # Pipeline benchmark: shares Tailscale (remote LLM), uses Qdrant on archivist-net, repo bind-mount.
+  # Pipeline benchmark: Qdrant on archivist-net, repo bind-mount.
   benchmark:
     profiles: ["benchmark"]
     build:
@@ -67,17 +40,19 @@ services:
       EMBED_API_KEY: ${EMBED_API_KEY:-}
       EMBED_MODEL: ${EMBED_MODEL:-bge-base}
       VECTOR_DIM: ${VECTOR_DIM:-768}
-      LLM_URL: ${LLM_URL:-http://openclaw-vllm-corp}
-      LLM_MODEL: ${LLM_MODEL:-qwen3.5-122b}
+      LLM_URL: ${LLM_URL:-http://host.docker.internal:11434}
+      LLM_MODEL: ${LLM_MODEL:-llama3.1}
       LLM_API_KEY: ${LLM_API_KEY:-}
       RERANK_ENABLED: ${RERANK_ENABLED:-false}
     volumes:
       - .:/workspace
     working_dir: /workspace
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       - qdrant
-      - tailscale
-    network_mode: "service:tailscale"
+    networks:
+      - archivist-net
 
   archivist:
     build:
@@ -107,10 +82,14 @@ services:
       - archivist-data:/data
       - archivist-backups:/data/archivist/backups
       - ${MEMORY_DIR:-./sample-memories}:/data/memories:ro
+    ports:
+      - "${MCP_PORT:-3100}:3100"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       - qdrant
-      - tailscale
-    network_mode: "service:tailscale"
+    networks:
+      - archivist-net
     restart: unless-stopped
 
   qdrant:
@@ -128,7 +107,6 @@ volumes:
   archivist-data:
   archivist-backups:
   qdrant-storage:
-  tailscale-state:
 
 networks:
   archivist-net:

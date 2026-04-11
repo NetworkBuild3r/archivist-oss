@@ -36,13 +36,13 @@ MCP endpoint: `http://localhost:3100/mcp` (preferred Streamable HTTP; legacy SSE
 - **Persistent data**: named volume `archivist-data` → `/data` (SQLite graph, config dir).
 - **Memories**: read-only mount `./sample-memories` → `/data/memories` by default; override with env **`MEMORY_DIR`** (path on the host).
 
-### Host paths (e.g. `/opt/appdata`)
+### Host paths (persistent memories on disk)
 
 ```bash
-sudo mkdir -p /opt/appdata/archivist-memories
-sudo chown "$USER:$USER" /opt/appdata/archivist-memories
+sudo mkdir -p /data/archivist-memories
+sudo chown "$USER:$USER" /data/archivist-memories
 cp docker-compose.override.example.yml docker-compose.override.yml
-# Edit override: point volumes to /opt/appdata/...
+# Edit override: set paths that match your environment
 docker compose up -d --build
 ```
 
