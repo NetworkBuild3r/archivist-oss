@@ -40,6 +40,8 @@ Point any MCP client at `http://localhost:3100/mcp` — done. Your agents now ha
 
 **Delete cascade hardening** — deleting a memory now fully cleans up all derived artifacts: micro-chunk FTS5 entries, reverse HyDE FTS5 entries, and per-child needle registry rows. Previously these were orphaned on delete.
 
+**Cascade consistency model** — Archivist uses two non-transactional stores (Qdrant + SQLite). The cascade makes the following contract: *(a) Detectable* — `DeleteResult.failed_steps` records every substep that failed; `PartialDeletionError` is raised when a critical Qdrant step fails. *(b) Repairable* — `sweep_orphans()` runs periodically to reconcile SQLite rows that have no corresponding Qdrant point. *(c) Auditable* — every delete and archive is written to the `audit_log` table with the full result. *(d) Retry-resilient* — transient Qdrant errors (429, 503, timeouts) are retried once; SQLite batch deletes retry once on lock contention. **Known limitation:** there is no distributed transaction across Qdrant and SQLite. A process crash mid-cascade leaves partial state; the orphan sweeper will clean it up on the next run. See `TECH_DEBT.md` for the planned architectural fix.
+
 **Structured observability** — every store and retrieval operation emits a structured log event with per-stage metrics. Feature flags are logged at startup for instant configuration visibility.
 
 See [`CHANGELOG.md`](CHANGELOG.md) for the full list including breaking changes.

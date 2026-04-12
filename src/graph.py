@@ -124,11 +124,13 @@ def init_schema():
             is_active INTEGER NOT NULL DEFAULT 1,
             retention_class TEXT NOT NULL DEFAULT 'standard',
             valid_from TEXT NOT NULL DEFAULT '',
-            valid_until TEXT NOT NULL DEFAULT ''
+            valid_until TEXT NOT NULL DEFAULT '',
+            memory_id TEXT NOT NULL DEFAULT ''
         );
         CREATE INDEX IF NOT EXISTS idx_facts_entity ON facts(entity_id);
         CREATE INDEX IF NOT EXISTS idx_facts_active ON facts(is_active);
         CREATE INDEX IF NOT EXISTS idx_facts_valid_from ON facts(valid_from);
+        CREATE INDEX IF NOT EXISTS idx_facts_memory_id ON facts(memory_id);
 
         CREATE TABLE IF NOT EXISTS curator_state (
             key TEXT PRIMARY KEY,
@@ -184,6 +186,7 @@ def _migrate_schema():
         ("entities", "namespace", "TEXT NOT NULL DEFAULT 'global'"),
         ("facts", "namespace", "TEXT NOT NULL DEFAULT 'global'"),
         ("relationships", "namespace", "TEXT NOT NULL DEFAULT 'global'"),
+        ("facts", "memory_id", "TEXT NOT NULL DEFAULT ''"),
     ]
     indexes = [
         "CREATE INDEX IF NOT EXISTS idx_facts_retention ON facts(retention_class)",
@@ -192,6 +195,7 @@ def _migrate_schema():
         "CREATE INDEX IF NOT EXISTS idx_entities_namespace ON entities(namespace)",
         "CREATE INDEX IF NOT EXISTS idx_facts_namespace ON facts(namespace)",
         "CREATE INDEX IF NOT EXISTS idx_relationships_namespace ON relationships(namespace)",
+        "CREATE INDEX IF NOT EXISTS idx_facts_memory_id ON facts(memory_id)",
     ]
     with GRAPH_WRITE_LOCK:
         conn = get_db()
@@ -580,7 +584,8 @@ _DATE_IN_PATH_RE = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
 
 def add_fact(entity_id: int, fact_text: str, source_file: str = "",
              agent_id: str = "", retention_class: str = "standard",
-             valid_from: str = "", valid_until: str = "", namespace: str = "global") -> int:
+             valid_from: str = "", valid_until: str = "", namespace: str = "global",
+             memory_id: str = "") -> int:
     now = datetime.now(timezone.utc).isoformat()
     new_words = _word_set(fact_text)
 
@@ -594,10 +599,10 @@ def add_fact(entity_id: int, fact_text: str, source_file: str = "",
         try:
             cur = conn.execute(
                 "INSERT INTO facts (entity_id, fact_text, source_file, agent_id, created_at, "
-                "retention_class, valid_from, valid_until, namespace) "
-                "VALUES (?,?,?,?,?,?,?,?,?)",
+                "retention_class, valid_from, valid_until, namespace, memory_id) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (entity_id, fact_text, source_file, agent_id, now, retention_class,
-                 valid_from, valid_until, namespace),
+                 valid_from, valid_until, namespace, memory_id),
             )
             conn.commit()
             fid = cur.lastrowid

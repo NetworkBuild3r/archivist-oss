@@ -6,6 +6,7 @@ cleanup step here and registering it in ``cascade.py``'s orphan sweeper.
 """
 
 import logging
+import sqlite3
 from dataclasses import asdict, dataclass, field
 
 from qdrant_client.models import Filter, FieldCondition, MatchValue
@@ -136,21 +137,21 @@ async def delete_memory_complete(
     all_ids = [memory_id] + hyde_ids + micro_ids
     try:
         result.fts_entries = delete_fts_chunks_batch(all_ids)
-    except Exception as e:
+    except (sqlite3.Error, OSError) as e:
         logger.error("cascade.fts_batch failed for %s: %s", memory_id, e)
         result.failed_steps.append("fts_batch")
 
     # 4. Batch-delete needle registry rows (primary + all children)
     try:
         result.registry_tokens = delete_needle_tokens_batch(all_ids)
-    except Exception as e:
+    except (sqlite3.Error, OSError) as e:
         logger.error("cascade.needle_batch failed for %s: %s", memory_id, e)
         result.failed_steps.append("needle_batch")
 
     # 5. Delete auto-extracted entity facts
     try:
         result.entity_facts = _delete_entity_facts_for_memory(memory_id)
-    except Exception as e:
+    except (sqlite3.Error, OSError) as e:
         logger.error("cascade.entity_facts failed for %s: %s", memory_id, e)
         result.failed_steps.append("entity_facts")
 
@@ -191,7 +192,8 @@ async def delete_memory_complete(
         metadata=metadata,
     )
 
-    if "qdrant_primary" in result.failed_steps or len(result.failed_steps) > 2:
+    _critical = {"qdrant_primary", "qdrant_children"}
+    if _critical & set(result.failed_steps):
         raise PartialDeletionError(result)
     elif result.failed_steps:
         logger.warning(
@@ -267,17 +269,12 @@ async def archive_memory_complete(
 
 
 def _delete_entity_facts_for_memory(memory_id: str) -> int:
-    """Remove auto-extracted facts whose source_file contains the memory_id.
+    """Soft-deactivate entity facts linked to *memory_id*.
 
-    The store pipeline sets source_file to 'explicit/{agent_id}' for API-stored
-    memories, so we also check the fact_text prefix pattern.  For facts linked via
-    the needle_registry (which stores memory_id directly), cleanup is handled by
-    delete_needle_tokens_batch.
-
-    Since facts don't have a direct memory_id FK, we use the convention that
-    fact_text is truncated to 200 chars (Chunk 1 fix) and the source_file
-    carries the agent context.  A future migration could add a memory_id
-    column to facts for exact correlation.
+    Primary path: exact match on the ``memory_id`` column (indexed, O(log n)).
+    Fallback path: LIKE match on ``source_file`` for pre-migration rows where
+    ``memory_id`` is still empty.  Once all rows are backfilled the fallback
+    becomes a no-op.
 
     Returns count of soft-deactivated facts.
     """
@@ -286,11 +283,20 @@ def _delete_entity_facts_for_memory(memory_id: str) -> int:
         try:
             cur = conn.execute(
                 "UPDATE facts SET is_active = 0 "
-                "WHERE source_file LIKE ? AND is_active = 1",
+                "WHERE memory_id = ? AND is_active = 1",
+                (memory_id,),
+            )
+            deactivated = cur.rowcount
+
+            cur2 = conn.execute(
+                "UPDATE facts SET is_active = 0 "
+                "WHERE source_file LIKE ? AND is_active = 1 AND memory_id = ''",
                 (f"%{memory_id}%",),
             )
+            deactivated += cur2.rowcount
+
             conn.commit()
-            return cur.rowcount
+            return deactivated
         except Exception as e:
             logger.warning(
                 "delete_entity_facts failed for memory %s: %s", memory_id, e,

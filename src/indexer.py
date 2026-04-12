@@ -291,7 +291,7 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
                     _seen_entity_names.add(ename)
                     etype = ent.get("type", "unknown")
                     _eid = upsert_entity(ename, etype, namespace=_ns or "global")
-                    add_fact(_eid, p.payload.get("text", "")[:200], _src_file, _agent, namespace=_ns or "global")
+                    add_fact(_eid, p.payload.get("text", "")[:200], _src_file, _agent, namespace=_ns or "global", memory_id=str(p.id))
 
         for p in points:
             register_needle_tokens(

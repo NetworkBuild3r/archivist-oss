@@ -260,13 +260,15 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
     ns_config = get_namespace_config(namespace)
     consistency = ns_config.consistency if ns_config else "eventual"
 
+    pid = str(uuid.uuid4())
+
     for ename in entity_names:
         eid = upsert_entity(ename.strip(), retention_class=retention, namespace=namespace or "global")
-        add_fact(eid, text[:200], f"explicit/{agent_id}", agent_id, retention_class=retention, namespace=namespace or "global")
+        add_fact(eid, text[:200], f"explicit/{agent_id}", agent_id, retention_class=retention, namespace=namespace or "global", memory_id=pid)
 
     if not entity_names:
         eid = upsert_entity(agent_id, "agent", retention_class=retention, namespace=namespace or "global")
-        add_fact(eid, text[:200], f"explicit/{agent_id}", agent_id, retention_class=retention, namespace=namespace or "global")
+        add_fact(eid, text[:200], f"explicit/{agent_id}", agent_id, retention_class=retention, namespace=namespace or "global", memory_id=pid)
 
         _auto_hints = pre_extract(text)
         _auto_entities = _auto_hints.get("entities", [])
@@ -276,7 +278,7 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
             if ename and ename != agent_id:
                 etype = ent.get("type", "unknown")
                 _eid = upsert_entity(ename, etype, retention_class=retention, namespace=namespace or "global")
-                add_fact(_eid, text[:200], f"explicit/{agent_id}", agent_id, retention_class=retention, namespace=namespace or "global")
+                add_fact(_eid, text[:200], f"explicit/{agent_id}", agent_id, retention_class=retention, namespace=namespace or "global", memory_id=pid)
     else:
         _auto_hints = pre_extract(text)
 
@@ -304,7 +306,6 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
         )
     vec = await embed_text(embed_input)
     client = qdrant_client()
-    pid = str(uuid.uuid4())
     now = datetime.now(timezone.utc)
     checksum = compute_memory_checksum(text, agent_id, namespace)
 

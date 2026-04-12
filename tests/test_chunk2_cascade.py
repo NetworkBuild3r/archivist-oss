@@ -198,7 +198,7 @@ class TestDeleteMemoryComplete:
 
     @pytest.mark.asyncio
     async def test_partial_deletion_error_on_many_failures(self, mock_audit):
-        """PartialDeletionError raised when >2 steps fail."""
+        """PartialDeletionError raised when qdrant_primary or qdrant_children fail."""
         from cascade import PartialDeletionError
 
         client = MagicMock()
@@ -207,7 +207,7 @@ class TestDeleteMemoryComplete:
         client.count.return_value = MagicMock(count=0)
 
         with patch("memory_lifecycle.qdrant_client", return_value=client), \
-             patch("memory_lifecycle.delete_fts_chunks_batch", side_effect=Exception("db locked")), \
+             patch("memory_lifecycle.delete_fts_chunks_batch", side_effect=sqlite3.OperationalError("db locked")), \
              patch("memory_lifecycle.delete_needle_tokens_batch", return_value=0), \
              patch("memory_lifecycle._delete_entity_facts_for_memory", return_value=0):
             from memory_lifecycle import delete_memory_complete
@@ -215,7 +215,7 @@ class TestDeleteMemoryComplete:
             with pytest.raises(PartialDeletionError) as exc_info:
                 await delete_memory_complete("mem-x", "ns")
 
-            assert len(exc_info.value.result.failed_steps) > 2
+            assert "qdrant_primary" in exc_info.value.result.failed_steps
 
     @pytest.mark.asyncio
     async def test_uses_collection_router(self, mock_fts, mock_needle, mock_entity_facts, mock_audit):
@@ -986,3 +986,226 @@ class TestMetricsExist:
         import metrics as m
         assert hasattr(m, "ORPHAN_SWEEP")
         assert "orphan" in m.ORPHAN_SWEEP.lower()
+
+
+class TestEntityFactsMemoryId:
+    """_delete_entity_facts_for_memory uses indexed memory_id column."""
+
+    def _insert_fact(self, memory_id: str, source_file: str = "") -> int:
+        """Insert a test fact row and return its id."""
+        from graph import get_db, upsert_entity
+        eid = upsert_entity("test-entity", "concept", namespace="global")
+        from datetime import datetime, timezone
+        conn = get_db()
+        cur = conn.execute(
+            "INSERT INTO facts (entity_id, fact_text, source_file, agent_id, created_at, "
+            "memory_id) VALUES (?, ?, ?, ?, ?, ?)",
+            (eid, "some fact text", source_file, "agent", datetime.now(timezone.utc).isoformat(), memory_id),
+        )
+        conn.commit()
+        row_id = cur.lastrowid
+        conn.close()
+        return row_id
+
+    def test_exact_match_deactivates_by_memory_id(self):
+        """Primary path: rows with matching memory_id are deactivated."""
+        from memory_lifecycle import _delete_entity_facts_for_memory
+        from graph import get_db
+
+        mid = "mem-exact-test-001"
+        self._insert_fact(mid, source_file="explicit/agent")
+
+        count = _delete_entity_facts_for_memory(mid)
+        assert count == 1
+
+        conn = get_db()
+        active = conn.execute(
+            "SELECT is_active FROM facts WHERE memory_id = ?", (mid,)
+        ).fetchone()
+        conn.close()
+        assert active is not None
+        assert active[0] == 0
+
+    def test_like_fallback_for_pre_migration_rows(self):
+        """Fallback: rows with memory_id='' but matching source_file are deactivated."""
+        from memory_lifecycle import _delete_entity_facts_for_memory
+        from graph import get_db
+
+        mid = "mem-fallback-test-002"
+        # Pre-migration row: memory_id is empty, but source_file contains the UUID
+        self._insert_fact("", source_file=f"explicit/{mid}")
+
+        count = _delete_entity_facts_for_memory(mid)
+        assert count == 1
+
+        conn = get_db()
+        row = conn.execute(
+            "SELECT is_active FROM facts WHERE source_file = ?",
+            (f"explicit/{mid}",)
+        ).fetchone()
+        conn.close()
+        assert row is not None
+        assert row[0] == 0
+
+    def test_like_fallback_does_not_touch_rows_with_memory_id_set(self):
+        """LIKE fallback is scoped to memory_id='' only — does not double-deactivate."""
+        from memory_lifecycle import _delete_entity_facts_for_memory
+        from graph import get_db
+
+        mid = "mem-scope-test-003"
+        # Row already has memory_id set correctly
+        self._insert_fact(mid, source_file=f"explicit/{mid}")
+
+        count = _delete_entity_facts_for_memory(mid)
+        # Should be found by the primary exact-match path only (count = 1)
+        assert count == 1
+
+    def test_non_matching_rows_untouched(self):
+        """Facts belonging to a different memory are not deactivated."""
+        from memory_lifecycle import _delete_entity_facts_for_memory
+        from graph import get_db
+
+        mid_target = "mem-target-004"
+        mid_other = "mem-other-004"
+        self._insert_fact(mid_other, source_file="explicit/other-agent")
+
+        count = _delete_entity_facts_for_memory(mid_target)
+        assert count == 0
+
+        conn = get_db()
+        row = conn.execute(
+            "SELECT is_active FROM facts WHERE memory_id = ?", (mid_other,)
+        ).fetchone()
+        conn.close()
+        assert row is not None
+        assert row[0] == 1  # untouched
+
+    def test_returns_zero_for_unknown_memory(self):
+        """Returns 0 and does not crash for a memory_id with no matching facts."""
+        from memory_lifecycle import _delete_entity_facts_for_memory
+        assert _delete_entity_facts_for_memory("completely-unknown-id") == 0
+
+
+class TestAddFactMemoryId:
+    """add_fact stores memory_id and it can be queried."""
+
+    def test_stores_memory_id(self):
+        from graph import add_fact, upsert_entity, get_db
+
+        eid = upsert_entity("test-entity-af", "concept", namespace="global")
+        mid = "mem-add-fact-test-001"
+        add_fact(eid, "test fact text", "explicit/agent", "agent",
+                 namespace="global", memory_id=mid)
+
+        conn = get_db()
+        row = conn.execute(
+            "SELECT memory_id FROM facts WHERE memory_id = ?", (mid,)
+        ).fetchone()
+        conn.close()
+        assert row is not None
+        assert row[0] == mid
+
+    def test_default_memory_id_is_empty(self):
+        """Existing call sites that don't pass memory_id get empty string."""
+        from graph import add_fact, upsert_entity, get_db
+
+        eid = upsert_entity("entity-no-mid", "concept", namespace="global")
+        fact_id = add_fact(eid, "fact with no memory_id", "trajectory/abc", "agent", namespace="global")
+
+        conn = get_db()
+        row = conn.execute(
+            "SELECT memory_id FROM facts WHERE id = ?", (fact_id,)
+        ).fetchone()
+        conn.close()
+        assert row is not None
+        assert row[0] == ""
+
+
+class TestScrollAllMaxPages:
+    """_scroll_all safety guard limits pagination."""
+
+    def test_max_pages_breaks_and_appends_failed_step(self):
+        """When max_pages is hit, step_name is appended to failed_steps."""
+        from cascade import _scroll_all
+        from qdrant_client.models import Filter
+
+        call_count = 0
+
+        def fake_scroll(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            pt = MagicMock()
+            pt.id = f"pt-{call_count}"
+            # Always return a non-None next_offset to simulate infinite pagination
+            return [pt], "next-offset"
+
+        mock_client = MagicMock()
+        mock_client.scroll.side_effect = fake_scroll
+
+        failed = []
+        filt = Filter(must=[])
+        ids = _scroll_all(
+            mock_client, "col", filt, "test_scroll", "mem-id", failed,
+            batch=1, max_pages=3,
+        )
+
+        assert len(ids) == 3
+        assert call_count == 3
+        assert "test_scroll" in failed
+
+    def test_no_guard_triggered_on_normal_completion(self):
+        """When pagination ends naturally, failed_steps is not appended."""
+        from cascade import _scroll_all
+        from qdrant_client.models import Filter
+
+        def fake_scroll(**kwargs):
+            pt = MagicMock()
+            pt.id = "only-pt"
+            return [pt], None  # None = last page
+
+        mock_client = MagicMock()
+        mock_client.scroll.side_effect = fake_scroll
+
+        failed = []
+        filt = Filter(must=[])
+        ids = _scroll_all(
+            mock_client, "col", filt, "test_scroll", "mem-id", failed,
+            batch=500, max_pages=1000,
+        )
+
+        assert ids == ["only-pt"]
+        assert failed == []
+
+
+class TestPartialDeletionErrorThreshold:
+    """PartialDeletionError is raised on qdrant_primary or qdrant_children failures."""
+
+    def test_raises_on_qdrant_primary_failure(self):
+        from memory_lifecycle import PartialDeletionError, DeleteResult
+
+        result = DeleteResult(memory_id="mid", failed_steps=["qdrant_primary"])
+        _critical = {"qdrant_primary", "qdrant_children"}
+        assert bool(_critical & set(result.failed_steps))
+
+    def test_raises_on_qdrant_children_failure(self):
+        from memory_lifecycle import DeleteResult
+
+        result = DeleteResult(memory_id="mid", failed_steps=["qdrant_children"])
+        _critical = {"qdrant_primary", "qdrant_children"}
+        assert bool(_critical & set(result.failed_steps))
+
+    def test_does_not_raise_on_fts_only_failure(self):
+        """FTS failure alone does not trigger PartialDeletionError."""
+        from memory_lifecycle import DeleteResult
+
+        result = DeleteResult(memory_id="mid", failed_steps=["fts_batch"])
+        _critical = {"qdrant_primary", "qdrant_children"}
+        assert not bool(_critical & set(result.failed_steps))
+
+    def test_does_not_raise_on_needle_only_failure(self):
+        """needle_batch failure alone does not trigger PartialDeletionError."""
+        from memory_lifecycle import DeleteResult
+
+        result = DeleteResult(memory_id="mid", failed_steps=["needle_batch"])
+        _critical = {"qdrant_primary", "qdrant_children"}
+        assert not bool(_critical & set(result.failed_steps))

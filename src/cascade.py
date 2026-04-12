@@ -167,13 +167,19 @@ def _scroll_all(
     memory_id: str,
     failed_steps: list[str],
     batch: int = _BATCH_CHUNK_SIZE,
+    max_pages: int = 1000,
 ) -> list[str]:
     """Paginate ``client.scroll`` until ``next_page_offset`` is ``None``.
 
     Returns a list of all matching point IDs (as strings).
+
+    *max_pages* limits pagination to ``max_pages * batch`` points (default
+    500 000).  If the limit is hit a warning is logged and the step is added
+    to *failed_steps* so callers know the result is incomplete.
     """
     ids: list[str] = []
     offset = None
+    pages = 0
     try:
         while True:
             pts, next_offset = client.scroll(
@@ -184,7 +190,15 @@ def _scroll_all(
                 with_payload=False,
             )
             ids.extend(str(p.id) for p in pts)
+            pages += 1
             if next_offset is None:
+                break
+            if pages >= max_pages:
+                logger.warning(
+                    "cascade.%s hit max_pages=%d for %s — result is incomplete",
+                    step_name, max_pages, memory_id,
+                )
+                failed_steps.append(step_name)
                 break
             offset = next_offset
     except Exception as e:
