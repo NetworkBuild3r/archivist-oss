@@ -11,10 +11,28 @@ Usage in the retrieval pipeline:
         await expand_query(...)
     if budget.can_afford(100):
         await generate_hyde(...)
+
+Adaptive profiles (v1.11): budget is selected per query type so needle
+queries get a fast path and multi-hop gets generous allocation.
 """
 
 import time
 from config import LATENCY_BUDGET_MS
+
+
+BUDGET_PROFILES: dict[str, int] = {
+    "needle": 200,
+    "simple_recall": 300,
+    "temporal": 400,
+    "broad": 500,
+    "multi_hop": 800,
+    "default": LATENCY_BUDGET_MS or 500,
+}
+
+
+def budget_for_query_type(query_type: str) -> int:
+    """Select the latency budget for a given query classification."""
+    return BUDGET_PROFILES.get(query_type, BUDGET_PROFILES["default"])
 
 
 class LatencyBudget:
@@ -24,12 +42,13 @@ class LatencyBudget:
         self._max_ms = max_ms or LATENCY_BUDGET_MS
         self._start = time.monotonic()
         self._reservations: dict[str, float] = {}
+        self._reserved_ms: float = 0.0
 
     def elapsed_ms(self) -> float:
         return (time.monotonic() - self._start) * 1000
 
     def remaining_ms(self) -> float:
-        return max(0.0, self._max_ms - self.elapsed_ms())
+        return max(0.0, self._max_ms - self.elapsed_ms() - self._reserved_ms)
 
     def can_afford(self, estimated_ms: float) -> bool:
         """Return True if there's enough budget for an operation."""
@@ -40,7 +59,13 @@ class LatencyBudget:
         if not self.can_afford(estimated_ms):
             return False
         self._reservations[label] = estimated_ms
+        self._reserved_ms += estimated_ms
         return True
+
+    def release(self, label: str) -> None:
+        """Release a reservation after the operation completes."""
+        if label in self._reservations:
+            self._reserved_ms -= self._reservations.pop(label)
 
     def is_expired(self) -> bool:
         return self.remaining_ms() <= 0
@@ -50,5 +75,6 @@ class LatencyBudget:
             "budget_ms": self._max_ms,
             "elapsed_ms": round(self.elapsed_ms(), 1),
             "remaining_ms": round(self.remaining_ms(), 1),
+            "reserved_ms": round(self._reserved_ms, 1),
             "reservations": dict(self._reservations),
         }

@@ -102,10 +102,13 @@ WEBHOOK_EVENTS: set[str] = set(e.strip() for e in _raw_events.split(",") if e.st
 DEDUP_LLM_ENABLED = _env_bool("DEDUP_LLM_ENABLED")
 DEDUP_LLM_THRESHOLD = float(os.getenv("DEDUP_LLM_THRESHOLD", "0.80"))
 CURATOR_TIP_BUDGET = int(os.getenv("CURATOR_TIP_BUDGET", "20"))
+CURATOR_MAX_PARALLEL = int(os.getenv("CURATOR_MAX_PARALLEL", "4"))
 CURATOR_QUEUE_DRAIN_INTERVAL = int(os.getenv("CURATOR_QUEUE_DRAIN_INTERVAL", "30"))
 HOTNESS_WEIGHT = float(os.getenv("HOTNESS_WEIGHT", "0.15"))
 HOTNESS_HALFLIFE_DAYS = int(os.getenv("HOTNESS_HALFLIFE_DAYS", "7"))
 IMPORTANCE_WEIGHT = float(os.getenv("IMPORTANCE_WEIGHT", "0.10"))
+IMPORTANCE_FLOOR = float(os.getenv("IMPORTANCE_FLOOR", "0.3"))
+IMPORTANCE_GRACE_DAYS = int(os.getenv("IMPORTANCE_GRACE_DAYS", "7"))
 
 # ── Entity injection tuning (v1.8 — needle regression fix) ──────────────────
 MAX_ENTITY_FACT_INJECTIONS = int(os.getenv("MAX_ENTITY_FACT_INJECTIONS", "15"))
@@ -135,6 +138,8 @@ DURABLE_ENTITY_TYPES = frozenset({
 
 # ── Curator ───────────────────────────────────────────────────────────────────
 CURATOR_INTERVAL_MINUTES = int(os.getenv("CURATOR_INTERVAL_MINUTES", "30"))
+ORPHAN_SWEEP_ENABLED = _env_bool("ORPHAN_SWEEP_ENABLED", "true")
+ORPHAN_SWEEP_EVERY_N_CYCLES = int(os.getenv("ORPHAN_SWEEP_EVERY_N_CYCLES", "12"))
 
 CURATOR_EXTRACT_PREFIXES: list[str] = [
     p.strip() for p in

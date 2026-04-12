@@ -133,5 +133,72 @@ async def embed_text(text: str, model: str = EMBED_MODEL) -> list[float]:
 
 
 async def embed_batch(texts: list[str], model: str = EMBED_MODEL) -> list[list[float]]:
-    """Embed multiple texts in parallel using asyncio.gather."""
-    return list(await asyncio.gather(*(embed_text(t, model) for t in texts)))
+    """Embed multiple texts in a single API call (true batch).
+
+    Falls back to individual parallel calls if the batch request fails
+    (e.g. provider doesn't support array input).
+    """
+    if not texts:
+        return []
+    if len(texts) == 1:
+        return [await embed_text(texts[0], model)]
+
+    truncated = [t[:_MAX_EMBED_CHARS] for t in texts]
+
+    cached_results: dict[int, list[float]] = {}
+    uncached_indices: list[int] = []
+    uncached_texts: list[str] = []
+    for i, t in enumerate(truncated):
+        cached = _cache_get(t, model)
+        if cached is not None:
+            m.inc(EMBED_CACHE_HITS)
+            cached_results[i] = list(cached)
+        else:
+            uncached_indices.append(i)
+            uncached_texts.append(t)
+
+    if not uncached_texts:
+        return [cached_results[i] for i in range(len(texts))]
+
+    try:
+        client = _get_embed_client()
+        t_embed = time.monotonic()
+        payload: dict = {"model": model, "input": uncached_texts}
+        if _IS_NVIDIA:
+            payload["input_type"] = "passage"
+            payload["truncate"] = "END"
+            payload["encoding_format"] = "float"
+
+        headers: dict[str, str] = {"Content-Type": "application/json"}
+        if EMBED_API_KEY:
+            headers["Authorization"] = f"Bearer {EMBED_API_KEY}"
+
+        resp = await client.post(
+            f"{EMBED_URL}/v1/embeddings",
+            headers=headers,
+            json=payload,
+            timeout=120,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        embeddings = sorted(data["data"], key=lambda x: x["index"])
+        dur_ms = (time.monotonic() - t_embed) * 1000
+        m.observe(m.EMBED_DURATION, dur_ms)
+        health.register("embeddings", healthy=True)
+
+        for j, emb in enumerate(embeddings):
+            vec = emb["embedding"]
+            orig_idx = uncached_indices[j]
+            cached_results[orig_idx] = vec
+            _cache_put(uncached_texts[j], model, vec)
+            m.inc(EMBED_CACHE_MISSES)
+
+        return [cached_results[i] for i in range(len(texts))]
+
+    except Exception as e:
+        logger.warning("Batch embed failed (%s), falling back to individual calls", e)
+        individual = list(await asyncio.gather(
+            *(embed_text(t, model) for t in texts)
+        ))
+        return individual

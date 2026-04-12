@@ -1,6 +1,7 @@
 """Conflict detection — checks for similar memories before writes.
 
 v1.0: adds LLM-adjudicated dedup for high-similarity matches.
+v1.11: consolidated query — single embed + single Qdrant search for both conflict + dedup.
 """
 
 import json
@@ -9,7 +10,8 @@ from dataclasses import dataclass
 
 from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchExcept
 
-from config import QDRANT_COLLECTION, DEDUP_LLM_ENABLED, DEDUP_LLM_THRESHOLD
+from config import DEDUP_LLM_ENABLED, DEDUP_LLM_THRESHOLD
+from collection_router import collection_for
 from embeddings import embed_text
 from llm import llm_query
 from qdrant import qdrant_client
@@ -50,48 +52,63 @@ class DedupResult:
     max_similarity: float
 
 
+async def _query_similar(
+    text: str,
+    namespace: str,
+    limit: int = 10,
+    vec: list[float] | None = None,
+) -> tuple[list[float], list]:
+    """Single Qdrant similarity query for both conflict + dedup paths.
+
+    Returns (embedding_vector, qdrant_scored_points).
+    """
+    if vec is None:
+        vec = await embed_text(text)
+    client = qdrant_client()
+    _coll = collection_for(namespace)
+
+    must_filters = [
+        FieldCondition(key="namespace", match=MatchValue(value=namespace)),
+    ]
+    try:
+        results = client.query_points(
+            collection_name=_coll,
+            query=vec,
+            query_filter=Filter(must=must_filters),
+            limit=limit,
+            with_payload=True,
+        ).points
+    except Exception as e:
+        logger.warning("Similarity query failed: %s", e)
+        results = []
+
+    return vec, results
+
+
 async def check_for_conflicts(
     text: str,
     namespace: str,
     agent_id: str,
     threshold: float = SIMILARITY_THRESHOLD,
+    *,
+    _shared_vec: list[float] | None = None,
+    _shared_results: list | None = None,
 ) -> ConflictResult:
     """Check if a new memory conflicts with existing ones in the same namespace."""
-    vec = await embed_text(text)
-    client = qdrant_client()
+    if _shared_results is not None:
+        results = _shared_results
+    else:
+        _, results = await _query_similar(text, namespace, vec=_shared_vec)
 
-    must_filters = [
-        FieldCondition(key="namespace", match=MatchValue(value=namespace)),
-    ]
-    if agent_id:
-        must_filters.append(
-            FieldCondition(key="agent_id", match=MatchExcept(**{"except": [agent_id]}))
-        )
+    cross_agent = [r for r in results if agent_id and (r.payload or {}).get("agent_id") != agent_id]
 
-    try:
-        results = client.query_points(
-            collection_name=QDRANT_COLLECTION,
-            query=vec,
-            query_filter=Filter(must=must_filters),
-            limit=10,
-            with_payload=True,
-        ).points
-    except Exception as e:
-        logger.warning("Conflict check failed: %s", e)
-        return ConflictResult(
-            has_conflict=False,
-            conflicting_ids=[],
-            max_similarity=0.0,
-            recommendation="keep_both",
-        )
-
-    conflicts = [r for r in results if r.score >= threshold]
+    conflicts = [r for r in cross_agent if r.score >= threshold]
 
     if not conflicts:
         return ConflictResult(
             has_conflict=False,
             conflicting_ids=[],
-            max_similarity=max((r.score for r in results), default=0.0),
+            max_similarity=max((r.score for r in cross_agent), default=0.0),
             recommendation="keep_both",
         )
 
@@ -115,29 +132,17 @@ async def llm_adjudicated_dedup(
     text: str,
     namespace: str,
     agent_id: str,
+    *,
+    _shared_results: list | None = None,
 ) -> DedupResult | None:
     """Run LLM dedup on high-similarity matches. Returns None if dedup is disabled or no matches."""
     if not DEDUP_LLM_ENABLED:
         return None
 
-    vec = await embed_text(text)
-    client = qdrant_client()
-
-    must_filters = [
-        FieldCondition(key="namespace", match=MatchValue(value=namespace)),
-    ]
-
-    try:
-        results = client.query_points(
-            collection_name=QDRANT_COLLECTION,
-            query=vec,
-            query_filter=Filter(must=must_filters),
-            limit=5,
-            with_payload=True,
-        ).points
-    except Exception as e:
-        logger.warning("Dedup similarity check failed: %s", e)
-        return None
+    if _shared_results is not None:
+        results = _shared_results
+    else:
+        _, results = await _query_similar(text, namespace)
 
     high_sim = [r for r in results if r.score >= DEDUP_LLM_THRESHOLD]
     if not high_sim:

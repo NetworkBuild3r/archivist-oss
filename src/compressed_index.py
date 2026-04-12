@@ -253,10 +253,23 @@ def build_wake_up_context(namespace: str, agent_id: str = "") -> dict:
 
     namespace_toc = build_namespace_index(namespace, agent_ids=agent_ids)
 
+    fleet_tips: list[str] = []
+    try:
+        _tips_conn = get_db()
+        _tips_cur = _tips_conn.execute(
+            "SELECT tip_text FROM tips WHERE agent_id = 'fleet' AND archived = 0 "
+            "ORDER BY usage_count DESC LIMIT 3"
+        )
+        fleet_tips = [r["tip_text"][:150] for r in _tips_cur.fetchall()]
+        _tips_conn.close()
+    except Exception:
+        pass
+
     return {
         "l0_identity": l0_identity,
         "l1_critical": l1_critical,
         "namespace_toc": namespace_toc,
+        "fleet_tips": fleet_tips,
         "total_memories": total_memories,
         "last_activity": last_activity,
         "top_entities": top_entities,
@@ -293,6 +306,11 @@ def format_wake_up_text(ctx: dict) -> str:
     l1 = ctx.get("l1_critical", "")
     if l1 and l1 != "No facts recorded yet.":
         parts.append(f"\n**Critical facts:**\n{l1}")
+    fleet_tips = ctx.get("fleet_tips", [])
+    if fleet_tips:
+        parts.append("\n**Fleet tips:**")
+        for tip in fleet_tips:
+            parts.append(f"  - {tip}")
     toc = ctx.get("namespace_toc", "")
     if toc and "No indexed knowledge" not in toc:
         parts.append(f"\n{toc}")

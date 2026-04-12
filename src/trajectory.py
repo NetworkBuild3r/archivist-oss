@@ -163,8 +163,10 @@ async def log_trajectory(
         finally:
             conn.close()
 
-    eid = upsert_entity(agent_id, "agent")
-    add_fact(eid, f"Trajectory [{outcome}]: {task_description[:200]}", f"trajectory/{traj_id}", agent_id)
+    from rbac import get_namespace_for_agent
+    _ns = get_namespace_for_agent(agent_id) if agent_id else "global"
+    eid = upsert_entity(agent_id, "agent", namespace=_ns)
+    add_fact(eid, f"Trajectory [{outcome}]: {task_description[:200]}", f"trajectory/{traj_id}", agent_id, namespace=_ns)
 
     return {"trajectory_id": traj_id, "agent_id": agent_id, "outcome": outcome}
 

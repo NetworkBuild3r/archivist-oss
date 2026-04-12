@@ -166,6 +166,7 @@ def init_schema():
         conn.commit()
         conn.close()
     _migrate_schema()
+    _migrate_entity_unique_constraint()
     _init_fts5()
 
 
@@ -179,11 +180,17 @@ def _migrate_schema():
         ("facts", "valid_from", "TEXT NOT NULL DEFAULT ''"),
         ("facts", "valid_until", "TEXT NOT NULL DEFAULT ''"),
         ("relationships", "provenance", "TEXT NOT NULL DEFAULT 'unknown'"),
+        ("entities", "namespace", "TEXT NOT NULL DEFAULT 'global'"),
+        ("facts", "namespace", "TEXT NOT NULL DEFAULT 'global'"),
+        ("relationships", "namespace", "TEXT NOT NULL DEFAULT 'global'"),
     ]
     indexes = [
         "CREATE INDEX IF NOT EXISTS idx_facts_retention ON facts(retention_class)",
         "CREATE INDEX IF NOT EXISTS idx_entities_retention ON entities(retention_class)",
         "CREATE INDEX IF NOT EXISTS idx_facts_valid_from ON facts(valid_from)",
+        "CREATE INDEX IF NOT EXISTS idx_entities_namespace ON entities(namespace)",
+        "CREATE INDEX IF NOT EXISTS idx_facts_namespace ON facts(namespace)",
+        "CREATE INDEX IF NOT EXISTS idx_relationships_namespace ON relationships(namespace)",
     ]
     with GRAPH_WRITE_LOCK:
         conn = get_db()
@@ -202,6 +209,71 @@ def _migrate_schema():
                 pass
         conn.close()
 
+
+def _migrate_entity_unique_constraint():
+    """Rebuild entities UNIQUE constraint to include namespace (idempotent).
+
+    The original schema has UNIQUE(name) which collides across namespaces.
+    This migration copies to a new table with UNIQUE(name, namespace),
+    then swaps in place.  Safe to run multiple times.
+    """
+    _logger = logging.getLogger("archivist.graph")
+    with GRAPH_WRITE_LOCK:
+        conn = get_db()
+        try:
+            cols = [row[1] for row in conn.execute("PRAGMA table_info(entities)").fetchall()]
+            if "namespace" not in cols:
+                return
+
+            idx_info = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='entities' AND sql IS NOT NULL"
+            ).fetchall()
+            has_ns_unique = any("namespace" in (r[0] or "") for r in idx_info)
+            create_sql = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='entities'"
+            ).fetchone()
+            if create_sql and "UNIQUE" in (create_sql[0] or ""):
+                after_unique = create_sql[0].split("UNIQUE", 1)[-1]
+                if "namespace" in after_unique:
+                    return
+            if has_ns_unique:
+                return
+
+            conn.execute("DROP TABLE IF EXISTS entities_new")
+            conn.execute("""
+                CREATE TABLE entities_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL COLLATE NOCASE,
+                    entity_type TEXT NOT NULL DEFAULT 'unknown',
+                    first_seen TEXT NOT NULL,
+                    last_seen TEXT NOT NULL,
+                    mention_count INTEGER NOT NULL DEFAULT 1,
+                    metadata TEXT DEFAULT '{}',
+                    retention_class TEXT NOT NULL DEFAULT 'standard',
+                    aliases TEXT NOT NULL DEFAULT '[]',
+                    namespace TEXT NOT NULL DEFAULT 'global',
+                    UNIQUE(name, namespace)
+                )
+            """)
+            conn.execute("""
+                INSERT INTO entities_new (id, name, entity_type, first_seen, last_seen,
+                    mention_count, metadata, retention_class, aliases, namespace)
+                SELECT id, name, entity_type, first_seen, last_seen,
+                    mention_count, metadata, retention_class, aliases, namespace
+                FROM entities
+            """)
+            conn.execute("DROP TABLE entities")
+            conn.execute("ALTER TABLE entities_new RENAME TO entities")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(name COLLATE NOCASE)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(entity_type)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_entities_namespace ON entities(namespace)")
+            conn.commit()
+            _logger.info("Migrated entities: rebuilt UNIQUE constraint to include namespace")
+        except Exception as e:
+            _logger.warning("Entity UNIQUE constraint migration failed (may already be done): %s", e)
+            conn.rollback()
+        finally:
+            conn.close()
 
 def _init_fts5():
     """Create the FTS5 virtual tables if they don't already exist.
@@ -347,26 +419,9 @@ def delete_fts_chunks_by_file(file_path: str):
 def delete_fts_chunks_by_qdrant_id(qdrant_id: str) -> int:
     """Remove FTS5 entries and memory_chunks rows for a single Qdrant point ID.
 
-    Returns the number of deleted memory_chunks rows.
+    Thin wrapper around :func:`delete_fts_chunks_batch` for single-ID callers.
     """
-    with GRAPH_WRITE_LOCK:
-        conn = get_db()
-        try:
-            rows = conn.execute(
-                "SELECT rowid FROM memory_chunks WHERE qdrant_id = ?", (qdrant_id,)
-            ).fetchall()
-            _delete_fts_rows(conn, rows)
-            cur = conn.execute("DELETE FROM memory_chunks WHERE qdrant_id = ?", (qdrant_id,))
-            conn.commit()
-            return cur.rowcount
-        except Exception as e:
-            logging.getLogger("archivist.graph").warning(
-                "FTS delete by qdrant_id failed for %s: %s", qdrant_id, e,
-            )
-            conn.rollback()
-            return 0
-        finally:
-            conn.close()
+    return delete_fts_chunks_batch([qdrant_id])
 
 
 def search_fts(query: str, namespace: str = "", agent_id: str = "",
@@ -465,14 +520,14 @@ _RETENTION_RANK = {"ephemeral": 0, "standard": 1, "durable": 2, "permanent": 3}
 
 
 def upsert_entity(name: str, entity_type: str = "unknown", agent_id: str = "",
-                  retention_class: str = "standard") -> int:
+                  retention_class: str = "standard", namespace: str = "global") -> int:
     now = datetime.now(timezone.utc).isoformat()
     with GRAPH_WRITE_LOCK:
         conn = get_db()
         try:
             cur = conn.execute(
-                "SELECT id, mention_count, retention_class FROM entities WHERE name = ? COLLATE NOCASE",
-                (name,),
+                "SELECT id, mention_count, retention_class FROM entities WHERE name = ? COLLATE NOCASE AND namespace = ?",
+                (name, namespace),
             )
             row = cur.fetchone()
             if row:
@@ -485,8 +540,8 @@ def upsert_entity(name: str, entity_type: str = "unknown", agent_id: str = "",
                 conn.commit()
                 return row["id"]
             cur = conn.execute(
-                "INSERT INTO entities (name, entity_type, first_seen, last_seen, retention_class) VALUES (?,?,?,?,?)",
-                (name, entity_type, now, now, retention_class),
+                "INSERT INTO entities (name, entity_type, first_seen, last_seen, retention_class, namespace) VALUES (?,?,?,?,?,?)",
+                (name, entity_type, now, now, retention_class, namespace),
             )
             conn.commit()
             return cur.lastrowid
@@ -495,19 +550,19 @@ def upsert_entity(name: str, entity_type: str = "unknown", agent_id: str = "",
 
 
 def add_relationship(source_id: int, target_id: int, rel_type: str, evidence: str,
-                     agent_id: str = "", provenance: str = "unknown"):
+                     agent_id: str = "", provenance: str = "unknown", namespace: str = "global"):
     now = datetime.now(timezone.utc).isoformat()
     with GRAPH_WRITE_LOCK:
         conn = get_db()
         try:
             conn.execute(
                 """INSERT INTO relationships (source_entity_id, target_entity_id, relation_type,
-                   evidence, agent_id, created_at, updated_at, provenance)
-                   VALUES (?,?,?,?,?,?,?,?)
+                   evidence, agent_id, created_at, updated_at, provenance, namespace)
+                   VALUES (?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(source_entity_id, target_entity_id, relation_type)
                    DO UPDATE SET evidence=excluded.evidence, updated_at=excluded.updated_at,
                    confidence=min(confidence+0.1, 1.0), provenance=excluded.provenance""",
-                (source_id, target_id, rel_type, evidence, agent_id, now, now, provenance),
+                (source_id, target_id, rel_type, evidence, agent_id, now, now, provenance, namespace),
             )
             conn.commit()
         finally:
@@ -524,7 +579,7 @@ _DATE_IN_PATH_RE = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
 
 def add_fact(entity_id: int, fact_text: str, source_file: str = "",
              agent_id: str = "", retention_class: str = "standard",
-             valid_from: str = "", valid_until: str = "") -> int:
+             valid_from: str = "", valid_until: str = "", namespace: str = "global") -> int:
     now = datetime.now(timezone.utc).isoformat()
     new_words = _word_set(fact_text)
 
@@ -538,10 +593,10 @@ def add_fact(entity_id: int, fact_text: str, source_file: str = "",
         try:
             cur = conn.execute(
                 "INSERT INTO facts (entity_id, fact_text, source_file, agent_id, created_at, "
-                "retention_class, valid_from, valid_until) "
-                "VALUES (?,?,?,?,?,?,?,?)",
+                "retention_class, valid_from, valid_until, namespace) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
                 (entity_id, fact_text, source_file, agent_id, now, retention_class,
-                 valid_from, valid_until),
+                 valid_from, valid_until, namespace),
             )
             conn.commit()
             fid = cur.lastrowid
@@ -609,17 +664,26 @@ def _normalize(text: str) -> str:
     return re.sub(r"[^\w\s\-]", "", text.lower()).strip()
 
 
-def search_entities(query: str, limit: int = 10) -> list[dict]:
+def search_entities(query: str, limit: int = 10, namespace: str = "") -> list[dict]:
     """Search entities by name or aliases (case-insensitive, normalized)."""
     conn = get_db()
     try:
         norm_q = _normalize(query)
-        cur = conn.execute(
-            "SELECT * FROM entities "
-            "WHERE name LIKE ? COLLATE NOCASE OR aliases LIKE ? COLLATE NOCASE "
-            "ORDER BY mention_count DESC LIMIT ?",
-            (f"%{query}%", f"%{norm_q}%", limit),
-        )
+        if namespace:
+            cur = conn.execute(
+                "SELECT * FROM entities "
+                "WHERE (name LIKE ? COLLATE NOCASE OR aliases LIKE ? COLLATE NOCASE) "
+                "AND namespace = ? "
+                "ORDER BY mention_count DESC LIMIT ?",
+                (f"%{query}%", f"%{norm_q}%", namespace, limit),
+            )
+        else:
+            cur = conn.execute(
+                "SELECT * FROM entities "
+                "WHERE name LIKE ? COLLATE NOCASE OR aliases LIKE ? COLLATE NOCASE "
+                "ORDER BY mention_count DESC LIMIT ?",
+                (f"%{query}%", f"%{norm_q}%", limit),
+            )
         return [dict(r) for r in cur.fetchall()]
     finally:
         conn.close()
@@ -887,19 +951,77 @@ def lookup_needle_tokens(query: str, namespace: str = "", agent_id: str = "") ->
 def delete_needle_tokens_by_memory(memory_id: str) -> int:
     """Remove all registry entries for a given memory ID.
 
-    Returns the number of rows deleted.
+    Thin wrapper around :func:`delete_needle_tokens_batch` for single-ID callers.
     """
-    _ensure_needle_registry()
+    return delete_needle_tokens_batch([memory_id])
+
+
+_BATCH_CHUNK = 500
+
+
+def delete_fts_chunks_batch(qdrant_ids: list[str]) -> int:
+    """Remove FTS5 entries and memory_chunks rows for multiple Qdrant IDs.
+
+    Internally chunks the ID list into groups of 500 to stay under the
+    sqlite3 ~999-parameter limit.  Acquires ``GRAPH_WRITE_LOCK`` once.
+    """
+    if not qdrant_ids:
+        return 0
+    total = 0
     with GRAPH_WRITE_LOCK:
         conn = get_db()
         try:
-            cur = conn.execute("DELETE FROM needle_registry WHERE memory_id = ?", (memory_id,))
+            for i in range(0, len(qdrant_ids), _BATCH_CHUNK):
+                chunk = qdrant_ids[i : i + _BATCH_CHUNK]
+                placeholders = ",".join("?" * len(chunk))
+                rows = conn.execute(
+                    f"SELECT rowid FROM memory_chunks WHERE qdrant_id IN ({placeholders})",
+                    chunk,
+                ).fetchall()
+                _delete_fts_rows(conn, rows)
+                cur = conn.execute(
+                    f"DELETE FROM memory_chunks WHERE qdrant_id IN ({placeholders})",
+                    chunk,
+                )
+                total += cur.rowcount
             conn.commit()
-            return cur.rowcount
         except Exception as e:
             logging.getLogger("archivist.graph").warning(
-                "Needle registry delete failed for %s: %s", memory_id, e,
+                "FTS batch delete failed: %s", e,
             )
-            return 0
+            conn.rollback()
         finally:
             conn.close()
+    return total
+
+
+def delete_needle_tokens_batch(memory_ids: list[str]) -> int:
+    """Remove needle_registry rows for multiple memory IDs.
+
+    Internally chunks the ID list into groups of 500 to stay under the
+    sqlite3 ~999-parameter limit.  Acquires ``GRAPH_WRITE_LOCK`` once.
+    """
+    if not memory_ids:
+        return 0
+    _ensure_needle_registry()
+    total = 0
+    with GRAPH_WRITE_LOCK:
+        conn = get_db()
+        try:
+            for i in range(0, len(memory_ids), _BATCH_CHUNK):
+                chunk = memory_ids[i : i + _BATCH_CHUNK]
+                placeholders = ",".join("?" * len(chunk))
+                cur = conn.execute(
+                    f"DELETE FROM needle_registry WHERE memory_id IN ({placeholders})",
+                    chunk,
+                )
+                total += cur.rowcount
+            conn.commit()
+        except Exception as e:
+            logging.getLogger("archivist.graph").warning(
+                "Needle registry batch delete failed: %s", e,
+            )
+            conn.rollback()
+        finally:
+            conn.close()
+    return total

@@ -140,3 +140,11 @@ INVALIDATE_COUNT = "archivist_invalidate_count_total"
 CURATOR_CYCLE_DURATION = "archivist_curator_cycle_duration_ms"
 DELETE_COMPLETE = "archivist_delete_complete_total"
 ARCHIVE_COMPLETE = "archivist_archive_complete_total"
+
+# ── Needle retrieval telemetry (v1.11) ───────────────────────────────────────
+NEEDLE_REGISTRY_HITS = "archivist_needle_registry_hits_total"
+NEEDLE_REGISTRY_STALE = "archivist_needle_registry_stale_total"
+MICRO_CHUNK_HITS = "archivist_micro_chunk_hits_total"
+
+# ── Cascade / orphan sweeper (v1.11) ─────────────────────────────────────────
+ORPHAN_SWEEP = "archivist_orphan_sweep_cleaned_total"

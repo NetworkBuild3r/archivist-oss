@@ -2,20 +2,27 @@
 
 Every code path that removes or archives a memory MUST go through this module.
 Adding a new artifact type to the write pipeline requires adding a corresponding
-cleanup step here.
+cleanup step here and registering it in ``cascade.py``'s orphan sweeper.
 """
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 
 from qdrant_client.models import Filter, FieldCondition, MatchValue
 
 from collection_router import collection_for
+from cascade import (
+    PartialDeletionError,
+    _qdrant_delete,
+    _qdrant_set_payload,
+    _scroll_all,
+)
 from graph import (
-    delete_fts_chunks_by_qdrant_id,
-    delete_needle_tokens_by_memory,
+    delete_fts_chunks_batch,
+    delete_needle_tokens_batch,
 )
 from qdrant import qdrant_client
+from audit import log_memory_event
 import metrics as m
 
 logger = logging.getLogger("archivist.memory_lifecycle")
@@ -31,6 +38,8 @@ class DeleteResult:
     fts_entries: int = 0
     registry_tokens: int = 0
     entity_facts: int = 0
+    memory_hotness: int = 0
+    failed_steps: list[str] = field(default_factory=list)
 
     @property
     def total(self) -> int:
@@ -41,7 +50,26 @@ class DeleteResult:
             + self.fts_entries
             + self.registry_tokens
             + self.entity_facts
+            + self.memory_hotness
         )
+
+
+@dataclass
+class ArchiveResult:
+    """Per-step success flags for archive operations."""
+    memory_id: str = ""
+    primary_archived: bool = False
+    reverse_hyde_archived: bool = False
+    micro_chunks_archived: bool = False
+    failed_steps: list[str] = field(default_factory=list)
+
+    @property
+    def total(self) -> int:
+        return sum([
+            self.primary_archived,
+            self.reverse_hyde_archived,
+            self.micro_chunks_archived,
+        ])
 
 
 async def delete_memory_complete(
@@ -63,91 +91,89 @@ async def delete_memory_complete(
     Returns:
         DeleteResult with counts of deleted artifacts per type.
 
-    Side effects:
-        - Removes Qdrant points (primary + reverse HyDE + micro-chunks)
-        - Removes FTS5 entries (memory_chunks + memory_fts + memory_fts_exact)
-        - Removes needle_registry rows
-        - Removes auto-extracted entity facts
-        - Logs structured deletion summary
+    Raises:
+        PartialDeletionError: If the primary Qdrant point delete fails or
+            more than two cascade steps fail.
     """
     col = collection or collection_for(namespace)
     client = qdrant_client()
     result = DeleteResult(memory_id=memory_id)
 
     # 0. Enumerate child point IDs BEFORE deleting them from Qdrant.
-    #    Micro-chunks and reverse HyDE vectors each have their own FTS5
-    #    and needle registry rows keyed by their own qdrant_id, not by the
-    #    parent memory_id.  We must collect these IDs first.
-    _child_ids: list[str] = []
-    for _filter_key in ("parent_id", "source_memory_id"):
-        try:
-            _pts, _ = client.scroll(
-                collection_name=col,
-                scroll_filter=Filter(
-                    must=[FieldCondition(key=_filter_key, match=MatchValue(value=memory_id))]
-                ),
-                limit=500,
-                with_payload=False,
-            )
-            _child_ids.extend(str(p.id) for p in _pts)
-        except Exception as e:
-            logger.warning("delete_cascade.enumerate_%s failed for %s: %s", _filter_key, memory_id, e)
+    micro_ids = _scroll_all(
+        client, col,
+        filt=Filter(must=[FieldCondition(key="parent_id", match=MatchValue(value=memory_id))]),
+        step_name="scroll_micro_chunks", memory_id=memory_id,
+        failed_steps=result.failed_steps,
+    )
+    hyde_ids = _scroll_all(
+        client, col,
+        filt=Filter(must=[FieldCondition(key="source_memory_id", match=MatchValue(value=memory_id))]),
+        step_name="scroll_reverse_hyde", memory_id=memory_id,
+        failed_steps=result.failed_steps,
+    )
 
     # 1. Delete primary Qdrant point
-    try:
-        client.delete(collection_name=col, points_selector=[memory_id])
-        result.qdrant_primary = 1
-    except Exception as e:
-        logger.warning("delete_cascade.qdrant_primary failed for %s: %s", memory_id, e)
+    result.qdrant_primary = _qdrant_delete(
+        client, col, [memory_id],
+        "qdrant_primary", memory_id, result.failed_steps,
+    )
 
-    # 2. Delete reverse HyDE vectors (source_memory_id == memory_id)
-    try:
-        resp = client.delete(
-            collection_name=col,
-            points_selector=Filter(
-                must=[FieldCondition(key="source_memory_id", match=MatchValue(value=memory_id))]
-            ),
+    # 2. Delete reverse HyDE vectors
+    result.qdrant_reverse_hyde = len(hyde_ids)
+    if hyde_ids:
+        _qdrant_delete(
+            client, col,
+            Filter(must=[FieldCondition(key="source_memory_id", match=MatchValue(value=memory_id))]),
+            "qdrant_reverse_hyde", memory_id, result.failed_steps,
         )
-        result.qdrant_reverse_hyde = getattr(resp, "operation_id", 0) or 0
-    except Exception as e:
-        logger.warning("delete_cascade.qdrant_reverse_hyde failed for %s: %s", memory_id, e)
 
-    # 3. Delete micro-chunk vectors (parent_id == memory_id)
-    try:
-        resp = client.delete(
-            collection_name=col,
-            points_selector=Filter(
-                must=[FieldCondition(key="parent_id", match=MatchValue(value=memory_id))]
-            ),
+    # 3. Delete micro-chunk vectors
+    result.qdrant_micro_chunks = len(micro_ids)
+    if micro_ids:
+        _qdrant_delete(
+            client, col,
+            Filter(must=[FieldCondition(key="parent_id", match=MatchValue(value=memory_id))]),
+            "qdrant_micro_chunks", memory_id, result.failed_steps,
         )
-        result.qdrant_micro_chunks = getattr(resp, "operation_id", 0) or 0
+
+    # 4. Batch-delete FTS5 entries (primary + all children)
+    all_ids = [memory_id] + hyde_ids + micro_ids
+    try:
+        result.fts_entries = delete_fts_chunks_batch(all_ids)
     except Exception as e:
-        logger.warning("delete_cascade.qdrant_micro_chunks failed for %s: %s", memory_id, e)
+        logger.error("cascade.fts_batch failed for %s: %s", memory_id, e)
+        result.failed_steps.append("fts_batch")
 
-    # 4. Delete FTS5 entries — primary + all enumerated children
-    _fts_deleted = 0
-    _all_fts_ids = [memory_id] + _child_ids
-    for _fts_id in _all_fts_ids:
-        try:
-            _fts_deleted += delete_fts_chunks_by_qdrant_id(_fts_id)
-        except Exception as e:
-            logger.warning("delete_cascade.fts failed for %s: %s", _fts_id, e)
-    result.fts_entries = _fts_deleted
+    # 5. Batch-delete needle registry rows (primary + all children)
+    try:
+        result.registry_tokens = delete_needle_tokens_batch(all_ids)
+    except Exception as e:
+        logger.error("cascade.needle_batch failed for %s: %s", memory_id, e)
+        result.failed_steps.append("needle_batch")
 
-    # 5. Delete needle registry rows — primary + all enumerated children
-    _reg_deleted = 0
-    for _reg_id in _all_fts_ids:
-        try:
-            _reg_deleted += delete_needle_tokens_by_memory(_reg_id)
-        except Exception as e:
-            logger.warning("delete_cascade.needle_registry failed for %s: %s", _reg_id, e)
-    result.registry_tokens = _reg_deleted
-
-    # 6. Delete auto-extracted entity facts linked to this memory
+    # 6. Delete auto-extracted entity facts
     try:
         result.entity_facts = _delete_entity_facts_for_memory(memory_id)
     except Exception as e:
-        logger.warning("delete_cascade.entity_facts failed for %s: %s", memory_id, e)
+        logger.error("cascade.entity_facts failed for %s: %s", memory_id, e)
+        result.failed_steps.append("entity_facts")
+
+    # 7. Delete memory_hotness row
+    try:
+        from graph import GRAPH_WRITE_LOCK, get_db as _get_db
+        with GRAPH_WRITE_LOCK:
+            _conn = _get_db()
+            try:
+                cur = _conn.execute(
+                    "DELETE FROM memory_hotness WHERE memory_id = ?", (memory_id,),
+                )
+                result.memory_hotness = cur.rowcount
+                _conn.commit()
+            finally:
+                _conn.close()
+    except Exception as e:
+        logger.debug("cascade.memory_hotness skipped for %s: %s", memory_id, e)
 
     m.inc(m.DELETE_COMPLETE, {"namespace": namespace})
 
@@ -163,9 +189,28 @@ async def delete_memory_complete(
             "fts_entries": result.fts_entries,
             "registry_tokens": result.registry_tokens,
             "entity_facts": result.entity_facts,
+            "memory_hotness": result.memory_hotness,
+            "failed_steps": result.failed_steps,
             "total_artifacts": result.total,
         },
     )
+
+    await log_memory_event(
+        agent_id="system",
+        action="delete",
+        memory_id=memory_id,
+        namespace=namespace,
+        text_hash="",
+        metadata=asdict(result),
+    )
+
+    if "qdrant_primary" in result.failed_steps or len(result.failed_steps) > 2:
+        raise PartialDeletionError(result)
+    elif result.failed_steps:
+        logger.warning(
+            "delete_cascade partial failure for %s: %s",
+            memory_id, result.failed_steps,
+        )
 
     return result
 
@@ -175,61 +220,61 @@ async def archive_memory_complete(
     namespace: str,
     *,
     collection: str | None = None,
-) -> int:
+) -> ArchiveResult:
     """Set archived=True on a memory and ALL derived Qdrant points.
 
     Archives: primary point + reverse HyDE + micro-chunks.
     Does NOT archive FTS5 or registry (they remain searchable).
 
-    Returns count of Qdrant points archived.
+    Returns ArchiveResult with per-step success flags.
     """
     col = collection or collection_for(namespace)
     client = qdrant_client()
-    archived = 0
+    result = ArchiveResult(memory_id=memory_id)
+    payload = {"archived": True}
 
-    # Archive primary point
-    try:
-        client.set_payload(
-            collection_name=col,
-            payload={"archived": True},
-            points=[memory_id],
-        )
-        archived += 1
-    except Exception as e:
-        logger.warning("archive_cascade.primary failed for %s: %s", memory_id, e)
+    result.primary_archived = _qdrant_set_payload(
+        client, col, payload, [memory_id],
+        "archive_primary", memory_id, result.failed_steps,
+    )
 
-    # Archive reverse HyDE points
-    try:
-        client.set_payload(
-            collection_name=col,
-            payload={"archived": True},
-            points=Filter(
-                must=[FieldCondition(key="source_memory_id", match=MatchValue(value=memory_id))]
-            ),
-        )
-    except Exception as e:
-        logger.warning("archive_cascade.reverse_hyde failed for %s: %s", memory_id, e)
+    result.reverse_hyde_archived = _qdrant_set_payload(
+        client, col, payload,
+        Filter(must=[FieldCondition(key="source_memory_id", match=MatchValue(value=memory_id))]),
+        "archive_reverse_hyde", memory_id, result.failed_steps,
+    )
 
-    # Archive micro-chunk points
-    try:
-        client.set_payload(
-            collection_name=col,
-            payload={"archived": True},
-            points=Filter(
-                must=[FieldCondition(key="parent_id", match=MatchValue(value=memory_id))]
-            ),
-        )
-    except Exception as e:
-        logger.warning("archive_cascade.micro_chunks failed for %s: %s", memory_id, e)
+    result.micro_chunks_archived = _qdrant_set_payload(
+        client, col, payload,
+        Filter(must=[FieldCondition(key="parent_id", match=MatchValue(value=memory_id))]),
+        "archive_micro_chunks", memory_id, result.failed_steps,
+    )
 
     m.inc(m.ARCHIVE_COMPLETE, {"namespace": namespace})
 
     logger.info(
         "memory.archived_complete",
-        extra={"memory_id": memory_id, "namespace": namespace, "collection": col},
+        extra={
+            "memory_id": memory_id,
+            "namespace": namespace,
+            "collection": col,
+            "primary": result.primary_archived,
+            "reverse_hyde": result.reverse_hyde_archived,
+            "micro_chunks": result.micro_chunks_archived,
+            "failed_steps": result.failed_steps,
+        },
     )
 
-    return archived
+    await log_memory_event(
+        agent_id="system",
+        action="archive",
+        memory_id=memory_id,
+        namespace=namespace,
+        text_hash="",
+        metadata=asdict(result),
+    )
+
+    return result
 
 
 def _delete_entity_facts_for_memory(memory_id: str) -> int:
@@ -238,7 +283,7 @@ def _delete_entity_facts_for_memory(memory_id: str) -> int:
     The store pipeline sets source_file to 'explicit/{agent_id}' for API-stored
     memories, so we also check the fact_text prefix pattern.  For facts linked via
     the needle_registry (which stores memory_id directly), cleanup is handled by
-    delete_needle_tokens_by_memory.
+    delete_needle_tokens_batch.
 
     Since facts don't have a direct memory_id FK, we use the convention that
     fact_text is truncated to 200 chars (Chunk 1 fix) and the source_file

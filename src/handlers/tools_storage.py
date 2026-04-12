@@ -16,7 +16,7 @@ from config import (
     QDRANT_COLLECTION, TEAM_MAP,
     CONFLICT_CHECK_ON_STORE, CONFLICT_BLOCK_ON_STORE,
 )
-from conflict_detection import check_for_conflicts, llm_adjudicated_dedup
+from conflict_detection import check_for_conflicts, llm_adjudicated_dedup, _query_similar
 from indexer import compute_ttl
 from qdrant import qdrant_client
 from rbac import get_namespace_for_agent, get_namespace_config
@@ -212,7 +212,9 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
         return [TextContent(type="text", text=denied)]
 
     if CONFLICT_CHECK_ON_STORE and not force_skip:
-        cr = await check_for_conflicts(text, namespace, agent_id)
+        _shared_vec, _shared_results = await _query_similar(text, namespace)
+        cr = await check_for_conflicts(text, namespace, agent_id,
+                                       _shared_vec=_shared_vec, _shared_results=_shared_results)
         if cr.has_conflict and CONFLICT_BLOCK_ON_STORE:
             m.inc(m.STORE_CONFLICT, {"namespace": namespace})
             webhooks.fire_background("memory_conflict", {
@@ -228,9 +230,12 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
                 "recommendation": cr.recommendation,
                 "hint": "Set force_skip_conflict_check true to store anyway, or merge with conflicting memories.",
             })
+    else:
+        _shared_results = None
 
     if not force_skip:
-        dedup = await llm_adjudicated_dedup(text, namespace, agent_id)
+        dedup = await llm_adjudicated_dedup(text, namespace, agent_id,
+                                            _shared_results=_shared_results)
         if dedup and dedup.action == "skip":
             return error_response({
                 "stored": False,
@@ -256,12 +261,12 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
     consistency = ns_config.consistency if ns_config else "eventual"
 
     for ename in entity_names:
-        eid = upsert_entity(ename.strip(), retention_class=retention)
-        add_fact(eid, text[:200], f"explicit/{agent_id}", agent_id, retention_class=retention)
+        eid = upsert_entity(ename.strip(), retention_class=retention, namespace=namespace or "global")
+        add_fact(eid, text[:200], f"explicit/{agent_id}", agent_id, retention_class=retention, namespace=namespace or "global")
 
     if not entity_names:
-        eid = upsert_entity(agent_id, "agent", retention_class=retention)
-        add_fact(eid, text[:200], f"explicit/{agent_id}", agent_id, retention_class=retention)
+        eid = upsert_entity(agent_id, "agent", retention_class=retention, namespace=namespace or "global")
+        add_fact(eid, text[:200], f"explicit/{agent_id}", agent_id, retention_class=retention, namespace=namespace or "global")
 
         _auto_hints = pre_extract(text)
         _auto_entities = _auto_hints.get("entities", [])
@@ -270,10 +275,21 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
             ename = ent["name"].strip()
             if ename and ename != agent_id:
                 etype = ent.get("type", "unknown")
-                _eid = upsert_entity(ename, etype, retention_class=retention)
-                add_fact(_eid, text[:200], f"explicit/{agent_id}", agent_id, retention_class=retention)
+                _eid = upsert_entity(ename, etype, retention_class=retention, namespace=namespace or "global")
+                add_fact(_eid, text[:200], f"explicit/{agent_id}", agent_id, retention_class=retention, namespace=namespace or "global")
     else:
         _auto_hints = pre_extract(text)
+
+    thought_type = (arguments.get("thought_type") or "").strip()
+    if not thought_type:
+        thought_type = _auto_hints.get("thought_type", "general")
+
+    from config import TOPIC_ROUTING_ENABLED
+    from topic_detector import detect_topics
+    _detected_topic = ""
+    if TOPIC_ROUTING_ENABLED:
+        _topics = detect_topics(text)
+        _detected_topic = _topics[0] if _topics else ""
 
     embed_input = text
     from config import CONTEXTUAL_AUGMENTATION_ENABLED
@@ -283,6 +299,8 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
             agent_id=agent_id,
             file_path=f"explicit/{agent_id}",
             date=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+            thought_type=thought_type,
+            topic=_detected_topic,
         )
     vec = await embed_text(embed_input)
     client = qdrant_client()
@@ -291,10 +309,6 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
     checksum = compute_memory_checksum(text, agent_id, namespace)
 
     ttl_expires_at = compute_ttl(namespace, importance=importance)
-
-    thought_type = (arguments.get("thought_type") or "").strip()
-    if not thought_type:
-        thought_type = _auto_hints.get("thought_type", "general")
 
     payload = {
         "agent_id": agent_id,
@@ -647,7 +661,8 @@ async def _handle_pin(arguments: dict) -> list[TextContent]:
         with GRAPH_WRITE_LOCK:
             conn = get_db()
             row = conn.execute(
-                "SELECT id FROM entities WHERE name = ? COLLATE NOCASE", (entity_name,)
+                "SELECT id FROM entities WHERE name = ? COLLATE NOCASE AND namespace = ?",
+                (entity_name, namespace or "global"),
             ).fetchone()
             if row:
                 conn.execute(
@@ -660,7 +675,7 @@ async def _handle_pin(arguments: dict) -> list[TextContent]:
                 conn.commit()
                 pinned.append({"type": "entity", "name": entity_name, "id": row["id"]})
             else:
-                eid = upsert_entity(entity_name, retention_class="permanent")
+                eid = upsert_entity(entity_name, retention_class="permanent", namespace=namespace or "global")
                 pinned.append({"type": "entity", "name": entity_name, "id": eid, "created": True})
             conn.close()
 

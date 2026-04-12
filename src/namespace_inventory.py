@@ -81,11 +81,11 @@ def _fetch_top_entities(conn, namespace: str, limit: int = 10) -> list[str]:
         cur = conn.execute(
             """
             SELECT name, mention_count FROM entities
-            WHERE mention_count >= 2
+            WHERE mention_count >= 2 AND namespace = ?
             ORDER BY mention_count DESC
             LIMIT ?
             """,
-            (limit,),
+            (namespace or "global", limit),
         )
         return [r["name"] for r in cur.fetchall()]
     except Exception as e:

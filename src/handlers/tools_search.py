@@ -334,7 +334,7 @@ async def _handle_recall(arguments: dict) -> list[TextContent]:
         if denied:
             return [TextContent(type="text", text=denied)]
 
-    entities = search_entities(entity_name)
+    entities = search_entities(entity_name, namespace=namespace)
     if not entities:
         return error_response({"error": "entity_not_found", "entity": entity_name})
 
@@ -351,7 +351,7 @@ async def _handle_recall(arguments: dict) -> list[TextContent]:
     }
 
     if related_name:
-        rel_entities = search_entities(related_name)
+        rel_entities = search_entities(related_name, namespace=namespace)
         if rel_entities:
             rel_eid = rel_entities[0]["id"]
             rel_facts = get_entity_facts(rel_eid, as_of=as_of)
@@ -537,8 +537,9 @@ async def _handle_index(arguments: dict) -> list[TextContent]:
 async def _handle_contradictions(arguments: dict) -> list[TextContent]:
     """Surface contradicting facts about an entity from different agents."""
     entity_name = arguments["entity"]
+    namespace = arguments.get("namespace", "")
 
-    entities = search_entities(entity_name, limit=1)
+    entities = search_entities(entity_name, limit=1, namespace=namespace)
     if not entities:
         return success_response({
             "entity": entity_name,
@@ -562,10 +563,11 @@ async def _handle_entity_brief(arguments: dict) -> list[TextContent]:
     entity_name = arguments["entity"]
     alias = (arguments.get("add_alias") or "").strip()
     as_of = (arguments.get("as_of") or "").strip()
+    namespace = arguments.get("namespace", "")
 
     caller = resolve_caller(arguments)
 
-    entities = search_entities(entity_name, limit=1)
+    entities = search_entities(entity_name, limit=1, namespace=namespace)
     if not entities:
         return error_response({
             "error": f"Entity '{entity_name}' not found in knowledge graph",

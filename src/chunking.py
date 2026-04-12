@@ -115,6 +115,8 @@ def chunk_text_hierarchical(
             })
 
         micro_chunks = _extract_needle_micro_chunks(parent)
+        from config import MAX_MICRO_CHUNKS_PER_MEMORY
+        micro_chunks = micro_chunks[:MAX_MICRO_CHUNKS_PER_MEMORY]
         for mi, micro in enumerate(micro_chunks):
             mh = hashlib.md5(f"{filepath}\0{pi}\0needle\0{mi}\0{micro}".encode()).hexdigest()
             micro_id = f"{mh[:8]}-{mh[8:12]}-{mh[12:16]}-{mh[16:20]}-{mh[20:32]}"

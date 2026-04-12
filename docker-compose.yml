@@ -17,6 +17,8 @@
 #
 # Academic suite (LongMemEval / LoCoMo / HaluMem):
 #   bash benchmarks/scripts/run_academic_benchmarks_docker.sh
+# LongMemEval only — timestamped JSON under .benchmarks/runs/ + longmemeval_latest symlink:
+#   bash benchmarks/scripts/run_longmemeval_docker.sh
 # Do not commit .env (gitignored); use .env.example as the template only.
 #
 # Data under Docker volumes by default; use docker-compose.override.example.yml to bind host paths.
@@ -40,7 +42,10 @@ services:
       EMBED_API_KEY: ${EMBED_API_KEY:-}
       EMBED_MODEL: ${EMBED_MODEL:-bge-base}
       VECTOR_DIM: ${VECTOR_DIM:-768}
-      LLM_URL: ${LLM_URL:-http://host.docker.internal:11434}
+      # Use BENCHMARK_LLM_URL to override the LLM endpoint inside the benchmark container.
+      # Needed when LLM_URL in .env is a Tailscale Magic DNS hostname (e.g. openclaw-vllm-corp)
+      # that the container can't resolve without a host mapping via OPENCLAW_VLLM_TSIP.
+      LLM_URL: ${BENCHMARK_LLM_URL:-${LLM_URL:-http://host.docker.internal:11434}}
       LLM_MODEL: ${LLM_MODEL:-llama3.1}
       LLM_API_KEY: ${LLM_API_KEY:-}
       RERANK_ENABLED: ${RERANK_ENABLED:-false}
@@ -49,6 +54,10 @@ services:
     working_dir: /workspace
     extra_hosts:
       - "host.docker.internal:host-gateway"
+      # Map the Tailscale LLM hostname to its IP so the container can reach it.
+      # Set OPENCLAW_VLLM_TSIP in .env (e.g. OPENCLAW_VLLM_TSIP=100.89.207.109).
+      # Falls back to 127.0.0.1 (no-op) when the variable is unset.
+      - "openclaw-vllm-corp:${OPENCLAW_VLLM_TSIP:-127.0.0.1}"
     depends_on:
       - qdrant
     networks:

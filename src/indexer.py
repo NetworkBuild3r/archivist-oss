@@ -154,6 +154,12 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
                     tier_map[c["id"]] = await generate_tiers(c["content"])
 
         contents = [c["content"] for c in hier_chunks]
+
+        _chunk_hints = [pre_extract(c["content"]) for c in hier_chunks]
+        _chunk_topics = []
+        if TOPIC_ROUTING_ENABLED:
+            _chunk_topics = [detect_topics(c["content"]) for c in hier_chunks]
+
         augmented_contents = contents
         if CONTEXTUAL_AUGMENTATION_ENABLED:
             augmented_contents = [
@@ -162,9 +168,10 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
                     agent_id=meta.get("agent_id", ""),
                     file_path=meta.get("file_path", ""),
                     date=meta.get("date", ""),
-                    topic="",
+                    topic=(_chunk_topics[i][0] if _chunk_topics and _chunk_topics[i] else ""),
+                    thought_type=_chunk_hints[i].get("thought_type", "general"),
                 )
-                for c in hier_chunks
+                for i, c in enumerate(hier_chunks)
             ]
         vectors = await embed_batch(augmented_contents)
 
@@ -179,8 +186,8 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
             if not chunk_meta["is_parent"] and chunk_meta["parent_id"]:
                 tiers = tier_map.get(chunk_meta["parent_id"], {})
 
-            topics = detect_topics(chunk_meta["content"]) if TOPIC_ROUTING_ENABLED else []
-            hints = pre_extract(chunk_meta["content"])
+            topics = _chunk_topics[i] if _chunk_topics else (detect_topics(chunk_meta["content"]) if TOPIC_ROUTING_ENABLED else [])
+            hints = _chunk_hints[i]
             _hints_by_id[pid] = hints
             payload = {
                 **meta,
@@ -271,6 +278,7 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
 
         _agent = meta.get("agent_id", "")
         _src_file = meta.get("file_path", "")
+        _ns = meta.get("namespace", "")
         _seen_entity_names: set[str] = set()
         for p in points:
             if not p.payload.get("is_parent", False):
@@ -282,8 +290,8 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
                 if ename and ename not in _seen_entity_names:
                     _seen_entity_names.add(ename)
                     etype = ent.get("type", "unknown")
-                    _eid = upsert_entity(ename, etype)
-                    add_fact(_eid, p.payload.get("text", "")[:200], _src_file, _agent)
+                    _eid = upsert_entity(ename, etype, namespace=_ns or "global")
+                    add_fact(_eid, p.payload.get("text", "")[:200], _src_file, _agent, namespace=_ns or "global")
 
         for p in points:
             register_needle_tokens(

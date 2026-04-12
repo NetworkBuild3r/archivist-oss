@@ -24,6 +24,9 @@ class NamespaceConfig:
     write: list[str]
     consistency: str = "eventual"
     ttl_days: Optional[int] = None
+    profile: str = "standard"
+    chunk_size: Optional[int] = None
+    latency_budget_ms: Optional[int] = None
 
 
 @dataclass
@@ -59,15 +62,26 @@ def load_config(path: str = NAMESPACES_CONFIG_PATH) -> RBACConfig:
         _config = RBACConfig()
         return _config
 
+    _PROFILE_DEFAULTS = {
+        "lite": {"chunk_size": 400, "latency_budget_ms": 200},
+        "standard": {"chunk_size": 800, "latency_budget_ms": 500},
+        "heavy": {"chunk_size": 1200, "latency_budget_ms": 800},
+    }
+
     _permissive_fallback = False
     ns_map: dict[str, NamespaceConfig] = {}
     for ns_raw in raw.get("namespaces", []):
+        profile = ns_raw.get("profile", "standard")
+        profile_defaults = _PROFILE_DEFAULTS.get(profile, _PROFILE_DEFAULTS["standard"])
         ns = NamespaceConfig(
             id=ns_raw["id"],
             read=ns_raw.get("read", []),
             write=ns_raw.get("write", []),
             consistency=ns_raw.get("consistency", "eventual"),
             ttl_days=ns_raw.get("ttl_days"),
+            profile=profile,
+            chunk_size=ns_raw.get("chunk_size", profile_defaults.get("chunk_size")),
+            latency_budget_ms=ns_raw.get("latency_budget_ms", profile_defaults.get("latency_budget_ms")),
         )
         ns_map[ns.id] = ns
 

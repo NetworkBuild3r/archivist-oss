@@ -60,7 +60,7 @@ from query_intent import classify_temporal_intent
 from topic_detector import detect_query_topic
 from ranker import ltr_available, rank_results as ltr_rank_results
 from collection_router import collection_for
-from latency_budget import LatencyBudget
+from latency_budget import LatencyBudget, budget_for_query_type
 from query_expansion import expand_query
 from hyde import is_needle_query, generate_hypothetical_document
 from result_types import ResultCandidate, RetrievalSource
@@ -555,13 +555,13 @@ def apply_importance_to_results(results: list[dict], weight: float | None = None
     return results
 
 
-def _apply_rerank(query: str, results: list[dict]) -> list[dict]:
+async def _apply_rerank(query: str, results: list[dict]) -> list[dict]:
     """Apply cross-encoder reranking if enabled."""
     if not RERANK_ENABLED:
         return results
     try:
         from reranker import rerank_results
-        return rerank_results(query, results, model_name=RERANK_MODEL, limit=RERANK_TOP_K)
+        return await rerank_results(query, results, model_name=RERANK_MODEL, limit=RERANK_TOP_K)
     except Exception as e:
         logger.warning("Reranking failed, using original order: %s", e)
         return results
@@ -629,6 +629,10 @@ async def recursive_retrieve(
         auto_type, auto_subcategory = await classify_query_full(
             query, inventory=stage0_inventory,
         )
+        _classified_budget_type = auto_type if auto_type else _initial_budget_type
+        _new_budget_ms = budget_for_query_type(_classified_budget_type)
+        if _new_budget_ms != _budget._max_ms:
+            _budget._max_ms = _new_budget_ms
 
     temporal_intent = ""
     if TEMPORAL_INTENT_ENABLED:
@@ -699,7 +703,8 @@ async def recursive_retrieve(
         m.observe(m.SEARCH_DURATION, elapsed)
         return out
 
-    _budget = LatencyBudget()
+    _initial_budget_type = "needle" if is_needle_query(query) else "default"
+    _budget = LatencyBudget(max_ms=budget_for_query_type(_initial_budget_type))
 
     # ── Stage timings (ms) for retrieval trace ──
     _stage_timings: dict[str, float] = {}
@@ -722,6 +727,7 @@ async def recursive_retrieve(
             _raw_registry = lookup_needle_tokens(query, namespace=namespace, agent_id=agent_id)
 
         if _raw_registry:
+            m.inc(m.NEEDLE_REGISTRY_HITS, {"namespace": namespace}, value=len(_raw_registry))
             _reg_candidates = [ResultCandidate.from_registry_hit(rh) for rh in _raw_registry]
 
             _reg_ids = [c.id for c in _reg_candidates if c.id]
@@ -745,6 +751,7 @@ async def recursive_retrieve(
                         c.update_from_payload(payload)
                         _live_candidates.append(c)
                     else:
+                        m.inc(m.NEEDLE_REGISTRY_STALE, {"namespace": namespace})
                         logger.warning(
                             "registry.stale_entry: memory_id=%s not found in Qdrant — dropping",
                             c.id,
@@ -878,7 +885,7 @@ async def recursive_retrieve(
     detected_entities: list[dict] = []
     _t_graph = time.monotonic()
     if GRAPH_RETRIEVAL_ENABLED:
-        entities = extract_entity_mentions(query)
+        entities = extract_entity_mentions(query, namespace=namespace)
         detected_entities = entities
         n_graph_entities = len(entities)
         if entities:
@@ -1084,7 +1091,7 @@ async def recursive_retrieve(
             logger.debug("Outcome adjustments skipped: %s", e)
 
     # Stage 3: Rerank (Phase 1)
-    reranked = _apply_rerank(query, filtered)
+    reranked = await _apply_rerank(query, filtered)
     n_rerank = len(reranked)
 
     # Stage 3a: Iterative retrieval — auto-reformulate on low-confidence (v1.10)
@@ -1141,6 +1148,10 @@ async def recursive_retrieve(
         enriched = capped if capped else enriched[:1]
 
     n_refine = len(enriched)
+
+    _micro_hits = sum(1 for r in enriched if r.get("parent_id") and not r.get("is_parent"))
+    if _micro_hits:
+        m.inc(m.MICRO_CHUNK_HITS, {"namespace": namespace}, value=_micro_hits)
 
     # Context-status signaling (v1.0, upgraded v1.1 with tokenizer)
     result_tokens_approx = sum(count_tokens(select_tier(r, tier)) for r in enriched)
