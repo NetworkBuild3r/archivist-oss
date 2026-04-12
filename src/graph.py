@@ -5,6 +5,7 @@ import re
 import sqlite3
 import os
 import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
@@ -964,35 +965,38 @@ def delete_fts_chunks_batch(qdrant_ids: list[str]) -> int:
 
     Internally chunks the ID list into groups of 500 to stay under the
     sqlite3 ~999-parameter limit.  Acquires ``GRAPH_WRITE_LOCK`` once.
+    Retries once on ``sqlite3.OperationalError`` (e.g. "database is locked").
     """
     if not qdrant_ids:
         return 0
-    total = 0
-    with GRAPH_WRITE_LOCK:
-        conn = get_db()
+    for attempt in range(2):
+        total = 0
         try:
-            for i in range(0, len(qdrant_ids), _BATCH_CHUNK):
-                chunk = qdrant_ids[i : i + _BATCH_CHUNK]
-                placeholders = ",".join("?" * len(chunk))
-                rows = conn.execute(
-                    f"SELECT rowid FROM memory_chunks WHERE qdrant_id IN ({placeholders})",
-                    chunk,
-                ).fetchall()
-                _delete_fts_rows(conn, rows)
-                cur = conn.execute(
-                    f"DELETE FROM memory_chunks WHERE qdrant_id IN ({placeholders})",
-                    chunk,
-                )
-                total += cur.rowcount
-            conn.commit()
-        except Exception as e:
-            logging.getLogger("archivist.graph").warning(
-                "FTS batch delete failed: %s", e,
-            )
-            conn.rollback()
-        finally:
-            conn.close()
-    return total
+            with GRAPH_WRITE_LOCK:
+                conn = get_db()
+                try:
+                    for i in range(0, len(qdrant_ids), _BATCH_CHUNK):
+                        chunk = qdrant_ids[i : i + _BATCH_CHUNK]
+                        placeholders = ",".join("?" * len(chunk))
+                        rows = conn.execute(
+                            f"SELECT rowid FROM memory_chunks WHERE qdrant_id IN ({placeholders})",
+                            chunk,
+                        ).fetchall()
+                        _delete_fts_rows(conn, rows)
+                        cur = conn.execute(
+                            f"DELETE FROM memory_chunks WHERE qdrant_id IN ({placeholders})",
+                            chunk,
+                        )
+                        total += cur.rowcount
+                    conn.commit()
+                finally:
+                    conn.close()
+            return total
+        except sqlite3.OperationalError:
+            if attempt == 0:
+                time.sleep(0.2)
+                continue
+            raise
 
 
 def delete_needle_tokens_batch(memory_ids: list[str]) -> int:
@@ -1000,28 +1004,31 @@ def delete_needle_tokens_batch(memory_ids: list[str]) -> int:
 
     Internally chunks the ID list into groups of 500 to stay under the
     sqlite3 ~999-parameter limit.  Acquires ``GRAPH_WRITE_LOCK`` once.
+    Retries once on ``sqlite3.OperationalError`` (e.g. "database is locked").
     """
     if not memory_ids:
         return 0
     _ensure_needle_registry()
-    total = 0
-    with GRAPH_WRITE_LOCK:
-        conn = get_db()
+    for attempt in range(2):
+        total = 0
         try:
-            for i in range(0, len(memory_ids), _BATCH_CHUNK):
-                chunk = memory_ids[i : i + _BATCH_CHUNK]
-                placeholders = ",".join("?" * len(chunk))
-                cur = conn.execute(
-                    f"DELETE FROM needle_registry WHERE memory_id IN ({placeholders})",
-                    chunk,
-                )
-                total += cur.rowcount
-            conn.commit()
-        except Exception as e:
-            logging.getLogger("archivist.graph").warning(
-                "Needle registry batch delete failed: %s", e,
-            )
-            conn.rollback()
-        finally:
-            conn.close()
-    return total
+            with GRAPH_WRITE_LOCK:
+                conn = get_db()
+                try:
+                    for i in range(0, len(memory_ids), _BATCH_CHUNK):
+                        chunk = memory_ids[i : i + _BATCH_CHUNK]
+                        placeholders = ",".join("?" * len(chunk))
+                        cur = conn.execute(
+                            f"DELETE FROM needle_registry WHERE memory_id IN ({placeholders})",
+                            chunk,
+                        )
+                        total += cur.rowcount
+                    conn.commit()
+                finally:
+                    conn.close()
+            return total
+        except sqlite3.OperationalError:
+            if attempt == 0:
+                time.sleep(0.2)
+                continue
+            raise

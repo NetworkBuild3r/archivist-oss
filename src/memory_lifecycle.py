@@ -20,6 +20,8 @@ from cascade import (
 from graph import (
     delete_fts_chunks_batch,
     delete_needle_tokens_batch,
+    GRAPH_WRITE_LOCK,
+    get_db,
 )
 from qdrant import qdrant_client
 from audit import log_memory_event
@@ -161,9 +163,8 @@ async def delete_memory_complete(
 
     # 7. Delete memory_hotness row
     try:
-        from graph import GRAPH_WRITE_LOCK, get_db as _get_db
         with GRAPH_WRITE_LOCK:
-            _conn = _get_db()
+            _conn = get_db()
             try:
                 cur = _conn.execute(
                     "DELETE FROM memory_hotness WHERE memory_id = ?", (memory_id,),
@@ -195,13 +196,15 @@ async def delete_memory_complete(
         },
     )
 
+    metadata = asdict(result)
+    metadata["result_type"] = "delete"
     await log_memory_event(
         agent_id="system",
         action="delete",
         memory_id=memory_id,
         namespace=namespace,
         text_hash="",
-        metadata=asdict(result),
+        metadata=metadata,
     )
 
     if "qdrant_primary" in result.failed_steps or len(result.failed_steps) > 2:
@@ -265,13 +268,15 @@ async def archive_memory_complete(
         },
     )
 
+    metadata = asdict(result)
+    metadata["result_type"] = "archive"
     await log_memory_event(
         agent_id="system",
         action="archive",
         memory_id=memory_id,
         namespace=namespace,
         text_hash="",
-        metadata=asdict(result),
+        metadata=metadata,
     )
 
     return result
@@ -292,8 +297,6 @@ def _delete_entity_facts_for_memory(memory_id: str) -> int:
 
     Returns count of soft-deactivated facts.
     """
-    from graph import GRAPH_WRITE_LOCK, get_db
-
     with GRAPH_WRITE_LOCK:
         conn = get_db()
         try:

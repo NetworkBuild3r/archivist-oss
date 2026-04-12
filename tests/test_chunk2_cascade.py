@@ -14,6 +14,7 @@ Covers:
 """
 
 import asyncio
+import sqlite3
 from dataclasses import asdict
 from unittest.mock import AsyncMock, MagicMock, patch, call
 
@@ -120,7 +121,7 @@ class TestDeleteMemoryComplete:
         mock_cursor.rowcount = 1
         mock_conn.execute.return_value = mock_cursor
         with patch("memory_lifecycle.GRAPH_WRITE_LOCK", MagicMock()), \
-             patch("memory_lifecycle._get_db", return_value=mock_conn):
+             patch("memory_lifecycle.get_db", return_value=mock_conn):
             yield mock_conn
 
     @pytest.fixture
@@ -194,7 +195,7 @@ class TestDeleteMemoryComplete:
 
             result = exc_info.value.result
             assert "qdrant_primary" in result.failed_steps
-            assert result.qdrant_primary == 0
+            assert result.qdrant_primary == 1  # pre-count preserved on failure
 
         mock_fts.assert_called_once()
         mock_needle.assert_called_once()
@@ -259,6 +260,7 @@ class TestDeleteMemoryComplete:
         assert kwargs["memory_id"] == "m-audit"
         assert "failed_steps" in kwargs["metadata"]
         assert "memory_hotness" in kwargs["metadata"]
+        assert kwargs["metadata"]["result_type"] == "delete"
 
 
 class TestPaginatedScroll:
@@ -352,7 +354,7 @@ class TestArchiveMemoryComplete:
 
     @pytest.mark.asyncio
     async def test_archive_audit_logging(self):
-        """Archive calls log_memory_event with action='archive'."""
+        """Archive calls log_memory_event with action='archive' and result_type."""
         client = MagicMock()
         mock_audit = AsyncMock()
         with patch("memory_lifecycle.qdrant_client", return_value=client), \
@@ -364,6 +366,7 @@ class TestArchiveMemoryComplete:
 
         mock_audit.assert_called_once()
         assert mock_audit.call_args[1]["action"] == "archive"
+        assert mock_audit.call_args[1]["metadata"]["result_type"] == "archive"
 
 
 class TestDeleteFtsChunksByQdrantId:
@@ -500,9 +503,10 @@ class TestOrphanSweeper:
         mock_client = MagicMock()
         p1 = MagicMock(); p1.id = "exists-in-qdrant"
         mock_client.retrieve.return_value = [p1]
+        mock_client.get_collections.return_value = MagicMock()
 
-        with patch("qdrant.qdrant_client", return_value=mock_client), \
-             patch("collection_router.collections_for_query", return_value=["test_col"]):
+        with patch("cascade.qdrant_client", return_value=mock_client), \
+             patch("cascade.collections_for_query", return_value=["test_col"]):
             from cascade import sweep_orphans
             result = sweep_orphans()
 
@@ -524,9 +528,10 @@ class TestOrphanSweeper:
         mock_client = MagicMock()
         p1 = MagicMock(); p1.id = "keep-this"
         mock_client.retrieve.return_value = [p1]
+        mock_client.get_collections.return_value = MagicMock()
 
-        with patch("qdrant.qdrant_client", return_value=mock_client), \
-             patch("collection_router.collections_for_query", return_value=["test_col"]):
+        with patch("cascade.qdrant_client", return_value=mock_client), \
+             patch("cascade.collections_for_query", return_value=["test_col"]):
             from cascade import sweep_orphans
             result = sweep_orphans()
 
@@ -617,6 +622,270 @@ class TestMergeUsesLifecycle:
             result = await merge_memories(["id1", "id2"], "semantic", "agent", "ns")
 
         assert mock_del.call_count == 2
+
+
+class TestQdrantRetry:
+    """Transient-only retry behaviour in _qdrant_delete and _qdrant_set_payload."""
+
+    def test_transient_retry_succeeds_on_second_attempt(self):
+        """First delete raises a transient error, second attempt succeeds."""
+        from cascade import _qdrant_delete
+        from qdrant_client.http.exceptions import ResponseHandlingException
+
+        client = MagicMock()
+        client.count.return_value = MagicMock(count=5)
+        client.delete.side_effect = [ResponseHandlingException("timeout"), None]
+
+        from qdrant_client.models import Filter, FieldCondition, MatchValue
+        filt = Filter(must=[FieldCondition(key="parent_id", match=MatchValue(value="mem-1"))])
+        failed = []
+
+        count = _qdrant_delete(client, "col", filt, "test_step", "mem-1", failed)
+
+        assert count == 5
+        assert failed == []
+        assert client.delete.call_count == 2
+
+    def test_permanent_error_does_not_retry(self):
+        """A non-transient error (e.g. 404) fails immediately without retry."""
+        from cascade import _qdrant_delete
+        from qdrant_client.http.exceptions import UnexpectedResponse
+
+        client = MagicMock()
+        err = UnexpectedResponse.__new__(UnexpectedResponse)
+        err.status_code = 404
+        err.reason_phrase = "Not Found"
+        err.content = b""
+        client.delete.side_effect = err
+        client.count.return_value = MagicMock(count=0)
+
+        failed = []
+        _qdrant_delete(client, "col", ["point-1"], "perm_step", "mem-1", failed)
+
+        assert client.delete.call_count == 1
+        assert "perm_step" in failed
+
+    def test_precount_returned_on_final_failure(self):
+        """Both attempts fail with transient errors; pre-count is still returned."""
+        from cascade import _qdrant_delete
+        from qdrant_client.http.exceptions import ResponseHandlingException
+
+        client = MagicMock()
+        client.delete.side_effect = ResponseHandlingException("network")
+
+        failed = []
+        count = _qdrant_delete(client, "col", ["p1", "p2", "p3"], "step_x", "mem-1", failed)
+
+        assert count == 3  # pre-count = len(selector)
+        assert "step_x" in failed
+        assert client.delete.call_count == 2  # 1 initial + 1 retry
+
+    def test_set_payload_transient_retry(self):
+        """_qdrant_set_payload retries on transient error and succeeds."""
+        from cascade import _qdrant_set_payload
+        from qdrant_client.http.exceptions import ResponseHandlingException
+
+        client = MagicMock()
+        client.set_payload.side_effect = [ResponseHandlingException("timeout"), None]
+
+        failed = []
+        ok = _qdrant_set_payload(
+            client, "col", {"archived": True}, ["p1"],
+            "archive_step", "mem-1", failed,
+        )
+
+        assert ok is True
+        assert failed == []
+        assert client.set_payload.call_count == 2
+
+    def test_set_payload_permanent_error_no_retry(self):
+        """_qdrant_set_payload does not retry permanent errors."""
+        from cascade import _qdrant_set_payload
+        from qdrant_client.http.exceptions import UnexpectedResponse
+
+        client = MagicMock()
+        err = UnexpectedResponse.__new__(UnexpectedResponse)
+        err.status_code = 400
+        err.reason_phrase = "Bad Request"
+        err.content = b""
+        client.set_payload.side_effect = err
+
+        failed = []
+        ok = _qdrant_set_payload(
+            client, "col", {"archived": True}, ["p1"],
+            "bad_step", "mem-1", failed,
+        )
+
+        assert ok is False
+        assert "bad_step" in failed
+        assert client.set_payload.call_count == 1
+
+
+class TestOrphanSweeperAdvanced:
+    """Extended sweep_orphans tests for health guard, needle scan, retrieve failures."""
+
+    def test_sweeper_aborts_on_qdrant_down(self):
+        """Sweeper returns skipped when Qdrant is unreachable."""
+        mock_client = MagicMock()
+        mock_client.get_collections.side_effect = ConnectionError("refused")
+
+        with patch("cascade.qdrant_client", return_value=mock_client):
+            from cascade import sweep_orphans
+            result = sweep_orphans()
+
+        assert result.get("skipped") == "qdrant_unavailable"
+        assert result["fts_cleaned"] == 0
+        assert result["needle_cleaned"] == 0
+
+    def test_needle_orphan_cleanup_primary(self):
+        """Needle rows keyed on a primary memory_id with no Qdrant point are cleaned."""
+        from graph import get_db, GRAPH_WRITE_LOCK, _ensure_needle_registry
+
+        _ensure_needle_registry()
+        conn = get_db()
+        conn.execute(
+            "INSERT INTO needle_registry (memory_id, token, namespace, agent_id, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("orphan-primary-id", "some_token", "ns", "agent", "2025-01-01T00:00:00"),
+        )
+        conn.commit()
+        conn.close()
+
+        mock_client = MagicMock()
+        mock_client.get_collections.return_value = MagicMock()
+        mock_client.retrieve.return_value = []
+
+        with patch("cascade.qdrant_client", return_value=mock_client), \
+             patch("cascade.collections_for_query", return_value=["test_col"]):
+            from cascade import sweep_orphans
+            result = sweep_orphans()
+
+        assert result["needle_cleaned"] >= 1
+
+        conn = get_db()
+        remaining = conn.execute(
+            "SELECT COUNT(*) FROM needle_registry WHERE memory_id = 'orphan-primary-id'"
+        ).fetchone()[0]
+        conn.close()
+        assert remaining == 0
+
+    def test_needle_orphan_cleanup_child(self):
+        """Needle rows where memory_id is a micro-chunk Qdrant ID are cleaned when orphaned."""
+        from graph import get_db, GRAPH_WRITE_LOCK, _ensure_needle_registry
+
+        _ensure_needle_registry()
+        conn = get_db()
+        conn.execute(
+            "INSERT INTO needle_registry (memory_id, token, namespace, agent_id, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("orphan-microchunk-id", "needle_tok", "ns", "agent", "2025-01-01T00:00:00"),
+        )
+        conn.commit()
+        conn.close()
+
+        mock_client = MagicMock()
+        mock_client.get_collections.return_value = MagicMock()
+        mock_client.retrieve.return_value = []
+
+        with patch("cascade.qdrant_client", return_value=mock_client), \
+             patch("cascade.collections_for_query", return_value=["test_col"]):
+            from cascade import sweep_orphans
+            result = sweep_orphans()
+
+        assert result["needle_cleaned"] >= 1
+
+        conn = get_db()
+        remaining = conn.execute(
+            "SELECT COUNT(*) FROM needle_registry WHERE memory_id = 'orphan-microchunk-id'"
+        ).fetchone()[0]
+        conn.close()
+        assert remaining == 0
+
+    def test_retrieve_failure_skips_subbatch(self):
+        """If client.retrieve fails for one collection, sub-batch is conservatively kept."""
+        from graph import upsert_fts_chunk, get_db
+
+        upsert_fts_chunk("maybe-orphan", "text", "f.md", 0, "a", "ns")
+
+        mock_client = MagicMock()
+        mock_client.get_collections.return_value = MagicMock()
+        mock_client.retrieve.side_effect = Exception("retrieve error")
+
+        with patch("cascade.qdrant_client", return_value=mock_client), \
+             patch("cascade.collections_for_query", return_value=["col_a", "col_b"]):
+            from cascade import sweep_orphans
+            result = sweep_orphans()
+
+        assert result["fts_cleaned"] == 0
+
+        conn = get_db()
+        count = conn.execute(
+            "SELECT COUNT(*) FROM memory_chunks WHERE qdrant_id = 'maybe-orphan'"
+        ).fetchone()[0]
+        conn.close()
+        assert count == 1
+
+
+class TestBatchSqliteRetry:
+    """SQLite batch functions retry on OperationalError."""
+
+    def test_fts_retry_on_operational_error(self):
+        """delete_fts_chunks_batch retries once on sqlite3.OperationalError."""
+        import sqlite3 as _sqlite3
+        from graph import delete_fts_chunks_batch, GRAPH_WRITE_LOCK
+
+        call_count = 0
+        _orig_get_db = None
+
+        def _flaky_get_db():
+            nonlocal call_count, _orig_get_db
+            call_count += 1
+            if call_count == 1:
+                raise _sqlite3.OperationalError("database is locked")
+            return _orig_get_db()
+
+        from graph import get_db as orig_get_db
+        _orig_get_db = orig_get_db
+
+        from graph import upsert_fts_chunk
+        upsert_fts_chunk("retry-id", "text", "f.md", 0, "a", "ns")
+
+        with patch("graph.get_db", side_effect=_flaky_get_db):
+            deleted = delete_fts_chunks_batch(["retry-id"])
+
+        assert deleted == 1
+        assert call_count == 2
+
+    def test_needle_retry_on_operational_error(self):
+        """delete_needle_tokens_batch retries once on sqlite3.OperationalError."""
+        import sqlite3 as _sqlite3
+        from graph import delete_needle_tokens_batch, _ensure_needle_registry, get_db
+
+        _ensure_needle_registry()
+        conn = get_db()
+        conn.execute(
+            "INSERT INTO needle_registry (memory_id, token, namespace, agent_id, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("retry-needle-id", "tok", "ns", "agent", "2025-01-01T00:00:00"),
+        )
+        conn.commit()
+        conn.close()
+
+        call_count = 0
+        _orig_get_db = get_db
+
+        def _flaky_get_db():
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise _sqlite3.OperationalError("database is locked")
+            return _orig_get_db()
+
+        with patch("graph.get_db", side_effect=_flaky_get_db):
+            deleted = delete_needle_tokens_batch(["retry-needle-id"])
+
+        assert deleted == 1
+        assert call_count == 2
 
 
 class TestMetricsExist:

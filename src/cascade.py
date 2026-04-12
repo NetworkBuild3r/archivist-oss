@@ -15,17 +15,42 @@ through a cascade will leave partial state.  The contract:
      against Qdrant point existence and cleans up stragglers.
   3. **Auditable** — Every delete/archive is logged to ``audit_log`` with the
      full result including ``failed_steps``.
+  4. **Retry-resilient** — Qdrant helpers retry once on transient errors
+     (429, 503, connection timeout).  Permanent errors (404, 400) fail
+     immediately.  SQLite batch functions retry once on OperationalError.
+  5. **Sweeper coverage** — ``sweep_orphans()`` reconciles both
+     ``memory_chunks`` (by ``qdrant_id``) and ``needle_registry`` (by
+     ``memory_id``, which stores both primary and micro-chunk IDs).
+     Aborts early if Qdrant is unreachable.
 """
 
 import logging
+import time
 
+from qdrant_client.http.exceptions import UnexpectedResponse, ResponseHandlingException
 from qdrant_client.models import Filter, FieldCondition, MatchValue
 
+from collection_router import collections_for_query
+from graph import (
+    get_db, GRAPH_WRITE_LOCK, _delete_fts_rows,
+    delete_fts_chunks_batch, delete_needle_tokens_batch,
+    _ensure_needle_registry,
+)
+from qdrant import qdrant_client
 import metrics as m
 
 logger = logging.getLogger("archivist.cascade")
 
 _BATCH_CHUNK_SIZE = 500
+
+_RETRYABLE_STATUS_CODES = frozenset({429, 503})
+
+
+def _is_transient(exc: Exception) -> bool:
+    """Return True if *exc* is a transient Qdrant error worth retrying."""
+    if isinstance(exc, UnexpectedResponse):
+        return exc.status_code in _RETRYABLE_STATUS_CODES
+    return isinstance(exc, (ResponseHandlingException, TimeoutError, ConnectionError, OSError))
 
 
 class PartialDeletionError(Exception):
@@ -50,6 +75,7 @@ def _qdrant_delete(
     step_name: str,
     memory_id: str,
     failed_steps: list[str],
+    retries: int = 1,
 ) -> int:
     """Delete Qdrant points and return a count.
 
@@ -57,23 +83,39 @@ def _qdrant_delete(
     the count is obtained via ``client.count`` *before* deleting (the delete
     response does not include a deleted-point count).
 
-    On failure the *step_name* is appended to *failed_steps* and 0 is returned.
+    Transient errors (429, 503, connection/timeout) are retried up to *retries*
+    times with a 0.5 s back-off.  Permanent errors fail immediately.
+
+    On failure the *step_name* is appended to *failed_steps* and the pre-count
+    (not 0) is returned so audit logs remain truthful.
     """
+    count = 0
     try:
-        count = 0
         if isinstance(selector, list):
             count = len(selector)
         elif isinstance(selector, Filter):
             resp = client.count(collection_name=col, count_filter=selector)
             count = getattr(resp, "count", 0)
-        client.delete(collection_name=col, points_selector=selector)
-        return count
     except Exception as e:
-        logger.error(
-            "cascade.%s failed for %s: %s", step_name, memory_id, e,
-        )
-        failed_steps.append(step_name)
-        return 0
+        logger.error("cascade.%s count failed for %s: %s", step_name, memory_id, e)
+
+    last_err = None
+    for attempt in range(1 + retries):
+        try:
+            client.delete(collection_name=col, points_selector=selector)
+            return count
+        except Exception as e:
+            last_err = e
+            if not _is_transient(e) or attempt >= retries:
+                break
+            time.sleep(0.5)
+
+    logger.error(
+        "cascade.%s failed for %s after %d attempt(s): %s",
+        step_name, memory_id, attempt + 1, last_err,
+    )
+    failed_steps.append(step_name)
+    return count
 
 
 def _qdrant_set_payload(
@@ -84,23 +126,33 @@ def _qdrant_set_payload(
     step_name: str,
     memory_id: str,
     failed_steps: list[str],
+    retries: int = 1,
 ) -> bool:
     """Set *payload* on Qdrant points matching *selector*.
 
+    Transient errors are retried up to *retries* times (0.5 s back-off).
     Returns ``True`` on success.  On failure the *step_name* is appended to
     *failed_steps* and ``False`` is returned.
     """
-    try:
-        client.set_payload(
-            collection_name=col, payload=payload, points=selector,
-        )
-        return True
-    except Exception as e:
-        logger.error(
-            "cascade.%s failed for %s: %s", step_name, memory_id, e,
-        )
-        failed_steps.append(step_name)
-        return False
+    last_err = None
+    for attempt in range(1 + retries):
+        try:
+            client.set_payload(
+                collection_name=col, payload=payload, points=selector,
+            )
+            return True
+        except Exception as e:
+            last_err = e
+            if not _is_transient(e) or attempt >= retries:
+                break
+            time.sleep(0.5)
+
+    logger.error(
+        "cascade.%s failed for %s after %d attempt(s): %s",
+        step_name, memory_id, attempt + 1, last_err,
+    )
+    failed_steps.append(step_name)
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -147,61 +199,126 @@ def _scroll_all(
 # Orphan sweeper
 # ---------------------------------------------------------------------------
 
-def sweep_orphans() -> dict[str, int]:
+_SWEEP_PAGE_SIZE = 5000
+
+
+def sweep_orphans() -> dict[str, int | str]:
     """Reconcile SQLite rows against Qdrant point existence.
 
-    Scans ``memory_chunks`` and ``needle_registry`` for IDs that have no
-    corresponding Qdrant point and removes the orphaned rows.
+    Scans ``memory_chunks`` (by ``qdrant_id``) and ``needle_registry``
+    (by ``memory_id``) for IDs that have no corresponding Qdrant point and
+    removes the orphaned rows.  Uses ``LIMIT/OFFSET`` pagination to avoid
+    loading entire tables into memory.
+
+    Aborts early with ``{"skipped": "qdrant_unavailable"}`` if Qdrant is
+    unreachable at the start of the sweep.
 
     Returns a dict with counts of cleaned rows per table.
     """
-    from graph import get_db, GRAPH_WRITE_LOCK, _delete_fts_rows
-    from qdrant import qdrant_client
-    from collection_router import collections_for_query
-
     client = qdrant_client()
+
+    try:
+        client.get_collections()
+    except Exception as e:
+        logger.warning("sweep_orphans: Qdrant unavailable, skipping: %s", e)
+        return {"fts_cleaned": 0, "needle_cleaned": 0, "skipped": "qdrant_unavailable"}
+
     collections = collections_for_query("")
 
-    conn = get_db()
-    try:
-        all_qdrant_ids = [
-            row[0]
-            for row in conn.execute(
-                "SELECT DISTINCT qdrant_id FROM memory_chunks"
-            ).fetchall()
-        ]
-    finally:
-        conn.close()
-
+    # --- Phase 1: memory_chunks orphan scan (paginated) ---
     orphan_ids: list[str] = []
-    for i in range(0, len(all_qdrant_ids), 100):
-        batch = all_qdrant_ids[i : i + 100]
-        found_ids: set[str] = set()
-        for coll in collections:
-            try:
-                points = client.retrieve(
-                    collection_name=coll, ids=batch, with_payload=False,
-                )
-                found_ids.update(str(p.id) for p in points)
-            except Exception as e:
-                logger.warning("sweep_orphans.retrieve failed for %s: %s", coll, e)
-                found_ids.update(batch)
-        orphan_ids.extend(bid for bid in batch if bid not in found_ids)
+    page_offset = 0
+    while True:
+        conn = get_db()
+        try:
+            rows = conn.execute(
+                "SELECT DISTINCT qdrant_id FROM memory_chunks LIMIT ? OFFSET ?",
+                (_SWEEP_PAGE_SIZE, page_offset),
+            ).fetchall()
+        finally:
+            conn.close()
+
+        if not rows:
+            break
+
+        batch_ids = [r[0] for r in rows]
+        for i in range(0, len(batch_ids), 100):
+            sub = batch_ids[i : i + 100]
+            found_ids: set[str] = set()
+            any_retrieve_failed = False
+            for coll in collections:
+                try:
+                    points = client.retrieve(
+                        collection_name=coll, ids=sub, with_payload=False,
+                    )
+                    found_ids.update(str(p.id) for p in points)
+                except Exception:
+                    any_retrieve_failed = True
+                    break
+            if any_retrieve_failed:
+                continue
+            orphan_ids.extend(bid for bid in sub if bid not in found_ids)
+
+        page_offset += _SWEEP_PAGE_SIZE
 
     fts_cleaned = 0
-    needle_cleaned = 0
+    needle_cleaned_from_fts = 0
 
     if orphan_ids:
-        from graph import delete_fts_chunks_batch, delete_needle_tokens_batch
         try:
             fts_cleaned = delete_fts_chunks_batch(orphan_ids)
         except Exception as e:
             logger.warning("sweep_orphans.fts_batch failed: %s", e)
         try:
-            needle_cleaned = delete_needle_tokens_batch(orphan_ids)
+            needle_cleaned_from_fts = delete_needle_tokens_batch(orphan_ids)
         except Exception as e:
-            logger.warning("sweep_orphans.needle_batch failed: %s", e)
+            logger.warning("sweep_orphans.needle_batch (fts pass) failed: %s", e)
 
+    # --- Phase 2: needle_registry orphan scan (paginated, separate) ---
+    _ensure_needle_registry()
+    needle_orphan_ids: list[str] = []
+    page_offset = 0
+    while True:
+        conn = get_db()
+        try:
+            rows = conn.execute(
+                "SELECT DISTINCT memory_id FROM needle_registry LIMIT ? OFFSET ?",
+                (_SWEEP_PAGE_SIZE, page_offset),
+            ).fetchall()
+        finally:
+            conn.close()
+
+        if not rows:
+            break
+
+        batch_ids = [r[0] for r in rows]
+        for i in range(0, len(batch_ids), 100):
+            sub = batch_ids[i : i + 100]
+            found: set[str] = set()
+            any_retrieve_failed = False
+            for coll in collections:
+                try:
+                    points = client.retrieve(
+                        collection_name=coll, ids=sub, with_payload=False,
+                    )
+                    found.update(str(p.id) for p in points)
+                except Exception:
+                    any_retrieve_failed = True
+                    break
+            if any_retrieve_failed:
+                continue
+            needle_orphan_ids.extend(bid for bid in sub if bid not in found)
+
+        page_offset += _SWEEP_PAGE_SIZE
+
+    needle_cleaned_direct = 0
+    if needle_orphan_ids:
+        try:
+            needle_cleaned_direct = delete_needle_tokens_batch(needle_orphan_ids)
+        except Exception as e:
+            logger.warning("sweep_orphans.needle_batch (direct) failed: %s", e)
+
+    needle_cleaned = needle_cleaned_from_fts + needle_cleaned_direct
     total = fts_cleaned + needle_cleaned
     if total:
         logger.info(
