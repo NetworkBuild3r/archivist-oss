@@ -1032,3 +1032,24 @@ def delete_needle_tokens_batch(memory_ids: list[str]) -> int:
                 time.sleep(0.2)
                 continue
             raise
+
+
+def delete_hotness(memory_id: str) -> int:
+    """Remove the ``memory_hotness`` row for *memory_id*.
+
+    Returns the number of rows deleted (0 or 1).  Silently returns 0 if the
+    ``memory_hotness`` table does not yet exist (it is lazily created by
+    ``hotness.refresh_hotness``).
+    """
+    with GRAPH_WRITE_LOCK:
+        conn = get_db()
+        try:
+            cur = conn.execute(
+                "DELETE FROM memory_hotness WHERE memory_id = ?", (memory_id,),
+            )
+            conn.commit()
+            return cur.rowcount
+        except sqlite3.OperationalError:
+            return 0
+        finally:
+            conn.close()

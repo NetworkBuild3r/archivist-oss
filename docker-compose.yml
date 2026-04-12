@@ -40,13 +40,13 @@ services:
       # Embedding vLLM on the host or another compose stack: override BENCHMARK_EMBED_URL if needed.
       EMBED_URL: ${BENCHMARK_EMBED_URL:-http://host.docker.internal:8000}
       EMBED_API_KEY: ${EMBED_API_KEY:-}
-      EMBED_MODEL: ${EMBED_MODEL:-bge-base}
+      EMBED_MODEL: ${BENCHMARK_EMBED_MODEL:-${EMBED_MODEL:-bge-base}}
       VECTOR_DIM: ${VECTOR_DIM:-768}
-      # Use BENCHMARK_LLM_URL to override the LLM endpoint inside the benchmark container.
-      # Needed when LLM_URL in .env is a Tailscale Magic DNS hostname (e.g. openclaw-vllm-corp)
-      # that the container can't resolve without a host mapping via OPENCLAW_VLLM_TSIP.
+      # Use BENCHMARK_LLM_URL / BENCHMARK_LLM_MODEL to override endpoints inside the benchmark
+      # container. Needed when LLM_URL in .env is a Tailscale Magic DNS hostname or 127.0.0.1
+      # that the container can't reach. Set BENCHMARK_* in .env and leave LLM_* for the main app.
       LLM_URL: ${BENCHMARK_LLM_URL:-${LLM_URL:-http://host.docker.internal:11434}}
-      LLM_MODEL: ${LLM_MODEL:-llama3.1}
+      LLM_MODEL: ${BENCHMARK_LLM_MODEL:-${LLM_MODEL:-llama3.1}}
       LLM_API_KEY: ${LLM_API_KEY:-}
       RERANK_ENABLED: ${RERANK_ENABLED:-false}
     volumes:

@@ -116,13 +116,8 @@ class TestDeleteMemoryComplete:
 
     @pytest.fixture
     def mock_hotness(self):
-        mock_conn = MagicMock()
-        mock_cursor = MagicMock()
-        mock_cursor.rowcount = 1
-        mock_conn.execute.return_value = mock_cursor
-        with patch("memory_lifecycle.GRAPH_WRITE_LOCK", MagicMock()), \
-             patch("memory_lifecycle.get_db", return_value=mock_conn):
-            yield mock_conn
+        with patch("memory_lifecycle.delete_hotness", return_value=1) as m:
+            yield m
 
     @pytest.fixture
     def mock_audit(self):
@@ -824,6 +819,92 @@ class TestOrphanSweeperAdvanced:
         ).fetchone()[0]
         conn.close()
         assert count == 1
+
+    def test_keyset_pagination_processes_all_pages(self):
+        """Sweeper uses keyset pagination (WHERE id > ?) to process multiple pages."""
+        from graph import upsert_fts_chunk, get_db
+        from cascade import _SWEEP_PAGE_SIZE
+
+        ids_to_insert = [f"ks-{i:04d}" for i in range(3)]
+        for qid in ids_to_insert:
+            upsert_fts_chunk(qid, f"text for {qid}", "f.md", 0, "a", "ns")
+
+        mock_client = MagicMock()
+        mock_client.get_collections.return_value = MagicMock()
+        mock_client.retrieve.return_value = []
+
+        with patch("cascade.qdrant_client", return_value=mock_client), \
+             patch("cascade.collections_for_query", return_value=["test_col"]), \
+             patch("cascade._SWEEP_PAGE_SIZE", 2):
+            from cascade import sweep_orphans
+            result = sweep_orphans()
+
+        assert result["fts_cleaned"] == 3
+
+        conn = get_db()
+        remaining = conn.execute(
+            "SELECT COUNT(*) FROM memory_chunks WHERE qdrant_id LIKE 'ks-%'"
+        ).fetchone()[0]
+        conn.close()
+        assert remaining == 0
+
+
+class TestDeleteHotness:
+    """graph.delete_hotness removes memory_hotness rows."""
+
+    def test_deletes_existing_row(self):
+        from graph import get_db, delete_hotness
+
+        conn = get_db()
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS memory_hotness "
+            "(memory_id TEXT PRIMARY KEY, score REAL NOT NULL DEFAULT 0.0, "
+            "retrieval_count INTEGER NOT NULL DEFAULT 0, last_accessed TEXT, "
+            "updated_at TEXT NOT NULL)",
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO memory_hotness (memory_id, score, retrieval_count, updated_at) "
+            "VALUES (?, ?, ?, ?)",
+            ("hot-mem-1", 0.8, 5, "2025-01-01T00:00:00"),
+        )
+        conn.commit()
+        conn.close()
+
+        deleted = delete_hotness("hot-mem-1")
+        assert deleted == 1
+
+        conn = get_db()
+        remaining = conn.execute(
+            "SELECT COUNT(*) FROM memory_hotness WHERE memory_id = 'hot-mem-1'"
+        ).fetchone()[0]
+        conn.close()
+        assert remaining == 0
+
+    def test_returns_zero_for_missing_id(self):
+        from graph import get_db, delete_hotness
+
+        conn = get_db()
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS memory_hotness "
+            "(memory_id TEXT PRIMARY KEY, score REAL NOT NULL DEFAULT 0.0, "
+            "retrieval_count INTEGER NOT NULL DEFAULT 0, last_accessed TEXT, "
+            "updated_at TEXT NOT NULL)",
+        )
+        conn.commit()
+        conn.close()
+
+        assert delete_hotness("nonexistent") == 0
+
+    def test_returns_zero_when_table_missing(self):
+        """Silently returns 0 if memory_hotness table doesn't exist yet."""
+        from graph import get_db, delete_hotness
+
+        conn = get_db()
+        conn.execute("DROP TABLE IF EXISTS memory_hotness")
+        conn.commit()
+        conn.close()
+
+        assert delete_hotness("any-id") == 0
 
 
 class TestBatchSqliteRetry:

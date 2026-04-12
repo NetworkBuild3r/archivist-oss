@@ -20,6 +20,7 @@ from cascade import (
 from graph import (
     delete_fts_chunks_batch,
     delete_needle_tokens_batch,
+    delete_hotness,
     GRAPH_WRITE_LOCK,
     get_db,
 )
@@ -121,25 +122,17 @@ async def delete_memory_complete(
         "qdrant_primary", memory_id, result.failed_steps,
     )
 
-    # 2. Delete reverse HyDE vectors
+    # 2. Delete all child vectors (reverse HyDE + micro-chunks) in one call
+    all_child_ids = hyde_ids + micro_ids
     result.qdrant_reverse_hyde = len(hyde_ids)
-    if hyde_ids:
-        _qdrant_delete(
-            client, col,
-            Filter(must=[FieldCondition(key="source_memory_id", match=MatchValue(value=memory_id))]),
-            "qdrant_reverse_hyde", memory_id, result.failed_steps,
-        )
-
-    # 3. Delete micro-chunk vectors
     result.qdrant_micro_chunks = len(micro_ids)
-    if micro_ids:
+    if all_child_ids:
         _qdrant_delete(
-            client, col,
-            Filter(must=[FieldCondition(key="parent_id", match=MatchValue(value=memory_id))]),
-            "qdrant_micro_chunks", memory_id, result.failed_steps,
+            client, col, all_child_ids,
+            "qdrant_children", memory_id, result.failed_steps,
         )
 
-    # 4. Batch-delete FTS5 entries (primary + all children)
+    # 3. Batch-delete FTS5 entries (primary + all children)
     all_ids = [memory_id] + hyde_ids + micro_ids
     try:
         result.fts_entries = delete_fts_chunks_batch(all_ids)
@@ -147,32 +140,23 @@ async def delete_memory_complete(
         logger.error("cascade.fts_batch failed for %s: %s", memory_id, e)
         result.failed_steps.append("fts_batch")
 
-    # 5. Batch-delete needle registry rows (primary + all children)
+    # 4. Batch-delete needle registry rows (primary + all children)
     try:
         result.registry_tokens = delete_needle_tokens_batch(all_ids)
     except Exception as e:
         logger.error("cascade.needle_batch failed for %s: %s", memory_id, e)
         result.failed_steps.append("needle_batch")
 
-    # 6. Delete auto-extracted entity facts
+    # 5. Delete auto-extracted entity facts
     try:
         result.entity_facts = _delete_entity_facts_for_memory(memory_id)
     except Exception as e:
         logger.error("cascade.entity_facts failed for %s: %s", memory_id, e)
         result.failed_steps.append("entity_facts")
 
-    # 7. Delete memory_hotness row
+    # 6. Delete memory_hotness row
     try:
-        with GRAPH_WRITE_LOCK:
-            _conn = get_db()
-            try:
-                cur = _conn.execute(
-                    "DELETE FROM memory_hotness WHERE memory_id = ?", (memory_id,),
-                )
-                result.memory_hotness = cur.rowcount
-                _conn.commit()
-            finally:
-                _conn.close()
+        result.memory_hotness = delete_hotness(memory_id)
     except Exception as e:
         logger.debug("cascade.memory_hotness skipped for %s: %s", memory_id, e)
 
