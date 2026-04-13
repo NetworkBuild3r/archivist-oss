@@ -9,6 +9,9 @@ Covers:
 """
 
 import sys, os, time, threading
+
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 
@@ -211,19 +214,31 @@ class TestQueryExpansionCache:
 
 # ── Benchmark Needle Questions Tests ─────────────────────────────────────────
 
+def _generate_questions_or_skip():
+    """``benchmarks/`` is gitignored in minimal clones; skip when fixtures are absent."""
+    fixtures_dir = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "benchmarks", "fixtures")
+    )
+    corpus_py = os.path.join(fixtures_dir, "generate_corpus.py")
+    if not os.path.isfile(corpus_py):
+        pytest.skip("benchmarks/fixtures/generate_corpus.py not present (benchmarks/ often gitignored)")
+    if fixtures_dir not in sys.path:
+        sys.path.insert(0, fixtures_dir)
+    from generate_corpus import _generate_questions
+    return _generate_questions
+
+
 class TestNeedleBenchmark:
     def test_needle_questions_count(self):
         """Sprint 1 target: at least 15 needle questions."""
-        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "benchmarks", "fixtures"))
-        from generate_corpus import _generate_questions
+        _generate_questions = _generate_questions_or_skip()
         questions = _generate_questions()
         needle_qs = [q for q in questions if q.get("query_type") == "needle"]
         assert len(needle_qs) >= 15, f"Expected >=15 needle questions, got {len(needle_qs)}"
 
     def test_needle_question_types_diverse(self):
         """Verify needle questions cover multiple categories."""
-        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "benchmarks", "fixtures"))
-        from generate_corpus import _generate_questions
+        _generate_questions = _generate_questions_or_skip()
         questions = _generate_questions()
         needle_qs = [q for q in questions if q.get("query_type") == "needle"]
         all_tags = set()

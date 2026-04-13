@@ -42,6 +42,7 @@ class TestMicroChunkCap:
 
         with patch("handlers.tools_storage._extract_needle_micro_chunks", return_value=many_chunks), \
              patch("handlers.tools_storage.embed_text", new_callable=AsyncMock, return_value=[0.1] * 1024), \
+             patch("conflict_detection.embed_text", new_callable=AsyncMock, return_value=[0.1] * 1024), \
              patch("handlers.tools_storage.embed_batch", new_callable=AsyncMock, return_value=[[0.1] * 1024] * 5), \
              patch("handlers.tools_storage.check_for_conflicts", new_callable=AsyncMock, return_value=MagicMock(has_conflict=False)), \
              patch("handlers.tools_storage.llm_adjudicated_dedup", new_callable=AsyncMock, return_value=None), \
@@ -85,6 +86,7 @@ class TestReverseHydeFireAndForget:
             return ["What is this?"]
 
         with patch("handlers.tools_storage.embed_text", new_callable=AsyncMock, return_value=[0.1] * 1024), \
+             patch("conflict_detection.embed_text", new_callable=AsyncMock, return_value=[0.1] * 1024), \
              patch("handlers.tools_storage.embed_batch", new_callable=AsyncMock, return_value=[[0.1] * 1024]), \
              patch("handlers.tools_storage.check_for_conflicts", new_callable=AsyncMock, return_value=MagicMock(has_conflict=False)), \
              patch("handlers.tools_storage.llm_adjudicated_dedup", new_callable=AsyncMock, return_value=None), \
@@ -129,6 +131,7 @@ class TestReverseHydeFireAndForget:
             raise RuntimeError("LLM is down")
 
         with patch("handlers.tools_storage.embed_text", new_callable=AsyncMock, return_value=[0.1] * 1024), \
+             patch("conflict_detection.embed_text", new_callable=AsyncMock, return_value=[0.1] * 1024), \
              patch("handlers.tools_storage.check_for_conflicts", new_callable=AsyncMock, return_value=MagicMock(has_conflict=False)), \
              patch("handlers.tools_storage.llm_adjudicated_dedup", new_callable=AsyncMock, return_value=None), \
              patch("handlers.tools_storage.qdrant_client") as mock_qc, \
