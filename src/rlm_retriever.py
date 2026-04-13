@@ -119,10 +119,14 @@ def _literal_search_sync(
         if memory_type:
             must_filters.append(FieldCondition(key="memory_type", match=MatchValue(value=memory_type)))
 
+        literal_must_not = [
+            FieldCondition(key="archived", match=MatchValue(value=True)),
+            FieldCondition(key="deleted", match=MatchValue(value=True)),
+        ]
         try:
             scrolled, _ = client.scroll(
                 collection_name=_coll,
-                scroll_filter=Filter(must=must_filters),
+                scroll_filter=Filter(must=must_filters, must_not=literal_must_not),
                 limit=limit,
                 with_payload=True,
             )
@@ -466,7 +470,11 @@ async def search_vectors(
         must_filters.append(FieldCondition(key="thought_type", match=MatchValue(value=thought_type)))
 
     _date_range_active = bool(date_from or date_to) and date_from != date_to
-    search_filter = Filter(must=must_filters) if must_filters else None
+    must_not_filters = [
+        FieldCondition(key="archived", match=MatchValue(value=True)),
+        FieldCondition(key="deleted", match=MatchValue(value=True)),
+    ]
+    search_filter = Filter(must=must_filters, must_not=must_not_filters)
     fetch_limit = limit * 3 if _date_range_active else limit
 
     _target_collection = collection_for(namespace)
@@ -754,6 +762,13 @@ async def recursive_retrieve(
                 for c in _reg_candidates:
                     payload = _reg_payload_map.get(c.id)
                     if payload:
+                        if payload.get("archived") or payload.get("deleted"):
+                            m.inc(m.NEEDLE_REGISTRY_STALE, {"namespace": namespace})
+                            logger.debug(
+                                "registry.excluded: memory_id=%s is archived/deleted — dropping",
+                                c.id,
+                            )
+                            continue
                         c.update_from_payload(payload)
                         _live_candidates.append(c)
                     else:
@@ -1277,6 +1292,14 @@ async def recursive_retrieve(
         answer = await llm_query(
             synth_prompt, system=synth_system, max_tokens=1024, model=synth_model, stage="synth",
         )
+        if answer is None:
+            answer = ""
+        else:
+            answer = str(answer)
+        if not answer.strip():
+            logger.warning("Synthesis returned empty text; falling back to raw extractions (truncated)")
+            answer = extractions_text[:24000]
+            _common_trace["synthesis_degraded"] = True
     except Exception as e:
         logger.error("Synthesis failed: %s", e)
         answer = extractions_text

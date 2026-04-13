@@ -286,6 +286,7 @@ INVALIDATE_COUNT = "archivist_invalidate_count_total"
 CURATOR_CYCLE_DURATION = "archivist_curator_cycle_duration_ms"
 DELETE_COMPLETE = "archivist_delete_complete_total"
 ARCHIVE_COMPLETE = "archivist_archive_complete_total"
+SOFT_DELETE_INITIATED = "archivist_soft_delete_initiated_total"
 
 # ── Needle retrieval telemetry (v1.11) ───────────────────────────────────────
 NEEDLE_REGISTRY_HITS = "archivist_needle_registry_hits_total"

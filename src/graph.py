@@ -160,11 +160,36 @@ def init_schema():
             agent_id TEXT NOT NULL DEFAULT '',
             namespace TEXT NOT NULL DEFAULT '',
             date TEXT NOT NULL DEFAULT '',
-            memory_type TEXT NOT NULL DEFAULT 'general'
+            memory_type TEXT NOT NULL DEFAULT 'general',
+            is_excluded INTEGER NOT NULL DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS idx_mc_qdrant ON memory_chunks(qdrant_id);
         CREATE INDEX IF NOT EXISTS idx_mc_namespace ON memory_chunks(namespace);
         CREATE INDEX IF NOT EXISTS idx_mc_agent ON memory_chunks(agent_id);
+        CREATE INDEX IF NOT EXISTS idx_mc_excluded ON memory_chunks(is_excluded);
+
+        -- Tracks all Qdrant point IDs created for each memory (Phase 2).
+        CREATE TABLE IF NOT EXISTS memory_points (
+            memory_id   TEXT NOT NULL,
+            qdrant_id   TEXT NOT NULL,
+            point_type  TEXT NOT NULL DEFAULT 'primary',
+            created_at  TEXT NOT NULL,
+            PRIMARY KEY (memory_id, qdrant_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_mp_memory ON memory_points(memory_id);
+        CREATE INDEX IF NOT EXISTS idx_mp_qdrant ON memory_points(qdrant_id);
+
+        -- Dead-letter queue for failed Qdrant deletes (Phase 2).
+        CREATE TABLE IF NOT EXISTS delete_failures (
+            id          TEXT PRIMARY KEY,
+            memory_id   TEXT NOT NULL,
+            qdrant_ids  TEXT NOT NULL,
+            error       TEXT NOT NULL,
+            created_at  TEXT NOT NULL,
+            resolved_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_df_memory ON delete_failures(memory_id);
+        CREATE INDEX IF NOT EXISTS idx_df_created ON delete_failures(created_at);
     """)
         conn.commit()
         conn.close()
@@ -187,6 +212,7 @@ def _migrate_schema():
         ("facts", "namespace", "TEXT NOT NULL DEFAULT 'global'"),
         ("relationships", "namespace", "TEXT NOT NULL DEFAULT 'global'"),
         ("facts", "memory_id", "TEXT NOT NULL DEFAULT ''"),
+        ("memory_chunks", "is_excluded", "INTEGER NOT NULL DEFAULT 0"),
     ]
     indexes = [
         "CREATE INDEX IF NOT EXISTS idx_facts_retention ON facts(retention_class)",
@@ -196,6 +222,7 @@ def _migrate_schema():
         "CREATE INDEX IF NOT EXISTS idx_facts_namespace ON facts(namespace)",
         "CREATE INDEX IF NOT EXISTS idx_relationships_namespace ON relationships(namespace)",
         "CREATE INDEX IF NOT EXISTS idx_facts_memory_id ON facts(memory_id)",
+        "CREATE INDEX IF NOT EXISTS idx_mc_excluded ON memory_chunks(is_excluded)",
     ]
     with GRAPH_WRITE_LOCK:
         conn = get_db()
@@ -434,7 +461,7 @@ def search_fts(query: str, namespace: str = "", agent_id: str = "",
     """BM25 keyword search via FTS5. Returns ranked results with qdrant_id and score."""
     conn = get_db()
     try:
-        where_clauses = []
+        where_clauses = ["mc.is_excluded = 0"]
         params: list = []
 
         if namespace:
@@ -447,7 +474,7 @@ def search_fts(query: str, namespace: str = "", agent_id: str = "",
             where_clauses.append("mc.memory_type = ?")
             params.append(memory_type)
 
-        where_sql = (" AND " + " AND ".join(where_clauses)) if where_clauses else ""
+        where_sql = " AND " + " AND ".join(where_clauses)
 
         sql = (
             "SELECT mc.qdrant_id, mc.file_path, mc.chunk_index, mc.agent_id, "
@@ -480,7 +507,7 @@ def search_fts_exact(query: str, namespace: str = "", agent_id: str = "",
     """Non-stemmed BM25 search via memory_fts_exact for exact token matching."""
     conn = get_db()
     try:
-        where_clauses = []
+        where_clauses = ["mc.is_excluded = 0"]
         params: list = []
 
         if namespace:
@@ -493,7 +520,7 @@ def search_fts_exact(query: str, namespace: str = "", agent_id: str = "",
             where_clauses.append("mc.memory_type = ?")
             params.append(memory_type)
 
-        where_sql = (" AND " + " AND ".join(where_clauses)) if where_clauses else ""
+        where_sql = " AND " + " AND ".join(where_clauses)
 
         sql = (
             "SELECT mc.qdrant_id, mc.file_path, mc.chunk_index, mc.agent_id, "
@@ -1004,6 +1031,42 @@ def delete_fts_chunks_batch(qdrant_ids: list[str]) -> int:
             raise
 
 
+def set_fts_excluded_batch(qdrant_ids: list[str], excluded: int = 1) -> int:
+    """Mark memory_chunks rows as excluded (or restore them) by Qdrant ID.
+
+    Sets ``is_excluded`` to *excluded* (1 = excluded from search, 0 = restored).
+    Used by archive and soft-delete to hide memories from BM25/FTS5 search
+    without physically removing the rows.
+
+    Chunks the ID list into groups of 500 to stay under the sqlite3 ~999
+    parameter limit.  Acquires ``GRAPH_WRITE_LOCK`` once.
+    """
+    if not qdrant_ids:
+        return 0
+    total = 0
+    with GRAPH_WRITE_LOCK:
+        conn = get_db()
+        try:
+            for i in range(0, len(qdrant_ids), _BATCH_CHUNK):
+                chunk = qdrant_ids[i : i + _BATCH_CHUNK]
+                placeholders = ",".join("?" * len(chunk))
+                cur = conn.execute(
+                    f"UPDATE memory_chunks SET is_excluded = ? "
+                    f"WHERE qdrant_id IN ({placeholders})",
+                    [excluded] + chunk,
+                )
+                total += cur.rowcount
+            conn.commit()
+        except Exception as e:
+            logging.getLogger("archivist.graph").warning(
+                "set_fts_excluded_batch failed: %s", e,
+            )
+            conn.rollback()
+        finally:
+            conn.close()
+    return total
+
+
 def delete_needle_tokens_batch(memory_ids: list[str]) -> int:
     """Remove needle_registry rows for multiple memory IDs.
 
@@ -1056,5 +1119,129 @@ def delete_hotness(memory_id: str) -> int:
             return cur.rowcount
         except sqlite3.OperationalError:
             return 0
+        finally:
+            conn.close()
+
+
+# ---------------------------------------------------------------------------
+# memory_points tracking (Phase 2)
+# ---------------------------------------------------------------------------
+
+def register_memory_points_batch(
+    points: list[dict],
+) -> int:
+    """Insert rows into ``memory_points`` for a batch of Qdrant points.
+
+    Each element of *points* must have::
+
+        {
+            "memory_id": str,   # primary memory Qdrant ID
+            "qdrant_id": str,   # this point's Qdrant ID
+            "point_type": str,  # "primary" | "micro_chunk" | "reverse_hyde"
+        }
+
+    Rows are inserted with ``INSERT OR IGNORE`` so re-running on the same IDs
+    is idempotent.  Acquires ``GRAPH_WRITE_LOCK`` once for the whole batch.
+
+    Returns the number of newly inserted rows.
+    """
+    if not points:
+        return 0
+
+    now = datetime.now(timezone.utc).isoformat()
+    total = 0
+    with GRAPH_WRITE_LOCK:
+        conn = get_db()
+        try:
+            for i in range(0, len(points), _BATCH_CHUNK):
+                chunk = points[i : i + _BATCH_CHUNK]
+                conn.executemany(
+                    "INSERT OR IGNORE INTO memory_points "
+                    "(memory_id, qdrant_id, point_type, created_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    [(p["memory_id"], p["qdrant_id"], p.get("point_type", "primary"), now)
+                     for p in chunk],
+                )
+                total += sum(1 for p in chunk)
+            conn.commit()
+        except Exception as e:
+            logging.getLogger("archivist.graph").warning(
+                "register_memory_points_batch failed: %s", e,
+            )
+            conn.rollback()
+        finally:
+            conn.close()
+    return total
+
+
+def lookup_memory_points(memory_id: str) -> list[dict]:
+    """Return all ``memory_points`` rows for *memory_id*.
+
+    Result rows have keys: ``memory_id``, ``qdrant_id``, ``point_type``,
+    ``created_at``.  Returns an empty list if no rows exist (legacy memory
+    created before Phase 2).
+    """
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            "SELECT memory_id, qdrant_id, point_type, created_at "
+            "FROM memory_points WHERE memory_id = ?",
+            (memory_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        logging.getLogger("archivist.graph").warning(
+            "lookup_memory_points failed for %s: %s", memory_id, e,
+        )
+        return []
+    finally:
+        conn.close()
+
+
+def delete_memory_points(memory_id: str) -> int:
+    """Remove all ``memory_points`` rows for *memory_id*.
+
+    Called by the hard-delete cascade after Qdrant points have been removed.
+    Returns the number of rows deleted.
+    """
+    with GRAPH_WRITE_LOCK:
+        conn = get_db()
+        try:
+            cur = conn.execute(
+                "DELETE FROM memory_points WHERE memory_id = ?", (memory_id,),
+            )
+            conn.commit()
+            return cur.rowcount
+        except Exception as e:
+            logging.getLogger("archivist.graph").warning(
+                "delete_memory_points failed for %s: %s", memory_id, e,
+            )
+            return 0
+        finally:
+            conn.close()
+
+
+def log_delete_failure(memory_id: str, qdrant_ids: list[str], error: str) -> None:
+    """Record a failed Qdrant delete to the ``delete_failures`` dead-letter table.
+
+    Used by the hard-delete cascade when a Qdrant batch delete fails so that
+    the orphaned IDs can be inspected and retried later.
+    """
+    import json as _json
+    import uuid as _uuid
+    now = datetime.now(timezone.utc).isoformat()
+    with GRAPH_WRITE_LOCK:
+        conn = get_db()
+        try:
+            conn.execute(
+                "INSERT INTO delete_failures (id, memory_id, qdrant_ids, error, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (str(_uuid.uuid4()), memory_id, _json.dumps(qdrant_ids), error, now),
+            )
+            conn.commit()
+        except Exception as e:
+            logging.getLogger("archivist.graph").warning(
+                "log_delete_failure insert failed for %s: %s", memory_id, e,
+            )
         finally:
             conn.close()

@@ -25,7 +25,7 @@ from config import (
 )
 from chunking import chunk_text, chunk_text_hierarchical
 from embeddings import embed_batch
-from graph import upsert_fts_chunk, delete_fts_chunks_by_file, upsert_entity, add_fact, register_needle_tokens
+from graph import upsert_fts_chunk, delete_fts_chunks_by_file, upsert_entity, add_fact, register_needle_tokens, register_memory_points_batch
 from qdrant import qdrant_client
 from rbac import get_namespace_for_agent, get_namespace_config
 from text_utils import extract_agent_id_from_path, compute_memory_checksum
@@ -263,6 +263,20 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
         client.upsert(collection_name=_coll, points=points)
         _metrics.inc(_metrics.INDEX_CHUNKS, value=len(points))
 
+        # Register all indexed points in memory_points for fast cascade lookup.
+        _mp_records = []
+        for p in points:
+            pid_str = str(p.id)
+            parent = p.payload.get("parent_id")
+            if parent:
+                _mp_records.append({"memory_id": parent, "qdrant_id": pid_str, "point_type": "micro_chunk"})
+            else:
+                _mp_records.append({"memory_id": pid_str, "qdrant_id": pid_str, "point_type": "primary"})
+        try:
+            register_memory_points_batch(_mp_records)
+        except Exception as _e:
+            logger.debug("indexer.register_memory_points failed: %s", _e)
+
         if BM25_ENABLED:
             for p in points:
                 upsert_fts_chunk(
@@ -353,6 +367,17 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
             if _rh_points:
                 client.upsert(collection_name=_coll, points=_rh_points)
                 _metrics.inc(_metrics.INDEX_CHUNKS, value=len(_rh_points))
+                try:
+                    register_memory_points_batch([
+                        {
+                            "memory_id": rp.payload.get("source_memory_id", str(rp.id)),
+                            "qdrant_id": str(rp.id),
+                            "point_type": "reverse_hyde",
+                        }
+                        for rp in _rh_points
+                    ])
+                except Exception as _e:
+                    logger.debug("indexer.register_memory_points (reverse_hyde) failed: %s", _e)
 
         logger.info("Indexed %s: %d chunks (ns=%s, hierarchical=%s, fts=%s)",
                      meta["file_path"], len(points), meta["namespace"], hierarchical, BM25_ENABLED)

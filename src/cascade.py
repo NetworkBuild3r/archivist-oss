@@ -34,7 +34,7 @@ from collection_router import collections_for_query
 from graph import (
     get_db, GRAPH_WRITE_LOCK, _delete_fts_rows,
     delete_fts_chunks_batch, delete_needle_tokens_batch,
-    _ensure_needle_registry,
+    _ensure_needle_registry, log_delete_failure,
 )
 from qdrant import qdrant_client
 import metrics as m
@@ -115,6 +115,12 @@ def _qdrant_delete(
         step_name, memory_id, attempt + 1, last_err,
     )
     failed_steps.append(step_name)
+    # Record the failed IDs in the dead-letter table for later inspection/replay.
+    if isinstance(selector, list) and selector:
+        try:
+            log_delete_failure(memory_id, selector, str(last_err))
+        except Exception as _dlq_err:
+            logger.debug("cascade.log_delete_failure failed: %s", _dlq_err)
     return count
 
 
