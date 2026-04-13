@@ -87,7 +87,7 @@ async def expand_query(
             stage="query_expansion",
         )
         dur_ms = round((time.monotonic() - t0) * 1000, 1)
-        m.observe("query_expansion_duration_ms", dur_ms)
+        m.observe(m.QUERY_EXPANSION_DURATION, dur_ms)
 
         lines = [line.strip() for line in raw.strip().split("\n") if line.strip()]
         # Remove numbering if the model adds it ("1. ...", "- ...")

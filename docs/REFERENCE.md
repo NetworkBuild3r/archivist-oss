@@ -76,13 +76,47 @@ parameter schemas and examples, see [CURSOR_SKILL.md](CURSOR_SKILL.md).
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
 | `/health` | GET | Liveness probe (no auth required) |
-| `/metrics` | GET | Prometheus text exposition |
+| `/metrics` | GET | Prometheus text exposition (see **Prometheus metrics** below) |
 | `/admin/invalidate` | POST/GET | Delete expired memories (TTL-based) |
 | `/admin/retrieval-logs` | GET | Export retrieval pipeline execution traces |
 | `/admin/dashboard` | GET | Health dashboard JSON (add `?batch=true` for batch heuristic) |
 | `/mcp` | GET/POST/DELETE | MCP Streamable HTTP transport entrypoint (preferred) |
 | `/mcp/sse` | GET | Legacy MCP SSE transport entrypoint |
 | `/mcp/messages/` | POST | Legacy SSE message handler |
+
+## Prometheus metrics
+
+Archivist exposes a **text exposition** endpoint at **`GET /metrics`** on the same port as MCP (see `MCP_PORT`, default **3100**). Implementation is in-repo (`src/metrics.py`); no extra Python dependency.
+
+| Env var | Default | Purpose |
+|---------|---------|---------|
+| `METRICS_ENABLED` | `true` | When `false`, recording is disabled and `/metrics` returns **404**. |
+| `METRICS_AUTH_EXEMPT` | `false` | When `true`, `/metrics` does not require `ARCHIVIST_API_KEY` (use for in-cluster Prometheus scrape). |
+| `METRICS_COLLECT_INTERVAL_SECONDS` | `60` | How often storage/availability gauges refresh (minimum enforced in the loop: 5s). |
+
+**Cardinality:** labels use tool names, namespaces, coarse status strings, and collection names — not raw queries or UUIDs.
+
+**Names (representative):**
+
+| Metric | Type | Labels (if any) | Meaning |
+|--------|------|-----------------|--------|
+| `archivist_mcp_tool_duration_ms` | histogram | `tool` | MCP tool call latency (ms). |
+| `archivist_mcp_tool_errors_total` | counter | `tool` | Unhandled handler exceptions per tool. |
+| `archivist_search_total` | counter | — | Completed retrieval pipeline runs. |
+| `archivist_search_duration_ms` | histogram | — | End-to-end search latency (ms). |
+| `archivist_search_results` | histogram | `namespace` | Count of items in `sources` returned. |
+| `archivist_store_total` | counter | `namespace` | Successful stores. |
+| `archivist_cache_hit_total` / `archivist_cache_miss_total` | counter | — | Hot-cache hits/misses. |
+| `archivist_embed_duration_ms` | histogram | — | Embedding API latency (ms). |
+| `archivist_embed_cache_hit_total` / `archivist_embed_cache_miss_total` | counter | — | In-process embed LRU cache. |
+| `archivist_qdrant_query_duration_ms` | histogram | — | Qdrant query latency (ms). |
+| `archivist_llm_duration_ms` | histogram | — | LLM call latency (ms). |
+| `archivist_total_memories` | gauge | `namespace` | Distinct memory IDs in audit log whose latest action is not `delete`. |
+| `archivist_sqlite_size_bytes` | gauge | — | Size of `SQLITE_PATH` on disk. |
+| `archivist_qdrant_vectors_total` | gauge | `collection` | Qdrant collection `points_count`. |
+| `archivist_qdrant_available` / `archivist_sqlite_available` | gauge | — | `1` if dependency responds, else `0` (Qdrant also reflects `health` registry when set). |
+
+**Kubernetes (Prometheus Operator):** point a `ServiceMonitor` at the Service port that serves HTTP (same as MCP), path `/metrics`, and set `METRICS_AUTH_EXEMPT=true` **or** configure scrape auth to send your `ARCHIVIST_API_KEY`.
 
 ## Timeout troubleshooting
 

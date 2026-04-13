@@ -596,6 +596,11 @@ async def enrich_with_parent(results: list[dict]) -> list[dict]:
     return results
 
 
+def _observe_search_results(namespace: str, sources: list | None) -> None:
+    """Record ``archivist_search_results`` (histogram of len(sources); label namespace)."""
+    m.observe(m.SEARCH_RESULTS, float(len(sources or [])), {"namespace": namespace or "_default"})
+
+
 async def recursive_retrieve(
     query: str,
     agent_id: str = "",
@@ -704,6 +709,7 @@ async def recursive_retrieve(
         m.inc(m.CACHE_HIT)
         m.inc(m.SEARCH_TOTAL)
         m.observe(m.SEARCH_DURATION, elapsed)
+        _observe_search_results(namespace, out.get("sources"))
         return out
 
     # ── Stage timings (ms) for retrieval trace ──
@@ -939,6 +945,7 @@ async def recursive_retrieve(
             ),
         }
         _attach_stage0(empty, stage0_inventory, auto_type, user_memory_type)
+        _observe_search_results(namespace, [])
         return empty
 
     # ── Post-retrieval processing (dedupe → threshold → rerank → enrich) ──
@@ -1071,6 +1078,7 @@ async def recursive_retrieve(
             ),
         }
         _attach_stage0(below, stage0_inventory, auto_type, user_memory_type)
+        _observe_search_results(namespace, [])
         return below
 
     # Stage 2b: Outcome-aware scoring (v0.6)
@@ -1204,6 +1212,7 @@ async def recursive_retrieve(
             "retrieval_trace": _retrieval_trace(**_common_trace),
         }
         _attach_stage0(no_refine, stage0_inventory, auto_type, user_memory_type)
+        _observe_search_results(namespace, no_refine.get("sources"))
         return no_refine
 
     # Stage 5: LLM refinement (parallel + optional high-confidence skip)
@@ -1248,6 +1257,7 @@ async def recursive_retrieve(
             "retrieval_trace": _retrieval_trace(**_common_trace),
         }
         _attach_stage0(no_rel, stage0_inventory, auto_type, user_memory_type)
+        _observe_search_results(namespace, [])
         return no_rel
 
     # Stage 6: Synthesis
@@ -1291,6 +1301,7 @@ async def recursive_retrieve(
         "retrieval_trace": _retrieval_trace(**_common_trace),
     }
     _attach_stage0(final_result, stage0_inventory, auto_type, user_memory_type)
+    _observe_search_results(namespace, final_result.get("sources"))
 
     elapsed = int((time.monotonic() - t0) * 1000)
     final_result["_cache_namespace"] = namespace

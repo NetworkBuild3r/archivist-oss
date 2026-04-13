@@ -3,6 +3,20 @@
 All notable changes to Archivist are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Added
+
+- **Storage gauges** (background refresh): `archivist_total_memories` (label `namespace`), `archivist_sqlite_size_bytes`, `archivist_qdrant_vectors_total` (label `collection`), `archivist_qdrant_available`, `archivist_sqlite_available` (0/1). Interval: `METRICS_COLLECT_INTERVAL_SECONDS` (default 60s, minimum 5s in the loop).
+- **Search result count histogram**: `archivist_search_results` (label `namespace`) — length of the `sources` list returned per search.
+- **`METRICS_AUTH_EXEMPT`** — when `true`, `GET /metrics` skips API key auth so Prometheus can scrape without the MCP key.
+
+### Changed
+
+- **`METRICS_ENABLED=false`** now disables all metric recording (no-ops) and returns **HTTP 404** on `GET /metrics`.
+- Renamed metrics to the `archivist_*` prefix: `embed_cache_hits_total` → `archivist_embed_cache_hit_total`, `embed_cache_misses_total` → `archivist_embed_cache_miss_total`, `hyde_duration_ms` → `archivist_hyde_duration_ms`, `reverse_hyde_duration_ms` → `archivist_reverse_hyde_duration_ms`, `query_expansion_duration_ms` → `archivist_query_expansion_duration_ms`.
+- Histogram rendering supports a second bucket layout for `archivist_search_results` (counts, not milliseconds).
+
 ## [1.11.0] - 2026-04-10
 
 ### Breaking Changes

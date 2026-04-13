@@ -93,6 +93,10 @@ TRAJECTORY_EXPORT_MAX = int(os.getenv("TRAJECTORY_EXPORT_MAX", "200"))
 
 # ── Observability (v0.9) ──────────────────────────────────────────────────────
 METRICS_ENABLED = _env_bool("METRICS_ENABLED", "true")
+# When true, GET /metrics skips API key auth (Prometheus scrape without sharing the key).
+METRICS_AUTH_EXEMPT = _env_bool("METRICS_AUTH_EXEMPT", "false")
+# Background refresh interval for SQLite/Qdrant storage gauges (seconds, minimum 5 in the loop).
+METRICS_COLLECT_INTERVAL_SECONDS = max(5, int(os.getenv("METRICS_COLLECT_INTERVAL_SECONDS", "60")))
 DEFAULT_CONSISTENCY = os.getenv("DEFAULT_CONSISTENCY", "eventual")
 # Slow-path warnings (0 = disabled). Logs one line when a step exceeds the threshold (ms).
 SLOW_EMBED_MS = float(os.getenv("SLOW_EMBED_MS", "0"))
@@ -274,6 +278,7 @@ def _log_feature_flags() -> None:
         "CONFLICT_CHECK_ON_STORE": CONFLICT_CHECK_ON_STORE,
         "JOURNAL_ENABLED": JOURNAL_ENABLED,
         "METRICS_ENABLED": METRICS_ENABLED,
+        "METRICS_AUTH_EXEMPT": METRICS_AUTH_EXEMPT,
     }
     enabled = [k for k, v in flags.items() if v]
     disabled = [k for k, v in flags.items() if not v]

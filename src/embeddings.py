@@ -36,8 +36,9 @@ _EMBED_CACHE_MAX = 2048
 _EMBED_CACHE_TTL = 3600  # 1 hour
 _embed_cache: OrderedDict[str, tuple[float, tuple[float, ...]]] = OrderedDict()
 _embed_cache_lock = threading.Lock()
-EMBED_CACHE_HITS = "embed_cache_hits_total"
-EMBED_CACHE_MISSES = "embed_cache_misses_total"
+# Backward-compatible aliases for the metric name strings (same as m.EMBED_CACHE_*).
+EMBED_CACHE_HITS = m.EMBED_CACHE_HIT
+EMBED_CACHE_MISSES = m.EMBED_CACHE_MISS
 
 
 def _cache_key(text: str, model: str) -> str:
@@ -90,11 +91,11 @@ async def embed_text(text: str, model: str = EMBED_MODEL) -> list[float]:
 
     cached = _cache_get(text, model)
     if cached is not None:
-        m.inc(EMBED_CACHE_HITS)
+        m.inc(m.EMBED_CACHE_HIT)
         # Cache stores immutable tuples; Qdrant query APIs expect list (not tuple).
         return list(cached)
 
-    m.inc(EMBED_CACHE_MISSES)
+    m.inc(m.EMBED_CACHE_MISS)
     client = _get_embed_client()
     for attempt in range(_MAX_RETRIES):
         try:
@@ -152,7 +153,7 @@ async def embed_batch(texts: list[str], model: str = EMBED_MODEL) -> list[list[f
     for i, t in enumerate(truncated):
         cached = _cache_get(t, model)
         if cached is not None:
-            m.inc(EMBED_CACHE_HITS)
+            m.inc(m.EMBED_CACHE_HIT)
             cached_results[i] = list(cached)
         else:
             uncached_indices.append(i)
@@ -193,7 +194,7 @@ async def embed_batch(texts: list[str], model: str = EMBED_MODEL) -> list[list[f
             orig_idx = uncached_indices[j]
             cached_results[orig_idx] = vec
             _cache_put(uncached_texts[j], model, vec)
-            m.inc(EMBED_CACHE_MISSES)
+            m.inc(m.EMBED_CACHE_MISS)
 
         return [cached_results[i] for i in range(len(texts))]
 

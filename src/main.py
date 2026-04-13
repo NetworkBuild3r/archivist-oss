@@ -15,6 +15,7 @@ from config import (
     MEMORY_ROOT, MCP_PORT, QDRANT_URL, QDRANT_COLLECTION, VECTOR_DIM, ARCHIVIST_API_KEY,
     CURATOR_QUEUE_DRAIN_INTERVAL, ARCHIVIST_INVALIDATION_EXPORT_PATH,
     QDRANT_HNSW_M, QDRANT_HNSW_EF_CONSTRUCT,
+    METRICS_ENABLED, METRICS_AUTH_EXEMPT, METRICS_COLLECT_INTERVAL_SECONDS,
 )
 from qdrant import qdrant_client
 import health
@@ -29,7 +30,7 @@ from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.routing import Mount, Route
-from starlette.responses import JSONResponse, PlainTextResponse
+from starlette.responses import JSONResponse, PlainTextResponse, Response
 from mcp.server.sse import SseServerTransport
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 
@@ -259,6 +260,16 @@ async def _startup():
         t = asyncio.create_task(coro, name=name)
         t.add_done_callback(_log_task_exception)
         _background_tasks.append(t)
+    # Periodic SQLite/Qdrant gauge refresh (disk size, point counts, availability).
+    if METRICS_ENABLED:
+        from metrics import run_storage_gauges_loop
+
+        sg = asyncio.create_task(
+            run_storage_gauges_loop(METRICS_COLLECT_INTERVAL_SECONDS),
+            name="storage_gauges",
+        )
+        sg.add_done_callback(_log_task_exception)
+        _background_tasks.append(sg)
     logger.info("Background tasks started: %s", [t.get_name() for t in _background_tasks])
 
 
@@ -347,10 +358,16 @@ streamable_http_app = StreamableHTTPASGIApp()
 
 
 class ArchivistAuthMiddleware(BaseHTTPMiddleware):
-    """Optional API key on all routes except GET /health (for probes)."""
+    """Optional API key on all routes except GET /health (for probes).
+
+    GET /health is always open. GET /metrics is open when METRICS_AUTH_EXEMPT is true
+    so in-cluster Prometheus can scrape without the MCP API key.
+    """
 
     async def dispatch(self, request, call_next):
         if request.url.path == "/health":
+            return await call_next(request)
+        if METRICS_AUTH_EXEMPT and request.url.path == "/metrics":
             return await call_next(request)
         if not ARCHIVIST_API_KEY:
             return await call_next(request)
@@ -381,8 +398,11 @@ async def handle_retrieval_export(request):
 
 
 async def handle_metrics(_request):
-    """Prometheus text exposition format."""
+    """Prometheus text exposition (same port as MCP). 404 when METRICS_ENABLED is false."""
+    if not METRICS_ENABLED:
+        return Response(status_code=404)
     from metrics import render
+
     return PlainTextResponse(render(), media_type="text/plain; version=0.0.4; charset=utf-8")
 
 

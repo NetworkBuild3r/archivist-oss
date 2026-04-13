@@ -134,6 +134,30 @@ env REVERSE_HYDE_ENABLED=false TIERED_CONTEXT_ENABLED=false QUERY_EXPANSION_ENAB
 
 For Docker-based runs, point embed/LLM at the host with **`host.docker.internal`** (see [`.env.example`](.env.example) **`BENCHMARK_*`** overrides). If the embedder binds only to **`127.0.0.1`**, run the harness on the host so cache hits and vector queries stay on the fast path — we fixed a subtle **tuple-vs-list** interaction between the embedding LRU cache and Qdrant so intermittent “unsupported query type” errors no longer appear on repeated queries.
 
+### Latest pipeline snapshot (v1.11 harness)
+
+**Medium memory, retrieval-only.** Fresh run on a **fully local** stack (independent **768‑dim** embedder + OpenAI-compatible LLM, **Qdrant**, **`--memory-scale medium`**, **`vector_only`**, **`--no-refine`** — pure retrieval, no generative refinement). **109** questions across temporal, needle, multi-hop, single-hop, and more.
+
+| Metric | Result |
+|--------|--------|
+| **Recall@5 / @10** | **87.5%** |
+| **MRR** | **0.63** |
+| **p50 / p95 latency** | **4.0 s / 11.8 s** |
+| **Tokens / query** | **~3,956** (bounded — not “read the whole corpus”) |
+
+**Where it shines — by query type (recall):**
+
+| Slice | Recall | n |
+|-------|--------|---|
+| **Needle** | **100%** | 2 |
+| **Single-hop** | **94.0%** | 50 |
+| **Temporal** | **90.0%** | 5 |
+| **Multi-hop** | **62.5%** | 10 |
+
+That **needle** and **single-hop** row is the headline: rare facts and direct lookups land in the **top 5** the vast majority of the time — exactly what agent memory is for. Multi-hop is harder by design (inference across chunks); the pipeline still beats guessing.
+
+> **Reproduce:** use the same host command as in *Ship it locally*, but set **`--memory-scale medium`** and **`--output .benchmarks/pipeline_medium_vector_only.json`**. Enable **`--print-slices`** for the per-query-type table.
+
 <p align="center">
   <img src="assets/benchmark_comparison.png" alt="Archivist vs Context Stuffing benchmark" width="900">
 </p>
@@ -613,7 +637,7 @@ These are available alongside the MCP interface for admin, monitoring, and integ
 
 Archivist is production-observable out of the box:
 
-- **Prometheus `/metrics`** — Counters (search, store, conflict, cache hit/miss, webhook, skill events, LLM calls), histograms (search duration, LLM duration), gauges. Scrape-ready.
+- **Prometheus `/metrics`** — Same port as MCP (`MCP_PORT`). Counters, histograms (durations in ms; search result counts in `archivist_search_results`), and gauges including storage and dependency availability. Set `METRICS_ENABLED=false` to disable recording and return 404 on `/metrics`; use `METRICS_AUTH_EXEMPT=true` if Prometheus must scrape without `ARCHIVIST_API_KEY`. Full list: [docs/REFERENCE.md](docs/REFERENCE.md#prometheus-metrics).
 - **Retrieval traces** — Every `archivist_search` response includes `retrieval_trace` with per-stage counts and timings.
 - **Health dashboard** — `archivist_health_dashboard` MCP tool or `GET /admin/dashboard`: memory counts, stale %, conflict rate, cache hit rate, skill health overview.
 - **Audit trail** — Immutable log of all memory operations, queryable via `archivist_audit_trail`.

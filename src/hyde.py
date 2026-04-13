@@ -117,7 +117,7 @@ async def generate_hypothetical_document(
             stage="hyde",
         )
         dur_ms = round((time.monotonic() - t0) * 1000, 1)
-        m.observe("hyde_duration_ms", dur_ms)
+        m.observe(m.HYDE_DURATION, dur_ms)
         doc = doc.strip()
         if doc:
             _cache_put(query, doc)
@@ -199,7 +199,7 @@ async def generate_reverse_hyde_questions(
             stage="reverse_hyde",
         )
         dur_ms = round((time.monotonic() - t0) * 1000, 1)
-        m.observe("reverse_hyde_duration_ms", dur_ms)
+        m.observe(m.REVERSE_HYDE_DURATION, dur_ms)
 
         questions = [
             q.strip().lstrip("0123456789.-) ")

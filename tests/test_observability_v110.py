@@ -66,6 +66,7 @@ async def test_dispatch_tool_records_tool_duration():
     m._counters.clear()
     m._gauges.clear()
     m._histogram_buckets.clear()
+    m._histogram_layout.clear()
 
     await dispatch_tool("archivist_context_check", {})
     text = m.render()
