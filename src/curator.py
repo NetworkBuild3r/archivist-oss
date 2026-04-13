@@ -17,8 +17,15 @@ from config import (
     CURATOR_TIP_BUDGET, CURATOR_MAX_PARALLEL,
     DURABLE_ENTITY_TYPES,
     ORPHAN_SWEEP_ENABLED, ORPHAN_SWEEP_EVERY_N_CYCLES,
+    LLM_MODEL, LLM_URL,
+    CURATOR_LLM_MODEL, CURATOR_LLM_URL, CURATOR_LLM_API_KEY,
 )
 from llm import llm_query
+
+# Resolve effective curator LLM settings once at import time.
+_CURATOR_MODEL = CURATOR_LLM_MODEL or LLM_MODEL
+_CURATOR_URL = CURATOR_LLM_URL or LLM_URL
+_CURATOR_KEY = CURATOR_LLM_API_KEY
 from graph import (
     upsert_entity, add_fact, add_relationship,
     get_curator_state, set_curator_state, get_db, GRAPH_WRITE_LOCK,
@@ -94,6 +101,8 @@ async def extract_knowledge(text: str, agent_id: str, source_file: str) -> dict 
     try:
         raw = await llm_query(
             prompt, system=EXTRACT_SYSTEM, max_tokens=1024, json_mode=True,
+            model=_CURATOR_MODEL, url=_CURATOR_URL, api_key=_CURATOR_KEY,
+            stage="curator_extract",
         )
         return json.loads(strip_fences(raw))
     except json.JSONDecodeError:
@@ -101,6 +110,8 @@ async def extract_knowledge(text: str, agent_id: str, source_file: str) -> dict 
             repair_prompt = f"Fix this invalid JSON:\n{raw[:2000]}"
             fixed = await llm_query(
                 repair_prompt, system=_JSON_REPAIR_SYSTEM, max_tokens=1024, json_mode=True,
+                model=_CURATOR_MODEL, url=_CURATOR_URL, api_key=_CURATOR_KEY,
+                stage="curator_json_repair",
             )
             return json.loads(strip_fences(fixed))
         except (json.JSONDecodeError, Exception) as e2:

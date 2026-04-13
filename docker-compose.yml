@@ -4,13 +4,12 @@
 #   docker compose up -d --build
 #   curl http://localhost:3100/health
 #
-# Embeddings on the host (e.g. vLLM :8000) from inside the archivist container:
-#   EMBED_URL=http://host.docker.internal:8000
-# Remote or local LLM (any OpenAI-compatible URL):
-#   LLM_URL=http://host.docker.internal:11434
-#   LLM_URL=https://api.openai.com
+# LLM / embedding: any OpenAI-compatible endpoint set via .env
+#   Ollama (local):  LLM_URL=http://host.docker.internal:11434
+#   vLLM (host):     LLM_URL=http://host.docker.internal:8000
+#   Cloud API:       LLM_URL=https://api.openai.com
 #
-# Benchmark in Docker (Qdrant + archivist network; use host.docker.internal for LLM/embed on host):
+# Benchmark in Docker (Qdrant + archivist network):
 #   docker compose up -d qdrant
 #   docker compose --profile benchmark build benchmark
 #   docker compose --profile benchmark run --rm benchmark --no-refine --output .benchmarks/pipeline.json
@@ -36,28 +35,27 @@ services:
       - .env
     environment:
       QDRANT_URL: http://qdrant:6333
-      # Do not use .env EMBED_URL=127.0.0.1 here — inside the container that points at itself.
-      # Embedding vLLM on the host or another compose stack: override BENCHMARK_EMBED_URL if needed.
+      # LLM and embedding: containers reach host services via host.docker.internal.
+      # Set BENCHMARK_EMBED_URL / BENCHMARK_LLM_URL in .env to override per-run.
       EMBED_URL: ${BENCHMARK_EMBED_URL:-http://host.docker.internal:8000}
       EMBED_API_KEY: ${EMBED_API_KEY:-}
       EMBED_MODEL: ${BENCHMARK_EMBED_MODEL:-${EMBED_MODEL:-bge-base}}
       VECTOR_DIM: ${VECTOR_DIM:-768}
-      # Use BENCHMARK_LLM_URL / BENCHMARK_LLM_MODEL to override endpoints inside the benchmark
-      # container. Needed when LLM_URL in .env is a Tailscale Magic DNS hostname or 127.0.0.1
-      # that the container can't reach. Set BENCHMARK_* in .env and leave LLM_* for the main app.
       LLM_URL: ${BENCHMARK_LLM_URL:-${LLM_URL:-http://host.docker.internal:11434}}
       LLM_MODEL: ${BENCHMARK_LLM_MODEL:-${LLM_MODEL:-llama3.1}}
       LLM_API_KEY: ${LLM_API_KEY:-}
+      # Curator LLM override — falls back to LLM_URL/LLM_MODEL when empty.
+      # Set BENCHMARK_CURATOR_LLM_URL / BENCHMARK_CURATOR_LLM_MODEL in .env to use a
+      # separate model for entity extraction, dedup, and compaction during benchmarks.
+      CURATOR_LLM_URL: ${BENCHMARK_CURATOR_LLM_URL:-${CURATOR_LLM_URL:-}}
+      CURATOR_LLM_MODEL: ${BENCHMARK_CURATOR_LLM_MODEL:-${CURATOR_LLM_MODEL:-}}
+      CURATOR_LLM_API_KEY: ${CURATOR_LLM_API_KEY:-}
       RERANK_ENABLED: ${RERANK_ENABLED:-false}
     volumes:
       - .:/workspace
     working_dir: /workspace
     extra_hosts:
       - "host.docker.internal:host-gateway"
-      # Map the Tailscale LLM hostname to its IP so the container can reach it.
-      # Set OPENCLAW_VLLM_TSIP in .env (e.g. OPENCLAW_VLLM_TSIP=100.89.207.109).
-      # Falls back to 127.0.0.1 (no-op) when the variable is unset.
-      - "openclaw-vllm-corp:${OPENCLAW_VLLM_TSIP:-127.0.0.1}"
     depends_on:
       - qdrant
     networks:
@@ -76,10 +74,18 @@ services:
       SQLITE_PATH: /data/archivist/graph.db
       MEMORY_ROOT: /data/memories
       NAMESPACES_CONFIG_PATH: /data/archivist/config/namespaces.yaml
-      # From .env
+      # LLM / embedding: configure in .env (any OpenAI-compatible endpoint).
+      # Examples: Ollama on host → http://host.docker.internal:11434
+      #           vLLM on host  → http://host.docker.internal:8000
+      #           Cloud API     → https://api.openai.com
       LLM_URL: ${LLM_URL:-http://host.docker.internal:11434}
       LLM_MODEL: ${LLM_MODEL:-llama3.1}
       LLM_API_KEY: ${LLM_API_KEY:-}
+      # Curator LLM override (optional): dedicated model for entity extraction, dedup,
+      # compaction. Falls back to LLM_URL / LLM_MODEL when empty.
+      CURATOR_LLM_URL: ${CURATOR_LLM_URL:-}
+      CURATOR_LLM_MODEL: ${CURATOR_LLM_MODEL:-}
+      CURATOR_LLM_API_KEY: ${CURATOR_LLM_API_KEY:-}
       EMBED_URL: ${EMBED_URL:-http://host.docker.internal:8000}
       EMBED_API_KEY: ${EMBED_API_KEY:-}
       EMBED_MODEL: ${EMBED_MODEL:-BAAI/bge-base-en-v1.5}

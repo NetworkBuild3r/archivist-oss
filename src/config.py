@@ -34,6 +34,15 @@ LLM_REFINE_MODEL = os.getenv("LLM_REFINE_MODEL", "").strip()
 LLM_SYNTH_MODEL = os.getenv("LLM_SYNTH_MODEL", "").strip()
 # Parallel refinement: max concurrent LLM calls for Stage 5 (minimum 1).
 LLM_REFINE_CONCURRENCY = max(1, int(os.getenv("LLM_REFINE_CONCURRENCY", "5")))
+
+# ── Curator LLM override (v1.11 — dedicated local model for curation tasks) ──
+# When set, curator tasks (entity extraction, dedup, compaction) use this model/URL
+# instead of the main LLM. Useful for running a smaller local model (e.g. Gemma 4 E2B)
+# for curation while pointing the main LLM at a larger remote model for synthesis.
+# Falls back to LLM_URL / LLM_MODEL / LLM_API_KEY when empty.
+CURATOR_LLM_URL = os.getenv("CURATOR_LLM_URL", "").strip()
+CURATOR_LLM_MODEL = os.getenv("CURATOR_LLM_MODEL", "").strip()
+CURATOR_LLM_API_KEY = os.getenv("CURATOR_LLM_API_KEY", os.getenv("LLM_API_KEY", "")).strip()
 # If top hit score is >= this, skip per-chunk LLM refinement and use tier text (0 = disabled, always refine).
 REFINE_SKIP_THRESHOLD = float(os.getenv("REFINE_SKIP_THRESHOLD", "0.0"))
 
@@ -277,6 +286,14 @@ def _log_feature_flags() -> None:
             "disabled_count": len(disabled),
         },
     )
+    if CURATOR_LLM_MODEL:
+        logger.info(
+            "config.curator_llm_override",
+            extra={
+                "curator_llm_model": CURATOR_LLM_MODEL,
+                "curator_llm_url": CURATOR_LLM_URL or LLM_URL,
+            },
+        )
 
 
 _log_feature_flags()

@@ -91,7 +91,8 @@ async def embed_text(text: str, model: str = EMBED_MODEL) -> list[float]:
     cached = _cache_get(text, model)
     if cached is not None:
         m.inc(EMBED_CACHE_HITS)
-        return cached
+        # Cache stores immutable tuples; Qdrant query APIs expect list (not tuple).
+        return list(cached)
 
     m.inc(EMBED_CACHE_MISSES)
     client = _get_embed_client()

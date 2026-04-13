@@ -7,7 +7,7 @@
 Vector search + knowledge graph + active curation — one MCP endpoint.</p>
 
 <p align="center">
-  <a href="#quick-start"><strong>Quick Start</strong></a> · <a href="#openclaw-and-agent-workspace-layout"><strong>OpenClaw Layout</strong></a> · <a href="#how-it-works"><strong>How It Works</strong></a> · <a href="#benchmarks"><strong>Benchmarks</strong></a> · <a href="#mcp-tools-30"><strong>30 MCP Tools</strong></a> · <a href="#configuration-reference"><strong>Config</strong></a> · <a href="#architecture-deep-dive"><strong>Architecture</strong></a> · <a href="docs/ROADMAP.md"><strong>Roadmap</strong></a>
+  <a href="#quick-start"><strong>Quick Start</strong></a> · <a href="#openclaw-and-agent-workspace-layout"><strong>OpenClaw Layout</strong></a> · <a href="#how-it-works"><strong>How It Works</strong></a> · <a href="#benchmarks"><strong>Benchmarks</strong></a> · <a href="#ship-it-locally-validated-performance"><strong>Ship It Locally</strong></a> · <a href="#mcp-tools-30"><strong>30 MCP Tools</strong></a> · <a href="#configuration-reference"><strong>Config</strong></a> · <a href="#architecture-deep-dive"><strong>Architecture</strong></a> · <a href="docs/ROADMAP.md"><strong>Roadmap</strong></a>
 </p>
 
 <p align="center">
@@ -107,6 +107,32 @@ Each stage is observable via `retrieval_trace` in every response.
 ## Benchmarks
 
 Live run (2026-04-06) — **Qdrant** vector store, **`BAAI/bge-base-en-v1.5`** embeddings (local), **`qwen3.5-122b`** via an OpenAI-compatible API. Four corpus scales (56 → 1,523 files), 107–110 questions per scale covering 8 query types. Context stuffing uses real LLM calls. All Archivist runs use `--no-refine` (pure retrieval, no generative synthesis). Context budget: **32,768 tokens** (realistic agent window after system prompt, history, and tools).
+
+### Ship it locally: validated performance
+
+You do not need a datacenter to prove Archivist works. **v1.11** is built for teams who want the *same* retrieval stack in prod and on a developer laptop: one **OpenAI-compatible** chat endpoint, one **independent** embedder, and an **optional curator LLM** so entity extraction, dedup, and compaction can run on a smaller local model while synthesis stays on your flagship model.
+
+| What we validated | Why it matters |
+|-------------------|----------------|
+| **Full stack on one machine** | Ollama (or any local `/v1` server) for **`LLM_URL`** + **`EMBED_URL`**, Qdrant in Docker, Archivist on `localhost:3100` — no Tailscale hop, no shared GPU cluster required for credible benchmarks. |
+| **Curator split** | Set **`CURATOR_LLM_URL`** / **`CURATOR_LLM_MODEL`** so background curation does not compete with user-facing chat for the same remote quota. See [`.env.example`](.env.example). |
+| **768‑dim embeddings** | **`nomic-embed-text`** (and similar) pair cleanly with **`VECTOR_DIM=768`** — match dimensions to your embedder and you are done. |
+| **Pipeline harness at scale** | The **`large`** preset (~460 files, needle-in-the-haystack queries) exercises the same RLM path as production; run **`vector_only`** with **`--no-refine`** for a fast, retrieval-focused scorecard. |
+
+**Fleet-grade QA (representative deployment).** On a live v1.11 instance with **768‑dim** embeddings and a local **Gemma-class** curator LLM, warmed searches landed around **~1.1–1.2 s** end-to-end with tight variance — a dramatic step-change versus earlier baselines in the **~15 s** range for comparable workloads. Your numbers will depend on hardware, model size, and network; the point is architectural: **bounded latency + stable behavior** once the stack is co-located and correctly dimensioned.
+
+**Reproduce the local pipeline benchmark (host Python — recommended when Ollama listens on `127.0.0.1` only):**
+
+```bash
+cp .env.example .env   # set LLM_URL, EMBED_URL, VECTOR_DIM, optional CURATOR_LLM_*
+docker compose up -d qdrant
+env REVERSE_HYDE_ENABLED=false TIERED_CONTEXT_ENABLED=false QUERY_EXPANSION_ENABLED=false \
+  python -m benchmarks.pipeline.evaluate \
+  --memory-scale large --variants vector_only --no-refine \
+  --output .benchmarks/needle_large_vector_only.json --print-slices
+```
+
+For Docker-based runs, point embed/LLM at the host with **`host.docker.internal`** (see [`.env.example`](.env.example) **`BENCHMARK_*`** overrides). If the embedder binds only to **`127.0.0.1`**, run the harness on the host so cache hits and vector queries stay on the fast path — we fixed a subtle **tuple-vs-list** interaction between the embedding LRU cache and Qdrant so intermittent “unsupported query type” errors no longer appear on repeated queries.
 
 <p align="center">
   <img src="assets/benchmark_comparison.png" alt="Archivist vs Context Stuffing benchmark" width="900">

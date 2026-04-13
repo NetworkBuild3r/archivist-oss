@@ -4,9 +4,14 @@ import json
 import logging
 
 import llm as llm_mod
+from config import LLM_MODEL, LLM_URL, CURATOR_LLM_MODEL, CURATOR_LLM_URL, CURATOR_LLM_API_KEY
 from text_utils import strip_fences
 
 logger = logging.getLogger("archivist.compaction")
+
+_CURATOR_MODEL = CURATOR_LLM_MODEL or LLM_MODEL
+_CURATOR_URL = CURATOR_LLM_URL or LLM_URL
+_CURATOR_KEY = CURATOR_LLM_API_KEY
 
 STRUCTURED_COMPACT_SYSTEM = (
     "You are a memory compaction assistant. Given a set of memory entries, "
@@ -68,6 +73,10 @@ async def compact_structured(
             system=system,
             max_tokens=600,
             json_mode=True,
+            model=_CURATOR_MODEL,
+            url=_CURATOR_URL,
+            api_key=_CURATOR_KEY,
+            stage="curator_compact_structured",
         )
         result = json.loads(strip_fences(raw))
         for key in ("goal", "progress", "decisions", "next_steps", "critical_context"):
@@ -84,7 +93,11 @@ async def compact_flat(texts: list[tuple[str, str]], multi_agent: bool = False) 
     combined = "\n\n---\n\n".join(f"[{mid}] {t[:400]}" for mid, t in texts)
     system = FLAT_COMPACT_MULTI_AGENT if multi_agent else FLAT_COMPACT_SYSTEM
     try:
-        summary = await llm_mod.llm_query(combined, system=system, max_tokens=300)
+        summary = await llm_mod.llm_query(
+            combined, system=system, max_tokens=300,
+            model=_CURATOR_MODEL, url=_CURATOR_URL, api_key=_CURATOR_KEY,
+            stage="curator_compact_flat",
+        )
         return summary.strip()
     except Exception as e:
         logger.warning("Flat compaction failed: %s", e)
@@ -95,7 +108,11 @@ async def _fallback_flat(combined: str, multi_agent: bool = False) -> dict:
     """Fallback when structured parsing fails — wrap flat summary in structured shell."""
     system = FLAT_COMPACT_MULTI_AGENT if multi_agent else FLAT_COMPACT_SYSTEM
     try:
-        summary = await llm_mod.llm_query(combined, system=system, max_tokens=300)
+        summary = await llm_mod.llm_query(
+            combined, system=system, max_tokens=300,
+            model=_CURATOR_MODEL, url=_CURATOR_URL, api_key=_CURATOR_KEY,
+            stage="curator_compact_fallback",
+        )
         return {
             "goal": "",
             "progress": [summary.strip()],

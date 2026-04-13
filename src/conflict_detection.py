@@ -11,8 +11,13 @@ from dataclasses import dataclass
 from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchExcept
 
 from config import DEDUP_LLM_ENABLED, DEDUP_LLM_THRESHOLD
+from config import LLM_MODEL, LLM_URL, CURATOR_LLM_MODEL, CURATOR_LLM_URL, CURATOR_LLM_API_KEY
 from collection_router import collection_for
 from embeddings import embed_text
+
+_CURATOR_MODEL = CURATOR_LLM_MODEL or LLM_MODEL
+_CURATOR_URL = CURATOR_LLM_URL or LLM_URL
+_CURATOR_KEY = CURATOR_LLM_API_KEY
 from llm import llm_query
 from qdrant import qdrant_client
 import metrics as m
@@ -171,7 +176,11 @@ async def llm_adjudicated_dedup(
 
     try:
         m.inc(m.CURATOR_LLM_CALLS)
-        raw = await llm_query(prompt, system=_DEDUP_SYSTEM, max_tokens=512, json_mode=True)
+        raw = await llm_query(
+            prompt, system=_DEDUP_SYSTEM, max_tokens=512, json_mode=True,
+            model=_CURATOR_MODEL, url=_CURATOR_URL, api_key=_CURATOR_KEY,
+            stage="curator_dedup",
+        )
         decisions = json.loads(raw.strip().strip("`").strip())
         if not isinstance(decisions, list):
             decisions = [decisions]

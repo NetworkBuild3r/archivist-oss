@@ -623,6 +623,9 @@ async def recursive_retrieve(
     # and scoring but must NOT narrow the search or it silently drops
     # memories stored under a different type (the "general" recall bug).
     effective_memory_type = memory_type
+    _initial_budget_type = "needle" if is_needle_query(query) else "default"
+    _budget = LatencyBudget(max_ms=budget_for_query_type(_initial_budget_type))
+
     if QUERY_CLASSIFICATION_ENABLED and not memory_type:
         if namespace:
             stage0_inventory = get_inventory(namespace)
@@ -702,9 +705,6 @@ async def recursive_retrieve(
         m.inc(m.SEARCH_TOTAL)
         m.observe(m.SEARCH_DURATION, elapsed)
         return out
-
-    _initial_budget_type = "needle" if is_needle_query(query) else "default"
-    _budget = LatencyBudget(max_ms=budget_for_query_type(_initial_budget_type))
 
     # ── Stage timings (ms) for retrieval trace ──
     _stage_timings: dict[str, float] = {}
