@@ -7,12 +7,12 @@
 Vector search + knowledge graph + active curation — one MCP endpoint.</p>
 
 <p align="center">
-  <a href="#quick-start"><strong>Quick Start</strong></a> · <a href="#openclaw-and-agent-workspace-layout"><strong>OpenClaw Layout</strong></a> · <a href="#how-it-works"><strong>How It Works</strong></a> · <a href="#benchmarks"><strong>Benchmarks</strong></a> · <a href="#mcp-tools-30"><strong>30 MCP Tools</strong></a> · <a href="#configuration-reference"><strong>Config</strong></a> · <a href="#architecture-deep-dive"><strong>Architecture</strong></a> · <a href="docs/ROADMAP.md"><strong>Roadmap</strong></a>
+  <a href="#quick-start"><strong>Quick Start</strong></a> · <a href="#openclaw-and-agent-workspace-layout"><strong>OpenClaw Layout</strong></a> · <a href="#how-it-works"><strong>How It Works</strong></a> · <a href="#benchmarks"><strong>Benchmarks</strong></a> · <a href="#ship-it-locally-validated-performance"><strong>Ship It Locally</strong></a> · <a href="#mcp-tools-30"><strong>30 MCP Tools</strong></a> · <a href="#configuration-reference"><strong>Config</strong></a> · <a href="#architecture-deep-dive"><strong>Architecture</strong></a> · <a href="docs/ROADMAP.md"><strong>Roadmap</strong></a>
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="License" />
-  <img src="https://img.shields.io/badge/version-v1.7.0-brightgreen" alt="Version" />
+  <img src="https://img.shields.io/badge/version-v1.11.0-brightgreen" alt="Version" />
   <img src="https://img.shields.io/badge/protocol-MCP-purple" alt="MCP" />
   <img src="https://img.shields.io/badge/models-any%20OpenAI--compatible-orange" alt="Models" />
 </p>
@@ -28,9 +28,23 @@ docker compose up -d --build               # Archivist :3100 + Qdrant :6333
 curl http://localhost:3100/health          # {"status":"ok"}
 ```
 
-Full Docker options (host vLLM, `/opt/appdata` volumes, overrides): [`docs/DOCKER.md`](docs/DOCKER.md).
+Full Docker options (host vLLM, persistent volumes, overrides): [`docs/DOCKER.md`](docs/DOCKER.md).
 
 Point any MCP client at `http://localhost:3100/mcp` — done. Your agents now have long-term memory with search, RBAC, knowledge graphs, and active curation out of the box. Legacy SSE compatibility remains available at `http://localhost:3100/mcp/sse`.
+
+---
+
+## What's New in v1.11
+
+**Needle Retrieval v2** — structured tokens (IPs, UUIDs, cron expressions, ticket IDs) now have **100% deterministic recall** via a dedicated registry, write-time question embeddings (Reverse HyDE), and focused micro-chunk vectors. Combined with uniform result typing and RRF fusion, needle-in-the-haystack queries that previously required luck now reliably surface.
+
+**Delete cascade hardening** — deleting a memory now fully cleans up all derived artifacts: micro-chunk FTS5 entries, reverse HyDE FTS5 entries, and per-child needle registry rows. Previously these were orphaned on delete.
+
+**Cascade consistency model** — Archivist uses two non-transactional stores (Qdrant + SQLite). The cascade makes the following contract: *(a) Detectable* — `DeleteResult.failed_steps` records every substep that failed; `PartialDeletionError` is raised when a critical Qdrant step fails. *(b) Repairable* — `sweep_orphans()` runs periodically to reconcile SQLite rows that have no corresponding Qdrant point. *(c) Auditable* — every delete and archive is written to the `audit_log` table with the full result. *(d) Retry-resilient* — transient Qdrant errors (429, 503, timeouts) are retried once; SQLite batch deletes retry once on lock contention. **Known limitation:** there is no distributed transaction across Qdrant and SQLite. A process crash mid-cascade leaves partial state; the orphan sweeper will clean it up on the next run. See `TECH_DEBT.md` for the planned architectural fix.
+
+**Structured observability** — every store and retrieval operation emits a structured log event with per-stage metrics. Feature flags are logged at startup for instant configuration visibility.
+
+See [`CHANGELOG.md`](CHANGELOG.md) for the full list including breaking changes.
 
 ---
 
@@ -92,7 +106,57 @@ Each stage is observable via `retrieval_trace` in every response.
 
 ## Benchmarks
 
-Live run (2026-04-06) — **Qdrant** vector store, **`BAAI/bge-base-en-v1.5`** embeddings (local), **`qwen3.5-122b`** via LiteLLM over Tailscale. Four corpus scales (56 → 1,523 files), 107–110 questions per scale covering 8 query types. Context stuffing uses real LLM calls. All Archivist runs use `--no-refine` (pure retrieval, no generative synthesis). Context budget: **32,768 tokens** (realistic agent window after system prompt, history, and tools).
+Live run (2026-04-06) — **Qdrant** vector store, **`BAAI/bge-base-en-v1.5`** embeddings (local), **`qwen3.5-122b`** via an OpenAI-compatible API. Four corpus scales (56 → 1,523 files), 107–110 questions per scale covering 8 query types. Context stuffing uses real LLM calls. All Archivist runs use `--no-refine` (pure retrieval, no generative synthesis). Context budget: **32,768 tokens** (realistic agent window after system prompt, history, and tools).
+
+### Ship it locally: validated performance
+
+You do not need a datacenter to prove Archivist works. **v1.11** is built for teams who want the *same* retrieval stack in prod and on a developer laptop: one **OpenAI-compatible** chat endpoint, one **independent** embedder, and an **optional curator LLM** so entity extraction, dedup, and compaction can run on a smaller local model while synthesis stays on your flagship model.
+
+| What we validated | Why it matters |
+|-------------------|----------------|
+| **Full stack on one machine** | Ollama (or any local `/v1` server) for **`LLM_URL`** + **`EMBED_URL`**, Qdrant in Docker, Archivist on `localhost:3100` — no Tailscale hop, no shared GPU cluster required for credible benchmarks. |
+| **Curator split** | Set **`CURATOR_LLM_URL`** / **`CURATOR_LLM_MODEL`** so background curation does not compete with user-facing chat for the same remote quota. See [`.env.example`](.env.example). |
+| **768‑dim embeddings** | **`nomic-embed-text`** (and similar) pair cleanly with **`VECTOR_DIM=768`** — match dimensions to your embedder and you are done. |
+| **Pipeline harness at scale** | The **`large`** preset (~460 files, needle-in-the-haystack queries) exercises the same RLM path as production; run **`vector_only`** with **`--no-refine`** for a fast, retrieval-focused scorecard. |
+
+**Fleet-grade QA (representative deployment).** On a live v1.11 instance with **768‑dim** embeddings and a local **Gemma-class** curator LLM, warmed searches landed around **~1.1–1.2 s** end-to-end with tight variance — a dramatic step-change versus earlier baselines in the **~15 s** range for comparable workloads. Your numbers will depend on hardware, model size, and network; the point is architectural: **bounded latency + stable behavior** once the stack is co-located and correctly dimensioned.
+
+**Reproduce the local pipeline benchmark (host Python — recommended when Ollama listens on `127.0.0.1` only):**
+
+```bash
+cp .env.example .env   # set LLM_URL, EMBED_URL, VECTOR_DIM, optional CURATOR_LLM_*
+docker compose up -d qdrant
+env REVERSE_HYDE_ENABLED=false TIERED_CONTEXT_ENABLED=false QUERY_EXPANSION_ENABLED=false \
+  python -m benchmarks.pipeline.evaluate \
+  --memory-scale large --variants vector_only --no-refine \
+  --output .benchmarks/needle_large_vector_only.json --print-slices
+```
+
+For Docker-based runs, point embed/LLM at the host with **`host.docker.internal`** (see [`.env.example`](.env.example) **`BENCHMARK_*`** overrides). If the embedder binds only to **`127.0.0.1`**, run the harness on the host so cache hits and vector queries stay on the fast path — we fixed a subtle **tuple-vs-list** interaction between the embedding LRU cache and Qdrant so intermittent “unsupported query type” errors no longer appear on repeated queries.
+
+### Latest pipeline snapshot (v1.11 harness)
+
+**Medium memory, retrieval-only.** Fresh run on a **fully local** stack (independent **768‑dim** embedder + OpenAI-compatible LLM, **Qdrant**, **`--memory-scale medium`**, **`vector_only`**, **`--no-refine`** — pure retrieval, no generative refinement). **109** questions across temporal, needle, multi-hop, single-hop, and more.
+
+| Metric | Result |
+|--------|--------|
+| **Recall@5 / @10** | **87.5%** |
+| **MRR** | **0.63** |
+| **p50 / p95 latency** | **4.0 s / 11.8 s** |
+| **Tokens / query** | **~3,956** (bounded — not “read the whole corpus”) |
+
+**Where it shines — by query type (recall):**
+
+| Slice | Recall | n |
+|-------|--------|---|
+| **Needle** | **100%** | 2 |
+| **Single-hop** | **94.0%** | 50 |
+| **Temporal** | **90.0%** | 5 |
+| **Multi-hop** | **62.5%** | 10 |
+
+That **needle** and **single-hop** row is the headline: rare facts and direct lookups land in the **top 5** the vast majority of the time — exactly what agent memory is for. Multi-hop is harder by design (inference across chunks); the pipeline still beats guessing.
+
+> **Reproduce:** use the same host command as in *Ship it locally*, but set **`--memory-scale medium`** and **`--output .benchmarks/pipeline_medium_vector_only.json`**. Enable **`--print-slices`** for the per-query-type table.
 
 <p align="center">
   <img src="assets/benchmark_comparison.png" alt="Archivist vs Context Stuffing benchmark" width="900">
@@ -203,7 +267,7 @@ This starts:
 
 ```bash
 curl http://localhost:3100/health
-# {"status": "ok", "service": "archivist", "version": "1.0.0"}
+# {"status": "ok", "service": "archivist", "version": "1.11.0"}
 ```
 
 ### 4. Connect your agents
@@ -426,8 +490,14 @@ The codebase is organized by domain:
 | `graph_retrieval.py` | Hybrid vector+graph, temporal decay, multi-hop |
 | `fts_search.py` | BM25 search + vector/BM25 score fusion |
 | `indexer.py` | File chunking, embedding, Qdrant + FTS5 dual-write |
-| `embeddings.py` | Embedding API client |
+| `embeddings.py` | Embedding API client with LRU+TTL cache |
 | `llm.py` | LLM API client |
+| `memory_lifecycle.py` | Unified delete/archive cascade (7 artifact types) |
+| `result_types.py` | `ResultCandidate` dataclass, `RetrievalSource` enum |
+| `contextual_augment.py` | Chunk metadata augmentation for embedding enrichment |
+| `chunking.py` | Text chunking (flat, hierarchical, needle micro-chunks) |
+| `pre_extractor.py` | Deterministic entity/date/thought-type extraction |
+| `hyde.py` | HyDE + Reverse HyDE (write-time question generation) |
 | **Memory Intelligence** | |
 | `curator.py` | Background entity extraction loop |
 | `curator_queue.py` | Write-ahead queue for deferred curation ops |
@@ -470,10 +540,14 @@ The codebase is organized by domain:
 | `importance_score` | float | 0.0-1.0 retention score |
 | `ttl_expires_at` | integer | Unix timestamp for expiry |
 | `checksum` | keyword | Content hash for dedup |
+| `source_memory_id` | keyword | Parent memory for reverse HyDE vectors |
+| `is_reverse_hyde` | bool | Reverse HyDE question embedding flag |
+| `reverse_hyde_question` | text | The generated question (for debugging) |
+| `thought_type` | keyword | Semantic classification (decision/lesson/insight/...) |
 
 **SQLite tables (17):**
 
-`entities`, `relationships`, `facts`, `memory_chunks`, `memory_fts` (FTS5), `curator_state`, `audit_log`, `memory_versions`, `trajectories`, `tips`, `annotations`, `ratings`, `memory_outcomes`, `skills`, `skill_versions`, `skill_lessons`, `skill_events`, `retrieval_logs`, `curator_queue`, `memory_hotness`, `skill_relations`
+`entities`, `relationships`, `facts`, `memory_chunks`, `memory_fts` (FTS5), `memory_fts_exact` (FTS5), `needle_registry`, `curator_state`, `audit_log`, `memory_versions`, `trajectories`, `tips`, `annotations`, `ratings`, `memory_outcomes`, `skills`, `skill_versions`, `skill_lessons`, `skill_events`, `retrieval_logs`, `curator_queue`, `memory_hotness`, `skill_relations`
 
 ### Three-Layer Memory Hierarchy
 
@@ -563,7 +637,7 @@ These are available alongside the MCP interface for admin, monitoring, and integ
 
 Archivist is production-observable out of the box:
 
-- **Prometheus `/metrics`** — Counters (search, store, conflict, cache hit/miss, webhook, skill events, LLM calls), histograms (search duration, LLM duration), gauges. Scrape-ready.
+- **Prometheus `/metrics`** — Same port as MCP (`MCP_PORT`). Counters, histograms (durations in ms; search result counts in `archivist_search_results`), and gauges including storage and dependency availability. Set `METRICS_ENABLED=false` to disable recording and return 404 on `/metrics`; use `METRICS_AUTH_EXEMPT=true` if Prometheus must scrape without `ARCHIVIST_API_KEY`. Full list: [docs/REFERENCE.md](docs/REFERENCE.md#prometheus-metrics).
 - **Retrieval traces** — Every `archivist_search` response includes `retrieval_trace` with per-stage counts and timings.
 - **Health dashboard** — `archivist_health_dashboard` MCP tool or `GET /admin/dashboard`: memory counts, stale %, conflict rate, cache hit rate, skill health overview.
 - **Audit trail** — Immutable log of all memory operations, queryable via `archivist_audit_trail`.
@@ -660,8 +734,9 @@ Archivist is integration and execution on top of public work from the agent-memo
 
 | Document | Covers |
 |----------|--------|
+| [`CHANGELOG.md`](CHANGELOG.md) | Version history, breaking changes, migration notes |
 | [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) | Three-tier benchmark results, reproduction steps, competitive comparison |
-| [`docs/DOCKER.md`](docs/DOCKER.md) | Docker Compose stack, host vLLM + cloud LLM, `/opt/appdata` volumes |
+| [`docs/DOCKER.md`](docs/DOCKER.md) | Docker Compose stack, host vLLM + cloud LLM, volume overrides |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Module map, data flow diagrams, storage schema, per-version operational notes |
 | [`docs/CURSOR_SKILL.md`](docs/CURSOR_SKILL.md) | Full parameter schemas and examples for all 30 MCP tools |
 | [`docs/REFERENCE.md`](docs/REFERENCE.md) | Condensed tool reference table |

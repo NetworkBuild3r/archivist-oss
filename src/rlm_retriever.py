@@ -10,7 +10,7 @@ Phase 5 (v0.8): hot cache, retrieval trajectory logging.
 import asyncio
 import logging
 import time
-from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchAny, SearchParams
+from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchAny, MatchText, SearchParams
 
 from config import (
     QDRANT_COLLECTION,
@@ -60,16 +60,105 @@ from query_intent import classify_temporal_intent
 from topic_detector import detect_query_topic
 from ranker import ltr_available, rank_results as ltr_rank_results
 from collection_router import collection_for
-from latency_budget import LatencyBudget
+from latency_budget import LatencyBudget, budget_for_query_type
 from query_expansion import expand_query
 from hyde import is_needle_query, generate_hypothetical_document
+from result_types import ResultCandidate, RetrievalSource
+from graph import lookup_needle_tokens
+from chunking import NEEDLE_PATTERNS as LITERAL_NEEDLE_PATTERNS
 import hot_cache
 import retrieval_log
-import metrics as m
 from namespace_inventory import NamespaceInventory, get_inventory
 from query_classifier import classify_query_full, SUBCATEGORY_TO_TOPIC
 
 logger = logging.getLogger("archivist.rlm")
+
+
+def _extract_literal_tokens(query: str) -> list[str]:
+    """Extract high-specificity tokens from query for literal substring search."""
+    tokens: list[str] = []
+    for pat in LITERAL_NEEDLE_PATTERNS:
+        for match in pat.finditer(query):
+            tok = match.group().strip()
+            if tok and len(tok) >= 3:
+                tokens.append(tok)
+    return tokens
+
+
+def _literal_search_sync(
+    tokens: list[str],
+    namespace: str = "",
+    agent_id: str = "",
+    agent_ids: list[str] | None = None,
+    memory_type: str = "",
+    limit: int = 10,
+) -> list[dict]:
+    """Exact substring search on Qdrant ``text`` payload via MatchText filter.
+
+    Only triggered when the query contains high-specificity tokens (IPs, cron, UUIDs, etc.).
+    Uses a scroll (no vector) so results are unscored — they get a synthetic high score.
+    """
+    if not tokens:
+        return []
+
+    client = qdrant_client()
+    _coll = collection_for(namespace)
+    all_hits: list[dict] = []
+    seen_ids: set[str] = set()
+
+    for token in tokens[:3]:
+        must_filters = [FieldCondition(key="text", match=MatchText(text=token))]
+        if agent_ids:
+            ids = [a for a in agent_ids if a]
+            if ids:
+                must_filters.append(FieldCondition(key="agent_id", match=MatchAny(any=ids)))
+        elif agent_id:
+            must_filters.append(FieldCondition(key="agent_id", match=MatchValue(value=agent_id)))
+        if namespace:
+            must_filters.append(FieldCondition(key="namespace", match=MatchValue(value=namespace)))
+        if memory_type:
+            must_filters.append(FieldCondition(key="memory_type", match=MatchValue(value=memory_type)))
+
+        try:
+            scrolled, _ = client.scroll(
+                collection_name=_coll,
+                scroll_filter=Filter(must=must_filters),
+                limit=limit,
+                with_payload=True,
+            )
+        except Exception:
+            continue
+
+        for hit in scrolled:
+            hid = str(getattr(hit, "id", ""))
+            if hid in seen_ids:
+                continue
+            seen_ids.add(hid)
+            p = hit.payload or {}
+            all_hits.append({
+                "id": hid,
+                "score": 0.0,
+                "text": p.get("text", ""),
+                "l0": p.get("l0", ""),
+                "l1": p.get("l1", ""),
+                "agent_id": p.get("agent_id", ""),
+                "file_path": p.get("file_path", ""),
+                "file_type": p.get("file_type", ""),
+                "date": p.get("date", ""),
+                "content_date": p.get("content_date", ""),
+                "indexed_at": p.get("indexed_at", ""),
+                "team": p.get("team", ""),
+                "namespace": p.get("namespace", ""),
+                "chunk_index": p.get("chunk_index", 0),
+                "parent_id": p.get("parent_id"),
+                "is_parent": p.get("is_parent", False),
+                "importance_score": p.get("importance_score", 0.5),
+                "retention_class": p.get("retention_class", "standard"),
+                "topic": p.get("topic", ""),
+                "thought_type": p.get("thought_type", ""),
+                "literal_match": True,
+            })
+    return all_hits[:limit]
 
 
 def _retrieval_trace(
@@ -466,13 +555,13 @@ def apply_importance_to_results(results: list[dict], weight: float | None = None
     return results
 
 
-def _apply_rerank(query: str, results: list[dict]) -> list[dict]:
+async def _apply_rerank(query: str, results: list[dict]) -> list[dict]:
     """Apply cross-encoder reranking if enabled."""
     if not RERANK_ENABLED:
         return results
     try:
         from reranker import rerank_results
-        return rerank_results(query, results, model_name=RERANK_MODEL, limit=RERANK_TOP_K)
+        return await rerank_results(query, results, model_name=RERANK_MODEL, limit=RERANK_TOP_K)
     except Exception as e:
         logger.warning("Reranking failed, using original order: %s", e)
         return results
@@ -507,6 +596,11 @@ async def enrich_with_parent(results: list[dict]) -> list[dict]:
     return results
 
 
+def _observe_search_results(namespace: str, sources: list | None) -> None:
+    """Record ``archivist_search_results`` (histogram of len(sources); label namespace)."""
+    m.observe(m.SEARCH_RESULTS, float(len(sources or [])), {"namespace": namespace or "_default"})
+
+
 async def recursive_retrieve(
     query: str,
     agent_id: str = "",
@@ -534,12 +628,19 @@ async def recursive_retrieve(
     # and scoring but must NOT narrow the search or it silently drops
     # memories stored under a different type (the "general" recall bug).
     effective_memory_type = memory_type
+    _initial_budget_type = "needle" if is_needle_query(query) else "default"
+    _budget = LatencyBudget(max_ms=budget_for_query_type(_initial_budget_type))
+
     if QUERY_CLASSIFICATION_ENABLED and not memory_type:
         if namespace:
             stage0_inventory = get_inventory(namespace)
         auto_type, auto_subcategory = await classify_query_full(
             query, inventory=stage0_inventory,
         )
+        _classified_budget_type = auto_type if auto_type else _initial_budget_type
+        _new_budget_ms = budget_for_query_type(_classified_budget_type)
+        if _new_budget_ms != _budget._max_ms:
+            _budget._max_ms = _new_budget_ms
 
     temporal_intent = ""
     if TEMPORAL_INTENT_ENABLED:
@@ -553,6 +654,9 @@ async def recursive_retrieve(
             detected_topic = SUBCATEGORY_TO_TOPIC.get(auto_subcategory, "")
 
     effective_threshold = threshold if threshold is not None else RETRIEVAL_THRESHOLD
+    _needle_query_detected = is_needle_query(query)
+    if _needle_query_detected and threshold is None:
+        effective_threshold = max(0.25, effective_threshold - 0.15)
     vector_limit = max(VECTOR_SEARCH_LIMIT, limit)
     n_graph_entities = 0
     n_graph_items = 0
@@ -575,6 +679,8 @@ async def recursive_retrieve(
             "dynamic_threshold_enabled": DYNAMIC_THRESHOLD_ENABLED,
             "ltr_used": _ltr_used,
             "hyde_used": _hyde_used,
+            "needle_query_detected": _needle_query_detected,
+            "needle_registry_hits": len(_registry_hits),
             "iterative_retry": _is_retry,
             "latency_budget_ms": _budget.remaining_ms(),
         }
@@ -603,15 +709,66 @@ async def recursive_retrieve(
         m.inc(m.CACHE_HIT)
         m.inc(m.SEARCH_TOTAL)
         m.observe(m.SEARCH_DURATION, elapsed)
+        _observe_search_results(namespace, out.get("sources"))
         return out
-
-    _budget = LatencyBudget()
 
     # ── Stage timings (ms) for retrieval trace ──
     _stage_timings: dict[str, float] = {}
     n_expansion_variants = 0
     _ltr_used = False
     _hyde_used = False
+
+    # ── Deterministic needle registry lookup (v2.0 — O(1) exact match) ──
+    _registry_hits: list[dict] = []
+    try:
+        _raw_registry: list[dict] = []
+        if agent_ids:
+            _seen_mem = set()
+            for aid in agent_ids:
+                for rh in lookup_needle_tokens(query, namespace=namespace, agent_id=aid):
+                    if rh["memory_id"] not in _seen_mem:
+                        _seen_mem.add(rh["memory_id"])
+                        _raw_registry.append(rh)
+        else:
+            _raw_registry = lookup_needle_tokens(query, namespace=namespace, agent_id=agent_id)
+
+        if _raw_registry:
+            m.inc(m.NEEDLE_REGISTRY_HITS, {"namespace": namespace}, value=len(_raw_registry))
+            _reg_candidates = [ResultCandidate.from_registry_hit(rh) for rh in _raw_registry]
+
+            _reg_ids = [c.id for c in _reg_candidates if c.id]
+            if _reg_ids:
+                _reg_coll = collection_for(namespace)
+                try:
+                    _reg_points = qdrant_client().retrieve(
+                        collection_name=_reg_coll,
+                        ids=_reg_ids,
+                        with_payload=True,
+                    )
+                    _reg_payload_map = {str(p.id): p.payload for p in _reg_points}
+                except Exception as e:
+                    logger.warning("Registry payload refresh failed: %s", e)
+                    _reg_payload_map = {}
+
+                _live_candidates = []
+                for c in _reg_candidates:
+                    payload = _reg_payload_map.get(c.id)
+                    if payload:
+                        c.update_from_payload(payload)
+                        _live_candidates.append(c)
+                    else:
+                        m.inc(m.NEEDLE_REGISTRY_STALE, {"namespace": namespace})
+                        logger.warning(
+                            "registry.stale_entry: memory_id=%s not found in Qdrant — dropping",
+                            c.id,
+                        )
+                _reg_candidates = _live_candidates
+
+            _registry_hits = [c.to_dict() for c in _reg_candidates]
+            for rh in _registry_hits:
+                rh["needle_registry_hit"] = True
+    except Exception as e:
+        logger.debug("Needle registry lookup failed: %s", e)
 
     # ── Multi-query expansion + embedding (v1.10) ──
     # Budget-gated: expansion requires ~150ms LLM call
@@ -675,13 +832,28 @@ async def recursive_retrieve(
             limit=vector_limit,
         )
 
-    # Launch ALL search paths concurrently: vector variants + BM25
+    # Launch ALL search paths concurrently: vector variants + BM25 + literal
     vec_tasks = [_search_one(q, v, detected_topic) for q, v in zip(query_variants, query_vecs)]
-    all_tasks = vec_tasks + [_bm25_async()]
+
+    async def _literal_async() -> list[dict]:
+        literal_tokens = _extract_literal_tokens(query)
+        if not literal_tokens:
+            return []
+        return await asyncio.to_thread(
+            _literal_search_sync, literal_tokens,
+            namespace=namespace,
+            agent_id=agent_id if not agent_ids else "",
+            agent_ids=agent_ids,
+            memory_type=effective_memory_type,
+            limit=vector_limit,
+        )
+
+    all_tasks = vec_tasks + [_bm25_async(), _literal_async()]
     all_results = await asyncio.gather(*all_tasks)
 
     vec_results = list(all_results[:len(vec_tasks)])
     bm25_hits = all_results[len(vec_tasks)]
+    literal_hits = all_results[len(vec_tasks) + 1]
 
     # If topic-filtered primary returned too few, retry without topic filter
     if detected_topic and len(vec_results[0]) < ADAPTIVE_VECTOR_MIN_RESULTS and _cached_query_vec:
@@ -690,8 +862,12 @@ async def recursive_retrieve(
             query, **_vec_common, topic="", _query_vec=_cached_query_vec,
         )
 
-    # Merge all vector variant results via RRF
+    # Merge all vector variant results + literal + registry via RRF
     non_empty_rankings = [r for r in vec_results if r]
+    if literal_hits:
+        non_empty_rankings.append(literal_hits)
+    if _registry_hits:
+        non_empty_rankings.append(_registry_hits)
     if len(non_empty_rankings) > 1:
         coarse = rrf_merge(non_empty_rankings, k=60)
         for r in coarse:
@@ -715,7 +891,7 @@ async def recursive_retrieve(
     detected_entities: list[dict] = []
     _t_graph = time.monotonic()
     if GRAPH_RETRIEVAL_ENABLED:
-        entities = extract_entity_mentions(query)
+        entities = extract_entity_mentions(query, namespace=namespace)
         detected_entities = entities
         n_graph_entities = len(entities)
         if entities:
@@ -727,6 +903,23 @@ async def recursive_retrieve(
             if graph_items:
                 coarse = merge_graph_context_into_results(coarse, graph_items)
     _stage_timings["graph_ms"] = round((time.monotonic() - _t_graph) * 1000, 1)
+
+    # Late HyDE pass: if regex-only check missed but broadened check (short + no entities) passes,
+    # generate HyDE doc and inject as an extra vector search to rescue needle results.
+    if (not _is_retry and not _hyde_used
+            and is_needle_query(query, entity_count=n_graph_entities)
+            and _budget.can_afford(150) and _cached_query_vec is not None):
+        try:
+            late_hyde_doc = await generate_hypothetical_document(query)
+            if late_hyde_doc:
+                late_vec = (await embed_batch([late_hyde_doc]))[0]
+                if late_vec:
+                    late_hits = await search_vectors(query, **_vec_common, topic="", _query_vec=late_vec)
+                    if late_hits:
+                        coarse, _ = _merge_into_results(coarse, late_hits)
+                    _hyde_used = True
+        except Exception as e:
+            logger.debug("Late HyDE pass failed: %s", e)
 
     if not coarse:
         empty = {
@@ -752,6 +945,7 @@ async def recursive_retrieve(
             ),
         }
         _attach_stage0(empty, stage0_inventory, auto_type, user_memory_type)
+        _observe_search_results(namespace, [])
         return empty
 
     # ── Post-retrieval processing (dedupe → threshold → rerank → enrich) ──
@@ -808,15 +1002,16 @@ async def recursive_retrieve(
             wider_filtered = apply_retrieval_threshold(wider_coarse, effective_threshold)
             filtered, _ = _merge_into_results(filtered, wider_filtered)
 
-    # Stage 2-bm25-rescue: BM25 rescue slots (v1.9)
+    # Stage 2-bm25-rescue: BM25 rescue slots (v1.9, needle-boosted v1.11)
     if BM25_RESCUE_ENABLED and BM25_ENABLED and n_bm25 > 0:
         bm25_max = max((r.get("bm25_score", 0) for r in coarse if r.get("bm25_score")), default=0)
         if bm25_max > 0:
             rescue_threshold = bm25_max * BM25_RESCUE_MIN_SCORE_RATIO
+            rescue_slots = 7 if _needle_query_detected else BM25_RESCUE_MAX_SLOTS
             rescue_candidates = [
                 r for r in coarse
                 if r.get("bm25_score", 0) >= rescue_threshold
-            ][:BM25_RESCUE_MAX_SLOTS]
+            ][:rescue_slots]
             filtered, n_bm25_rescue = _merge_into_results(
                 filtered, rescue_candidates,
                 min_score=effective_threshold, tag="bm25_rescue",
@@ -883,6 +1078,7 @@ async def recursive_retrieve(
             ),
         }
         _attach_stage0(below, stage0_inventory, auto_type, user_memory_type)
+        _observe_search_results(namespace, [])
         return below
 
     # Stage 2b: Outcome-aware scoring (v0.6)
@@ -903,7 +1099,7 @@ async def recursive_retrieve(
             logger.debug("Outcome adjustments skipped: %s", e)
 
     # Stage 3: Rerank (Phase 1)
-    reranked = _apply_rerank(query, filtered)
+    reranked = await _apply_rerank(query, filtered)
     n_rerank = len(reranked)
 
     # Stage 3a: Iterative retrieval — auto-reformulate on low-confidence (v1.10)
@@ -961,6 +1157,10 @@ async def recursive_retrieve(
 
     n_refine = len(enriched)
 
+    _micro_hits = sum(1 for r in enriched if r.get("parent_id") and not r.get("is_parent"))
+    if _micro_hits:
+        m.inc(m.MICRO_CHUNK_HITS, {"namespace": namespace}, value=_micro_hits)
+
     # Context-status signaling (v1.0, upgraded v1.1 with tokenizer)
     result_tokens_approx = sum(count_tokens(select_tier(r, tier)) for r in enriched)
     budget_tokens = max_tokens if max_tokens and max_tokens > 0 else None
@@ -1012,6 +1212,7 @@ async def recursive_retrieve(
             "retrieval_trace": _retrieval_trace(**_common_trace),
         }
         _attach_stage0(no_refine, stage0_inventory, auto_type, user_memory_type)
+        _observe_search_results(namespace, no_refine.get("sources"))
         return no_refine
 
     # Stage 5: LLM refinement (parallel + optional high-confidence skip)
@@ -1056,6 +1257,7 @@ async def recursive_retrieve(
             "retrieval_trace": _retrieval_trace(**_common_trace),
         }
         _attach_stage0(no_rel, stage0_inventory, auto_type, user_memory_type)
+        _observe_search_results(namespace, [])
         return no_rel
 
     # Stage 6: Synthesis
@@ -1099,6 +1301,7 @@ async def recursive_retrieve(
         "retrieval_trace": _retrieval_trace(**_common_trace),
     }
     _attach_stage0(final_result, stage0_inventory, auto_type, user_memory_type)
+    _observe_search_results(namespace, final_result.get("sources"))
 
     elapsed = int((time.monotonic() - t0) * 1000)
     final_result["_cache_namespace"] = namespace
@@ -1114,5 +1317,27 @@ async def recursive_retrieve(
     m.inc(m.SEARCH_TOTAL)
     m.inc(m.CACHE_MISS)
     m.observe(m.SEARCH_DURATION, elapsed)
+
+    logger.info(
+        "retrieval_pipeline.complete",
+        extra={
+            "query_length": len(query),
+            "namespace": namespace,
+            "agent_id": agent_id or "fleet",
+            "registry_hits": len(_registry_hits),
+            "vector_results": n_coarse,
+            "bm25_results": n_bm25,
+            "graph_entities": n_graph_entities,
+            "graph_items": n_graph_items,
+            "deduped": n_dedupe,
+            "post_threshold": len(filtered),
+            "final_count": len(refined),
+            "expansion_variants": n_expansion_variants,
+            "hyde_used": _hyde_used,
+            "ltr_used": _ltr_used,
+            "bm25_rescue": n_bm25_rescue,
+            "duration_ms": elapsed,
+        },
+    )
 
     return final_result

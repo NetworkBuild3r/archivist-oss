@@ -39,8 +39,16 @@ async def llm_query(
     max_tokens: int = 1024,
     json_mode: bool = False,
     stage: str = "",
+    url: str = "",
+    api_key: str | None = None,
 ) -> str:
-    """Send a prompt to the configured LLM and return the response text."""
+    """Send a prompt to the configured LLM and return the response text.
+
+    ``url`` and ``api_key`` override the module-level LLM_URL / LLM_API_KEY
+    defaults, allowing callers (e.g. the curator) to use a different endpoint
+    without changing global config.  Pass ``api_key=""`` to explicitly send
+    no key (e.g. Ollama doesn't require one).
+    """
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
@@ -54,17 +62,20 @@ async def llm_query(
     if json_mode:
         body["response_format"] = {"type": "json_object"}
 
+    effective_url = url or LLM_URL
+    effective_key = LLM_API_KEY if api_key is None else api_key
+
     m.inc(m.LLM_CALL)
     t0 = time.monotonic()
     client = _get_llm_client()
     for attempt in range(_MAX_RETRIES):
         try:
             headers: dict[str, str] = {}
-            if LLM_API_KEY:
-                headers["Authorization"] = f"Bearer {LLM_API_KEY}"
+            if effective_key:
+                headers["Authorization"] = f"Bearer {effective_key}"
             try:
                 resp = await client.post(
-                    f"{LLM_URL}/v1/chat/completions",
+                    f"{effective_url}/v1/chat/completions",
                     json=body,
                     headers=headers,
                 )
@@ -81,7 +92,7 @@ async def llm_query(
                     logger.debug("json_mode unsupported by provider, retrying without it")
                     body.pop("response_format", None)
                     resp = await client.post(
-                        f"{LLM_URL}/v1/chat/completions",
+                        f"{effective_url}/v1/chat/completions",
                         json=body,
                         headers=headers,
                     )

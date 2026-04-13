@@ -66,6 +66,7 @@ async def test_dispatch_tool_records_tool_duration():
     m._counters.clear()
     m._gauges.clear()
     m._histogram_buckets.clear()
+    m._histogram_layout.clear()
 
     await dispatch_tool("archivist_context_check", {})
     text = m.render()
@@ -76,6 +77,7 @@ async def test_dispatch_tool_records_tool_duration():
 async def test_handle_invalidate_appends_export_jsonl(tmp_path, monkeypatch):
     import audit
     import main
+    import memory_lifecycle
 
     export_path = tmp_path / "inv.jsonl"
     monkeypatch.setattr(main, "ARCHIVIST_INVALIDATION_EXPORT_PATH", str(export_path))
@@ -90,6 +92,8 @@ async def test_handle_invalidate_appends_export_jsonl(tmp_path, monkeypatch):
     mock_client.delete = MagicMock()
     monkeypatch.setattr(main, "qdrant_client", lambda **kwargs: mock_client)
     monkeypatch.setattr(audit, "log_memory_event", AsyncMock())
+    # TTL invalidation calls full cascade delete — mock it so CI does not need Qdrant.
+    monkeypatch.setattr(memory_lifecycle, "delete_memory_complete", AsyncMock())
 
     resp = await main.handle_invalidate(None)
     assert resp.status_code == 200

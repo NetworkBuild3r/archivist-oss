@@ -6,10 +6,10 @@
 
 services:
   archivist:
-    # Writable memories on the host (e.g. ROC /opt/appdata)
+    # Writable memories on the host (adjust path to your environment)
     volumes:
-      - /opt/appdata/archivist-memories:/data/memories:rw
+      - /data/archivist-memories:/data/memories:rw
     # Optional: pin data volume to a host path (SQLite + config live in named volume by default)
     # Uncomment to store graph DB on disk:
     # volumes:
-    #   - /opt/appdata/archivist-data:/data
+    #   - /data/archivist-data:/data

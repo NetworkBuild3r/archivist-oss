@@ -24,6 +24,8 @@ _lock = threading.Lock()
 
 # agent_id → OrderedDict[(cache_key) → (timestamp, value)]
 _agent_caches: dict[str, OrderedDict] = {}
+# namespace → set of (agent_id, cache_key) for O(1) invalidation
+_ns_index: dict[str, set[tuple[str, str]]] = {}
 _MAX_AGENT_IDS = 256
 _last_agent_prune = 0.0
 
@@ -32,6 +34,17 @@ def _cache_key(query: str, namespace: str = "", tier: str = "l2",
                memory_type: str = "", extra: str = "") -> str:
     raw = f"{query}|{namespace}|{tier}|{memory_type}|{extra}"
     return hashlib.sha256(raw.encode()).hexdigest()[:24]
+
+
+def _remove_from_ns_index(agent_id: str, key: str, value: dict) -> None:
+    """Remove a single (agent_id, key) pair from the namespace index. Caller holds _lock."""
+    ns = value.get("_cache_namespace", "")
+    if ns:
+        bucket = _ns_index.get(ns)
+        if bucket is not None:
+            bucket.discard((agent_id, key))
+            if not bucket:
+                del _ns_index[ns]
 
 
 def get(agent_id: str, query: str, namespace: str = "", tier: str = "l2",
@@ -50,6 +63,7 @@ def get(agent_id: str, query: str, namespace: str = "", tier: str = "l2",
             return None
         ts, value = entry
         if time.time() - ts > HOT_CACHE_TTL_SECONDS:
+            _remove_from_ns_index(agent_id, key, value)
             del cache[key]
             return None
         cache.move_to_end(key)
@@ -65,7 +79,10 @@ def _prune_stale_agents_locked(now: float) -> None:
     empty = [aid for aid, cache in _agent_caches.items()
              if not cache or all(now - ts > HOT_CACHE_TTL_SECONDS for ts, _ in cache.values())]
     for aid in empty:
-        del _agent_caches[aid]
+        cache = _agent_caches.pop(aid, None)
+        if cache:
+            for key, (_, value) in cache.items():
+                _remove_from_ns_index(aid, key, value)
 
 
 def put(agent_id: str, query: str, result: dict, namespace: str = "",
@@ -78,30 +95,40 @@ def put(agent_id: str, query: str, result: dict, namespace: str = "",
     now = time.time()
     with _lock:
         cache = _agent_caches.setdefault(agent_id, OrderedDict())
+
+        old_entry = cache.get(key)
+        if old_entry is not None:
+            _remove_from_ns_index(agent_id, key, old_entry[1])
+
         cache[key] = (now, result)
         cache.move_to_end(key)
+
+        result_ns = result.get("_cache_namespace", "")
+        if result_ns:
+            _ns_index.setdefault(result_ns, set()).add((agent_id, key))
+
         while len(cache) > HOT_CACHE_MAX_PER_AGENT:
-            cache.popitem(last=False)
+            evicted_key, (_, evicted_val) = cache.popitem(last=False)
+            _remove_from_ns_index(agent_id, evicted_key, evicted_val)
+
         if len(_agent_caches) > _MAX_AGENT_IDS:
             _prune_stale_agents_locked(now)
 
 
 def invalidate_namespace(namespace: str) -> int:
-    """Evict all cache entries whose namespace matches. Called on writes."""
+    """Evict all cache entries whose namespace matches. O(1) index lookup."""
     if not HOT_CACHE_ENABLED:
         return 0
 
     evicted = 0
     with _lock:
-        for agent_id, cache in _agent_caches.items():
-            to_remove = []
-            for key, (ts, value) in cache.items():
-                cached_ns = value.get("_cache_namespace", "")
-                if cached_ns == namespace:
-                    to_remove.append(key)
-            for key in to_remove:
-                del cache[key]
-                evicted += 1
+        entries = _ns_index.pop(namespace, None)
+        if entries:
+            for agent_id, key in entries:
+                cache = _agent_caches.get(agent_id)
+                if cache is not None and key in cache:
+                    del cache[key]
+                    evicted += 1
     if evicted:
         logger.debug("Cache invalidation: evicted %d entries for namespace %s", evicted, namespace)
     try:
@@ -117,7 +144,11 @@ def invalidate_agent(agent_id: str) -> int:
     """Clear the entire hot cache for one agent."""
     with _lock:
         cache = _agent_caches.pop(agent_id, None)
-        return len(cache) if cache else 0
+        if not cache:
+            return 0
+        for key, (_, value) in cache.items():
+            _remove_from_ns_index(agent_id, key, value)
+        return len(cache)
 
 
 def invalidate_all() -> int:
@@ -125,6 +156,7 @@ def invalidate_all() -> int:
     with _lock:
         total = sum(len(c) for c in _agent_caches.values())
         _agent_caches.clear()
+        _ns_index.clear()
     try:
         import namespace_inventory
 

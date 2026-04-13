@@ -15,9 +15,40 @@ from graph import (
 from config import (
     GRAPH_RETRIEVAL_WEIGHT, TEMPORAL_DECAY_HALFLIFE_DAYS,
     MAX_ENTITY_FACT_INJECTIONS, ENTITY_SPECIFICITY_MAX_MENTIONS,
+    CROSS_AGENT_MAX_SHARE,
 )
 
 logger = logging.getLogger("archivist.graph_retrieval")
+
+
+def _apply_cross_agent_cap(items: list[dict], agent_id_key: str = "agent_id") -> list[dict]:
+    """Enforce CROSS_AGENT_MAX_SHARE on a list of graph-sourced items.
+
+    Mirrors the vector-path guard in rlm_retriever: no single agent's items
+    may exceed CROSS_AGENT_MAX_SHARE of the total.  Overflow items are pushed
+    to the end (not dropped) so they can still fill empty slots.
+    """
+    if CROSS_AGENT_MAX_SHARE >= 1.0 or len(items) < 2:
+        return items
+
+    agents = {it.get(agent_id_key, "") for it in items}
+    if len(agents) <= 1:
+        return items
+
+    max_per = max(1, int(len(items) * CROSS_AGENT_MAX_SHARE))
+    counts: dict[str, int] = {}
+    kept: list[dict] = []
+    overflow: list[dict] = []
+    for it in items:
+        aid = it.get(agent_id_key, "")
+        c = counts.get(aid, 0)
+        if c < max_per:
+            kept.append(it)
+            counts[aid] = c + 1
+        else:
+            overflow.append(it)
+    kept.extend(overflow)
+    return kept
 
 
 _STOPWORDS = frozenset({
@@ -38,7 +69,7 @@ _STOPWORDS = frozenset({
 })
 
 
-def extract_entity_mentions(query: str) -> list[dict]:
+def extract_entity_mentions(query: str, namespace: str = "") -> list[dict]:
     """Find entities from the KG whose names appear in the query.
 
     Uses N-gram expansion (1, 2, 3-word windows) to match multi-word
@@ -60,7 +91,7 @@ def extract_entity_mentions(query: str) -> list[dict]:
             # Skip single stopwords — they match too many entities
             if n == 1 and phrase in _STOPWORDS:
                 continue
-            found = search_entities(phrase, limit=3)
+            found = search_entities(phrase, limit=3, namespace=namespace)
             for e in found:
                 if e["id"] in seen:
                     continue
@@ -132,7 +163,7 @@ def graph_context_for_entities(entity_ids: list[int], depth: int = 1) -> list[di
 
         frontier = next_frontier
 
-    return context_items
+    return _apply_cross_agent_cap(context_items)
 
 
 def apply_temporal_decay(
@@ -200,6 +231,8 @@ def merge_graph_context_into_results(
     dominating the coarse result set).
     """
     w = weight if weight is not None else GRAPH_RETRIEVAL_WEIGHT
+
+    graph_items = _apply_cross_agent_cap(graph_items)
 
     file_index: dict[str, int] = {}
     for i, r in enumerate(vector_results):
@@ -363,6 +396,7 @@ def build_entity_fact_results(
                 "valid_until": f.get("valid_until", ""),
             })
 
+    results = _apply_cross_agent_cap(results)
     if cap > 0 and len(results) > cap:
         results.sort(key=lambda r: r["score"], reverse=True)
         results = results[:cap]

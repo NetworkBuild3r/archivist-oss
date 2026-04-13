@@ -82,46 +82,55 @@ def apply_hotness_to_results(results: list[dict], weight: float | None = None) -
 
 
 def batch_update_hotness() -> int:
-    """Aggregate retrieval_logs into memory_hotness. Called from curator cycle."""
+    """Aggregate retrieval_logs into memory_hotness. Called from curator cycle.
+
+    v1.11: Fixes population bug -- creates rows for memories found in
+    retrieval_logs that lack a memory_hotness entry.  Also applies importance
+    feedback with cold-start guardrails (grace period, floor, relative frequency).
+    """
     _ensure_schema()
+    from config import IMPORTANCE_FLOOR, IMPORTANCE_GRACE_DAYS
 
     conn = get_db()
     now = datetime.now(timezone.utc)
     now_iso = now.isoformat()
 
-    rows = conn.execute("""
-        SELECT
-            json_extract(retrieval_trace, '$.coarse_hits') as hits,
-            query,
-            agent_id,
-            namespace,
-            created_at
-        FROM retrieval_logs
-        WHERE cache_hit = 0
-        ORDER BY created_at DESC
-        LIMIT 5000
-    """).fetchall()
-
     memory_counts: dict[str, int] = {}
     memory_last_access: dict[str, str] = {}
-
-    try:
-        mem_rows = conn.execute("""
-            SELECT
-                json_extract(retrieval_trace, '$.after_threshold') as after_threshold,
-                created_at
-            FROM retrieval_logs
-            WHERE cache_hit = 0
-            ORDER BY created_at DESC
-            LIMIT 1000
-        """).fetchall()
-    except Exception:
-        mem_rows = []
 
     hotness_rows = conn.execute("SELECT memory_id, retrieval_count, last_accessed FROM memory_hotness").fetchall()
     for r in hotness_rows:
         memory_counts[r["memory_id"]] = r["retrieval_count"]
         memory_last_access[r["memory_id"]] = r["last_accessed"] or now_iso
+
+    try:
+        log_rows = conn.execute("""
+            SELECT
+                json_extract(retrieval_trace, '$.result_ids') as result_ids,
+                created_at
+            FROM retrieval_logs
+            WHERE cache_hit = 0 AND created_at > datetime('now', '-7 days')
+            ORDER BY created_at DESC
+            LIMIT 5000
+        """).fetchall()
+    except Exception:
+        log_rows = []
+
+    import json as _json
+    for row in log_rows:
+        try:
+            ids = _json.loads(row["result_ids"] or "[]")
+        except Exception:
+            continue
+        if not isinstance(ids, list):
+            continue
+        for mid in ids:
+            if not mid:
+                continue
+            mid = str(mid)
+            memory_counts[mid] = memory_counts.get(mid, 0) + 1
+            if mid not in memory_last_access or row["created_at"] > memory_last_access.get(mid, ""):
+                memory_last_access[mid] = row["created_at"]
 
     updated = 0
     with GRAPH_WRITE_LOCK:
@@ -135,8 +144,11 @@ def batch_update_hotness() -> int:
             score = compute_hotness(count, days)
 
             conn.execute(
-                "INSERT OR REPLACE INTO memory_hotness (memory_id, score, retrieval_count, last_accessed, updated_at) "
-                "VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO memory_hotness (memory_id, score, retrieval_count, last_accessed, updated_at) "
+                "VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(memory_id) DO UPDATE SET score=excluded.score, "
+                "retrieval_count=excluded.retrieval_count, last_accessed=excluded.last_accessed, "
+                "updated_at=excluded.updated_at",
                 (mid, score, count, last_str, now_iso),
             )
             updated += 1

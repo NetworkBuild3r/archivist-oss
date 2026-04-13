@@ -14,10 +14,18 @@ import metrics as m
 from config import (
     MEMORY_ROOT, CURATOR_INTERVAL_MINUTES,
     CURATOR_EXTRACT_PREFIXES, CURATOR_EXTRACT_SKIP_SEGMENTS,
-    CURATOR_TIP_BUDGET,
+    CURATOR_TIP_BUDGET, CURATOR_MAX_PARALLEL,
     DURABLE_ENTITY_TYPES,
+    ORPHAN_SWEEP_ENABLED, ORPHAN_SWEEP_EVERY_N_CYCLES,
+    LLM_MODEL, LLM_URL,
+    CURATOR_LLM_MODEL, CURATOR_LLM_URL, CURATOR_LLM_API_KEY,
 )
 from llm import llm_query
+
+# Resolve effective curator LLM settings once at import time.
+_CURATOR_MODEL = CURATOR_LLM_MODEL or LLM_MODEL
+_CURATOR_URL = CURATOR_LLM_URL or LLM_URL
+_CURATOR_KEY = CURATOR_LLM_API_KEY
 from graph import (
     upsert_entity, add_fact, add_relationship,
     get_curator_state, set_curator_state, get_db, GRAPH_WRITE_LOCK,
@@ -93,6 +101,8 @@ async def extract_knowledge(text: str, agent_id: str, source_file: str) -> dict 
     try:
         raw = await llm_query(
             prompt, system=EXTRACT_SYSTEM, max_tokens=1024, json_mode=True,
+            model=_CURATOR_MODEL, url=_CURATOR_URL, api_key=_CURATOR_KEY,
+            stage="curator_extract",
         )
         return json.loads(strip_fences(raw))
     except json.JSONDecodeError:
@@ -100,6 +110,8 @@ async def extract_knowledge(text: str, agent_id: str, source_file: str) -> dict 
             repair_prompt = f"Fix this invalid JSON:\n{raw[:2000]}"
             fixed = await llm_query(
                 repair_prompt, system=_JSON_REPAIR_SYSTEM, max_tokens=1024, json_mode=True,
+                model=_CURATOR_MODEL, url=_CURATOR_URL, api_key=_CURATOR_KEY,
+                stage="curator_json_repair",
             )
             return json.loads(strip_fences(fixed))
         except (json.JSONDecodeError, Exception) as e2:
@@ -119,6 +131,9 @@ def _retention_for_entity_type(entity_type: str) -> str:
 
 async def process_extraction(data: dict, agent_id: str, source_file: str):
     """Store extracted knowledge in the graph."""
+    from rbac import get_namespace_for_agent
+    _ns = get_namespace_for_agent(agent_id) if agent_id else "global"
+
     entity_retention: dict[str, str] = {}
     for ent in data.get("entities", []):
         name = ent.get("name", "").strip()
@@ -126,7 +141,7 @@ async def process_extraction(data: dict, agent_id: str, source_file: str):
             etype = ent.get("type", "unknown")
             rc = _retention_for_entity_type(etype)
             entity_retention[name.lower()] = rc
-            upsert_entity(name, etype, agent_id, retention_class=rc)
+            upsert_entity(name, etype, agent_id, retention_class=rc, namespace=_ns)
 
     file_date = ""
     m = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", source_file)
@@ -138,13 +153,13 @@ async def process_extraction(data: dict, agent_id: str, source_file: str):
         ftext = fact.get("fact", "").strip()
         if ename and ftext:
             rc = entity_retention.get(ename.lower(), "standard")
-            eid = upsert_entity(ename, retention_class=rc)
+            eid = upsert_entity(ename, retention_class=rc, namespace=_ns)
             vf = (fact.get("valid_from") or "").strip()
             vu = (fact.get("valid_until") or "").strip()
             if not vf and file_date:
                 vf = file_date
             add_fact(eid, ftext, source_file, agent_id, retention_class=rc,
-                     valid_from=vf, valid_until=vu)
+                     valid_from=vf, valid_until=vu, namespace=_ns)
 
     for rel in data.get("relationships", []):
         src = rel.get("source", "").strip()
@@ -153,9 +168,9 @@ async def process_extraction(data: dict, agent_id: str, source_file: str):
         evidence = rel.get("evidence", "").strip()
         provenance = rel.get("provenance", "inferred").strip()
         if src and tgt:
-            sid = upsert_entity(src)
-            tid = upsert_entity(tgt)
-            add_relationship(sid, tid, rtype, evidence, agent_id, provenance=provenance)
+            sid = upsert_entity(src, namespace=_ns)
+            tid = upsert_entity(tgt, namespace=_ns)
+            add_relationship(sid, tid, rtype, evidence, agent_id, provenance=provenance, namespace=_ns)
 
 
 def _file_checksum(text: str) -> str:
@@ -168,6 +183,9 @@ async def curate_cycle():
 
     Uses mtime as a fast first pass, then content checksum to skip files
     whose content hasn't actually changed (e.g. touch, metadata-only update).
+
+    Files are processed concurrently (up to CURATOR_MAX_PARALLEL) to overlap
+    LLM extraction latency.
     """
     last_run = get_curator_state("last_curate_time")
     if last_run:
@@ -179,6 +197,7 @@ async def curate_cycle():
     processed = 0
     skipped_unchanged = 0
 
+    candidates: list[tuple[str, str, str]] = []  # (filepath, rel, text)
     for root, _dirs, files in os.walk(MEMORY_ROOT):
         for fname in files:
             if not fname.endswith(".md"):
@@ -203,18 +222,33 @@ async def curate_cycle():
                     skipped_unchanged += 1
                     continue
 
+                candidates.append((filepath, rel, text))
+            except Exception as e:
+                logger.error("Curator scan failed on %s: %s", filepath, e)
+
+    sem = asyncio.Semaphore(max(1, CURATOR_MAX_PARALLEL))
+
+    async def _process_one(filepath: str, rel: str, text: str) -> bool:
+        async with sem:
+            try:
                 agent_id = extract_agent_id_from_path(rel)
                 data = await extract_knowledge(text, agent_id, rel) if should_extract_knowledge(rel) else None
                 if data:
                     await process_extraction(data, agent_id, rel)
-                    processed += 1
-
                 await index_file(filepath)
-
-                set_curator_state(f"checksum:{rel}", current_checksum)
-
+                set_curator_state(f"checksum:{rel}", _file_checksum(text))
+                return data is not None
             except Exception as e:
                 logger.error("Curator failed on %s: %s", filepath, e)
+                return False
+
+    results = await asyncio.gather(
+        *(_process_one(fp, rel, txt) for fp, rel, txt in candidates),
+        return_exceptions=True,
+    )
+    for r in results:
+        if r is True:
+            processed += 1
 
     set_curator_state("last_curate_time", now.isoformat())
     return {"processed": processed, "skipped": skipped_unchanged}
@@ -224,8 +258,9 @@ async def extract_all_agent_memories() -> int:
     """Run knowledge extraction on every eligible agent markdown file under MEMORY_ROOT.
 
     Ignores mtime/checksum (for benchmarks and backfills). Does not run decay.
+    Processes files concurrently up to CURATOR_MAX_PARALLEL.
     """
-    processed = 0
+    candidates: list[tuple[str, str, str]] = []
     for root, _dirs, files in os.walk(MEMORY_ROOT):
         for fname in files:
             if not fname.endswith(".md"):
@@ -239,13 +274,29 @@ async def extract_all_agent_memories() -> int:
                 rel = os.path.relpath(filepath, MEMORY_ROOT)
                 if not should_extract_knowledge(rel):
                     continue
+                candidates.append((filepath, rel, text))
+            except Exception as e:
+                logger.error("Bench curator scan failed on %s: %s", filepath, e)
+
+    sem = asyncio.Semaphore(max(1, CURATOR_MAX_PARALLEL))
+
+    async def _extract_one(filepath: str, rel: str, text: str) -> bool:
+        async with sem:
+            try:
                 agent_id = extract_agent_id_from_path(rel)
                 data = await extract_knowledge(text, agent_id, rel)
                 if data:
                     await process_extraction(data, agent_id, rel)
-                    processed += 1
+                    return True
             except Exception as e:
                 logger.error("Bench curator failed on %s: %s", filepath, e)
+            return False
+
+    results = await asyncio.gather(
+        *(_extract_one(fp, rel, txt) for fp, rel, txt in candidates),
+        return_exceptions=True,
+    )
+    processed = sum(1 for r in results if r is True)
     logger.info("extract_all_agent_memories: processed %d files", processed)
     return processed
 
@@ -338,7 +389,7 @@ def _refresh_wake_up_caches() -> int:
     try:
         rows = conn.execute(
             "SELECT DISTINCT namespace, agent_id FROM memory_chunks "
-            "WHERE namespace != '' LIMIT 50"
+            "WHERE namespace != '' LIMIT 500"
         ).fetchall()
     finally:
         conn.close()
@@ -368,6 +419,7 @@ async def curator_loop():
     base_interval = CURATOR_INTERVAL_MINUTES * 60
     backoff_sec = base_interval
     max_backoff = 3600
+    _sweep_counter = 0
     logger.info("Curator loop started (interval: %d min)", CURATOR_INTERVAL_MINUTES)
     while True:
         try:
@@ -401,6 +453,19 @@ async def curator_loop():
                 wake_pairs = _refresh_wake_up_caches()
             except Exception as e:
                 logger.warning("Wake-up cache refresh failed (non-fatal): %s", e)
+
+            orphans_cleaned = 0
+            _sweep_counter += 1
+            if ORPHAN_SWEEP_ENABLED and _sweep_counter >= ORPHAN_SWEEP_EVERY_N_CYCLES:
+                _sweep_counter = 0
+                try:
+                    from cascade import sweep_orphans
+                    sr = sweep_orphans()
+                    orphans_cleaned = sr.get("fts_cleaned", 0) + sr.get("needle_cleaned", 0)
+                    if orphans_cleaned:
+                        logger.info("Orphan sweep cleaned %d rows", orphans_cleaned)
+                except Exception as e:
+                    logger.warning("Orphan sweep failed (non-fatal): %s", e)
 
             dur_ms = round((time.monotonic() - t_iter) * 1000, 1)
             m.observe(m.CURATOR_CYCLE_DURATION, dur_ms)

@@ -9,13 +9,14 @@ Only activated for queries that look like factoid/needle requests
 (configurable heuristic) or when the primary search scores low.
 """
 
+import hashlib
 import logging
 import re
 import time
 import threading
 from collections import OrderedDict
 
-from config import LLM_REFINE_MODEL, LLM_MODEL
+from config import LLM_REFINE_MODEL, LLM_MODEL, REVERSE_HYDE_ENABLED, REVERSE_HYDE_QUESTIONS_PER_CHUNK
 from llm import llm_query
 import metrics as m
 
@@ -53,10 +54,20 @@ _hyde_cache: OrderedDict[str, tuple[float, str]] = OrderedDict()
 _hyde_lock = threading.Lock()
 
 
-def is_needle_query(query: str) -> bool:
-    """Heuristic: does this query look like it's seeking a specific fact?"""
+def is_needle_query(query: str, entity_count: int = -1) -> bool:
+    """Heuristic: does this query look like it's seeking a specific fact?
+
+    Tier 1: Fast regex check against known needle patterns.
+    Tier 2: Short queries (< 15 tokens) with no known entity match
+    are assumed to be potential needles — activates HyDE as a safety net.
+    Pass ``entity_count`` from graph retrieval when available; -1 skips tier 2.
+    """
     for pat in _NEEDLE_PATTERNS:
         if pat.search(query):
+            return True
+    if entity_count >= 0:
+        tokens = query.strip().split()
+        if len(tokens) < 15 and entity_count == 0:
             return True
     return False
 
@@ -106,7 +117,7 @@ async def generate_hypothetical_document(
             stage="hyde",
         )
         dur_ms = round((time.monotonic() - t0) * 1000, 1)
-        m.observe("hyde_duration_ms", dur_ms)
+        m.observe(m.HYDE_DURATION, dur_ms)
         doc = doc.strip()
         if doc:
             _cache_put(query, doc)
@@ -116,3 +127,90 @@ async def generate_hypothetical_document(
     except Exception as e:
         logger.warning("HyDE generation failed: %s", e)
         return None
+
+
+# ── Reverse HyDE: write-time hypothetical question generation (v2.0) ─────────
+
+_REVERSE_HYDE_SYSTEM = (
+    "You are a search query generator. Given a piece of factual content, "
+    "generate {count} diverse questions that someone might ask to find this information. "
+    "Include both natural language questions and keyword-style queries. "
+    "Focus on specific facts, names, numbers, identifiers, and dates in the content. "
+    "Output one question per line. No numbering, no bullets."
+)
+
+_REVERSE_HYDE_CACHE_MAX = 512
+_REVERSE_HYDE_CACHE_TTL = 3600
+_reverse_hyde_cache: OrderedDict[str, tuple[float, list[str]]] = OrderedDict()
+_reverse_hyde_lock = threading.Lock()
+
+
+def _reverse_cache_get(text_key: str) -> list[str] | None:
+    with _reverse_hyde_lock:
+        entry = _reverse_hyde_cache.get(text_key)
+        if entry is None:
+            return None
+        ts, questions = entry
+        if time.monotonic() - ts > _REVERSE_HYDE_CACHE_TTL:
+            _reverse_hyde_cache.pop(text_key, None)
+            return None
+        _reverse_hyde_cache.move_to_end(text_key)
+        return questions
+
+
+def _reverse_cache_put(text_key: str, questions: list[str]) -> None:
+    with _reverse_hyde_lock:
+        _reverse_hyde_cache[text_key] = (time.monotonic(), questions)
+        _reverse_hyde_cache.move_to_end(text_key)
+        while len(_reverse_hyde_cache) > _REVERSE_HYDE_CACHE_MAX:
+            _reverse_hyde_cache.popitem(last=False)
+
+
+async def generate_reverse_hyde_questions(
+    text: str,
+    count: int = 0,
+    model: str = "",
+) -> list[str]:
+    """Generate hypothetical questions that ``text`` would answer.
+
+    Used at write/index time to create question-embedding vectors
+    that live in the same semantic space as future user queries.
+    Returns up to ``count`` questions, or empty list on failure.
+    """
+    if not REVERSE_HYDE_ENABLED:
+        return []
+    if not count:
+        count = REVERSE_HYDE_QUESTIONS_PER_CHUNK
+
+    cache_key = hashlib.md5(text.encode()).hexdigest()
+    cached = _reverse_cache_get(cache_key)
+    if cached is not None:
+        return cached[:count]
+
+    hyde_model = model or LLM_REFINE_MODEL or LLM_MODEL
+    system = _REVERSE_HYDE_SYSTEM.replace("{count}", str(count))
+    t0 = time.monotonic()
+    try:
+        raw = await llm_query(
+            text[:1500],
+            system=system,
+            max_tokens=256,
+            model=hyde_model,
+            stage="reverse_hyde",
+        )
+        dur_ms = round((time.monotonic() - t0) * 1000, 1)
+        m.observe(m.REVERSE_HYDE_DURATION, dur_ms)
+
+        questions = [
+            q.strip().lstrip("0123456789.-) ")
+            for q in raw.strip().splitlines()
+            if q.strip() and len(q.strip()) > 5
+        ][:count]
+
+        if questions:
+            _reverse_cache_put(cache_key, questions)
+            logger.debug("reverse_hyde dur_ms=%.1f count=%d", dur_ms, len(questions))
+        return questions
+    except Exception as e:
+        logger.warning("Reverse HyDE generation failed: %s", e)
+        return []

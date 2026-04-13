@@ -4,54 +4,28 @@
 #   docker compose up -d --build
 #   curl http://localhost:3100/health
 #
-# Embeddings on the host (e.g. vLLM :8000) from inside the archivist container:
-#   EMBED_URL=http://host.docker.internal:8000
-# LiteLLM / proxy over Tailscale (configured via .env), often :80 from home k3s:
-#   LLM_URL=http://openclaw-vllm-corp
-#   OPENCLAW_VLLM_TSIP=<100.x from: docker exec ... tailscale status | grep openclaw>
+# LLM / embedding: any OpenAI-compatible endpoint set via .env
+#   Ollama (local):  LLM_URL=http://host.docker.internal:11434
+#   vLLM (host):     LLM_URL=http://host.docker.internal:8000
+#   Cloud API:       LLM_URL=https://api.openai.com
 #
-# Benchmark in Docker (Qdrant + Tailscale in this compose; embeddings on host / other compose; LLM remote):
-#   docker compose up -d qdrant tailscale
+# Benchmark in Docker (Qdrant + archivist network):
+#   docker compose up -d qdrant
 #   docker compose --profile benchmark build benchmark
 #   docker compose --profile benchmark run --rm benchmark --no-refine --output .benchmarks/pipeline.json
-# Set EMBED_URL in .env to http://host.docker.internal:8000 (or your embedding container IP).
 #
-# Academic suite (LongMemEval / LoCoMo / HaluMem) — same network as Qwen (openclaw-vllm-corp extra_hosts):
+# Academic suite (LongMemEval / LoCoMo / HaluMem):
 #   bash benchmarks/scripts/run_academic_benchmarks_docker.sh
-#   bash benchmarks/scripts/run_academic_benchmarks_docker.sh --limit 50 --no-curator
+# LongMemEval only — timestamped JSON under .benchmarks/runs/ + longmemeval_latest symlink:
+#   bash benchmarks/scripts/run_longmemeval_docker.sh
 # Do not commit .env (gitignored); use .env.example as the template only.
 #
-# Data under Docker volumes by default; use docker-compose.override.example.yml to bind /opt/appdata.
+# Data under Docker volumes by default; use docker-compose.override.example.yml to bind host paths.
 
 name: archivist
 
 services:
-  tailscale:
-    image: tailscale/tailscale:latest
-    hostname: archivist-tailscale
-    # Docker's resolver (127.0.0.11) does not use Tailscale Magic DNS; map the peer hostname to its
-    # Tailscale IP. Update OPENCLAW_VLLM_TSIP in .env if this machine's 100.x address changes.
-    extra_hosts:
-      - "openclaw-vllm-corp:${OPENCLAW_VLLM_TSIP:-100.89.207.109}"
-      # Reach host from containers sharing this network (embedding vLLM on host or published port).
-      - "host.docker.internal:host-gateway"
-    ports:
-      - "${MCP_PORT:-3100}:3100"
-    environment:
-      - TS_AUTHKEY=${TS_AUTHKEY}
-      - TS_STATE_DIR=/var/lib/tailscale
-      - TS_USERSPACE=false
-    volumes:
-      - tailscale-state:/var/lib/tailscale
-      - /dev/net/tun:/dev/net/tun
-    cap_add:
-      - NET_ADMIN
-      - SYS_MODULE
-    networks:
-      - archivist-net
-    restart: unless-stopped
-
-  # Pipeline benchmark: shares Tailscale (remote LLM), uses Qdrant on archivist-net, repo bind-mount.
+  # Pipeline benchmark: Qdrant on archivist-net, repo bind-mount.
   benchmark:
     profiles: ["benchmark"]
     build:
@@ -61,23 +35,31 @@ services:
       - .env
     environment:
       QDRANT_URL: http://qdrant:6333
-      # Do not use .env EMBED_URL=127.0.0.1 here — inside the container that points at itself.
-      # Embedding vLLM on the host or another compose stack: override BENCHMARK_EMBED_URL if needed.
+      # LLM and embedding: containers reach host services via host.docker.internal.
+      # Set BENCHMARK_EMBED_URL / BENCHMARK_LLM_URL in .env to override per-run.
       EMBED_URL: ${BENCHMARK_EMBED_URL:-http://host.docker.internal:8000}
       EMBED_API_KEY: ${EMBED_API_KEY:-}
-      EMBED_MODEL: ${EMBED_MODEL:-bge-base}
+      EMBED_MODEL: ${BENCHMARK_EMBED_MODEL:-${EMBED_MODEL:-bge-base}}
       VECTOR_DIM: ${VECTOR_DIM:-768}
-      LLM_URL: ${LLM_URL:-http://openclaw-vllm-corp}
-      LLM_MODEL: ${LLM_MODEL:-qwen3.5-122b}
+      LLM_URL: ${BENCHMARK_LLM_URL:-${LLM_URL:-http://host.docker.internal:11434}}
+      LLM_MODEL: ${BENCHMARK_LLM_MODEL:-${LLM_MODEL:-llama3.1}}
       LLM_API_KEY: ${LLM_API_KEY:-}
+      # Curator LLM override — falls back to LLM_URL/LLM_MODEL when empty.
+      # Set BENCHMARK_CURATOR_LLM_URL / BENCHMARK_CURATOR_LLM_MODEL in .env to use a
+      # separate model for entity extraction, dedup, and compaction during benchmarks.
+      CURATOR_LLM_URL: ${BENCHMARK_CURATOR_LLM_URL:-${CURATOR_LLM_URL:-}}
+      CURATOR_LLM_MODEL: ${BENCHMARK_CURATOR_LLM_MODEL:-${CURATOR_LLM_MODEL:-}}
+      CURATOR_LLM_API_KEY: ${CURATOR_LLM_API_KEY:-}
       RERANK_ENABLED: ${RERANK_ENABLED:-false}
     volumes:
       - .:/workspace
     working_dir: /workspace
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       - qdrant
-      - tailscale
-    network_mode: "service:tailscale"
+    networks:
+      - archivist-net
 
   archivist:
     build:
@@ -92,10 +74,18 @@ services:
       SQLITE_PATH: /data/archivist/graph.db
       MEMORY_ROOT: /data/memories
       NAMESPACES_CONFIG_PATH: /data/archivist/config/namespaces.yaml
-      # From .env
+      # LLM / embedding: configure in .env (any OpenAI-compatible endpoint).
+      # Examples: Ollama on host → http://host.docker.internal:11434
+      #           vLLM on host  → http://host.docker.internal:8000
+      #           Cloud API     → https://api.openai.com
       LLM_URL: ${LLM_URL:-http://host.docker.internal:11434}
       LLM_MODEL: ${LLM_MODEL:-llama3.1}
       LLM_API_KEY: ${LLM_API_KEY:-}
+      # Curator LLM override (optional): dedicated model for entity extraction, dedup,
+      # compaction. Falls back to LLM_URL / LLM_MODEL when empty.
+      CURATOR_LLM_URL: ${CURATOR_LLM_URL:-}
+      CURATOR_LLM_MODEL: ${CURATOR_LLM_MODEL:-}
+      CURATOR_LLM_API_KEY: ${CURATOR_LLM_API_KEY:-}
       EMBED_URL: ${EMBED_URL:-http://host.docker.internal:8000}
       EMBED_API_KEY: ${EMBED_API_KEY:-}
       EMBED_MODEL: ${EMBED_MODEL:-BAAI/bge-base-en-v1.5}
@@ -107,10 +97,14 @@ services:
       - archivist-data:/data
       - archivist-backups:/data/archivist/backups
       - ${MEMORY_DIR:-./sample-memories}:/data/memories:ro
+    ports:
+      - "${MCP_PORT:-3100}:3100"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       - qdrant
-      - tailscale
-    network_mode: "service:tailscale"
+    networks:
+      - archivist-net
     restart: unless-stopped
 
   qdrant:
@@ -128,7 +122,6 @@ volumes:
   archivist-data:
   archivist-backups:
   qdrant-storage:
-  tailscale-state:
 
 networks:
   archivist-net:

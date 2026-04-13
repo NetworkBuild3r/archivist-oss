@@ -109,6 +109,7 @@ def ensure_collection(namespace: str) -> str:
                 ("retention_class", PayloadSchemaType.KEYWORD),
                 ("topic", PayloadSchemaType.KEYWORD),
                 ("thought_type", PayloadSchemaType.KEYWORD),
+                ("text", PayloadSchemaType.TEXT),
             ]:
                 client.create_payload_index(
                     collection_name=name, field_name=field, field_schema=schema,

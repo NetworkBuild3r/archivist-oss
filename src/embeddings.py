@@ -26,7 +26,7 @@ logger = logging.getLogger("archivist.embeddings")
 
 _MAX_RETRIES = 3
 _RETRY_DELAYS = [1, 2, 4]
-_MAX_EMBED_CHARS = 1200
+_MAX_EMBED_CHARS = 2400
 _IS_NVIDIA = os.getenv("EMBED_PROVIDER", "").lower() == "nvidia" or "nvidia" in EMBED_URL.lower()
 
 _embed_client: httpx.AsyncClient | None = None
@@ -34,10 +34,11 @@ _embed_client: httpx.AsyncClient | None = None
 # ── Embedding vector cache (v1.10) ──────────────────────────────────────────
 _EMBED_CACHE_MAX = 2048
 _EMBED_CACHE_TTL = 3600  # 1 hour
-_embed_cache: OrderedDict[str, tuple[float, list[float]]] = OrderedDict()
+_embed_cache: OrderedDict[str, tuple[float, tuple[float, ...]]] = OrderedDict()
 _embed_cache_lock = threading.Lock()
-EMBED_CACHE_HITS = "embed_cache_hits_total"
-EMBED_CACHE_MISSES = "embed_cache_misses_total"
+# Backward-compatible aliases for the metric name strings (same as m.EMBED_CACHE_*).
+EMBED_CACHE_HITS = m.EMBED_CACHE_HIT
+EMBED_CACHE_MISSES = m.EMBED_CACHE_MISS
 
 
 def _cache_key(text: str, model: str) -> str:
@@ -45,7 +46,7 @@ def _cache_key(text: str, model: str) -> str:
     return hashlib.sha256(f"{model}:{text}".encode()).hexdigest()[:24]
 
 
-def _cache_get(text: str, model: str) -> list[float] | None:
+def _cache_get(text: str, model: str) -> tuple[float, ...] | None:
     key = _cache_key(text, model)
     with _embed_cache_lock:
         entry = _embed_cache.get(key)
@@ -56,13 +57,13 @@ def _cache_get(text: str, model: str) -> list[float] | None:
             _embed_cache.pop(key, None)
             return None
         _embed_cache.move_to_end(key)
-        return list(vec)
+        return vec
 
 
 def _cache_put(text: str, model: str, vec: list[float]) -> None:
     key = _cache_key(text, model)
     with _embed_cache_lock:
-        _embed_cache[key] = (time.monotonic(), list(vec))
+        _embed_cache[key] = (time.monotonic(), tuple(vec))
         _embed_cache.move_to_end(key)
         while len(_embed_cache) > _EMBED_CACHE_MAX:
             _embed_cache.popitem(last=False)
@@ -90,10 +91,11 @@ async def embed_text(text: str, model: str = EMBED_MODEL) -> list[float]:
 
     cached = _cache_get(text, model)
     if cached is not None:
-        m.inc(EMBED_CACHE_HITS)
-        return cached
+        m.inc(m.EMBED_CACHE_HIT)
+        # Cache stores immutable tuples; Qdrant query APIs expect list (not tuple).
+        return list(cached)
 
-    m.inc(EMBED_CACHE_MISSES)
+    m.inc(m.EMBED_CACHE_MISS)
     client = _get_embed_client()
     for attempt in range(_MAX_RETRIES):
         try:
@@ -133,5 +135,72 @@ async def embed_text(text: str, model: str = EMBED_MODEL) -> list[float]:
 
 
 async def embed_batch(texts: list[str], model: str = EMBED_MODEL) -> list[list[float]]:
-    """Embed multiple texts in parallel using asyncio.gather."""
-    return list(await asyncio.gather(*(embed_text(t, model) for t in texts)))
+    """Embed multiple texts in a single API call (true batch).
+
+    Falls back to individual parallel calls if the batch request fails
+    (e.g. provider doesn't support array input).
+    """
+    if not texts:
+        return []
+    if len(texts) == 1:
+        return [await embed_text(texts[0], model)]
+
+    truncated = [t[:_MAX_EMBED_CHARS] for t in texts]
+
+    cached_results: dict[int, list[float]] = {}
+    uncached_indices: list[int] = []
+    uncached_texts: list[str] = []
+    for i, t in enumerate(truncated):
+        cached = _cache_get(t, model)
+        if cached is not None:
+            m.inc(m.EMBED_CACHE_HIT)
+            cached_results[i] = list(cached)
+        else:
+            uncached_indices.append(i)
+            uncached_texts.append(t)
+
+    if not uncached_texts:
+        return [cached_results[i] for i in range(len(texts))]
+
+    try:
+        client = _get_embed_client()
+        t_embed = time.monotonic()
+        payload: dict = {"model": model, "input": uncached_texts}
+        if _IS_NVIDIA:
+            payload["input_type"] = "passage"
+            payload["truncate"] = "END"
+            payload["encoding_format"] = "float"
+
+        headers: dict[str, str] = {"Content-Type": "application/json"}
+        if EMBED_API_KEY:
+            headers["Authorization"] = f"Bearer {EMBED_API_KEY}"
+
+        resp = await client.post(
+            f"{EMBED_URL}/v1/embeddings",
+            headers=headers,
+            json=payload,
+            timeout=120,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        embeddings = sorted(data["data"], key=lambda x: x["index"])
+        dur_ms = (time.monotonic() - t_embed) * 1000
+        m.observe(m.EMBED_DURATION, dur_ms)
+        health.register("embeddings", healthy=True)
+
+        for j, emb in enumerate(embeddings):
+            vec = emb["embedding"]
+            orig_idx = uncached_indices[j]
+            cached_results[orig_idx] = vec
+            _cache_put(uncached_texts[j], model, vec)
+            m.inc(m.EMBED_CACHE_MISS)
+
+        return [cached_results[i] for i in range(len(texts))]
+
+    except Exception as e:
+        logger.warning("Batch embed failed (%s), falling back to individual calls", e)
+        individual = list(await asyncio.gather(
+            *(embed_text(t, model) for t in texts)
+        ))
+        return individual

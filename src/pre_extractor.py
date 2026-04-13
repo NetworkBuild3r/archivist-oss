@@ -10,6 +10,8 @@ from __future__ import annotations
 import re
 from collections import Counter
 
+from chunking import NEEDLE_PATTERNS as _CHUNKING_NEEDLE_PATTERNS
+
 # ---------------------------------------------------------------------------
 # Thought-type taxonomy (mid-granularity semantic classification)
 # ---------------------------------------------------------------------------
@@ -93,6 +95,18 @@ _STOP_ENTITIES = frozenset({
     "note", "example", "yes", "no", "ok", "done", "wip",
 })
 
+_NEEDLE_ENTITY_PATTERNS: list[tuple[re.Pattern, str]] = [
+    (_CHUNKING_NEEDLE_PATTERNS[0], "ip_address"),      # IP / CIDR
+    (_CHUNKING_NEEDLE_PATTERNS[5], "uuid"),             # UUID
+    (_CHUNKING_NEEDLE_PATTERNS[3], "ticket_id"),        # employee / ticket IDs
+    (re.compile(r"\b[a-z][a-z0-9]*(?:-[a-z0-9]+){2,}\b"), "hostname"),  # filtered in extract_needle_entities
+]
+
+
+def _looks_like_hostname(text: str) -> bool:
+    """Require at least one segment to contain a digit, avoiding common English."""
+    return any(c.isdigit() for c in text)
+
 
 def _classify_entity(name: str) -> str:
     """Guess entity type from name patterns."""
@@ -100,6 +114,21 @@ def _classify_entity(name: str) -> str:
         if pat.search(name):
             return etype
     return "unknown"
+
+
+def extract_needle_entities(text: str) -> list[dict]:
+    """Extract high-specificity tokens (IPs, UUIDs, ticket IDs, hostnames) as entities."""
+    results: list[dict] = []
+    seen: set[str] = set()
+    for pat, etype in _NEEDLE_ENTITY_PATTERNS:
+        for mt in pat.finditer(text):
+            val = mt.group().strip()
+            if val and val not in seen and len(val) >= 3:
+                if etype == "hostname" and not _looks_like_hostname(val):
+                    continue
+                seen.add(val)
+                results.append({"name": val, "type": etype, "confidence": "needle_pattern"})
+    return results
 
 
 def pre_extract(text: str, source_file: str = "") -> dict:

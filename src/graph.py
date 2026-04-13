@@ -5,10 +5,12 @@ import re
 import sqlite3
 import os
 import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
 from config import SQLITE_PATH
+from chunking import NEEDLE_PATTERNS
 
 # Serialize writes — WAL allows concurrent readers; writers must not race.
 GRAPH_WRITE_LOCK = threading.Lock()
@@ -122,11 +124,13 @@ def init_schema():
             is_active INTEGER NOT NULL DEFAULT 1,
             retention_class TEXT NOT NULL DEFAULT 'standard',
             valid_from TEXT NOT NULL DEFAULT '',
-            valid_until TEXT NOT NULL DEFAULT ''
+            valid_until TEXT NOT NULL DEFAULT '',
+            memory_id TEXT NOT NULL DEFAULT ''
         );
         CREATE INDEX IF NOT EXISTS idx_facts_entity ON facts(entity_id);
         CREATE INDEX IF NOT EXISTS idx_facts_active ON facts(is_active);
         CREATE INDEX IF NOT EXISTS idx_facts_valid_from ON facts(valid_from);
+        CREATE INDEX IF NOT EXISTS idx_facts_memory_id ON facts(memory_id);
 
         CREATE TABLE IF NOT EXISTS curator_state (
             key TEXT PRIMARY KEY,
@@ -165,6 +169,7 @@ def init_schema():
         conn.commit()
         conn.close()
     _migrate_schema()
+    _migrate_entity_unique_constraint()
     _init_fts5()
 
 
@@ -178,11 +183,19 @@ def _migrate_schema():
         ("facts", "valid_from", "TEXT NOT NULL DEFAULT ''"),
         ("facts", "valid_until", "TEXT NOT NULL DEFAULT ''"),
         ("relationships", "provenance", "TEXT NOT NULL DEFAULT 'unknown'"),
+        ("entities", "namespace", "TEXT NOT NULL DEFAULT 'global'"),
+        ("facts", "namespace", "TEXT NOT NULL DEFAULT 'global'"),
+        ("relationships", "namespace", "TEXT NOT NULL DEFAULT 'global'"),
+        ("facts", "memory_id", "TEXT NOT NULL DEFAULT ''"),
     ]
     indexes = [
         "CREATE INDEX IF NOT EXISTS idx_facts_retention ON facts(retention_class)",
         "CREATE INDEX IF NOT EXISTS idx_entities_retention ON entities(retention_class)",
         "CREATE INDEX IF NOT EXISTS idx_facts_valid_from ON facts(valid_from)",
+        "CREATE INDEX IF NOT EXISTS idx_entities_namespace ON entities(namespace)",
+        "CREATE INDEX IF NOT EXISTS idx_facts_namespace ON facts(namespace)",
+        "CREATE INDEX IF NOT EXISTS idx_relationships_namespace ON relationships(namespace)",
+        "CREATE INDEX IF NOT EXISTS idx_facts_memory_id ON facts(memory_id)",
     ]
     with GRAPH_WRITE_LOCK:
         conn = get_db()
@@ -202,15 +215,84 @@ def _migrate_schema():
         conn.close()
 
 
+def _migrate_entity_unique_constraint():
+    """Rebuild entities UNIQUE constraint to include namespace (idempotent).
+
+    The original schema has UNIQUE(name) which collides across namespaces.
+    This migration copies to a new table with UNIQUE(name, namespace),
+    then swaps in place.  Safe to run multiple times.
+    """
+    _logger = logging.getLogger("archivist.graph")
+    with GRAPH_WRITE_LOCK:
+        conn = get_db()
+        try:
+            cols = [row[1] for row in conn.execute("PRAGMA table_info(entities)").fetchall()]
+            if "namespace" not in cols:
+                return
+
+            idx_info = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='entities' AND sql IS NOT NULL"
+            ).fetchall()
+            has_ns_unique = any("namespace" in (r[0] or "") for r in idx_info)
+            create_sql = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='entities'"
+            ).fetchone()
+            if create_sql and "UNIQUE" in (create_sql[0] or ""):
+                after_unique = create_sql[0].split("UNIQUE", 1)[-1]
+                if "namespace" in after_unique:
+                    return
+            if has_ns_unique:
+                return
+
+            conn.execute("DROP TABLE IF EXISTS entities_new")
+            conn.execute("""
+                CREATE TABLE entities_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL COLLATE NOCASE,
+                    entity_type TEXT NOT NULL DEFAULT 'unknown',
+                    first_seen TEXT NOT NULL,
+                    last_seen TEXT NOT NULL,
+                    mention_count INTEGER NOT NULL DEFAULT 1,
+                    metadata TEXT DEFAULT '{}',
+                    retention_class TEXT NOT NULL DEFAULT 'standard',
+                    aliases TEXT NOT NULL DEFAULT '[]',
+                    namespace TEXT NOT NULL DEFAULT 'global',
+                    UNIQUE(name, namespace)
+                )
+            """)
+            conn.execute("""
+                INSERT INTO entities_new (id, name, entity_type, first_seen, last_seen,
+                    mention_count, metadata, retention_class, aliases, namespace)
+                SELECT id, name, entity_type, first_seen, last_seen,
+                    mention_count, metadata, retention_class, aliases, namespace
+                FROM entities
+            """)
+            conn.execute("DROP TABLE entities")
+            conn.execute("ALTER TABLE entities_new RENAME TO entities")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(name COLLATE NOCASE)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(entity_type)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_entities_namespace ON entities(namespace)")
+            conn.commit()
+            _logger.info("Migrated entities: rebuilt UNIQUE constraint to include namespace")
+        except Exception as e:
+            _logger.warning("Entity UNIQUE constraint migration failed (may already be done): %s", e)
+            conn.rollback()
+        finally:
+            conn.close()
+
 def _init_fts5():
-    """Create the FTS5 virtual table if it doesn't already exist.
+    """Create the FTS5 virtual tables if they don't already exist.
 
     Separated from init_schema() because FTS5 contentless-delete tables
     need a slightly different DDL path and tolerate 'already exists' gracefully.
 
-    On success we run a trivial read against ``memory_fts`` and register
-    ``fts5`` as healthy; on failure we register unhealthy so downstream
-    BM25 search can skip FTS without pretending the index exists.
+    Creates two tables:
+      - ``memory_fts``: Porter-stemmed for recall-oriented BM25 search.
+      - ``memory_fts_exact``: Non-stemmed (unicode61 only) for exact token matching
+        of identifiers, IPs, cron expressions, etc.
+
+    On success we run a trivial read and register ``fts5`` as healthy;
+    on failure we register unhealthy so downstream BM25 search can skip FTS.
     """
     import health
 
@@ -222,11 +304,16 @@ def _init_fts5():
                 "USING fts5(text, content='memory_chunks', content_rowid='rowid', "
                 "tokenize='porter unicode61')"
             )
+            conn.execute(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts_exact "
+                "USING fts5(text, content='memory_chunks', content_rowid='rowid', "
+                "tokenize='unicode61')"
+            )
             conn.commit()
             conn.execute("SELECT count(*) FROM memory_fts LIMIT 1")
+            conn.execute("SELECT count(*) FROM memory_fts_exact LIMIT 1")
             health.register("fts5", healthy=True)
         except Exception as e:
-            # Downstream: search_bm25() checks is_healthy("fts5") and returns [].
             health.register("fts5", healthy=False, detail=str(e))
         finally:
             conn.close()
@@ -242,7 +329,7 @@ def upsert_fts_chunk(
     date: str = "",
     memory_type: str = "general",
 ):
-    """Insert or replace a chunk in memory_chunks and sync to FTS5 index."""
+    """Insert or replace a chunk in memory_chunks and sync to both FTS5 indexes."""
     with GRAPH_WRITE_LOCK:
         conn = get_db()
         try:
@@ -254,6 +341,13 @@ def upsert_fts_chunk(
                     "INSERT INTO memory_fts(memory_fts, rowid, text) VALUES('delete', ?, ?)",
                     (old["rowid"], old["text"]),
                 )
+                try:
+                    conn.execute(
+                        "INSERT INTO memory_fts_exact(memory_fts_exact, rowid, text) VALUES('delete', ?, ?)",
+                        (old["rowid"], old["text"]),
+                    )
+                except Exception:
+                    pass
                 conn.execute("DELETE FROM memory_chunks WHERE qdrant_id = ?", (qdrant_id,))
 
             conn.execute(
@@ -266,12 +360,43 @@ def upsert_fts_chunk(
                 "INSERT INTO memory_fts (rowid, text) VALUES (?, ?)",
                 (rowid, text),
             )
+            try:
+                conn.execute(
+                    "INSERT INTO memory_fts_exact (rowid, text) VALUES (?, ?)",
+                    (rowid, text),
+                )
+            except Exception:
+                pass
             conn.commit()
         except Exception as e:
             logging.getLogger("archivist.graph").warning("FTS upsert failed for %s: %s", qdrant_id, e)
             conn.rollback()
         finally:
             conn.close()
+
+
+def _delete_fts_rows(conn, rows):
+    """Delete FTS5 shadow-table entries for the given memory_chunks rows.
+
+    Best-effort — FTS5 extension may be unavailable.
+    """
+    for row in rows:
+        try:
+            conn.execute(
+                "INSERT INTO memory_fts (memory_fts, rowid, text) VALUES ('delete', ?, "
+                "(SELECT text FROM memory_chunks WHERE rowid = ?))",
+                (row["rowid"], row["rowid"]),
+            )
+        except Exception:
+            pass
+        try:
+            conn.execute(
+                "INSERT INTO memory_fts_exact (memory_fts_exact, rowid, text) VALUES ('delete', ?, "
+                "(SELECT text FROM memory_chunks WHERE rowid = ?))",
+                (row["rowid"], row["rowid"]),
+            )
+        except Exception:
+            pass
 
 
 def delete_fts_chunks_by_file(file_path: str):
@@ -286,15 +411,7 @@ def delete_fts_chunks_by_file(file_path: str):
             rows = conn.execute(
                 "SELECT rowid FROM memory_chunks WHERE file_path = ?", (file_path,)
             ).fetchall()
-            for row in rows:
-                try:
-                    conn.execute(
-                        "INSERT INTO memory_fts (memory_fts, rowid, text) VALUES ('delete', ?, "
-                        "(SELECT text FROM memory_chunks WHERE rowid = ?))",
-                        (row["rowid"], row["rowid"]),
-                    )
-                except Exception:
-                    pass  # FTS5 unavailable — still delete the chunks row
+            _delete_fts_rows(conn, rows)
             conn.execute("DELETE FROM memory_chunks WHERE file_path = ?", (file_path,))
             conn.commit()
         except Exception as e:
@@ -302,6 +419,14 @@ def delete_fts_chunks_by_file(file_path: str):
             conn.rollback()
         finally:
             conn.close()
+
+
+def delete_fts_chunks_by_qdrant_id(qdrant_id: str) -> int:
+    """Remove FTS5 entries and memory_chunks rows for a single Qdrant point ID.
+
+    Thin wrapper around :func:`delete_fts_chunks_batch` for single-ID callers.
+    """
+    return delete_fts_chunks_batch([qdrant_id])
 
 
 def search_fts(query: str, namespace: str = "", agent_id: str = "",
@@ -350,18 +475,64 @@ def search_fts(query: str, namespace: str = "", agent_id: str = "",
         conn.close()
 
 
+def search_fts_exact(query: str, namespace: str = "", agent_id: str = "",
+                     memory_type: str = "", limit: int = 30) -> list[dict]:
+    """Non-stemmed BM25 search via memory_fts_exact for exact token matching."""
+    conn = get_db()
+    try:
+        where_clauses = []
+        params: list = []
+
+        if namespace:
+            where_clauses.append("mc.namespace = ?")
+            params.append(namespace)
+        if agent_id:
+            where_clauses.append("mc.agent_id = ?")
+            params.append(agent_id)
+        if memory_type:
+            where_clauses.append("mc.memory_type = ?")
+            params.append(memory_type)
+
+        where_sql = (" AND " + " AND ".join(where_clauses)) if where_clauses else ""
+
+        sql = (
+            "SELECT mc.qdrant_id, mc.file_path, mc.chunk_index, mc.agent_id, "
+            "mc.namespace, mc.date, mc.memory_type, mc.text, "
+            "rank AS bm25_rank "
+            "FROM memory_fts_exact "
+            "JOIN memory_chunks mc ON memory_fts_exact.rowid = mc.rowid "
+            f"WHERE memory_fts_exact MATCH ? {where_sql} "
+            "ORDER BY rank "
+            f"LIMIT ?"
+        )
+        params = [query] + params + [limit]
+
+        cur = conn.execute(sql, params)
+        results = []
+        for row in cur.fetchall():
+            r = dict(row)
+            r["bm25_score"] = -r.pop("bm25_rank", 0)
+            results.append(r)
+        return results
+    except Exception as e:
+        logging.getLogger("archivist.graph").warning("FTS exact search failed: %s", e)
+        return []
+    finally:
+        conn.close()
+
+
 _RETENTION_RANK = {"ephemeral": 0, "standard": 1, "durable": 2, "permanent": 3}
 
 
 def upsert_entity(name: str, entity_type: str = "unknown", agent_id: str = "",
-                  retention_class: str = "standard") -> int:
+                  retention_class: str = "standard", namespace: str = "global") -> int:
     now = datetime.now(timezone.utc).isoformat()
     with GRAPH_WRITE_LOCK:
         conn = get_db()
         try:
             cur = conn.execute(
-                "SELECT id, mention_count, retention_class FROM entities WHERE name = ? COLLATE NOCASE",
-                (name,),
+                "SELECT id, mention_count, retention_class FROM entities WHERE name = ? COLLATE NOCASE AND namespace = ?",
+                (name, namespace),
             )
             row = cur.fetchone()
             if row:
@@ -374,8 +545,8 @@ def upsert_entity(name: str, entity_type: str = "unknown", agent_id: str = "",
                 conn.commit()
                 return row["id"]
             cur = conn.execute(
-                "INSERT INTO entities (name, entity_type, first_seen, last_seen, retention_class) VALUES (?,?,?,?,?)",
-                (name, entity_type, now, now, retention_class),
+                "INSERT INTO entities (name, entity_type, first_seen, last_seen, retention_class, namespace) VALUES (?,?,?,?,?,?)",
+                (name, entity_type, now, now, retention_class, namespace),
             )
             conn.commit()
             return cur.lastrowid
@@ -384,19 +555,19 @@ def upsert_entity(name: str, entity_type: str = "unknown", agent_id: str = "",
 
 
 def add_relationship(source_id: int, target_id: int, rel_type: str, evidence: str,
-                     agent_id: str = "", provenance: str = "unknown"):
+                     agent_id: str = "", provenance: str = "unknown", namespace: str = "global"):
     now = datetime.now(timezone.utc).isoformat()
     with GRAPH_WRITE_LOCK:
         conn = get_db()
         try:
             conn.execute(
                 """INSERT INTO relationships (source_entity_id, target_entity_id, relation_type,
-                   evidence, agent_id, created_at, updated_at, provenance)
-                   VALUES (?,?,?,?,?,?,?,?)
+                   evidence, agent_id, created_at, updated_at, provenance, namespace)
+                   VALUES (?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(source_entity_id, target_entity_id, relation_type)
                    DO UPDATE SET evidence=excluded.evidence, updated_at=excluded.updated_at,
                    confidence=min(confidence+0.1, 1.0), provenance=excluded.provenance""",
-                (source_id, target_id, rel_type, evidence, agent_id, now, now, provenance),
+                (source_id, target_id, rel_type, evidence, agent_id, now, now, provenance, namespace),
             )
             conn.commit()
         finally:
@@ -413,7 +584,8 @@ _DATE_IN_PATH_RE = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
 
 def add_fact(entity_id: int, fact_text: str, source_file: str = "",
              agent_id: str = "", retention_class: str = "standard",
-             valid_from: str = "", valid_until: str = "") -> int:
+             valid_from: str = "", valid_until: str = "", namespace: str = "global",
+             memory_id: str = "") -> int:
     now = datetime.now(timezone.utc).isoformat()
     new_words = _word_set(fact_text)
 
@@ -427,10 +599,10 @@ def add_fact(entity_id: int, fact_text: str, source_file: str = "",
         try:
             cur = conn.execute(
                 "INSERT INTO facts (entity_id, fact_text, source_file, agent_id, created_at, "
-                "retention_class, valid_from, valid_until) "
-                "VALUES (?,?,?,?,?,?,?,?)",
+                "retention_class, valid_from, valid_until, namespace, memory_id) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (entity_id, fact_text, source_file, agent_id, now, retention_class,
-                 valid_from, valid_until),
+                 valid_from, valid_until, namespace, memory_id),
             )
             conn.commit()
             fid = cur.lastrowid
@@ -498,17 +670,26 @@ def _normalize(text: str) -> str:
     return re.sub(r"[^\w\s\-]", "", text.lower()).strip()
 
 
-def search_entities(query: str, limit: int = 10) -> list[dict]:
+def search_entities(query: str, limit: int = 10, namespace: str = "") -> list[dict]:
     """Search entities by name or aliases (case-insensitive, normalized)."""
     conn = get_db()
     try:
         norm_q = _normalize(query)
-        cur = conn.execute(
-            "SELECT * FROM entities "
-            "WHERE name LIKE ? COLLATE NOCASE OR aliases LIKE ? COLLATE NOCASE "
-            "ORDER BY mention_count DESC LIMIT ?",
-            (f"%{query}%", f"%{norm_q}%", limit),
-        )
+        if namespace:
+            cur = conn.execute(
+                "SELECT * FROM entities "
+                "WHERE (name LIKE ? COLLATE NOCASE OR aliases LIKE ? COLLATE NOCASE) "
+                "AND namespace = ? "
+                "ORDER BY mention_count DESC LIMIT ?",
+                (f"%{query}%", f"%{norm_q}%", namespace, limit),
+            )
+        else:
+            cur = conn.execute(
+                "SELECT * FROM entities "
+                "WHERE name LIKE ? COLLATE NOCASE OR aliases LIKE ? COLLATE NOCASE "
+                "ORDER BY mention_count DESC LIMIT ?",
+                (f"%{query}%", f"%{norm_q}%", limit),
+            )
         return [dict(r) for r in cur.fetchall()]
     finally:
         conn.close()
@@ -685,3 +866,195 @@ def set_curator_state(key: str, value: str):
         )
         conn.commit()
         conn.close()
+
+
+# ── Deterministic needle registry (v2.0 — 100% recall for structured tokens) ─
+
+_ensure_needle_registry = schema_guard("""
+    CREATE TABLE IF NOT EXISTS needle_registry (
+        token TEXT NOT NULL,
+        memory_id TEXT NOT NULL,
+        namespace TEXT NOT NULL DEFAULT '',
+        agent_id TEXT NOT NULL DEFAULT '',
+        chunk_text TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (token, memory_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_needle_token ON needle_registry(token);
+    CREATE INDEX IF NOT EXISTS idx_needle_token_ns ON needle_registry(token, namespace);
+""")
+
+
+def register_needle_tokens(memory_id: str, text: str, namespace: str = "", agent_id: str = ""):
+    """Extract and register high-specificity tokens from text for O(1) lookup."""
+    _ensure_needle_registry()
+    tokens: set[str] = set()
+    for pat in NEEDLE_PATTERNS:
+        for mt in pat.finditer(text):
+            tok = mt.group().strip()
+            if tok and len(tok) >= 3:
+                tokens.add(tok)
+    if not tokens:
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    snippet = text[:500]
+    with GRAPH_WRITE_LOCK:
+        conn = get_db()
+        try:
+            for tok in tokens:
+                conn.execute(
+                    "INSERT OR REPLACE INTO needle_registry "
+                    "(token, memory_id, namespace, agent_id, chunk_text, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (tok, memory_id, namespace, agent_id, snippet, now),
+                )
+            conn.commit()
+        except Exception as e:
+            logging.getLogger("archivist.graph").warning("Needle registry insert failed: %s", e)
+            conn.rollback()
+        finally:
+            conn.close()
+
+
+def lookup_needle_tokens(query: str, namespace: str = "", agent_id: str = "") -> list[dict]:
+    """Find exact token matches in the needle registry. O(1) per token."""
+    _ensure_needle_registry()
+    tokens: set[str] = set()
+    for pat in NEEDLE_PATTERNS:
+        for mt in pat.finditer(query):
+            tok = mt.group().strip()
+            if tok and len(tok) >= 3:
+                tokens.add(tok)
+    if not tokens:
+        return []
+    conn = get_db()
+    try:
+        results: list[dict] = []
+        seen_ids: set[str] = set()
+        for tok in tokens:
+            where = "WHERE token = ?"
+            params: list = [tok]
+            if namespace:
+                where += " AND namespace = ?"
+                params.append(namespace)
+            if agent_id:
+                where += " AND agent_id = ?"
+                params.append(agent_id)
+            cur = conn.execute(f"SELECT * FROM needle_registry {where}", params)
+            for row in cur.fetchall():
+                r = dict(row)
+                if r["memory_id"] not in seen_ids:
+                    seen_ids.add(r["memory_id"])
+                    results.append(r)
+        return results
+    except Exception as e:
+        logging.getLogger("archivist.graph").warning("Needle registry lookup failed: %s", e)
+        return []
+    finally:
+        conn.close()
+
+
+def delete_needle_tokens_by_memory(memory_id: str) -> int:
+    """Remove all registry entries for a given memory ID.
+
+    Thin wrapper around :func:`delete_needle_tokens_batch` for single-ID callers.
+    """
+    return delete_needle_tokens_batch([memory_id])
+
+
+_BATCH_CHUNK = 500
+
+
+def delete_fts_chunks_batch(qdrant_ids: list[str]) -> int:
+    """Remove FTS5 entries and memory_chunks rows for multiple Qdrant IDs.
+
+    Internally chunks the ID list into groups of 500 to stay under the
+    sqlite3 ~999-parameter limit.  Acquires ``GRAPH_WRITE_LOCK`` once.
+    Retries once on ``sqlite3.OperationalError`` (e.g. "database is locked").
+    """
+    if not qdrant_ids:
+        return 0
+    for attempt in range(2):
+        total = 0
+        try:
+            with GRAPH_WRITE_LOCK:
+                conn = get_db()
+                try:
+                    for i in range(0, len(qdrant_ids), _BATCH_CHUNK):
+                        chunk = qdrant_ids[i : i + _BATCH_CHUNK]
+                        placeholders = ",".join("?" * len(chunk))
+                        rows = conn.execute(
+                            f"SELECT rowid FROM memory_chunks WHERE qdrant_id IN ({placeholders})",
+                            chunk,
+                        ).fetchall()
+                        _delete_fts_rows(conn, rows)
+                        cur = conn.execute(
+                            f"DELETE FROM memory_chunks WHERE qdrant_id IN ({placeholders})",
+                            chunk,
+                        )
+                        total += cur.rowcount
+                    conn.commit()
+                finally:
+                    conn.close()
+            return total
+        except sqlite3.OperationalError:
+            if attempt == 0:
+                time.sleep(0.2)
+                continue
+            raise
+
+
+def delete_needle_tokens_batch(memory_ids: list[str]) -> int:
+    """Remove needle_registry rows for multiple memory IDs.
+
+    Internally chunks the ID list into groups of 500 to stay under the
+    sqlite3 ~999-parameter limit.  Acquires ``GRAPH_WRITE_LOCK`` once.
+    Retries once on ``sqlite3.OperationalError`` (e.g. "database is locked").
+    """
+    if not memory_ids:
+        return 0
+    _ensure_needle_registry()
+    for attempt in range(2):
+        total = 0
+        try:
+            with GRAPH_WRITE_LOCK:
+                conn = get_db()
+                try:
+                    for i in range(0, len(memory_ids), _BATCH_CHUNK):
+                        chunk = memory_ids[i : i + _BATCH_CHUNK]
+                        placeholders = ",".join("?" * len(chunk))
+                        cur = conn.execute(
+                            f"DELETE FROM needle_registry WHERE memory_id IN ({placeholders})",
+                            chunk,
+                        )
+                        total += cur.rowcount
+                    conn.commit()
+                finally:
+                    conn.close()
+            return total
+        except sqlite3.OperationalError:
+            if attempt == 0:
+                time.sleep(0.2)
+                continue
+            raise
+
+
+def delete_hotness(memory_id: str) -> int:
+    """Remove the ``memory_hotness`` row for *memory_id*.
+
+    Returns the number of rows deleted (0 or 1).  Silently returns 0 if the
+    ``memory_hotness`` table does not yet exist (it is lazily created by
+    ``hotness.refresh_hotness``).
+    """
+    with GRAPH_WRITE_LOCK:
+        conn = get_db()
+        try:
+            cur = conn.execute(
+                "DELETE FROM memory_hotness WHERE memory_id = ?", (memory_id,),
+            )
+            conn.commit()
+            return cur.rowcount
+        except sqlite3.OperationalError:
+            return 0
+        finally:
+            conn.close()

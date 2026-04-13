@@ -5,6 +5,7 @@ is unavailable the reranker degrades gracefully — results pass through
 sorted by their original vector score.
 """
 
+import asyncio
 import logging
 from typing import Optional
 
@@ -32,7 +33,7 @@ def _get_model(model_name: str):
         return None
 
 
-def rerank_results(
+async def rerank_results(
     query: str,
     results: list[dict],
     model_name: str = "BAAI/bge-reranker-v2-m3",
@@ -42,17 +43,17 @@ def rerank_results(
 
     Each result dict must have a "text" key. A "rerank_score" key is added.
     If the model is unavailable, results are returned sorted by original "score".
+    The CPU-bound model.predict() is offloaded to a thread to keep the event loop responsive.
     """
     if not results:
         return results
 
     model = _get_model(model_name)
     if model is None:
-        # Graceful fallback: return top-limit by original vector score
         return sorted(results, key=lambda x: x.get("score", 0), reverse=True)[:limit]
 
     pairs = [[query, r["text"]] for r in results]
-    scores = model.predict(pairs)
+    scores = await asyncio.to_thread(model.predict, pairs)
 
     for i, r in enumerate(results):
         r["rerank_score"] = float(scores[i])

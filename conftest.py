@@ -32,6 +32,7 @@ def _isolate_env(monkeypatch, tmp_path):
     graph.init_schema()
 
     _schema_guards = [
+        ("graph", "_ensure_needle_registry"),
         ("trajectory", "_ensure_trajectory_schema"),
         ("skills", "_ensure_skill_schema"),
         ("curator_queue", "_ensure_schema"),
