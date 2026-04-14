@@ -49,7 +49,8 @@ REFINE_SKIP_THRESHOLD = float(os.getenv("REFINE_SKIP_THRESHOLD", "0.0"))
 # ── Storage paths ─────────────────────────────────────────────────────────────
 MEMORY_ROOT = os.getenv("MEMORY_ROOT", "/data/memories")
 SQLITE_PATH = os.getenv("SQLITE_PATH", "/data/archivist/graph.db")
-NAMESPACES_CONFIG_PATH = os.getenv("NAMESPACES_CONFIG_PATH", "/data/archivist/config/namespaces.yaml")
+# Empty default: permissive RBAC (no ACL file). Docker Compose sets an explicit path for archivist.
+NAMESPACES_CONFIG_PATH = os.getenv("NAMESPACES_CONFIG_PATH", "").strip()
 
 # ── Chunking ──────────────────────────────────────────────────────────────────
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "800"))

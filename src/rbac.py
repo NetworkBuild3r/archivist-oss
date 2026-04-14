@@ -49,6 +49,14 @@ def load_config(path: str = NAMESPACES_CONFIG_PATH) -> RBACConfig:
     """Load namespace + RBAC config from YAML. Falls back to permissive mode on error."""
     global _config, _permissive_fallback
 
+    if not (path or "").strip():
+        logger.info(
+            "RBAC: NAMESPACES_CONFIG_PATH not set — permissive mode (no namespace ACL file)",
+        )
+        _permissive_fallback = True
+        _config = RBACConfig()
+        return _config
+
     try:
         with open(path, "r") as f:
             raw = yaml.safe_load(f)
