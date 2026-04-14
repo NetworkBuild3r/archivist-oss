@@ -77,3 +77,26 @@ python -m benchmarks.academic.beir_thin \
 ```
 
 Use `--model` to match your production embedding model id when comparing families.
+
+## Speed (LongMemEval)
+
+Indexing was slow because **reverse HyDE** and related options trigger **many LLM calls per chunk**. `run_thin_reference.sh` sets **`BENCHMARK_FAST=1` by default** (after sourcing `.env`), which exports:
+
+- `REVERSE_HYDE_ENABLED=false`
+- `SYNTHETIC_QUESTIONS_ENABLED=false`
+- `QUERY_EXPANSION_ENABLED=false`
+- `TIERED_CONTEXT_ENABLED=false`
+- `CONTEXTUAL_AUGMENTATION_ENABLED=false`
+
+For a **full-fidelity** run (slow), use:
+
+```bash
+BENCHMARK_FAST=0 bash benchmarks/scripts/run_thin_reference.sh
+```
+
+**More knobs:**
+
+- **`LIMIT_LM=5`** — fewer questions while you tune hardware.
+- **Faster judge** — use a small, non-reasoning chat model for `LLM_URL` / `LLM_MODEL` during benchmarks (reasoning models that only fill `reasoning` are slow and noisy for yes/no judging).
+- **GPU / batching** — keep **embeddings** on a fast endpoint; local Ollama on CPU for everything will bound wall time.
+- **`SKIP_BEIR=1`** — skip BEIR if you only care about LongMemEval right now.
