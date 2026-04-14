@@ -5,8 +5,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [1.12.0] - 2026-04-14
+
 ### Added
 
+- **Semantic chunking** — `chunk_text_semantic()` for markdown-aware parent chunks; `CHUNKING_STRATEGY` (`semantic` \| `fixed`, default `semantic`) in config; hierarchical indexing passes the strategy through from `indexer.py`.
+- **Synthetic question generation** (`synthetic_questions.py`) for optional indexing-time enrichment (feature-flagged).
+- **Pipeline benchmark artifacts in-repo** — `benchmarks/pipeline/`, `benchmarks/scripts/`, `benchmarks/academic/` (adapters), `benchmarks/fixtures/questions.json`, and `benchmarks/fixtures/corpus_small/` (including a long-doc sample with **synthetic** hostnames/paths for public use). Large generated corpora remain gitignored.
 - **Storage gauges** (background refresh): `archivist_total_memories` (label `namespace`), `archivist_sqlite_size_bytes`, `archivist_qdrant_vectors_total` (label `collection`), `archivist_qdrant_available`, `archivist_sqlite_available` (0/1). Interval: `METRICS_COLLECT_INTERVAL_SECONDS` (default 60s, minimum 5s in the loop).
 - **Search result count histogram**: `archivist_search_results` (label `namespace`) — length of the `sources` list returned per search.
 - **`METRICS_AUTH_EXEMPT`** — when `true`, `GET /metrics` skips API key auth so Prometheus can scrape without the MCP key.
@@ -16,6 +21,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - **`METRICS_ENABLED=false`** now disables all metric recording (no-ops) and returns **HTTP 404** on `GET /metrics`.
 - Renamed metrics to the `archivist_*` prefix: `embed_cache_hits_total` → `archivist_embed_cache_hit_total`, `embed_cache_misses_total` → `archivist_embed_cache_miss_total`, `hyde_duration_ms` → `archivist_hyde_duration_ms`, `reverse_hyde_duration_ms` → `archivist_reverse_hyde_duration_ms`, `query_expansion_duration_ms` → `archivist_query_expansion_duration_ms`.
 - Histogram rendering supports a second bucket layout for `archivist_search_results` (counts, not milliseconds).
+- Version string bumped to **1.12.0** in health endpoint and startup log.
+
+### Removed
+
+- **`TECH_DEBT.md`** — superseded by `docs/ARCHITECTURE.md` and issue-tracker planning; cascade notes folded into README + architecture docs.
 
 ## [1.11.0] - 2026-04-10
 

@@ -69,6 +69,34 @@ class TestRRF:
         scores = [r["rrf_score"] for r in result]
         assert scores == sorted(scores, reverse=True)
 
+    def test_default_k_is_20(self):
+        from rank_fusion import rrf_merge
+        r1 = [{"id": "a", "score": 0.9}]
+        r2 = [{"id": "b", "score": 0.8}]
+        result = rrf_merge([r1, r2])
+        # With k=20: rank-1 item gets 1/(20+1) = 0.047619
+        expected_score = round(1.0 / (20 + 1), 6)
+        assert result[0]["rrf_score"] == expected_score or result[1]["rrf_score"] == expected_score
+
+    def test_adaptive_k_small_list(self):
+        from rank_fusion import rrf_merge
+        r1 = [{"id": str(i)} for i in range(15)]
+        r2 = [{"id": str(i)} for i in range(15)]
+        result_adaptive = rrf_merge([r1, r2], adaptive_k=True)
+        # 15 items → k = max(1, min(15//15, 20)) = 1
+        # With k=1, rank-1 score = 2/(1+1) = 1.0
+        top = result_adaptive[0]
+        assert top["rrf_score"] == round(2.0 / (1 + 1), 6)
+
+    def test_adaptive_k_capped_at_20(self):
+        from rank_fusion import rrf_merge
+        r1 = [{"id": str(i)} for i in range(500)]
+        r2 = [{"id": str(i)} for i in range(500)]
+        result = rrf_merge([r1, r2], adaptive_k=True)
+        # 500 items → k = max(1, min(500//15, 20)) = min(33, 20) = 20
+        expected = round(2.0 / (20 + 1), 6)
+        assert result[0]["rrf_score"] == expected
+
 
 # ── BM25 AND/OR/Phrase Tests ────────────────────────────────────────────────
 

@@ -12,7 +12,7 @@ Vector search + knowledge graph + active curation — one MCP endpoint.</p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="License" />
-  <img src="https://img.shields.io/badge/version-v1.11.0-brightgreen" alt="Version" />
+  <img src="https://img.shields.io/badge/version-v1.12.0-brightgreen" alt="Version" />
   <img src="https://img.shields.io/badge/protocol-MCP-purple" alt="MCP" />
   <img src="https://img.shields.io/badge/models-any%20OpenAI--compatible-orange" alt="Models" />
 </p>
@@ -34,13 +34,21 @@ Point any MCP client at `http://localhost:3100/mcp` — done. Your agents now ha
 
 ---
 
+## What's New in v1.12
+
+**Semantic chunking** — parent chunks can follow markdown structure (headings, code blocks, lists) via `CHUNKING_STRATEGY=semantic` (default), with `fixed` for the previous fixed-size parent split. Improves retrieval on long technical documents without changing the child chunking API.
+
+**Benchmark harness in-repo** — `benchmarks/pipeline/` and `benchmarks/fixtures/corpus_small/` (plus `questions.json`) are tracked so you can reproduce retrieval evaluations locally. Sample corpus text uses **synthetic** hostnames and paths only.
+
+---
+
 ## What's New in v1.11
 
 **Needle Retrieval v2** — structured tokens (IPs, UUIDs, cron expressions, ticket IDs) now have **100% deterministic recall** via a dedicated registry, write-time question embeddings (Reverse HyDE), and focused micro-chunk vectors. Combined with uniform result typing and RRF fusion, needle-in-the-haystack queries that previously required luck now reliably surface.
 
 **Delete cascade hardening** — deleting a memory now fully cleans up all derived artifacts: micro-chunk FTS5 entries, reverse HyDE FTS5 entries, and per-child needle registry rows. Previously these were orphaned on delete.
 
-**Cascade consistency model** — Archivist uses two non-transactional stores (Qdrant + SQLite). The cascade makes the following contract: *(a) Detectable* — `DeleteResult.failed_steps` records every substep that failed; `PartialDeletionError` is raised when a critical Qdrant step fails. *(b) Repairable* — `sweep_orphans()` runs periodically to reconcile SQLite rows that have no corresponding Qdrant point. *(c) Auditable* — every delete and archive is written to the `audit_log` table with the full result. *(d) Retry-resilient* — transient Qdrant errors (429, 503, timeouts) are retried once; SQLite batch deletes retry once on lock contention. **Known limitation:** there is no distributed transaction across Qdrant and SQLite. A process crash mid-cascade leaves partial state; the orphan sweeper will clean it up on the next run. See `TECH_DEBT.md` for the planned architectural fix.
+**Cascade consistency model** — Archivist uses two non-transactional stores (Qdrant + SQLite). The cascade makes the following contract: *(a) Detectable* — `DeleteResult.failed_steps` records every substep that failed; `PartialDeletionError` is raised when a critical Qdrant step fails. *(b) Repairable* — `sweep_orphans()` runs periodically to reconcile SQLite rows that have no corresponding Qdrant point. *(c) Auditable* — every delete and archive is written to the `audit_log` table with the full result. *(d) Retry-resilient* — transient Qdrant errors (429, 503, timeouts) are retried once; SQLite batch deletes retry once on lock contention. **Known limitation:** there is no distributed transaction across Qdrant and SQLite. A process crash mid-cascade leaves partial state; the orphan sweeper will clean it up on the next run. Deeper lifecycle notes: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 **Structured observability** — every store and retrieval operation emits a structured log event with per-stage metrics. Feature flags are logged at startup for instant configuration visibility.
 
@@ -267,7 +275,7 @@ This starts:
 
 ```bash
 curl http://localhost:3100/health
-# {"status": "ok", "service": "archivist", "version": "1.11.0"}
+# {"status": "ok", "service": "archivist", "version": "1.12.0"}
 ```
 
 ### 4. Connect your agents
@@ -716,6 +724,8 @@ pip install -r requirements.txt
 python -m pytest tests/ -v
 ```
 
+**Pipeline benchmark (optional):** large corpora (`corpus_medium` through `corpus_stress`) are generated or downloaded locally and stay **gitignored**. The **small** fixture and `benchmarks/fixtures/questions.json` are in the repo; run `python -m benchmarks.pipeline.evaluate --help` after configuring `.env` (see [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md)).
+
 Tests are organized by domain with markers:
 - **Unit tests** — Run by default, no external services needed
 - **Integration tests** — Marked `@pytest.mark.integration`, require Qdrant + LLM
@@ -740,7 +750,7 @@ Archivist is integration and execution on top of public work from the agent-memo
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Module map, data flow diagrams, storage schema, per-version operational notes |
 | [`docs/CURSOR_SKILL.md`](docs/CURSOR_SKILL.md) | Full parameter schemas and examples for all 30 MCP tools |
 | [`docs/REFERENCE.md`](docs/REFERENCE.md) | Condensed tool reference table |
-| [`docs/ROADMAP.md`](docs/ROADMAP.md) | Version history (v0.3 → v1.5) and future plans |
+| [`docs/ROADMAP.md`](docs/ROADMAP.md) | Phased roadmap and differentiation goals |
 | [`docs/INSPIRATION.md`](docs/INSPIRATION.md) | Credits, research lineage, ReMe comparison |
 | [`docs/REMOTES.md`](docs/REMOTES.md) | Multi-remote Git workflow for internal + public repos |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Development conventions and PR guidelines |

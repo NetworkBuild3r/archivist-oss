@@ -1,4 +1,4 @@
-"""Tests for TECH_DEBT.md: Cascade & Delete Architecture fixes.
+"""Tests for delete/archive cascade, needle registry, FTS exclusion, and related fixes.
 
 Covers:
 Phase 1b:

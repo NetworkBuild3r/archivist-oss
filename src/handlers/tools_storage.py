@@ -344,6 +344,7 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
         "retention_class": retention,
         "memory_type": arguments.get("memory_type", "general"),
         "thought_type": thought_type,
+        "representation_type": "chunk",
     }
     if retention in ("durable", "permanent"):
         ttl_expires_at = None
@@ -485,6 +486,54 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
             _reverse_hyde_background(), name=f"reverse_hyde_{pid}"
         )
         _rh_task.add_done_callback(_rh_done)
+
+    # Synthetic question generation (background, non-blocking)
+    from config import SYNTHETIC_QUESTIONS_ENABLED as _SQ_ENABLED
+    if _SQ_ENABLED:
+        async def _synthetic_questions_background():
+            from synthetic_questions import generate_and_embed_synthetic_points
+            base_payload = {
+                "agent_id": agent_id,
+                "text": text,
+                "file_path": f"explicit/{agent_id}",
+                "file_type": "explicit",
+                "date": now.strftime("%Y-%m-%d"),
+                "team": TEAM_MAP.get(agent_id, "unknown"),
+                "chunk_index": 0,
+                "namespace": namespace,
+                "version": 1,
+                "importance_score": importance,
+                "retention_class": retention,
+                "memory_type": arguments.get("memory_type", "general"),
+                "thought_type": thought_type,
+            }
+            sq_points = await generate_and_embed_synthetic_points(
+                chunk_point_id=pid,
+                chunk_text=text,
+                base_payload=base_payload,
+            )
+            if sq_points:
+                client.upsert(collection_name=_coll, points=sq_points)
+                register_memory_points_batch([
+                    {"memory_id": pid, "qdrant_id": str(sp.id), "point_type": "synthetic_question"}
+                    for sp in sq_points
+                ])
+            logger.info(
+                "synthetic_questions.background_complete",
+                extra={"memory_id": pid, "question_count": len(sq_points)},
+            )
+
+        def _sq_done(task: asyncio.Task):
+            if task.cancelled():
+                return
+            exc = task.exception()
+            if exc:
+                logger.warning("Synthetic questions background task failed for %s: %s", pid, exc)
+
+        _sq_task = asyncio.create_task(
+            _synthetic_questions_background(), name=f"synthetic_q_{pid}"
+        )
+        _sq_task.add_done_callback(_sq_done)
 
     from audit import log_memory_event
     await log_memory_event(

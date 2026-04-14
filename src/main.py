@@ -155,7 +155,7 @@ async def file_watcher():
 
 
 async def handle_health(_request):
-    return JSONResponse({"status": "ok", "service": "archivist", "version": "1.11.0"})
+    return JSONResponse({"status": "ok", "service": "archivist", "version": "1.12.0"})
 
 
 async def handle_invalidate(_request):
@@ -241,7 +241,7 @@ def _log_task_exception(task: asyncio.Task):
 
 async def _startup():
     """Run on app startup: init DB, load RBAC, ensure Qdrant collection, start background tasks."""
-    logger.info("Archivist v1.11.0 starting up...")
+    logger.info("Archivist v1.12.0 starting up...")
 
     init_schema()
     logger.info("Graph schema initialized")

@@ -5,7 +5,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from chunking import chunk_text, chunk_text_hierarchical
+from chunking import chunk_text, chunk_text_hierarchical, chunk_text_semantic
 
 
 def test_chunk_text_basic():
@@ -110,6 +110,141 @@ def test_parent_ids_differ_by_filepath():
     assert ids_a.isdisjoint(ids_b), "Parent/child IDs should be unique per file path"
 
 
+# ── Semantic chunking tests ───────────────────────────────────────────────────
+
+def test_semantic_short_document_fast_path():
+    """Documents shorter than size return a single chunk, unchanged."""
+    text = "## Summary\n\nThis is a short document with one section."
+    chunks = chunk_text_semantic(text, size=2000)
+    assert len(chunks) == 1
+    assert chunks[0] == text.strip()
+
+
+def test_semantic_empty_returns_empty():
+    """Empty and whitespace-only text returns an empty list."""
+    assert chunk_text_semantic("") == []
+    assert chunk_text_semantic("   \n\n  ") == []
+
+
+def test_semantic_heading_based_split():
+    """Each top-level heading becomes its own chunk when document exceeds size."""
+    section_body = "Content " * 60  # ~480 chars per section
+    text = (
+        f"## Introduction\n\n{section_body}\n\n"
+        f"## Architecture\n\n{section_body}\n\n"
+        f"## Deployment\n\n{section_body}"
+    )
+    chunks = chunk_text_semantic(text, size=600)
+    # Each section ~520 chars — should stay together; no merging across headings
+    assert len(chunks) >= 3, f"Expected ≥3 chunks, got {len(chunks)}: {[c[:60] for c in chunks]}"
+    # Every chunk must contain its heading
+    headings_found = sum(1 for c in chunks if c.startswith("## "))
+    assert headings_found >= 3, "Each section chunk should start with its heading"
+
+
+def test_semantic_never_merges_across_headings():
+    """Content from different sections must not appear in the same chunk."""
+    intro_body = "Alpha content. " * 10
+    arch_body = "Beta content. " * 10
+    text = f"## Alpha\n\n{intro_body}\n\n## Beta\n\n{arch_body}"
+    chunks = chunk_text_semantic(text, size=300)
+    for chunk in chunks:
+        has_alpha = "Alpha content" in chunk
+        has_beta = "Beta content" in chunk
+        assert not (has_alpha and has_beta), (
+            "A single chunk must not contain content from both ## Alpha and ## Beta sections"
+        )
+
+
+def test_semantic_code_block_not_split():
+    """A fenced code block is never broken across chunks."""
+    preamble = "Setup instructions follow.\n\n" * 5  # push over size limit
+    code = "```\nimport os\nos.environ['FOO'] = 'bar'\nprint('done')\n```"
+    text = f"## Setup\n\n{preamble}{code}"
+    chunks = chunk_text_semantic(text, size=300)
+    # Find the chunk that contains the code block
+    code_chunks = [c for c in chunks if "```" in c]
+    for c in code_chunks:
+        # Opening and closing fences must both appear
+        assert c.count("```") >= 2, f"Code block split across chunk boundary: {c}"
+
+
+def test_semantic_heading_prepended_to_sub_chunks():
+    """When a section is split, the heading is prepended to each sub-chunk."""
+    # Build a section that's definitely over 400 chars
+    body = "Detail paragraph. " * 15  # ~270 chars × 2 paragraphs
+    text = f"## Big Section\n\n{body}\n\n{body}"
+    chunks = chunk_text_semantic(text, size=400)
+    if len(chunks) > 1:
+        # All sub-chunks from the oversized section carry the heading
+        for c in chunks:
+            assert "Big Section" in c, (
+                f"Sub-chunk missing heading context: {c[:80]!r}"
+            )
+
+
+def test_semantic_no_headings_falls_back_to_paragraph_split():
+    """Documents without markdown headings fall back to paragraph splitting."""
+    paragraphs = ["Paragraph number {}. ".format(i) * 10 for i in range(8)]
+    text = "\n\n".join(paragraphs)
+    # With size=300 this should produce multiple chunks
+    chunks = chunk_text_semantic(text, size=300)
+    assert len(chunks) >= 2, "Headingless long text should still be split"
+    assert all(len(c) > 0 for c in chunks)
+
+
+def test_semantic_all_content_preserved():
+    """No content is silently dropped — all unique words survive."""
+    sections = {
+        "Alpha": "unique_alpha_word",
+        "Beta": "unique_beta_word",
+        "Gamma": "unique_gamma_word",
+    }
+    body = "filler text " * 60
+    parts = [f"## {name}\n\n{body} {word}" for name, word in sections.items()]
+    text = "\n\n".join(parts)
+    chunks = chunk_text_semantic(text, size=800)
+    combined = " ".join(chunks)
+    for word in sections.values():
+        assert word in combined, f"Word '{word}' was dropped during semantic chunking"
+
+
+def test_semantic_hierarchical_uses_semantic_strategy():
+    """chunk_text_hierarchical with strategy='semantic' calls chunk_text_semantic."""
+    section_body = "Detail line. " * 40  # ~520 chars
+    text = (
+        f"## Section One\n\n{section_body}\n\n"
+        f"## Section Two\n\n{section_body}\n\n"
+        f"## Section Three\n\n{section_body}"
+    )
+    result_semantic = chunk_text_hierarchical(
+        text, "test.md", parent_size=700, child_size=300, strategy="semantic"
+    )
+    result_fixed = chunk_text_hierarchical(
+        text, "test.md", parent_size=700, child_size=300, strategy="fixed"
+    )
+    parents_semantic = [c for c in result_semantic if c["is_parent"]]
+    parents_fixed = [c for c in result_fixed if c["is_parent"]]
+    # Semantic should produce heading-aligned parents; fixed may split differently
+    semantic_headings = sum(1 for p in parents_semantic if p["content"].startswith("## "))
+    assert semantic_headings >= 2, (
+        f"Semantic strategy should produce heading-aligned parents, got: "
+        f"{[p['content'][:60] for p in parents_semantic]}"
+    )
+
+
+def test_semantic_short_document_same_as_fixed():
+    """Short documents produce identical output regardless of strategy."""
+    text = "## Note\n\nThis is a short note that fits in one chunk."
+    sem = chunk_text_hierarchical(text, "note.md", parent_size=2000, strategy="semantic")
+    fix = chunk_text_hierarchical(text, "note.md", parent_size=2000, strategy="fixed")
+    sem_contents = [c["content"] for c in sem if c["is_parent"]]
+    fix_contents = [c["content"] for c in fix if c["is_parent"]]
+    assert sem_contents == fix_contents, (
+        "Short documents must produce identical parent content regardless of strategy"
+    )
+
+
 if __name__ == "__main__":
     test_chunk_text_basic()
     test_chunk_text_empty()
@@ -120,4 +255,14 @@ if __name__ == "__main__":
     test_hierarchical_ids_are_unique()
     test_hierarchical_small_text()
     test_parent_ids_differ_by_filepath()
+    test_semantic_short_document_fast_path()
+    test_semantic_empty_returns_empty()
+    test_semantic_heading_based_split()
+    test_semantic_never_merges_across_headings()
+    test_semantic_code_block_not_split()
+    test_semantic_heading_prepended_to_sub_chunks()
+    test_semantic_no_headings_falls_back_to_paragraph_split()
+    test_semantic_all_content_preserved()
+    test_semantic_hierarchical_uses_semantic_strategy()
+    test_semantic_short_document_same_as_fixed()
     print("All parent-child chunking tests passed ✓")

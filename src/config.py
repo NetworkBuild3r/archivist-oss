@@ -58,6 +58,9 @@ PARENT_CHUNK_SIZE = int(os.getenv("PARENT_CHUNK_SIZE", "2000"))
 PARENT_CHUNK_OVERLAP = int(os.getenv("PARENT_CHUNK_OVERLAP", "200"))
 CHILD_CHUNK_SIZE = int(os.getenv("CHILD_CHUNK_SIZE", "500"))
 CHILD_CHUNK_OVERLAP = int(os.getenv("CHILD_CHUNK_OVERLAP", "100"))
+# "semantic": heading-aligned, code-block-preserving parent splits (default).
+# "fixed":    legacy paragraph-accumulation parent splits (for regression testing).
+CHUNKING_STRATEGY = os.getenv("CHUNKING_STRATEGY", "semantic")
 
 # ── Retrieval ─────────────────────────────────────────────────────────────────
 RETRIEVAL_THRESHOLD = float(os.getenv("RETRIEVAL_THRESHOLD", "0.65"))
@@ -174,7 +177,11 @@ BM25_WEIGHT = float(os.getenv("BM25_WEIGHT", "0.3"))
 VECTOR_WEIGHT = float(os.getenv("VECTOR_WEIGHT", "0.7"))
 
 # ── Needle-finding: query expansion + dynamic threshold (v1.10) ──────────────
-QUERY_EXPANSION_ENABLED = _env_bool("QUERY_EXPANSION_ENABLED", "true")
+# Query expansion is disabled by default.  Benchmarking showed it adds ~6 seconds
+# of LLM latency per query for <1pp recall improvement on small/medium corpora.
+# Enable with QUERY_EXPANSION_ENABLED=true only if you have a fast local LLM and
+# evidence that expansion helps your specific corpus.
+QUERY_EXPANSION_ENABLED = _env_bool("QUERY_EXPANSION_ENABLED", "false")
 QUERY_EXPANSION_COUNT = int(os.getenv("QUERY_EXPANSION_COUNT", "3"))
 QUERY_EXPANSION_MODEL = os.getenv("QUERY_EXPANSION_MODEL", "").strip()
 DYNAMIC_THRESHOLD_ENABLED = _env_bool("DYNAMIC_THRESHOLD_ENABLED", "true")
@@ -185,6 +192,18 @@ CONTEXTUAL_AUGMENTATION_ENABLED = _env_bool("CONTEXTUAL_AUGMENTATION_ENABLED", "
 # ── Reverse HyDE: write-time question generation (v2.0) ──────────────────────
 REVERSE_HYDE_ENABLED = _env_bool("REVERSE_HYDE_ENABLED", "true")
 REVERSE_HYDE_QUESTIONS_PER_CHUNK = int(os.getenv("REVERSE_HYDE_QUESTIONS_PER_CHUNK", "3"))
+
+# ── Synthetic question generation: index-time multi-representation (v2.1) ────
+SYNTHETIC_QUESTIONS_ENABLED = _env_bool("SYNTHETIC_QUESTIONS_ENABLED", "false")
+SYNTHETIC_QUESTIONS_COUNT = int(os.getenv("SYNTHETIC_QUESTIONS_COUNT", "4"))
+
+# ── Cross-encoder reranker (v2.2 — Phase 2 of v2 retrieval architecture) ─────
+# When enabled, candidates from the nomination step (vector, BM25, graph, needle)
+# are scored by a cross-encoder model instead of flowing through the
+# temporal-decay → hotness → threshold → rescue pipeline.
+RERANKER_ENABLED = _env_bool("RERANKER_ENABLED", "false")
+RERANKER_MODEL = os.getenv("RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
+RERANKER_TOP_K = int(os.getenv("RERANKER_TOP_K", "20"))
 
 # ── Micro-chunk limits (v1.10 — prevent unbounded store latency) ─────────────
 MAX_MICRO_CHUNKS_PER_MEMORY = int(os.getenv("MAX_MICRO_CHUNKS_PER_MEMORY", "5"))
@@ -272,6 +291,8 @@ def _log_feature_flags() -> None:
         "TEMPORAL_INTENT_ENABLED": TEMPORAL_INTENT_ENABLED,
         "BM25_RESCUE_ENABLED": BM25_RESCUE_ENABLED,
         "ADAPTIVE_VECTOR_LIMIT_ENABLED": ADAPTIVE_VECTOR_LIMIT_ENABLED,
+        "SYNTHETIC_QUESTIONS_ENABLED": SYNTHETIC_QUESTIONS_ENABLED,
+        "RERANKER_ENABLED": RERANKER_ENABLED,
         "NAMESPACE_SHARDING_ENABLED": NAMESPACE_SHARDING_ENABLED,
         "SINGLE_COLLECTION_MODE": SINGLE_COLLECTION_MODE,
         "QUERY_CLASSIFICATION_ENABLED": QUERY_CLASSIFICATION_ENABLED,

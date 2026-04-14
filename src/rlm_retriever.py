@@ -34,6 +34,8 @@ from config import (
     QUERY_EXPANSION_ENABLED, QUERY_EXPANSION_COUNT, QUERY_EXPANSION_MODEL,
     DYNAMIC_THRESHOLD_ENABLED,
     QDRANT_SEARCH_EF, LATENCY_BUDGET_MS,
+    RERANKER_ENABLED, RERANKER_MODEL, RERANKER_TOP_K,
+    SYNTHETIC_QUESTIONS_ENABLED,
 )
 from embeddings import embed_text, embed_batch
 from llm import llm_query
@@ -156,6 +158,7 @@ def _literal_search_sync(
                 "chunk_index": p.get("chunk_index", 0),
                 "parent_id": p.get("parent_id"),
                 "is_parent": p.get("is_parent", False),
+                "parent_text": p.get("parent_text", ""),
                 "importance_score": p.get("importance_score", 0.5),
                 "retention_class": p.get("retention_class", "standard"),
                 "topic": p.get("topic", ""),
@@ -321,8 +324,9 @@ async def _refine_one_chunk(
     """Run LLM refinement for one chunk. Concurrency is capped by ``_refine_sem``."""
     async with _refine_sem:
         context = select_tier(hit, tier)
-        if hit.get("parent_context") and tier == "l2":
-            context = f"[Parent context]\n{hit['parent_context']}\n\n[Matched chunk]\n{context}"
+        parent_ctx = hit.get("parent_text", "")
+        if parent_ctx and tier == "l2":
+            context = f"[Parent context]\n{parent_ctx}\n\n[Matched chunk]\n{context}"
 
         graph_extra = ""
         if hit.get("graph_context"):
@@ -474,6 +478,10 @@ async def search_vectors(
         FieldCondition(key="archived", match=MatchValue(value=True)),
         FieldCondition(key="deleted", match=MatchValue(value=True)),
     ]
+    if not SYNTHETIC_QUESTIONS_ENABLED:
+        must_not_filters.append(
+            FieldCondition(key="representation_type", match=MatchValue(value="synthetic_question")),
+        )
     search_filter = Filter(must=must_filters, must_not=must_not_filters)
     fetch_limit = limit * 3 if _date_range_active else limit
 
@@ -523,10 +531,14 @@ async def search_vectors(
             "chunk_index": hit.payload.get("chunk_index", 0),
             "parent_id": hit.payload.get("parent_id"),
             "is_parent": hit.payload.get("is_parent", False),
+            "parent_text": hit.payload.get("parent_text", ""),
             "importance_score": hit.payload.get("importance_score", 0.5),
             "retention_class": hit.payload.get("retention_class", "standard"),
             "topic": hit.payload.get("topic", ""),
             "thought_type": hit.payload.get("thought_type", ""),
+            "representation_type": hit.payload.get("representation_type", "chunk"),
+            "synthetic_question": hit.payload.get("synthetic_question", ""),
+            "source_memory_id": hit.payload.get("source_memory_id", ""),
         }
         for hit in results
     ]
@@ -573,35 +585,6 @@ async def _apply_rerank(query: str, results: list[dict]) -> list[dict]:
     except Exception as e:
         logger.warning("Reranking failed, using original order: %s", e)
         return results
-
-
-async def enrich_with_parent(results: list[dict]) -> list[dict]:
-    """For child chunks, fetch and attach the parent chunk text for richer context."""
-    parent_ids = {r["parent_id"] for r in results if r.get("parent_id") and not r.get("is_parent")}
-    if not parent_ids:
-        return results
-
-    ns = next((r.get("namespace", "") for r in results if r.get("parent_id")), "")
-    _coll = collection_for(ns)
-
-    client = qdrant_client()
-    try:
-        parents = client.retrieve(
-            collection_name=_coll,
-            ids=list(parent_ids),
-            with_payload=True,
-        )
-        parent_map = {str(p.id): p.payload.get("text", "") for p in parents}
-    except Exception as e:
-        logger.warning("Parent enrichment failed: %s", e)
-        return results
-
-    for r in results:
-        pid = r.get("parent_id")
-        if pid and pid in parent_map:
-            r["parent_context"] = parent_map[pid]
-
-    return results
 
 
 def _observe_search_results(namespace: str, sources: list | None) -> None:
@@ -669,6 +652,7 @@ async def recursive_retrieve(
     n_graph_entities = 0
     n_graph_items = 0
     n_bm25_rescue = 0
+    n_synthetic_hits = 0
     was_adaptive_widened = False
     was_cross_agent_capped = False
 
@@ -689,6 +673,7 @@ async def recursive_retrieve(
             "hyde_used": _hyde_used,
             "needle_query_detected": _needle_query_detected,
             "needle_registry_hits": len(_registry_hits),
+            "synthetic_hits": n_synthetic_hits,
             "iterative_retry": _is_retry,
             "latency_budget_ms": _budget.remaining_ms(),
         }
@@ -878,13 +863,18 @@ async def recursive_retrieve(
         )
 
     # Merge all vector variant results + literal + registry via RRF
+    # v2 path (RERANKER_ENABLED) does its own ID-based dedup from raw sources
+    # so we only do RRF merge for the legacy path; both paths still compute n_coarse.
     non_empty_rankings = [r for r in vec_results if r]
     if literal_hits:
         non_empty_rankings.append(literal_hits)
     if _registry_hits:
         non_empty_rankings.append(_registry_hits)
-    if len(non_empty_rankings) > 1:
-        coarse = rrf_merge(non_empty_rankings, k=60)
+
+    if RERANKER_ENABLED:
+        coarse = [item for sublist in non_empty_rankings for item in sublist]
+    elif len(non_empty_rankings) > 1:
+        coarse = rrf_merge(non_empty_rankings, k=20)
         for r in coarse:
             if "score" not in r or r.get("rrf_score", 0) > r.get("score", 0):
                 r["score"] = r["rrf_score"]
@@ -896,11 +886,17 @@ async def recursive_retrieve(
     _stage_timings["vector_ms"] = round((time.monotonic() - _t_vec) * 1000, 1)
     n_coarse = len(coarse)
 
-    # Merge BM25 results (already retrieved in parallel above)
     n_bm25 = len(bm25_hits)
-    if bm25_hits:
+    if bm25_hits and not RERANKER_ENABLED:
         coarse = merge_vector_and_bm25(coarse, bm25_hits)
     _stage_timings["bm25_ms"] = round((time.monotonic() - _t_vec) * 1000, 1)
+
+    logger.debug(
+        "POST-FUSION coarse=%d bm25=%d top5_scores=%s top3_paths=%s",
+        len(coarse), n_bm25,
+        [round(r.get("score", 0), 4) for r in coarse[:5]],
+        [r.get("file_path", "?") for r in coarse[:3]],
+    )
 
     # Stage 1a: Graph augmentation (v0.5)
     detected_entities: list[dict] = []
@@ -915,13 +911,13 @@ async def recursive_retrieve(
                 depth=MULTI_HOP_DEPTH,
             )
             n_graph_items = len(graph_items)
-            if graph_items:
+            if graph_items and not RERANKER_ENABLED:
                 coarse = merge_graph_context_into_results(coarse, graph_items)
     _stage_timings["graph_ms"] = round((time.monotonic() - _t_graph) * 1000, 1)
 
-    # Late HyDE pass: if regex-only check missed but broadened check (short + no entities) passes,
-    # generate HyDE doc and inject as an extra vector search to rescue needle results.
-    if (not _is_retry and not _hyde_used
+    # Late HyDE pass — legacy path only; v2 path relies on the nomination pool
+    if (not RERANKER_ENABLED
+            and not _is_retry and not _hyde_used
             and is_needle_query(query, entity_count=n_graph_entities)
             and _budget.can_afford(150) and _cached_query_vec is not None):
         try:
@@ -963,197 +959,336 @@ async def recursive_retrieve(
         _observe_search_results(namespace, [])
         return empty
 
-    # ── Post-retrieval processing (dedupe → threshold → rerank → enrich) ──
+    # ── Post-retrieval processing ──
     _t_post = time.monotonic()
 
-    # Stage 1b: Dedupe (important when merging multi-agent results)
-    coarse = dedupe_vector_hits(coarse)
-    n_dedupe = len(coarse)
+    if RERANKER_ENABLED:
+        # ══════════════════════════════════════════════════════════════════
+        # v2 CLEAN PATH: nominate → ID-dedupe → parent enrich → rerank → top-K
+        # The cross-encoder is the single source of truth for ranking.
+        # No RRF, no threshold, no temporal decay, no hotness, no rescue.
+        # ══════════════════════════════════════════════════════════════════
 
-    # Stage 1c: Temporal decay (v0.5, intent-aware v1.9)
-    temporal_applied = False
-    if TEMPORAL_DECAY_HALFLIFE_DAYS > 0:
-        coarse = apply_temporal_decay(
-            coarse, TEMPORAL_DECAY_HALFLIFE_DAYS, temporal_intent=temporal_intent,
+        # Nomination: collect ALL candidates into a pool, dedupe by Qdrant point ID.
+        # Sources were already gathered in parallel above (vec_results, bm25_hits,
+        # literal_hits, _registry_hits).  We flatten everything into one list
+        # and keep the best score per unique point ID.
+        candidate_pool: dict[str, dict] = {}
+        _all_nomination_sources = []
+        for vr in vec_results:
+            _all_nomination_sources.extend(vr)
+        if bm25_hits:
+            _all_nomination_sources.extend(bm25_hits)
+        if literal_hits:
+            _all_nomination_sources.extend(literal_hits)
+        if _registry_hits:
+            _all_nomination_sources.extend(_registry_hits)
+
+        for r in _all_nomination_sources:
+            rid = str(r.get("id") or r.get("qdrant_id") or "")
+            if not rid:
+                fp = r.get("file_path", "")
+                ci = r.get("chunk_index", 0)
+                rid = f"{fp}:{ci}"
+            existing = candidate_pool.get(rid)
+            if existing is None:
+                candidate_pool[rid] = dict(r)
+            elif r.get("score", 0) > existing.get("score", 0):
+                candidate_pool[rid] = dict(r)
+            if r.get("representation_type") == "synthetic_question":
+                candidate_pool[rid]["synthetic_match"] = True
+            if r.get("needle_registry_hit"):
+                candidate_pool[rid]["needle_registry_hit"] = True
+
+        pool = list(candidate_pool.values())
+        n_dedupe = len(pool)
+        n_synthetic_hits = sum(1 for r in pool if r.get("synthetic_match"))
+
+        # Graph entity facts: inject as additional candidates (not score modifiers)
+        if GRAPH_RETRIEVAL_ENABLED and detected_entities:
+            entity_facts = build_entity_fact_results(detected_entities, min_score=0.0)
+            for ef in entity_facts:
+                efid = str(ef.get("id", ""))
+                if efid and efid not in candidate_pool:
+                    candidate_pool[efid] = ef
+                    pool.append(ef)
+
+        if not pool:
+            _stage_timings["postprocess_ms"] = round((time.monotonic() - _t_post) * 1000, 1)
+            empty_pool = {
+                "answer": "No relevant memories found.",
+                "sources": [],
+                "chunks_searched": n_coarse,
+                "agents_scoped": agent_ids or ([agent_id] if agent_id else []),
+                "retrieval_trace": _retrieval_trace(
+                    vector_limit=vector_limit, coarse_count=n_coarse,
+                    deduped_count=0, threshold=0.0, after_threshold_count=0,
+                    after_rerank_count=0, parent_enriched=False, refinement_chunks=0,
+                    graph_entities_found=n_graph_entities, graph_context_items=n_graph_items,
+                    tier=tier, bm25_hits=n_bm25, stage_timings=_stage_timings,
+                    reranker_enabled=True, reranker_model=RERANKER_MODEL,
+                    **_trace_kw(),
+                ),
+            }
+            _attach_stage0(empty_pool, stage0_inventory, auto_type, user_memory_type)
+            _observe_search_results(namespace, [])
+            return empty_pool
+
+        # Cross-encoder rerank: the sole ranking authority
+        # Parent text is already stored in the payload at index time — no runtime fetch needed
+        from reranker import rerank_candidates
+        reranked = await rerank_candidates(
+            query, pool,
+            model_name=RERANKER_MODEL,
+            top_k=RERANKER_TOP_K,
         )
-        temporal_applied = True
+        n_rerank = len(reranked)
+        filtered = reranked
 
-    # Stage 1d–1e: Scoring — LTR model (v1.10) or hand-tuned pipeline
-    _ltr_used = False
-    if ltr_available():
-        coarse = ltr_rank_results(coarse)
-        _ltr_used = True
-    else:
-        coarse = apply_hotness_to_results(coarse)
-        coarse = apply_importance_to_results(coarse)
-
-    # Stage 2: Threshold filter (Phase 1, dynamic v1.10)
-    if DYNAMIC_THRESHOLD_ENABLED:
-        filtered = apply_dynamic_threshold(coarse, effective_threshold)
-    else:
-        filtered = apply_retrieval_threshold(coarse, effective_threshold)
-
-    # Stage 2-rescue: Adaptive vector limit (v1.9)
-    if (ADAPTIVE_VECTOR_LIMIT_ENABLED
-            and len(filtered) < ADAPTIVE_VECTOR_MIN_RESULTS
-            and n_coarse >= vector_limit):
-        wider_limit = int(vector_limit * ADAPTIVE_VECTOR_LIMIT_MULTIPLIER)
-        wider_coarse = await search_vectors(
-            query, agent_id=agent_id, agent_ids=agent_ids, team=team,
-            namespace=namespace, date_from=date_from, date_to=date_to,
-            memory_type=effective_memory_type, limit=wider_limit,
-            _query_vec=_cached_query_vec,
-        )
-        if len(wider_coarse) > n_coarse:
-            was_adaptive_widened = True
-            wider_coarse = dedupe_vector_hits(wider_coarse)
-            if TEMPORAL_DECAY_HALFLIFE_DAYS > 0:
-                wider_coarse = apply_temporal_decay(
-                    wider_coarse, TEMPORAL_DECAY_HALFLIFE_DAYS,
-                    temporal_intent=temporal_intent,
-                )
-            wider_coarse = apply_hotness_to_results(wider_coarse)
-            wider_coarse = apply_importance_to_results(wider_coarse)
-            wider_filtered = apply_retrieval_threshold(wider_coarse, effective_threshold)
-            filtered, _ = _merge_into_results(filtered, wider_filtered)
-
-    # Stage 2-bm25-rescue: BM25 rescue slots (v1.9, needle-boosted v1.11)
-    if BM25_RESCUE_ENABLED and BM25_ENABLED and n_bm25 > 0:
-        bm25_max = max((r.get("bm25_score", 0) for r in coarse if r.get("bm25_score")), default=0)
-        if bm25_max > 0:
-            rescue_threshold = bm25_max * BM25_RESCUE_MIN_SCORE_RATIO
-            rescue_slots = 7 if _needle_query_detected else BM25_RESCUE_MAX_SLOTS
-            rescue_candidates = [
-                r for r in coarse
-                if r.get("bm25_score", 0) >= rescue_threshold
-            ][:rescue_slots]
-            filtered, n_bm25_rescue = _merge_into_results(
-                filtered, rescue_candidates,
-                min_score=effective_threshold, tag="bm25_rescue",
-            )
-
-    # Stage 2-xagent: Cross-agent rank guards (v1.9)
-    if agent_ids and len(agent_ids) > 1 and CROSS_AGENT_MAX_SHARE < 1.0 and filtered:
-        max_per_agent = max(1, int(len(filtered) * CROSS_AGENT_MAX_SHARE))
-        agent_counts: dict[str, int] = {}
-        guarded: list[dict] = []
-        overflow: list[dict] = []
-        for r in filtered:
-            aid = r.get("agent_id", "")
-            cnt = agent_counts.get(aid, 0)
-            if cnt < max_per_agent:
-                guarded.append(r)
-                agent_counts[aid] = cnt + 1
-            else:
-                overflow.append(r)
-                was_cross_agent_capped = True
-        guarded.extend(overflow)
-        filtered = guarded
-
-    # Stage 2a: Entity fact injection (v1.7) — guaranteed recall for known entities
-    # Vector-first preservation (v1.8): top vector results are never displaced.
-    n_entity_facts_injected = 0
-    if GRAPH_RETRIEVAL_ENABLED and detected_entities:
-        entity_facts = build_entity_fact_results(
-            detected_entities, min_score=effective_threshold + 0.05,
-            as_of=date_from,
-        )
-        if entity_facts:
-            filtered, n_entity_facts_injected = _merge_into_results(
-                filtered, entity_facts,
-                preserve_top_n=min(5, max(limit // 2, 1)),
-            )
-
-    if not filtered:
         _stage_timings["postprocess_ms"] = round((time.monotonic() - _t_post) * 1000, 1)
-        below = {
-            "status": "below_threshold",
-            "answer": "",
-            "sources": [],
-            "chunks_searched": n_coarse,
-            "threshold": effective_threshold,
-            "best_score": max(r["score"] for r in coarse) if coarse else 0,
-            "agents_scoped": agent_ids or ([agent_id] if agent_id else []),
-            "retrieval_trace": _retrieval_trace(
-                vector_limit=vector_limit,
-                coarse_count=n_coarse,
-                deduped_count=n_dedupe,
-                threshold=effective_threshold,
-                after_threshold_count=0,
-                after_rerank_count=0,
-                parent_enriched=False,
-                refinement_chunks=0,
-                graph_entities_found=n_graph_entities,
-                graph_context_items=n_graph_items,
-                temporal_decay_applied=temporal_applied,
-                tier=tier,
-                bm25_hits=n_bm25,
-                stage_timings=_stage_timings,
-                **_trace_kw(),
-            ),
-        }
-        _attach_stage0(below, stage0_inventory, auto_type, user_memory_type)
-        _observe_search_results(namespace, [])
-        return below
+        _common_trace = dict(
+            vector_limit=vector_limit,
+            coarse_count=n_coarse,
+            deduped_count=n_dedupe,
+            threshold=0.0,
+            after_threshold_count=len(filtered),
+            after_rerank_count=n_rerank,
+            parent_enriched=any(r.get("parent_text") for r in filtered),
+            refinement_chunks=0,
+            graph_entities_found=n_graph_entities,
+            graph_context_items=n_graph_items,
+            entity_facts_injected=0,
+            temporal_decay_applied=False,
+            tier=tier,
+            outcome_adjustments=0,
+            context_status=None,
+            bm25_hits=n_bm25,
+            stage_timings=_stage_timings,
+            reranker_enabled=True,
+            reranker_model=RERANKER_MODEL,
+            nomination_pool_size=len(pool),
+            **_trace_kw(),
+        )
+    else:
+        # ══════════════════════════════════════════════════════════════════
+        # LEGACY PATH (RERANKER_ENABLED=False)
+        # Kept intact for shadow comparison during migration.
+        # ══════════════════════════════════════════════════════════════════
 
-    # Stage 2b: Outcome-aware scoring (v0.6)
-    n_outcome_adj = 0
-    filtered_ids = [str(r.get("id", "")) for r in filtered if r.get("id")]
-    if filtered_ids:
-        try:
-            adjustments = get_outcome_adjustments(filtered_ids)
-            for r in filtered:
-                adj = adjustments.get(str(r.get("id", "")), 0.0)
-                if adj != 0.0:
-                    r["outcome_adjustment"] = adj
-                    r["score"] = r.get("score", 0) + adj
-                    n_outcome_adj += 1
-            if n_outcome_adj:
-                filtered.sort(key=lambda x: x.get("score", 0), reverse=True)
-        except Exception as e:
-            logger.debug("Outcome adjustments skipped: %s", e)
+        # Legacy merging: RRF + BM25 merge (already done above in coarse)
+        coarse = dedupe_vector_hits(coarse)
+        n_dedupe = len(coarse)
+        n_synthetic_hits = sum(1 for r in coarse if r.get("synthetic_match"))
 
-    # Stage 3: Rerank (Phase 1)
-    reranked = await _apply_rerank(query, filtered)
-    n_rerank = len(reranked)
-
-    # Stage 3a: Iterative retrieval — auto-reformulate on low-confidence (v1.10)
-    # Budget-gated: retry requires another full pipeline pass (~200ms)
-    _ITERATIVE_THRESHOLD = 0.45
-    if (not _is_retry
-            and reranked
-            and max(r.get("score", 0) for r in reranked) < _ITERATIVE_THRESHOLD
-            and _budget.can_afford(200)):
-        try:
-            snippets = " | ".join(
-                (r.get("text", "") or "")[:80] for r in reranked[:3]
+        # Stage 1c: Temporal decay (v0.5, intent-aware v1.9)
+        temporal_applied = False
+        if TEMPORAL_DECAY_HALFLIFE_DAYS > 0:
+            coarse = apply_temporal_decay(
+                coarse, TEMPORAL_DECAY_HALFLIFE_DAYS, temporal_intent=temporal_intent,
             )
-            reformulated = await llm_query(
-                f"The search query '{query}' returned low-relevance results: [{snippets}]. "
-                "Suggest a single, better search query to find the answer. Return ONLY the query.",
-                system="You are a search query optimizer. Return only the improved query, nothing else.",
-                max_tokens=64,
-                model=LLM_REFINE_MODEL or LLM_MODEL,
-                stage="iterative_retrieval",
+            temporal_applied = True
+
+        # Stage 1d–1e: Scoring — LTR model (v1.10) or hand-tuned pipeline
+        _ltr_used = False
+        if ltr_available():
+            coarse = ltr_rank_results(coarse)
+            _ltr_used = True
+        else:
+            coarse = apply_hotness_to_results(coarse)
+            coarse = apply_importance_to_results(coarse)
+
+        # Stage 2: Threshold filter (Phase 1, dynamic v1.10)
+        if DYNAMIC_THRESHOLD_ENABLED:
+            filtered = apply_dynamic_threshold(coarse, effective_threshold)
+        else:
+            filtered = apply_retrieval_threshold(coarse, effective_threshold)
+
+        # Stage 2-rescue: Adaptive vector limit (v1.9)
+        if (ADAPTIVE_VECTOR_LIMIT_ENABLED
+                and len(filtered) < ADAPTIVE_VECTOR_MIN_RESULTS
+                and n_coarse >= vector_limit):
+            wider_limit = int(vector_limit * ADAPTIVE_VECTOR_LIMIT_MULTIPLIER)
+            wider_coarse = await search_vectors(
+                query, agent_id=agent_id, agent_ids=agent_ids, team=team,
+                namespace=namespace, date_from=date_from, date_to=date_to,
+                memory_type=effective_memory_type, limit=wider_limit,
+                _query_vec=_cached_query_vec,
             )
-            reformulated = reformulated.strip().strip('"').strip("'")
-            if reformulated and reformulated.lower() != query.lower():
-                logger.debug("Iterative retrieval: reformulated %r -> %r", query, reformulated)
-                _stage_timings["postprocess_ms"] = round((time.monotonic() - _t_post) * 1000, 1)
-                return await recursive_retrieve(
-                    reformulated,
-                    agent_id=agent_id, agent_ids=agent_ids, team=team,
-                    namespace=namespace, limit=limit, refine=refine,
-                    threshold=threshold, tier=tier,
-                    date_from=date_from, date_to=date_to,
-                    max_tokens=max_tokens, memory_type=memory_type,
-                    _is_retry=True,
+            if len(wider_coarse) > n_coarse:
+                was_adaptive_widened = True
+                wider_coarse = dedupe_vector_hits(wider_coarse)
+                if TEMPORAL_DECAY_HALFLIFE_DAYS > 0:
+                    wider_coarse = apply_temporal_decay(
+                        wider_coarse, TEMPORAL_DECAY_HALFLIFE_DAYS,
+                        temporal_intent=temporal_intent,
+                    )
+                wider_coarse = apply_hotness_to_results(wider_coarse)
+                wider_coarse = apply_importance_to_results(wider_coarse)
+                wider_filtered = apply_retrieval_threshold(wider_coarse, effective_threshold)
+                filtered, _ = _merge_into_results(filtered, wider_filtered)
+
+        # Stage 2-bm25-rescue: BM25 rescue slots (v1.9, needle-boosted v1.11)
+        if BM25_RESCUE_ENABLED and BM25_ENABLED and n_bm25 > 0:
+            bm25_max = max((r.get("bm25_score", 0) for r in coarse if r.get("bm25_score")), default=0)
+            if bm25_max > 0:
+                rescue_threshold = bm25_max * BM25_RESCUE_MIN_SCORE_RATIO
+                rescue_slots = 7 if _needle_query_detected else BM25_RESCUE_MAX_SLOTS
+                rescue_candidates = [
+                    r for r in coarse
+                    if r.get("bm25_score", 0) >= rescue_threshold
+                ][:rescue_slots]
+                filtered, n_bm25_rescue = _merge_into_results(
+                    filtered, rescue_candidates,
+                    min_score=effective_threshold, tag="bm25_rescue",
                 )
-        except Exception as e:
-            logger.debug("Iterative retrieval reformulation failed: %s", e)
 
-    # Stage 4: Parent-child enrichment (Phase 1)
-    enriched = await enrich_with_parent(reranked)
+        # Stage 2-xagent: Cross-agent rank guards (v1.9)
+        if agent_ids and len(agent_ids) > 1 and CROSS_AGENT_MAX_SHARE < 1.0 and filtered:
+            max_per_agent = max(1, int(len(filtered) * CROSS_AGENT_MAX_SHARE))
+            agent_counts: dict[str, int] = {}
+            guarded: list[dict] = []
+            overflow: list[dict] = []
+            for r in filtered:
+                aid = r.get("agent_id", "")
+                cnt = agent_counts.get(aid, 0)
+                if cnt < max_per_agent:
+                    guarded.append(r)
+                    agent_counts[aid] = cnt + 1
+                else:
+                    overflow.append(r)
+                    was_cross_agent_capped = True
+            guarded.extend(overflow)
+            filtered = guarded
+
+        # Stage 2a: Entity fact injection (v1.7) — guaranteed recall for known entities
+        n_entity_facts_injected = 0
+        if GRAPH_RETRIEVAL_ENABLED and detected_entities:
+            entity_facts = build_entity_fact_results(
+                detected_entities, min_score=effective_threshold + 0.05,
+                as_of=date_from,
+            )
+            if entity_facts:
+                filtered, n_entity_facts_injected = _merge_into_results(
+                    filtered, entity_facts,
+                    preserve_top_n=min(5, max(limit // 2, 1)),
+                )
+
+        if not filtered:
+            _stage_timings["postprocess_ms"] = round((time.monotonic() - _t_post) * 1000, 1)
+            below = {
+                "status": "below_threshold",
+                "answer": "",
+                "sources": [],
+                "chunks_searched": n_coarse,
+                "threshold": effective_threshold,
+                "best_score": max(r["score"] for r in coarse) if coarse else 0,
+                "agents_scoped": agent_ids or ([agent_id] if agent_id else []),
+                "retrieval_trace": _retrieval_trace(
+                    vector_limit=vector_limit,
+                    coarse_count=n_coarse,
+                    deduped_count=n_dedupe,
+                    threshold=effective_threshold,
+                    after_threshold_count=0,
+                    after_rerank_count=0,
+                    parent_enriched=False,
+                    refinement_chunks=0,
+                    graph_entities_found=n_graph_entities,
+                    graph_context_items=n_graph_items,
+                    temporal_decay_applied=temporal_applied,
+                    tier=tier,
+                    bm25_hits=n_bm25,
+                    stage_timings=_stage_timings,
+                    **_trace_kw(),
+                ),
+            }
+            _attach_stage0(below, stage0_inventory, auto_type, user_memory_type)
+            _observe_search_results(namespace, [])
+            return below
+
+        # Stage 2b: Outcome-aware scoring (v0.6)
+        n_outcome_adj = 0
+        filtered_ids = [str(r.get("id", "")) for r in filtered if r.get("id")]
+        if filtered_ids:
+            try:
+                adjustments = get_outcome_adjustments(filtered_ids)
+                for r in filtered:
+                    adj = adjustments.get(str(r.get("id", "")), 0.0)
+                    if adj != 0.0:
+                        r["outcome_adjustment"] = adj
+                        r["score"] = r.get("score", 0) + adj
+                        n_outcome_adj += 1
+                if n_outcome_adj:
+                    filtered.sort(key=lambda x: x.get("score", 0), reverse=True)
+            except Exception as e:
+                logger.debug("Outcome adjustments skipped: %s", e)
+
+        # Stage 3: Rerank (legacy RERANK_ENABLED path — separate from RERANKER_ENABLED)
+        reranked = await _apply_rerank(query, filtered)
+        n_rerank = len(reranked)
+
+        # Stage 3a: Iterative retrieval — auto-reformulate on low-confidence (v1.10)
+        _ITERATIVE_THRESHOLD = 0.45
+        if (not _is_retry
+                and reranked
+                and max(r.get("score", 0) for r in reranked) < _ITERATIVE_THRESHOLD
+                and _budget.can_afford(200)):
+            try:
+                snippets = " | ".join(
+                    (r.get("text", "") or "")[:80] for r in reranked[:3]
+                )
+                reformulated = await llm_query(
+                    f"The search query '{query}' returned low-relevance results: [{snippets}]. "
+                    "Suggest a single, better search query to find the answer. Return ONLY the query.",
+                    system="You are a search query optimizer. Return only the improved query, nothing else.",
+                    max_tokens=64,
+                    model=LLM_REFINE_MODEL or LLM_MODEL,
+                    stage="iterative_retrieval",
+                )
+                reformulated = reformulated.strip().strip('"').strip("'")
+                if reformulated and reformulated.lower() != query.lower():
+                    logger.debug("Iterative retrieval: reformulated %r -> %r", query, reformulated)
+                    _stage_timings["postprocess_ms"] = round((time.monotonic() - _t_post) * 1000, 1)
+                    return await recursive_retrieve(
+                        reformulated,
+                        agent_id=agent_id, agent_ids=agent_ids, team=team,
+                        namespace=namespace, limit=limit, refine=refine,
+                        threshold=threshold, tier=tier,
+                        date_from=date_from, date_to=date_to,
+                        max_tokens=max_tokens, memory_type=memory_type,
+                        _is_retry=True,
+                    )
+            except Exception as e:
+                logger.debug("Iterative retrieval reformulation failed: %s", e)
+
+        # Stage 4: Parent text is now stored at index time; no runtime enrichment needed
+        enriched = reranked
+
+        _stage_timings["postprocess_ms"] = round((time.monotonic() - _t_post) * 1000, 1)
+        _common_trace = dict(
+            vector_limit=vector_limit,
+            coarse_count=n_coarse,
+            deduped_count=n_dedupe,
+            threshold=effective_threshold,
+            after_threshold_count=len(filtered),
+            after_rerank_count=n_rerank,
+            parent_enriched=any(r.get("parent_text") for r in enriched),
+            refinement_chunks=0,
+            graph_entities_found=n_graph_entities,
+            graph_context_items=n_graph_items,
+            entity_facts_injected=n_entity_facts_injected,
+            temporal_decay_applied=temporal_applied,
+            tier=tier,
+            outcome_adjustments=n_outcome_adj,
+            context_status=None,
+            bm25_hits=n_bm25,
+            stage_timings=_stage_timings,
+            **_trace_kw(),
+        )
+
+    # ── Common tail: cap → refine → synthesize ──
+    if RERANKER_ENABLED:
+        enriched = filtered
+    # else: enriched was set in the legacy branch above
 
     # Cap how many chunks we refine (per-request limit)
     enriched = enriched[:limit]
@@ -1193,25 +1328,10 @@ async def recursive_retrieve(
 
     _stage_timings["postprocess_ms"] = round((time.monotonic() - _t_post) * 1000, 1)
 
-    _common_trace = dict(
-        vector_limit=vector_limit,
-        coarse_count=n_coarse,
-        deduped_count=n_dedupe,
-        threshold=effective_threshold,
-        after_threshold_count=len(filtered),
-        after_rerank_count=n_rerank,
-        parent_enriched=any(r.get("parent_context") for r in enriched),
+    _common_trace.update(
         refinement_chunks=n_refine,
-        graph_entities_found=n_graph_entities,
-        graph_context_items=n_graph_items,
-        entity_facts_injected=n_entity_facts_injected,
-        temporal_decay_applied=temporal_applied,
-        tier=tier,
-        outcome_adjustments=n_outcome_adj,
+        parent_enriched=any(r.get("parent_text") for r in enriched),
         context_status=_ctx_status,
-        bm25_hits=n_bm25,
-        stage_timings=_stage_timings,
-        **_trace_kw(),
     )
 
     if not refine:
@@ -1359,6 +1479,7 @@ async def recursive_retrieve(
             "hyde_used": _hyde_used,
             "ltr_used": _ltr_used,
             "bm25_rescue": n_bm25_rescue,
+            "synthetic_hits": n_synthetic_hits,
             "duration_ms": elapsed,
         },
     )

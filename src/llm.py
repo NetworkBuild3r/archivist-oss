@@ -79,8 +79,11 @@ async def llm_query(
     no key (e.g. Ollama doesn't require one).
     """
     messages = []
-    if system:
-        messages.append({"role": "system", "content": system})
+    effective_system = system
+    if model.startswith("qwen3") and not model.startswith("qwen3-embedding"):
+        effective_system = "/no_think\n" + effective_system if effective_system else "/no_think"
+    if effective_system:
+        messages.append({"role": "system", "content": effective_system})
     messages.append({"role": "user", "content": prompt})
 
     body: dict = {

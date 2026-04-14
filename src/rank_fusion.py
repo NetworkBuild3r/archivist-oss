@@ -14,9 +14,10 @@ Used by:
 
 def rrf_merge(
     rankings: list[list[dict]],
-    k: int = 60,
+    k: int = 20,
     id_key: str = "",
     limit: int = 0,
+    adaptive_k: bool = False,
 ) -> list[dict]:
     """Merge multiple ranked lists using Reciprocal Rank Fusion.
 
@@ -36,6 +37,10 @@ def rrf_merge(
             entry["rrf_score"] = 1.0 / (k + 1)
             out.append(entry)
         return out[:limit] if limit else out
+
+    if adaptive_k:
+        longest = max(len(r) for r in rankings)
+        k = max(1, min(longest // 15, 20))
 
     scores: dict[str, float] = {}
     best_copy: dict[str, dict] = {}

@@ -41,14 +41,12 @@ htmlcov/
 # Benchmark raw output (rendered report is in docs/BENCHMARKS.md)
 .benchmarks/
 
-# Benchmark source (private — bind-mounted at runtime, excluded from Docker image)
-benchmarks/
-
-# Generated scale corpora — these live under benchmarks/ above, kept for clarity
-# benchmarks/fixtures/corpus_small/
-# benchmarks/fixtures/corpus_medium/
-# benchmarks/fixtures/corpus_large/
-# benchmarks/fixtures/corpus_stress/
+# Large generated corpora + local caches (harness + questions + corpus_small are tracked)
+benchmarks/__pycache__/
+benchmarks/fixtures/__pycache__/
+benchmarks/fixtures/corpus_medium/
+benchmarks/fixtures/corpus_large/
+benchmarks/fixtures/corpus_stress/
 
 # Models (downloaded at runtime)
 models/

@@ -152,7 +152,7 @@ def invalidate_agent(agent_id: str) -> int:
 
 
 def invalidate_all() -> int:
-    """Clear all caches."""
+    """Clear all caches unconditionally."""
     with _lock:
         total = sum(len(c) for c in _agent_caches.values())
         _agent_caches.clear()
@@ -164,6 +164,10 @@ def invalidate_all() -> int:
     except Exception:
         pass
     return total
+
+
+# Alias for callers that want to be explicit about bypassing guards.
+force_invalidate_all = invalidate_all
 
 
 def stats() -> dict:

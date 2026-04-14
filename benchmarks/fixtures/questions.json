@@ -1,0 +1,1829 @@
+[
+  {
+    "id": 1,
+    "query": "What do we know about kubernetes?",
+    "query_type": "single_hop",
+    "expected_keywords": [
+      "kubernetes",
+      "k8s",
+      "cluster"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 2,
+    "query": "What is the current kubernetes setup?",
+    "query_type": "single_hop",
+    "expected_keywords": [
+      "kubernetes",
+      "k8s",
+      "cluster"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 3,
+    "query": "Describe the kubernetes configuration.",
+    "query_type": "single_hop",
+    "expected_keywords": [
+      "kubernetes",
+      "k8s",
+      "cluster"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 4,
+    "query": "Describe the kubernetes configuration.",
+    "query_type": "single_hop",
+    "expected_keywords": [
+      "kubernetes",
+      "k8s",
+      "cluster"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 5,
+    "query": "Describe the kubernetes configuration.",
+    "query_type": "single_hop",
+    "expected_keywords": [
+      "kubernetes",
+      "k8s",
+      "cluster"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 6,
+    "query": "What do we know about release?",
+    "query_type": "single_hop",
+    "expected_keywords": [
+      "pipeline",
+      "ci/cd",
+      "gitlab"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 7,
+    "query": "What do we know about build?",
+    "query_type": "single_hop",
+    "expected_keywords": [
+      "pipeline",
+      "ci/cd",
+      "gitlab"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 8,
+    "query": "Tell me the details about pipeline.",
+    "query_type": "single_hop",
+    "expected_keywords": [
+      "pipeline",
+      "ci/cd",
+      "gitlab"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 9,
+    "query": "What do we know about pipeline?",
+    "query_type": "single_hop",
+    "expected_keywords": [
+      "pipeline",
+      "ci/cd",
+      "gitlab"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 10,
+    "query": "Describe the cicd configuration.",
+    "query_type": "single_hop",
+    "expected_keywords": [
+      "pipeline",
+      "ci/cd",
+      "gitlab"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 11,
+    "query": "Describe the monitoring configuration.",
+    "query_type": "single_hop",
+    "expected_keywords": [
+      "prometheus",
+      "grafana",
+      "alert"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 12,
+    "query": "What do we know about dashboard?",
+    "query_type": "single_hop",
+    "expected_keywords": [
+      "prometheus",
+      "grafana",
+      "alert"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 13,
+    "query": "Describe the monitoring configuration.",
+    "query_type": "single_hop",
+    "expected_keywords": [
+      "prometheus",
+      "grafana",
+      "alert"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 14,
+    "query": "Tell me the details about grafana.",
+    "query_type": "single_hop",
+    "expected_keywords": [
+      "prometheus",
+      "grafana",
+      "alert"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 15,
+    "query": "Tell me the details about dashboard.",
+    "query_type": "single_hop",
+    "expected_keywords": [
+      "prometheus",
+      "grafana",
+      "alert"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 16,
+    "query": "What is the current database setup?",
+    "query_type": "single_hop",
+    "expected_keywords": [
+      "database",
+      "postgres",
+      "migration"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 17,
+    "query": "What do we know about postgres?",
+    "query_type": "single_hop",
+    "expected_keywords": [
+      "database",
+      "postgres",
+      "migration"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 18,
+    "query": "Tell me the details about migration.",
+    "query_type": "single_hop",
+    "expected_keywords": [
+      "database",
+      "postgres",
+      "migration"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 19,
+    "query": "What is the current database setup?",
+    "query_type": "single_hop",
+    "expected_keywords": [
+      "database",
+      "postgres",
+      "migration"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 20,
+    "query": "Describe the database configuration.",
+    "query_type": "single_hop",
+    "expected_keywords": [
+      "database",
+      "postgres",
+      "migration"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 21,
+    "query": "Describe the security configuration.",
+    "query_type": "single_hop",
+    "expected_keywords": [
+      "security",
+      "auth",
+      "rbac"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 22,
+    "query": "What is the current security setup?",
+    "query_type": "single_hop",
+    "expected_keywords": [
+      "security",
+      "auth",
+      "rbac"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 23,
+    "query": "What do we know about security?",
+    "query_type": "single_hop",
+    "expected_keywords": [
+      "security",
+      "auth",
+      "rbac"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 24,
+    "query": "Tell me the details about security.",
+    "query_type": "single_hop",
+    "expected_keywords": [
+      "security",
+      "auth",
+      "rbac"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 25,
+    "query": "What is the current security setup?",
+    "query_type": "single_hop",
+    "expected_keywords": [
+      "security",
+      "auth",
+      "rbac"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 26,
+    "query": "What is the current architecture setup?",
+    "query_type": "single_hop",
+    "expected_keywords": [
+      "microservice",
+      "api",
+      "kubernetes"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 27,
+    "query": "What is the current architecture setup?",
+    "query_type": "single_hop",
+    "expected_keywords": [
+      "microservice",
+      "api",
+      "kubernetes"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 28,
+    "query": "What do we know about service?",
+    "query_type": "single_hop",
+    "expected_keywords": [
+      "kubernetes",
+      "k8s",
+      "cluster",
+      "microservice",
+      "api"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 29,
+    "query": "Tell me the details about event.",
+    "query_type": "single_hop",
+    "expected_keywords": [
+      "microservice",
+      "api",
+      "gateway"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 30,
+    "query": "What do we know about queue?",
+    "query_type": "single_hop",
+    "expected_keywords": [
+      "microservice",
+      "api",
+      "gateway"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 31,
+    "query": "What do we know about unit?",
+    "query_type": "single_hop",
+    "expected_keywords": [
+      "test",
+      "coverage",
+      "integration"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 32,
+    "query": "What is the current testing setup?",
+    "query_type": "single_hop",
+    "expected_keywords": [
+      "test",
+      "coverage",
+      "integration"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 33,
+    "query": "What is the current testing setup?",
+    "query_type": "single_hop",
+    "expected_keywords": [
+      "test",
+      "coverage",
+      "integration"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 34,
+    "query": "Describe the testing configuration.",
+    "query_type": "single_hop",
+    "expected_keywords": [
+      "test",
+      "coverage",
+      "integration"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 35,
+    "query": "What do we know about test?",
+    "query_type": "single_hop",
+    "expected_keywords": [
+      "test",
+      "coverage",
+      "integration"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 36,
+    "query": "Describe the incident configuration.",
+    "query_type": "single_hop",
+    "expected_keywords": [
+      "incident",
+      "outage",
+      "rollback"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 37,
+    "query": "What is the current incident setup?",
+    "query_type": "single_hop",
+    "expected_keywords": [
+      "incident",
+      "outage",
+      "rollback"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 38,
+    "query": "What do we know about outage?",
+    "query_type": "single_hop",
+    "expected_keywords": [
+      "incident",
+      "outage",
+      "rollback"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 39,
+    "query": "What do we know about postmortem?",
+    "query_type": "single_hop",
+    "expected_keywords": [
+      "incident",
+      "outage",
+      "rollback"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 40,
+    "query": "What is the current incident setup?",
+    "query_type": "single_hop",
+    "expected_keywords": [
+      "incident",
+      "outage",
+      "rollback"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 41,
+    "query": "Tell me the details about cache.",
+    "query_type": "single_hop",
+    "expected_keywords": [
+      "latency",
+      "throughput",
+      "cache"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 42,
+    "query": "Describe the performance configuration.",
+    "query_type": "single_hop",
+    "expected_keywords": [
+      "latency",
+      "throughput",
+      "cache"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 43,
+    "query": "What is the current performance setup?",
+    "query_type": "single_hop",
+    "expected_keywords": [
+      "latency",
+      "throughput",
+      "cache"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 44,
+    "query": "What is the current performance setup?",
+    "query_type": "single_hop",
+    "expected_keywords": [
+      "latency",
+      "throughput",
+      "cache"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 45,
+    "query": "Describe the performance configuration.",
+    "query_type": "single_hop",
+    "expected_keywords": [
+      "latency",
+      "throughput",
+      "cache"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 46,
+    "query": "What is the current cost setup?",
+    "query_type": "single_hop",
+    "expected_keywords": [
+      "cost",
+      "budget",
+      "savings"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 47,
+    "query": "What do we know about billing?",
+    "query_type": "single_hop",
+    "expected_keywords": [
+      "cost",
+      "budget",
+      "savings"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 48,
+    "query": "Describe the cost configuration.",
+    "query_type": "single_hop",
+    "expected_keywords": [
+      "cost",
+      "budget",
+      "savings"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 49,
+    "query": "Describe the cost configuration.",
+    "query_type": "single_hop",
+    "expected_keywords": [
+      "cost",
+      "budget",
+      "savings"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 50,
+    "query": "Describe the cost configuration.",
+    "query_type": "single_hop",
+    "expected_keywords": [
+      "cost",
+      "budget",
+      "savings"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 51,
+    "query": "How does the monitoring stack observe the Kubernetes cluster?",
+    "query_type": "multi_hop",
+    "expected_keywords": [
+      "kubernetes",
+      "k8s",
+      "cluster"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 52,
+    "query": "What security measures protect the CI/CD pipeline?",
+    "query_type": "multi_hop",
+    "expected_keywords": [
+      "pipeline",
+      "ci/cd",
+      "gitlab",
+      "security",
+      "auth"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 53,
+    "query": "How does database optimization affect overall system performance?",
+    "query_type": "multi_hop",
+    "expected_keywords": [
+      "database",
+      "postgres",
+      "migration",
+      "latency",
+      "throughput"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 54,
+    "query": "How are microservices tested in the integration environment?",
+    "query_type": "multi_hop",
+    "expected_keywords": [
+      "kubernetes",
+      "k8s",
+      "cluster",
+      "microservice",
+      "api"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 55,
+    "query": "How do alerts relate to incident response?",
+    "query_type": "multi_hop",
+    "expected_keywords": [
+      "prometheus",
+      "grafana",
+      "alert",
+      "incident",
+      "outage"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 56,
+    "query": "What cost optimizations exist for Kubernetes compute?",
+    "query_type": "multi_hop",
+    "expected_keywords": [
+      "kubernetes",
+      "k8s",
+      "cluster",
+      "latency",
+      "throughput"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 57,
+    "query": "How is database access controlled and encrypted?",
+    "query_type": "multi_hop",
+    "expected_keywords": [
+      "database",
+      "postgres",
+      "migration"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 58,
+    "query": "How does the CI/CD pipeline deploy to Kubernetes?",
+    "query_type": "multi_hop",
+    "expected_keywords": [
+      "kubernetes",
+      "k8s",
+      "cluster",
+      "pipeline",
+      "ci/cd"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 59,
+    "query": "How does the API gateway handle high throughput?",
+    "query_type": "multi_hop",
+    "expected_keywords": [
+      "microservice",
+      "api",
+      "gateway",
+      "latency",
+      "throughput"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 60,
+    "query": "How are tests integrated into the CI pipeline?",
+    "query_type": "multi_hop",
+    "expected_keywords": [
+      "pipeline",
+      "ci/cd",
+      "gitlab",
+      "test",
+      "coverage"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 62,
+    "query": "What are the most recent changes to the deployment pipeline?",
+    "query_type": "temporal",
+    "expected_keywords": [
+      "kubernetes",
+      "k8s",
+      "cluster",
+      "pipeline",
+      "ci/cd"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 63,
+    "query": "What is the current state of production Kubernetes?",
+    "query_type": "temporal",
+    "expected_keywords": [
+      "kubernetes",
+      "k8s",
+      "cluster"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 64,
+    "query": "When was the last significant incident?",
+    "query_type": "temporal",
+    "expected_keywords": [
+      "incident",
+      "outage",
+      "rollback"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 65,
+    "query": "What security changes have been made recently?",
+    "query_type": "temporal",
+    "expected_keywords": [
+      "security",
+      "auth",
+      "rbac"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 66,
+    "query": "What is the Redis cache hit rate for the users table?",
+    "query_type": "adversarial",
+    "expected_keywords": [
+      "latency",
+      "throughput",
+      "cache"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 67,
+    "query": "How many pods are running in the staging cluster right now?",
+    "query_type": "adversarial",
+    "expected_keywords": [
+      "kubernetes",
+      "k8s",
+      "cluster"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 68,
+    "query": "What is the total number of microservices in production?",
+    "query_type": "adversarial",
+    "expected_keywords": [
+      "kubernetes",
+      "k8s",
+      "cluster",
+      "microservice",
+      "api"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 69,
+    "query": "Who approved the last production deployment?",
+    "query_type": "adversarial",
+    "expected_keywords": [
+      "kubernetes",
+      "k8s",
+      "cluster",
+      "pipeline",
+      "ci/cd"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 70,
+    "query": "What are the conflicting reports about Kubernetes from different agents?",
+    "query_type": "adversarial",
+    "expected_keywords": [
+      "kubernetes",
+      "k8s",
+      "cluster"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 71,
+    "query": "What has the chief agent reported about costs?",
+    "query_type": "agent_scoped",
+    "expected_keywords": [
+      "cost",
+      "budget",
+      "savings"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 72,
+    "query": "What does gitbob know about the CI pipeline?",
+    "query_type": "agent_scoped",
+    "expected_keywords": [
+      "pipeline",
+      "ci/cd",
+      "gitlab"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 73,
+    "query": "What monitoring information has grafgreg recorded?",
+    "query_type": "agent_scoped",
+    "expected_keywords": [
+      "prometheus",
+      "grafana",
+      "alert"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 74,
+    "query": "What deployments has argo managed?",
+    "query_type": "agent_scoped",
+    "expected_keywords": [
+      "kubernetes",
+      "k8s",
+      "cluster",
+      "pipeline",
+      "ci/cd"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 75,
+    "query": "What has securitysam flagged about authentication?",
+    "query_type": "agent_scoped",
+    "expected_keywords": [
+      "security",
+      "auth",
+      "rbac"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "medium",
+      "large"
+    ]
+  },
+  {
+    "id": 76,
+    "query": "What are the stated API p99 latency SLO values for monitoring, including conflicting notes?",
+    "query_type": "contradiction",
+    "expected_keywords": [
+      "200ms",
+      "500ms",
+      "latency",
+      "monitoring"
+    ],
+    "expected_answer": "200ms 500ms latency",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 77,
+    "query": "Is the monitoring latency target 200ms or 500ms p99?",
+    "query_type": "contradiction",
+    "expected_keywords": [
+      "200ms",
+      "500ms",
+      "latency",
+      "monitoring"
+    ],
+    "expected_answer": "200ms 500ms latency",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 78,
+    "query": "What is the exact approved production backup window (time and day)?",
+    "query_type": "needle",
+    "expected_keywords": [
+      "04:15",
+      "sunday",
+      "backup",
+      "window",
+      "archivistneedlev1"
+    ],
+    "expected_answer": "backup window 04:15 UTC Sunday",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "medium",
+      "large"
+    ]
+  },
+  {
+    "id": 79,
+    "query": "Find the canonical backup schedule phrase used for production.",
+    "query_type": "needle",
+    "expected_keywords": [
+      "04:15",
+      "sunday",
+      "backup",
+      "window",
+      "archivistneedlev1"
+    ],
+    "expected_answer": "backup window 04:15 UTC Sunday",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "medium",
+      "large"
+    ]
+  },
+  {
+    "id": 81,
+    "query": "Tell me about rollback",
+    "query_type": "broad",
+    "expected_keywords": [
+      "incident",
+      "outage",
+      "rollback"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 82,
+    "query": "Tell me about cache",
+    "query_type": "broad",
+    "expected_keywords": [
+      "latency",
+      "throughput",
+      "cache"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 83,
+    "query": "Tell me about ingress",
+    "query_type": "broad",
+    "expected_keywords": [
+      "kubernetes",
+      "k8s",
+      "cluster"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 84,
+    "query": "Tell me about pod",
+    "query_type": "broad",
+    "expected_keywords": [
+      "kubernetes",
+      "k8s",
+      "cluster"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 85,
+    "query": "Tell me about auth",
+    "query_type": "broad",
+    "expected_keywords": [
+      "security",
+      "auth",
+      "rbac"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 86,
+    "query": "Tell me about budget",
+    "query_type": "broad",
+    "expected_keywords": [
+      "cost",
+      "budget",
+      "savings"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 87,
+    "query": "Tell me about postmortem",
+    "query_type": "broad",
+    "expected_keywords": [
+      "incident",
+      "outage",
+      "rollback"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 88,
+    "query": "Tell me about grafana",
+    "query_type": "broad",
+    "expected_keywords": [
+      "prometheus",
+      "grafana",
+      "alert"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 89,
+    "query": "Tell me about query",
+    "query_type": "broad",
+    "expected_keywords": [
+      "database",
+      "postgres",
+      "migration"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 90,
+    "query": "Tell me about certificate",
+    "query_type": "broad",
+    "expected_keywords": [
+      "security",
+      "auth",
+      "rbac"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 91,
+    "query": "Tell me about savings",
+    "query_type": "broad",
+    "expected_keywords": [
+      "cost",
+      "budget",
+      "savings"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 92,
+    "query": "Tell me about query",
+    "query_type": "broad",
+    "expected_keywords": [
+      "database",
+      "postgres",
+      "migration"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 93,
+    "query": "Tell me about incident",
+    "query_type": "broad",
+    "expected_keywords": [
+      "incident",
+      "outage",
+      "rollback"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 94,
+    "query": "Tell me about release",
+    "query_type": "broad",
+    "expected_keywords": [
+      "pipeline",
+      "ci/cd",
+      "gitlab"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 95,
+    "query": "Tell me about dashboard",
+    "query_type": "broad",
+    "expected_keywords": [
+      "prometheus",
+      "grafana",
+      "alert"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 96,
+    "query": "Tell me about deploy",
+    "query_type": "broad",
+    "expected_keywords": [
+      "pipeline",
+      "ci/cd",
+      "gitlab"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 97,
+    "query": "Tell me about billing",
+    "query_type": "broad",
+    "expected_keywords": [
+      "cost",
+      "budget",
+      "savings"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 98,
+    "query": "Tell me about security",
+    "query_type": "broad",
+    "expected_keywords": [
+      "security",
+      "auth",
+      "rbac"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 99,
+    "query": "Tell me about GitLab",
+    "query_type": "broad",
+    "expected_keywords": [
+      "pipeline",
+      "ci/cd",
+      "gitlab"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 100,
+    "query": "Tell me about gateway",
+    "query_type": "broad",
+    "expected_keywords": [
+      "microservice",
+      "api",
+      "gateway"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 101,
+    "query": "Tell me about e2e",
+    "query_type": "broad",
+    "expected_keywords": [
+      "test",
+      "coverage",
+      "integration"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 102,
+    "query": "Tell me about deployment",
+    "query_type": "broad",
+    "expected_keywords": [
+      "kubernetes",
+      "k8s",
+      "cluster",
+      "pipeline",
+      "ci/cd"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 103,
+    "query": "Tell me about prometheus",
+    "query_type": "broad",
+    "expected_keywords": [
+      "prometheus",
+      "grafana",
+      "alert"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 104,
+    "query": "Tell me about vault",
+    "query_type": "broad",
+    "expected_keywords": [
+      "security",
+      "auth",
+      "rbac"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 105,
+    "query": "Tell me about migration",
+    "query_type": "broad",
+    "expected_keywords": [
+      "database",
+      "postgres",
+      "migration"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 106,
+    "query": "Tell me about dashboard",
+    "query_type": "broad",
+    "expected_keywords": [
+      "prometheus",
+      "grafana",
+      "alert"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 107,
+    "query": "Tell me about cluster",
+    "query_type": "broad",
+    "expected_keywords": [
+      "kubernetes",
+      "k8s",
+      "cluster"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 108,
+    "query": "Tell me about incident",
+    "query_type": "broad",
+    "expected_keywords": [
+      "incident",
+      "outage",
+      "rollback"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 109,
+    "query": "Tell me about API",
+    "query_type": "broad",
+    "expected_keywords": [
+      "microservice",
+      "api",
+      "gateway"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 110,
+    "query": "Tell me about deployment",
+    "query_type": "broad",
+    "expected_keywords": [
+      "kubernetes",
+      "k8s",
+      "cluster",
+      "pipeline",
+      "ci/cd"
+    ],
+    "expected_answer": "",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "all"
+    ]
+  },
+  {
+    "id": 111,
+    "query": "What are the example hostnames and ports for the api-gateway and memory-service?",
+    "query_type": "single_hop",
+    "expected_keywords": [
+      "demo-api.example.internal",
+      "demo-memory.example.internal",
+      "8080",
+      "3100"
+    ],
+    "expected_answer": "demo-api.example.internal:8080 for api-gateway, demo-memory.example.internal:3100 for memory-service",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "small",
+      "medium",
+      "large",
+      "stress"
+    ]
+  },
+  {
+    "id": 112,
+    "query": "What Prometheus alert fires when the embed latency p99 exceeds 200ms?",
+    "query_type": "single_hop",
+    "expected_keywords": [
+      "archivist_embed_duration",
+      "p99",
+      "200ms",
+      "on-call"
+    ],
+    "expected_answer": "archivist_embed_duration_p99 > 200ms for 5 minutes pages the on-call SRE",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "small",
+      "medium",
+      "large",
+      "stress"
+    ]
+  },
+  {
+    "id": 113,
+    "query": "What CI/CD environment variables are injected for the archivist deployment pipeline?",
+    "query_type": "multi_hop",
+    "expected_keywords": [
+      "QDRANT_URL",
+      "RERANKER_ENABLED",
+      "CHUNKING_STRATEGY",
+      "SYNTHETIC_QUESTIONS_ENABLED"
+    ],
+    "expected_answer": "QDRANT_URL, LLM_URL, EMBED_URL, ARCHIVIST_API_KEY, RERANKER_ENABLED=true, SYNTHETIC_QUESTIONS_ENABLED=true, CHUNKING_STRATEGY=semantic (values use demo hostnames in the benchmark doc)",
+    "namespace": "",
+    "caller_agent_id": "",
+    "scales": [
+      "small",
+      "medium",
+      "large",
+      "stress"
+    ]
+  }
+]
