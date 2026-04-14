@@ -745,6 +745,7 @@ Archivist is integration and execution on top of public work from the agent-memo
 | Document | Covers |
 |----------|--------|
 | [`CHANGELOG.md`](CHANGELOG.md) | Version history, breaking changes, migration notes |
+| [`benchmarks/README.md`](benchmarks/README.md) | Thin LongMemEval + BEIR commands (reference benchmarks) |
 | [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) | Three-tier benchmark results, reproduction steps, competitive comparison |
 | [`docs/DOCKER.md`](docs/DOCKER.md) | Docker Compose stack, host vLLM + cloud LLM, volume overrides |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Module map, data flow diagrams, storage schema, per-version operational notes |

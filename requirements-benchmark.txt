@@ -1,0 +1,3 @@
+# Optional: thin industry-reference benchmarks (BEIR dense baseline).
+#   pip install -r requirements-benchmark.txt
+beir>=2.0.0
