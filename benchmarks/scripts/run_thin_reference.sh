@@ -1,20 +1,27 @@
 #!/usr/bin/env bash
 # Thin reference benchmarks: LongMemEval (Archivist adapter) + BEIR dense baseline.
 #
+# Run from repo root (path is auto-detected). Reuses your existing .env — do not overwrite it.
+#
 # Prerequisites:
-#   - Host: cp .env.example .env  (LLM_URL, EMBED_URL, QDRANT_URL, VECTOR_DIM, …)
-#   - docker compose up -d qdrant
-#   - pip install -r requirements.txt
-#   - pip install -r requirements-benchmark.txt   # for BEIR only
+#   - .env with LLM_URL, EMBED_URL, QDRANT_URL, VECTOR_DIM (and keys if needed)
+#   - Qdrant reachable at QDRANT_URL (e.g. docker compose up -d qdrant)
+#   - Same Python you use for dev:  python -m pip install -r requirements.txt
+#   - For BEIR: pip install -r requirements-benchmark.txt  OR  SKIP_BEIR=1
 #
 # Usage:
 #   bash benchmarks/scripts/run_thin_reference.sh
 #   LIMIT_LM=50 LIMIT_BEIR=100 bash benchmarks/scripts/run_thin_reference.sh
+#   SKIP_BEIR=1 bash benchmarks/scripts/run_thin_reference.sh   # LongMemEval only
 #
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
+
+if [[ ! -f .env ]]; then
+  echo "Warning: no .env in $ROOT — create from .env.example or export LLM_URL/EMBED_URL/QDRANT_URL." >&2
+fi
 
 if [[ -f .env && ! -f /.dockerenv ]]; then
   set -a
@@ -31,9 +38,12 @@ OUT_BEIR="${OUT_BEIR:-.benchmarks/beir_nfcorpus_thin.json}"
 mkdir -p .benchmarks data/longmemeval data/beir
 
 echo "=============================================="
-echo "  Thin reference benchmarks"
+echo "  Thin reference benchmarks  (repo: $ROOT)"
 echo "  LongMemEval limit: $LIMIT_LM  → $OUT_LM"
 echo "  BEIR queries:      $LIMIT_BEIR → $OUT_BEIR"
+if [[ "${SKIP_BEIR:-0}" == "1" ]]; then
+  echo "  BEIR:              skipped (SKIP_BEIR=1)"
+fi
 echo "=============================================="
 
 # --- LongMemEval (full Archivist stack: Qdrant + index + retrieve + judge) ---
@@ -53,16 +63,23 @@ python -m benchmarks.academic.longmemeval.adapter \
   --no-refine \
   --output "$OUT_LM"
 
-echo ""
-echo "[2/2] BEIR NFCorpus thin (dense baseline — not Archivist RLM)..."
-python -c "import beir" 2>/dev/null || pip install -q -r requirements-benchmark.txt
+if [[ "${SKIP_BEIR:-0}" != "1" ]]; then
+  echo ""
+  echo "[2/2] BEIR NFCorpus thin (dense baseline — not Archivist RLM)..."
+  python -c "import beir" 2>/dev/null || python -m pip install -q -r requirements-benchmark.txt
 
-python -m benchmarks.academic.beir_thin \
-  --dataset nfcorpus \
-  --limit-queries "$LIMIT_BEIR" \
-  --output "$OUT_BEIR"
+  python -m benchmarks.academic.beir_thin \
+    --dataset nfcorpus \
+    --limit-queries "$LIMIT_BEIR" \
+    --output "$OUT_BEIR"
+else
+  echo ""
+  echo "[2/2] BEIR skipped (SKIP_BEIR=1)"
+fi
 
 echo ""
 echo "Done."
 echo "  LongMemEval: $OUT_LM"
-echo "  BEIR:        $OUT_BEIR"
+if [[ "${SKIP_BEIR:-0}" != "1" ]]; then
+  echo "  BEIR:        $OUT_BEIR"
+fi
