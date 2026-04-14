@@ -43,6 +43,11 @@ LLM_REFINE_CONCURRENCY = max(1, int(os.getenv("LLM_REFINE_CONCURRENCY", "5")))
 CURATOR_LLM_URL = os.getenv("CURATOR_LLM_URL", "").strip()
 CURATOR_LLM_MODEL = os.getenv("CURATOR_LLM_MODEL", "").strip()
 CURATOR_LLM_API_KEY = os.getenv("CURATOR_LLM_API_KEY", os.getenv("LLM_API_KEY", "")).strip()
+
+# Optional: LongMemEval (benchmark) LLM-as-judge only — fast yes/no on a separate host.
+# Retrieval/indexing still use LLM_URL / LLM_MODEL. Base URL must NOT include /v1 (same as LLM_URL).
+BENCHMARK_JUDGE_LLM_URL = os.getenv("BENCHMARK_JUDGE_LLM_URL", "").strip()
+BENCHMARK_JUDGE_LLM_MODEL = os.getenv("BENCHMARK_JUDGE_LLM_MODEL", "").strip()
 # If top hit score is >= this, skip per-chunk LLM refinement and use tier text (0 = disabled, always refine).
 REFINE_SKIP_THRESHOLD = float(os.getenv("REFINE_SKIP_THRESHOLD", "0.0"))
 

@@ -80,7 +80,8 @@ async def llm_query(
     """
     messages = []
     effective_system = system
-    if model.startswith("qwen3") and not model.startswith("qwen3-embedding"):
+    _mid = model.lower()
+    if "qwen3" in _mid and "embedding" not in _mid:
         effective_system = "/no_think\n" + effective_system if effective_system else "/no_think"
     if effective_system:
         messages.append({"role": "system", "content": effective_system})

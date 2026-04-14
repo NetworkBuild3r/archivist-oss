@@ -18,6 +18,11 @@ Setup:
        mkdir -p data/longmemeval && cd data/longmemeval
        wget https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_s_cleaned.json
 
+    Optional dedicated judge LLM (fast yes/no; does not change retrieval LLM):
+       BENCHMARK_JUDGE_LLM_URL=http://192.168.11.161:11435
+       BENCHMARK_JUDGE_LLM_MODEL=jaahas/qwen3.5-uncensored:9b
+       BENCHMARK_JUDGE_LLM_API_KEY=ollama
+
     2. Run single variant:
        python -m benchmarks.academic.longmemeval.adapter \\
            --data-file data/longmemeval/longmemeval_s_cleaned.json \\
@@ -283,7 +288,13 @@ async def _llm_judge(question: str, ground_truth: str, hypothesis: str,
 
     Uses the same task-specific prompts as the official LongMemEval evaluation.
     Returns True if the judge says 'yes'.
+
+    Optional **dedicated judge endpoint** (fast yes/no, e.g. Ollama on a GPU box):
+    ``BENCHMARK_JUDGE_LLM_URL``, ``BENCHMARK_JUDGE_LLM_MODEL``,
+    optional ``BENCHMARK_JUDGE_LLM_API_KEY`` (omit to reuse ``LLM_API_KEY``;
+    set to empty for no ``Authorization`` header). Base URL must not include ``/v1``.
     """
+    import config as cfg
     from llm import llm_query
 
     prompt = _get_judge_prompt(
@@ -294,8 +305,27 @@ async def _llm_judge(question: str, ground_truth: str, hypothesis: str,
         abstention=is_abstention,
     )
 
+    judge_url = (cfg.BENCHMARK_JUDGE_LLM_URL or "").strip()
+    if judge_url:
+        j_model = cfg.BENCHMARK_JUDGE_LLM_MODEL or cfg.LLM_MODEL
+        if "BENCHMARK_JUDGE_LLM_API_KEY" in os.environ:
+            j_key: str | None = os.environ["BENCHMARK_JUDGE_LLM_API_KEY"]
+        else:
+            j_key = None
+    else:
+        j_model = cfg.LLM_MODEL
+        j_key = None
+        judge_url = ""
+
     try:
-        response = await llm_query(prompt, max_tokens=10)
+        response = await llm_query(
+            prompt,
+            max_tokens=10,
+            model=j_model,
+            url=judge_url,
+            api_key=j_key,
+            stage="longmemeval_judge",
+        )
         return "yes" in response.lower()
     except Exception as e:
         logger.warning("LLM judge failed: %s — defaulting to keyword fallback", e)
@@ -509,11 +539,18 @@ async def run_longmemeval_benchmark(
             if vals:
                 retrieval_summary[rk] = round(_mean(vals), 4)
 
+        _ju = getattr(config, "BENCHMARK_JUDGE_LLM_URL", "") or ""
+        _jm = getattr(config, "BENCHMARK_JUDGE_LLM_MODEL", "") or ""
         summary = {
             "benchmark": "LongMemEval",
             "variant": variant or "default",
             "eval_protocol": "llm-as-judge (official, per-task prompts)",
-            "judge_model": os.environ.get("LLM_MODEL", "unknown"),
+            "judge_model": (
+                f"{_jm or config.LLM_MODEL} @ {_ju}"
+                if _ju
+                else os.environ.get("LLM_MODEL", "unknown")
+            ),
+            "judge_llm_url": _ju or config.LLM_URL,
             "data_file": os.path.basename(data_file),
             "total_questions": len(items),
             "evaluated_questions": len(all_results),
