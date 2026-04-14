@@ -243,12 +243,14 @@ class TestCollectionRoutingIntegration:
         source = inspect.getsource(search_vectors)
         assert "collection_for" in source
 
-    def test_enrich_with_parent_uses_collection_router(self):
-        """enrich_with_parent should route to the correct shard."""
+    def test_parent_text_stored_at_index_time(self):
+        """parent_text should be stored at index time, not fetched at runtime."""
         import inspect
-        from rlm_retriever import enrich_with_parent
-        source = inspect.getsource(enrich_with_parent)
-        assert "collection_for" in source
+        from rlm_retriever import search_vectors
+        source = inspect.getsource(search_vectors)
+        assert "parent_text" in source, (
+            "search_vectors must propagate parent_text from Qdrant payload"
+        )
 
     def test_collection_router_refresh(self):
         """refresh_known_collections should return 0 when sharding disabled."""

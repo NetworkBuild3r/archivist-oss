@@ -22,10 +22,11 @@ from config import (
     TIERED_CONTEXT_ENABLED,
     BM25_ENABLED, TOPIC_ROUTING_ENABLED,
     CONTEXTUAL_AUGMENTATION_ENABLED,
+    CHUNKING_STRATEGY,
 )
 from chunking import chunk_text, chunk_text_hierarchical
 from embeddings import embed_batch
-from graph import upsert_fts_chunk, delete_fts_chunks_by_file, upsert_entity, add_fact, register_needle_tokens
+from graph import upsert_fts_chunk, delete_fts_chunks_by_file, upsert_entity, add_fact, register_needle_tokens, register_memory_points_batch
 from qdrant import qdrant_client
 from rbac import get_namespace_for_agent, get_namespace_config
 from text_utils import extract_agent_id_from_path, compute_memory_checksum
@@ -142,6 +143,7 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
             parent_overlap=PARENT_CHUNK_OVERLAP,
             child_size=CHILD_CHUNK_SIZE,
             child_overlap=CHILD_CHUNK_OVERLAP,
+            strategy=CHUNKING_STRATEGY,
         )
         if not hier_chunks:
             return 0
@@ -175,6 +177,11 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
             ]
         vectors = await embed_batch(augmented_contents)
 
+        # Build parent_text lookup so children carry their parent's text at index time
+        _parent_text_map: dict[str, str] = {
+            c["id"]: c["content"] for c in hier_chunks if c["is_parent"]
+        }
+
         points = []
         _hints_by_id: dict[str, dict] = {}
         for i, (chunk_meta, vec) in enumerate(zip(hier_chunks, vectors)):
@@ -185,6 +192,10 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
             # Children inherit their parent's L0/L1 as context hint
             if not chunk_meta["is_parent"] and chunk_meta["parent_id"]:
                 tiers = tier_map.get(chunk_meta["parent_id"], {})
+
+            parent_text = ""
+            if not chunk_meta["is_parent"] and chunk_meta["parent_id"]:
+                parent_text = _parent_text_map.get(chunk_meta["parent_id"], "")
 
             topics = _chunk_topics[i] if _chunk_topics else (detect_topics(chunk_meta["content"]) if TOPIC_ROUTING_ENABLED else [])
             hints = _chunk_hints[i]
@@ -198,8 +209,10 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
                 "l1": tiers.get("l1", ""),
                 "parent_id": chunk_meta["parent_id"],
                 "is_parent": chunk_meta["is_parent"],
+                "parent_text": parent_text,
                 "topic": topics[0] if topics else "",
                 "thought_type": hints.get("thought_type", "general"),
+                "representation_type": "chunk",
                 "version": 1,
                 "consistency_level": consistency,
                 "checksum": checksum,
@@ -247,6 +260,8 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
                 "text_augmented": augmented_flat[i] if augmented_flat else "",
                 "topic": topics[0] if topics else "",
                 "thought_type": hints.get("thought_type", "general"),
+                "parent_text": "",
+                "representation_type": "chunk",
                 "version": 1,
                 "consistency_level": consistency,
                 "checksum": checksum,
@@ -262,6 +277,20 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
         _coll = ensure_collection(meta.get("namespace", ""))
         client.upsert(collection_name=_coll, points=points)
         _metrics.inc(_metrics.INDEX_CHUNKS, value=len(points))
+
+        # Register all indexed points in memory_points for fast cascade lookup.
+        _mp_records = []
+        for p in points:
+            pid_str = str(p.id)
+            parent = p.payload.get("parent_id")
+            if parent:
+                _mp_records.append({"memory_id": parent, "qdrant_id": pid_str, "point_type": "micro_chunk"})
+            else:
+                _mp_records.append({"memory_id": pid_str, "qdrant_id": pid_str, "point_type": "primary"})
+        try:
+            register_memory_points_batch(_mp_records)
+        except Exception as _e:
+            logger.debug("indexer.register_memory_points failed: %s", _e)
 
         if BM25_ENABLED:
             for p in points:
@@ -353,6 +382,67 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
             if _rh_points:
                 client.upsert(collection_name=_coll, points=_rh_points)
                 _metrics.inc(_metrics.INDEX_CHUNKS, value=len(_rh_points))
+                try:
+                    register_memory_points_batch([
+                        {
+                            "memory_id": rp.payload.get("source_memory_id", str(rp.id)),
+                            "qdrant_id": str(rp.id),
+                            "point_type": "reverse_hyde",
+                        }
+                        for rp in _rh_points
+                    ])
+                except Exception as _e:
+                    logger.debug("indexer.register_memory_points (reverse_hyde) failed: %s", _e)
+
+        # Synthetic question generation: multi-representation indexing
+        import config as _cfg
+        if _cfg.SYNTHETIC_QUESTIONS_ENABLED:
+            from synthetic_questions import generate_and_embed_synthetic_points
+            _sq_semaphore = asyncio.Semaphore(3)
+            _parent_points_sq = [p for p in points if p.payload.get("is_parent", False)]
+
+            async def _gen_sq_for_point(p):
+                async with _sq_semaphore:
+                    try:
+                        base_payload = {
+                            k: v for k, v in p.payload.items()
+                            if k not in ("text_augmented", "l0", "l1", "checksum")
+                        }
+                        return await generate_and_embed_synthetic_points(
+                            chunk_point_id=str(p.id),
+                            chunk_text=p.payload.get("text", ""),
+                            base_payload=base_payload,
+                        )
+                    except Exception as e:
+                        logger.warning("Synthetic questions failed for chunk %s: %s", p.id, e)
+                        return []
+
+            _sq_batches = await asyncio.gather(
+                *[_gen_sq_for_point(p) for p in _parent_points_sq],
+                return_exceptions=True,
+            )
+            _sq_points: list[PointStruct] = []
+            for batch in _sq_batches:
+                if isinstance(batch, BaseException):
+                    logger.warning("Synthetic questions gather error: %s", batch)
+                    continue
+                _sq_points.extend(batch)
+            if _sq_points:
+                client.upsert(collection_name=_coll, points=_sq_points)
+                _metrics.inc(_metrics.INDEX_CHUNKS, value=len(_sq_points))
+                try:
+                    register_memory_points_batch([
+                        {
+                            "memory_id": sp.payload.get("source_memory_id", str(sp.id)),
+                            "qdrant_id": str(sp.id),
+                            "point_type": "synthetic_question",
+                        }
+                        for sp in _sq_points
+                    ])
+                except Exception as _e:
+                    logger.debug("indexer.register_memory_points (synthetic_questions) failed: %s", _e)
+                logger.info("Indexed %d synthetic question points for %s",
+                            len(_sq_points), meta["file_path"])
 
         logger.info("Indexed %s: %d chunks (ns=%s, hierarchical=%s, fts=%s)",
                      meta["file_path"], len(points), meta["namespace"], hierarchical, BM25_ENABLED)

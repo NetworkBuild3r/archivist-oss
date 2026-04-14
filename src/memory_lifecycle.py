@@ -12,6 +12,7 @@ from dataclasses import asdict, dataclass, field
 from qdrant_client.models import Filter, FieldCondition, MatchValue
 
 from collection_router import collection_for
+import curator_queue
 from cascade import (
     PartialDeletionError,
     _qdrant_delete,
@@ -22,6 +23,10 @@ from graph import (
     delete_fts_chunks_batch,
     delete_needle_tokens_batch,
     delete_hotness,
+    set_fts_excluded_batch,
+    lookup_memory_points,
+    delete_memory_points,
+    log_delete_failure,
     GRAPH_WRITE_LOCK,
     get_db,
 )
@@ -104,18 +109,29 @@ async def delete_memory_complete(
     result = DeleteResult(memory_id=memory_id)
 
     # 0. Enumerate child point IDs BEFORE deleting them from Qdrant.
-    micro_ids = _scroll_all(
-        client, col,
-        filt=Filter(must=[FieldCondition(key="parent_id", match=MatchValue(value=memory_id))]),
-        step_name="scroll_micro_chunks", memory_id=memory_id,
-        failed_steps=result.failed_steps,
-    )
-    hyde_ids = _scroll_all(
-        client, col,
-        filt=Filter(must=[FieldCondition(key="source_memory_id", match=MatchValue(value=memory_id))]),
-        step_name="scroll_reverse_hyde", memory_id=memory_id,
-        failed_steps=result.failed_steps,
-    )
+    #    Prefer the memory_points table (O(1) SQLite lookup, no Qdrant round-trip).
+    #    Fall back to paginated Qdrant scroll for legacy memories created before Phase 2.
+    _mp_rows = lookup_memory_points(memory_id)
+    if _mp_rows:
+        micro_ids = [r["qdrant_id"] for r in _mp_rows if r["point_type"] == "micro_chunk"]
+        hyde_ids = [r["qdrant_id"] for r in _mp_rows if r["point_type"] == "reverse_hyde"]
+        logger.debug(
+            "delete.child_lookup from memory_points: micro=%d hyde=%d",
+            len(micro_ids), len(hyde_ids),
+        )
+    else:
+        micro_ids = _scroll_all(
+            client, col,
+            filt=Filter(must=[FieldCondition(key="parent_id", match=MatchValue(value=memory_id))]),
+            step_name="scroll_micro_chunks", memory_id=memory_id,
+            failed_steps=result.failed_steps,
+        )
+        hyde_ids = _scroll_all(
+            client, col,
+            filt=Filter(must=[FieldCondition(key="source_memory_id", match=MatchValue(value=memory_id))]),
+            step_name="scroll_reverse_hyde", memory_id=memory_id,
+            failed_steps=result.failed_steps,
+        )
 
     # 1. Delete primary Qdrant point
     result.qdrant_primary = _qdrant_delete(
@@ -160,6 +176,12 @@ async def delete_memory_complete(
         result.memory_hotness = delete_hotness(memory_id)
     except Exception as e:
         logger.debug("cascade.memory_hotness skipped for %s: %s", memory_id, e)
+
+    # 7. Clean up memory_points tracking rows.
+    try:
+        delete_memory_points(memory_id)
+    except Exception as e:
+        logger.debug("cascade.memory_points cleanup skipped for %s: %s", memory_id, e)
 
     m.inc(m.DELETE_COMPLETE, {"namespace": namespace})
 
@@ -213,7 +235,8 @@ async def archive_memory_complete(
     """Set archived=True on a memory and ALL derived Qdrant points.
 
     Archives: primary point + reverse HyDE + micro-chunks.
-    Does NOT archive FTS5 or registry (they remain searchable).
+    Also marks all related FTS5 rows as excluded so archived memories no longer
+    appear in BM25/FTS keyword search.
 
     Returns ArchiveResult with per-step success flags.
     """
@@ -221,6 +244,20 @@ async def archive_memory_complete(
     client = qdrant_client()
     result = ArchiveResult(memory_id=memory_id)
     payload = {"archived": True}
+
+    # Enumerate child IDs before setting payload so we can mark them excluded in FTS.
+    micro_ids = _scroll_all(
+        client, col,
+        filt=Filter(must=[FieldCondition(key="parent_id", match=MatchValue(value=memory_id))]),
+        step_name="archive_scroll_micro", memory_id=memory_id,
+        failed_steps=result.failed_steps,
+    )
+    hyde_ids = _scroll_all(
+        client, col,
+        filt=Filter(must=[FieldCondition(key="source_memory_id", match=MatchValue(value=memory_id))]),
+        step_name="archive_scroll_hyde", memory_id=memory_id,
+        failed_steps=result.failed_steps,
+    )
 
     result.primary_archived = _qdrant_set_payload(
         client, col, payload, [memory_id],
@@ -238,6 +275,13 @@ async def archive_memory_complete(
         Filter(must=[FieldCondition(key="parent_id", match=MatchValue(value=memory_id))]),
         "archive_micro_chunks", memory_id, result.failed_steps,
     )
+
+    # Mark all related FTS5 rows as excluded so they disappear from BM25 search.
+    all_ids = [memory_id] + micro_ids + hyde_ids
+    try:
+        set_fts_excluded_batch(all_ids, excluded=1)
+    except Exception as e:
+        logger.warning("archive.fts_excluded failed for %s: %s", memory_id, e)
 
     m.inc(m.ARCHIVE_COMPLETE, {"namespace": namespace})
 
@@ -304,3 +348,90 @@ def _delete_entity_facts_for_memory(memory_id: str) -> int:
             return 0
         finally:
             conn.close()
+
+
+async def soft_delete_memory(memory_id: str, namespace: str) -> dict:
+    """Mark a memory as deleted and enqueue a background hard-cascade.
+
+    Hot path (~5 ms, non-blocking):
+      1. Set ``deleted=True`` on the primary Qdrant point and all child points
+         (micro-chunks, reverse HyDE) so they disappear from vector search
+         immediately.
+      2. Mark the primary FTS entry (and any discovered child entries) as
+         excluded so the memory disappears from BM25 search immediately.
+      3. Enqueue a ``delete_memory`` job in ``curator_queue`` for the full
+         hard-cascade (run by the background drain loop).
+      4. Log to ``audit_log`` with status ``"soft_delete_initiated"``.
+
+    Returns a dict with ``{"status": "soft_delete_initiated", "op_id": ...}``.
+
+    Raises:
+        Exception: If the primary Qdrant ``set_payload`` call fails (critical).
+    """
+    col = collection_for(namespace)
+    client = qdrant_client()
+    failed_steps: list[str] = []
+    deleted_payload = {"deleted": True}
+
+    # 1a. Mark primary point as deleted in Qdrant.
+    _qdrant_set_payload(
+        client, col, deleted_payload, [memory_id],
+        "soft_delete_primary", memory_id, failed_steps,
+    )
+    if "soft_delete_primary" in failed_steps:
+        raise RuntimeError(
+            f"soft_delete_memory: primary Qdrant set_payload failed for {memory_id}"
+        )
+
+    # 1b. Mark child points (micro-chunks + reverse HyDE) as deleted.
+    _qdrant_set_payload(
+        client, col, deleted_payload,
+        Filter(must=[FieldCondition(key="parent_id", match=MatchValue(value=memory_id))]),
+        "soft_delete_micro_chunks", memory_id, failed_steps,
+    )
+    _qdrant_set_payload(
+        client, col, deleted_payload,
+        Filter(must=[FieldCondition(key="source_memory_id", match=MatchValue(value=memory_id))]),
+        "soft_delete_reverse_hyde", memory_id, failed_steps,
+    )
+
+    # 2. Mark FTS entries as excluded so they disappear from BM25 search.
+    # We exclude the primary here; children will be cleaned by the hard-cascade.
+    try:
+        set_fts_excluded_batch([memory_id], excluded=1)
+    except Exception as e:
+        logger.warning("soft_delete.fts_excluded failed for %s: %s", memory_id, e)
+
+    # 3. Enqueue the background hard-cascade.
+    op_id = curator_queue.enqueue(
+        "delete_memory",
+        {"memory_ids": [memory_id], "namespace": namespace},
+    )
+
+    # 4. Audit log.
+    await log_memory_event(
+        agent_id="system",
+        action="soft_delete",
+        memory_id=memory_id,
+        namespace=namespace,
+        text_hash="",
+        metadata={
+            "op_id": op_id,
+            "failed_steps": failed_steps,
+            "status": "soft_delete_initiated",
+        },
+    )
+
+    m.inc(m.SOFT_DELETE_INITIATED, {"namespace": namespace})
+
+    logger.info(
+        "memory.soft_deleted",
+        extra={
+            "memory_id": memory_id,
+            "namespace": namespace,
+            "op_id": op_id,
+            "failed_steps": failed_steps,
+        },
+    )
+
+    return {"status": "soft_delete_initiated", "op_id": op_id}

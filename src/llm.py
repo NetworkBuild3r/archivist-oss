@@ -22,6 +22,35 @@ _RETRY_DELAYS = [1, 2, 4]
 _llm_client: httpx.AsyncClient | None = None
 
 
+def _message_text(data: dict) -> str:
+    """Extract assistant text from an OpenAI-style chat completion JSON body.
+
+    Providers may return ``content: null`` (JSON ``null`` → Python ``None``).
+    ``dict.get("content", "")`` does **not** substitute when the key exists with a null value,
+    which led to ``None`` answers and empty LongMemEval ``hypothesis`` fields downstream.
+    Some Ollama models also populate ``reasoning`` when ``content`` is empty.
+    """
+    choice0 = (data.get("choices") or [{}])[0] or {}
+    msg = choice0.get("message") or {}
+    raw = msg.get("content")
+    if raw is None:
+        out = ""
+    else:
+        out = str(raw)
+    if not out.strip():
+        reasoning = msg.get("reasoning")
+        if reasoning and str(reasoning).strip():
+            rtxt = str(reasoning).strip()
+            if len(rtxt) > 8000:
+                rtxt = rtxt[-8000:]
+            logger.warning(
+                "LLM message.content empty; using message.reasoning (truncated to %d chars)",
+                len(rtxt),
+            )
+            out = rtxt
+    return out
+
+
 def _get_llm_client() -> httpx.AsyncClient:
     global _llm_client
     if _llm_client is None or _llm_client.is_closed:
@@ -50,8 +79,11 @@ async def llm_query(
     no key (e.g. Ollama doesn't require one).
     """
     messages = []
-    if system:
-        messages.append({"role": "system", "content": system})
+    effective_system = system
+    if model.startswith("qwen3") and not model.startswith("qwen3-embedding"):
+        effective_system = "/no_think\n" + effective_system if effective_system else "/no_think"
+    if effective_system:
+        messages.append({"role": "system", "content": effective_system})
     messages.append({"role": "user", "content": prompt})
 
     body: dict = {
@@ -80,7 +112,7 @@ async def llm_query(
                     headers=headers,
                 )
                 resp.raise_for_status()
-                result = resp.json()["choices"][0]["message"]["content"]
+                result = _message_text(resp.json())
                 _dur_ms = (time.monotonic() - t0) * 1000
                 _labels = {"stage": stage} if stage else None
                 m.observe(m.LLM_DURATION, _dur_ms, _labels)
@@ -97,7 +129,7 @@ async def llm_query(
                         headers=headers,
                     )
                     resp.raise_for_status()
-                    result = resp.json()["choices"][0]["message"]["content"]
+                    result = _message_text(resp.json())
                     _dur_ms = (time.monotonic() - t0) * 1000
                     _labels = {"stage": stage} if stage else None
                     m.observe(m.LLM_DURATION, _dur_ms, _labels)

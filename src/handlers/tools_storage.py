@@ -11,7 +11,7 @@ from mcp.types import Tool, TextContent
 from qdrant_client.models import PointStruct
 
 from embeddings import embed_text, embed_batch
-from graph import upsert_entity, add_fact, register_needle_tokens, upsert_fts_chunk
+from graph import upsert_entity, add_fact, register_needle_tokens, upsert_fts_chunk, register_memory_points_batch
 from config import (
     QDRANT_COLLECTION, TEAM_MAP,
     CONFLICT_CHECK_ON_STORE, CONFLICT_BLOCK_ON_STORE,
@@ -86,6 +86,23 @@ TOOLS: list[Tool] = [
                 },
             },
             "required": ["text", "agent_id"],
+        },
+    ),
+    Tool(
+        name="archivist_delete",
+        description=(
+            "Soft-delete a memory by ID. Immediately hides it from all search paths "
+            "(vector, BM25, needle registry) by marking it deleted in Qdrant and FTS, "
+            "then enqueues a background hard-cascade. Returns in ~5 ms."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "memory_id": {"type": "string", "description": "Qdrant point ID of the memory to delete"},
+                "agent_id": {"type": "string", "description": "Agent requesting the deletion"},
+                "namespace": {"type": "string", "description": "Namespace (default: auto-detect from agent_id)", "default": ""},
+            },
+            "required": ["memory_id", "agent_id"],
         },
     ),
     Tool(
@@ -327,6 +344,7 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
         "retention_class": retention,
         "memory_type": arguments.get("memory_type", "general"),
         "thought_type": thought_type,
+        "representation_type": "chunk",
     }
     if retention in ("durable", "permanent"):
         ttl_expires_at = None
@@ -338,6 +356,7 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
         collection_name=_coll,
         points=[PointStruct(id=pid, vector=vec, payload=payload)],
     )
+    register_memory_points_batch([{"memory_id": pid, "qdrant_id": pid, "point_type": "primary"}])
 
     from config import BM25_ENABLED
     if BM25_ENABLED:
@@ -406,6 +425,10 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
 
         if _micro_points:
             client.upsert(collection_name=_coll, points=_micro_points)
+            register_memory_points_batch([
+                {"memory_id": pid, "qdrant_id": str(mp.id), "point_type": "micro_chunk"}
+                for mp in _micro_points
+            ])
 
     # Reverse HyDE: fire-and-forget — generate hypothetical questions in background
     from config import REVERSE_HYDE_ENABLED
@@ -443,6 +466,10 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
                 ))
             if _rh_points:
                 client.upsert(collection_name=_coll, points=_rh_points)
+                register_memory_points_batch([
+                    {"memory_id": pid, "qdrant_id": str(rp.id), "point_type": "reverse_hyde"}
+                    for rp in _rh_points
+                ])
             logger.info(
                 "reverse_hyde.background_complete",
                 extra={"memory_id": pid, "question_count": len(_rh_questions)},
@@ -459,6 +486,54 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
             _reverse_hyde_background(), name=f"reverse_hyde_{pid}"
         )
         _rh_task.add_done_callback(_rh_done)
+
+    # Synthetic question generation (background, non-blocking)
+    from config import SYNTHETIC_QUESTIONS_ENABLED as _SQ_ENABLED
+    if _SQ_ENABLED:
+        async def _synthetic_questions_background():
+            from synthetic_questions import generate_and_embed_synthetic_points
+            base_payload = {
+                "agent_id": agent_id,
+                "text": text,
+                "file_path": f"explicit/{agent_id}",
+                "file_type": "explicit",
+                "date": now.strftime("%Y-%m-%d"),
+                "team": TEAM_MAP.get(agent_id, "unknown"),
+                "chunk_index": 0,
+                "namespace": namespace,
+                "version": 1,
+                "importance_score": importance,
+                "retention_class": retention,
+                "memory_type": arguments.get("memory_type", "general"),
+                "thought_type": thought_type,
+            }
+            sq_points = await generate_and_embed_synthetic_points(
+                chunk_point_id=pid,
+                chunk_text=text,
+                base_payload=base_payload,
+            )
+            if sq_points:
+                client.upsert(collection_name=_coll, points=sq_points)
+                register_memory_points_batch([
+                    {"memory_id": pid, "qdrant_id": str(sp.id), "point_type": "synthetic_question"}
+                    for sp in sq_points
+                ])
+            logger.info(
+                "synthetic_questions.background_complete",
+                extra={"memory_id": pid, "question_count": len(sq_points)},
+            )
+
+        def _sq_done(task: asyncio.Task):
+            if task.cancelled():
+                return
+            exc = task.exception()
+            if exc:
+                logger.warning("Synthetic questions background task failed for %s: %s", pid, exc)
+
+        _sq_task = asyncio.create_task(
+            _synthetic_questions_background(), name=f"synthetic_q_{pid}"
+        )
+        _sq_task.add_done_callback(_sq_done)
 
     from audit import log_memory_event
     await log_memory_event(
@@ -757,10 +832,52 @@ async def _handle_unpin(arguments: dict) -> list[TextContent]:
 # Handler registry
 # ---------------------------------------------------------------------------
 
+async def _handle_delete(arguments: dict) -> list[TextContent]:
+    """Soft-delete a memory by ID.
+
+    Sets ``deleted=True`` on the Qdrant point immediately (so it vanishes from
+    all search paths), marks the FTS entry as excluded, then enqueues a
+    background hard-cascade via ``curator_queue``.  Returns in ~5 ms.
+    """
+    from memory_lifecycle import soft_delete_memory
+    from rbac import get_namespace_for_agent
+
+    memory_id = arguments.get("memory_id", "").strip()
+    agent_id = arguments.get("agent_id", "").strip()
+    namespace = arguments.get("namespace", "").strip()
+
+    if not memory_id:
+        return error_response({"error": "memory_id is required"})
+    if not agent_id:
+        return error_response({"error": "agent_id is required"})
+
+    ns_err = _rbac_gate(agent_id, namespace)
+    if ns_err:
+        return ns_err
+    if not namespace:
+        namespace = get_namespace_for_agent(agent_id)
+
+    try:
+        result = await soft_delete_memory(memory_id, namespace)
+    except Exception as e:
+        logger.error("archivist_delete failed for %s: %s", memory_id, e)
+        return error_response({"error": str(e)})
+
+    hot_cache.invalidate_namespace(namespace)
+
+    return success_response({
+        "deleted": True,
+        "memory_id": memory_id,
+        "namespace": namespace,
+        **result,
+    })
+
+
 HANDLERS: dict[str, object] = {
     "archivist_store": _handle_store,
     "archivist_merge": _handle_merge,
     "archivist_compress": _handle_compress,
     "archivist_pin": _handle_pin,
     "archivist_unpin": _handle_unpin,
+    "archivist_delete": _handle_delete,
 }

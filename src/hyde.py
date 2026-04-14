@@ -112,7 +112,7 @@ async def generate_hypothetical_document(
         doc = await llm_query(
             query,
             system=_HYDE_SYSTEM,
-            max_tokens=128,
+            max_tokens=384,
             model=hyde_model,
             stage="hyde",
         )
@@ -194,7 +194,7 @@ async def generate_reverse_hyde_questions(
         raw = await llm_query(
             text[:1500],
             system=system,
-            max_tokens=256,
+            max_tokens=512,
             model=hyde_model,
             stage="reverse_hyde",
         )

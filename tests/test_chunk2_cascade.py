@@ -314,6 +314,7 @@ class TestArchiveMemoryComplete:
     @pytest.mark.asyncio
     async def test_archives_primary_and_children(self):
         client = MagicMock()
+        client.scroll.return_value = ([], None)  # no child points to enumerate
         with patch("memory_lifecycle.qdrant_client", return_value=client), \
              patch("memory_lifecycle.collection_for", return_value="test_col"), \
              patch("memory_lifecycle.log_memory_event", new_callable=AsyncMock):
@@ -335,6 +336,7 @@ class TestArchiveMemoryComplete:
     async def test_archive_tracks_failures(self):
         """Failures in set_payload are tracked in ArchiveResult.failed_steps."""
         client = MagicMock()
+        client.scroll.return_value = ([], None)
         client.set_payload.side_effect = [None, Exception("nope"), None]
         with patch("memory_lifecycle.qdrant_client", return_value=client), \
              patch("memory_lifecycle.collection_for", return_value="test_col"), \
@@ -351,6 +353,7 @@ class TestArchiveMemoryComplete:
     async def test_archive_audit_logging(self):
         """Archive calls log_memory_event with action='archive' and result_type."""
         client = MagicMock()
+        client.scroll.return_value = ([], None)
         mock_audit = AsyncMock()
         with patch("memory_lifecycle.qdrant_client", return_value=client), \
              patch("memory_lifecycle.collection_for", return_value="test_col"), \

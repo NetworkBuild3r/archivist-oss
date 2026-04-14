@@ -101,6 +101,7 @@ def search_bm25(
     rankings: list[list[dict]] = []
 
     or_q = _fts5_safe_query(query)
+    or_hits: list[dict] = []
     if or_q:
         or_hits = search_fts(
             query=or_q, namespace=namespace, agent_id=agent_id,
@@ -109,47 +110,65 @@ def search_bm25(
         if or_hits:
             rankings.append(or_hits)
 
-    and_q = _fts5_and_query(query)
-    if and_q:
-        try:
-            and_hits = search_fts(
-                query=and_q, namespace=namespace, agent_id=agent_id,
-                memory_type=memory_type, limit=limit,
-            )
-            if and_hits:
-                rankings.append(and_hits)
-        except Exception:
-            pass
+    # On small indices OR already covers most chunks; extra modes add noise.
+    _run_extra_modes = len(or_hits) >= 200
 
-    phrase_q = _fts5_phrase_query(query)
-    if phrase_q and phrase_q != and_q:
-        try:
-            phrase_hits = search_fts(
-                query=phrase_q, namespace=namespace, agent_id=agent_id,
-                memory_type=memory_type, limit=limit,
-            )
-            if phrase_hits:
-                rankings.append(phrase_hits)
-        except Exception:
-            pass
-
-    if _EXACT_TOKEN_RE.search(query):
-        exact_q = _fts5_safe_query(query)
-        if exact_q:
+    if _run_extra_modes:
+        and_q = _fts5_and_query(query)
+        if and_q:
             try:
-                exact_hits = search_fts_exact(
-                    query=exact_q, namespace=namespace, agent_id=agent_id,
+                and_hits = search_fts(
+                    query=and_q, namespace=namespace, agent_id=agent_id,
                     memory_type=memory_type, limit=limit,
                 )
-                if exact_hits:
-                    rankings.append(exact_hits)
+                if and_hits:
+                    rankings.append(and_hits)
             except Exception:
                 pass
+
+        phrase_q = _fts5_phrase_query(query)
+        if phrase_q and phrase_q != and_q:
+            try:
+                phrase_hits = search_fts(
+                    query=phrase_q, namespace=namespace, agent_id=agent_id,
+                    memory_type=memory_type, limit=limit,
+                )
+                if phrase_hits:
+                    rankings.append(phrase_hits)
+            except Exception:
+                pass
+
+        if _EXACT_TOKEN_RE.search(query):
+            exact_q = _fts5_safe_query(query)
+            if exact_q:
+                try:
+                    exact_hits = search_fts_exact(
+                        query=exact_q, namespace=namespace, agent_id=agent_id,
+                        memory_type=memory_type, limit=limit,
+                    )
+                    if exact_hits:
+                        rankings.append(exact_hits)
+                except Exception:
+                    pass
+    else:
+        # Always run exact-token search even on small indices (needle recall)
+        if _EXACT_TOKEN_RE.search(query):
+            exact_q = _fts5_safe_query(query)
+            if exact_q:
+                try:
+                    exact_hits = search_fts_exact(
+                        query=exact_q, namespace=namespace, agent_id=agent_id,
+                        memory_type=memory_type, limit=limit,
+                    )
+                    if exact_hits:
+                        rankings.append(exact_hits)
+                except Exception:
+                    pass
 
     if not rankings:
         return []
 
-    merged = rrf_merge(rankings, k=60, id_key="qdrant_id", limit=limit)
+    merged = rrf_merge(rankings, k=20, id_key="qdrant_id", limit=limit)
     for r in merged:
         if "bm25_score" not in r:
             r["bm25_score"] = r.get("rrf_score", 0)
@@ -160,13 +179,13 @@ def merge_vector_and_bm25(
     vector_results: list[dict],
     bm25_results: list[dict],
 ) -> list[dict]:
-    """Fuse vector and BM25 results using RRF.
+    """Fuse vector and BM25 results using RRF with vector-priority rescue.
 
-    Replaces the old linear 0.7v + 0.3b fusion with rank-based fusion
-    which is more robust when score distributions differ.
+    Preserves original vector scores through fusion so downstream stages
+    operate on meaningful signal instead of flat RRF noise.
     """
     if not bm25_results:
-        return vector_results
+        return vector_results[:20]
     if not vector_results:
         out = []
         for r in bm25_results:
@@ -175,12 +194,24 @@ def merge_vector_and_bm25(
             out.append(entry)
         return sorted(out, key=lambda x: x["score"], reverse=True)
 
-    rankings = [vector_results, bm25_results]
-    merged = rrf_merge(rankings, k=60)
+    vector_id_scores: dict[str, float] = {}
+    for r in vector_results:
+        rid = r.get("id") or r.get("qdrant_id", "")
+        if rid:
+            vector_id_scores[rid] = r.get("score", 0)
 
+    rankings = [vector_results, bm25_results]
+    merged = rrf_merge(rankings, k=20)
+
+    vector_top_ids = {(r.get("id") or r.get("qdrant_id", "")) for r in vector_results[:8]}
     for r in merged:
+        rid = r.get("id") or r.get("qdrant_id", "")
+        r["vector_score"] = vector_id_scores.get(rid, 0)
         r["score"] = r["rrf_score"]
+        if rid in vector_top_ids:
+            r["score"] = max(r["score"], r["vector_score"] + 0.5)
         if "bm25_score" not in r:
             r["bm25_score"] = 0
 
-    return merged
+    merged.sort(key=lambda x: x["score"], reverse=True)
+    return merged[:20]
