@@ -97,6 +97,6 @@ BENCHMARK_FAST=0 bash benchmarks/scripts/run_thin_reference.sh
 **More knobs:**
 
 - **`LIMIT_LM=5`** — fewer questions while you tune hardware.
-- **Faster judge** — use a small, non-reasoning chat model for `LLM_URL` / `LLM_MODEL` during benchmarks (reasoning models that only fill `reasoning` are slow and noisy for yes/no judging).
+- **Faster judge (separate host)** — keep `LLM_URL` for retrieval/synthesis on your workstation; set **`BENCHMARK_JUDGE_LLM_URL`**, **`BENCHMARK_JUDGE_LLM_MODEL`**, and optionally **`BENCHMARK_JUDGE_LLM_API_KEY`** to a fast Ollama/vLLM on the LAN (e.g. DGX). URLs are API roots **without** `/v1`. Qwen3-class judge IDs get `/no_think` automatically in `llm.py`.
 - **GPU / batching** — keep **embeddings** on a fast endpoint; local Ollama on CPU for everything will bound wall time.
 - **`SKIP_BEIR=1`** — skip BEIR if you only care about LongMemEval right now.
