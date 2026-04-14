@@ -34,6 +34,8 @@ Setup:
            --data-file data/longmemeval/longmemeval_s_cleaned.json \\
            --limit 10 --no-refine --output .benchmarks/longmemeval_quick.json
 
+    Scripted thin runs: see ``benchmarks/README.md``.
+
 """
 from __future__ import annotations
 

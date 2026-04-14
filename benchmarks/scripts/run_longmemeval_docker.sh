@@ -46,30 +46,28 @@ echo "================================================"
 export BENCHMARK_GIT_SHA="$GIT_SHA"
 export BENCHMARK_GIT_BRANCH="$GIT_BRANCH"
 
-EXTRA=""
-[[ ${#EVAL_ARGS[@]} -gt 0 ]] && EXTRA=$(printf ' %q' "${EVAL_ARGS[@]}")
+_INNER="/workspace/benchmarks/scripts/longmemeval_docker_inner.sh"
 
 docker compose up -d qdrant
 docker compose --profile benchmark build benchmark
 
-_INNER='set -euo pipefail
-mkdir -p data/longmemeval .benchmarks/runs
-LM="data/longmemeval/longmemeval_s_cleaned.json"
-if [[ ! -f "$LM" ]]; then
-  wget -q -O "$LM" "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_s_cleaned.json"
-fi
-exec python -m benchmarks.academic.longmemeval.adapter \
-  --data-file "$LM" \
-  --output "$LONGMEMEVAL_OUTPUT" \
-  '"$EXTRA"
+_run() {
+  # shellcheck disable=SC2086
+  docker compose --profile benchmark run --rm \
+    -e BENCHMARK_GIT_SHA="$GIT_SHA" \
+    -e BENCHMARK_GIT_BRANCH="$GIT_BRANCH" \
+    -e LONGMEMEVAL_OUTPUT="/workspace/$OUT" \
+    --entrypoint bash benchmark \
+    -c "exec bash $_INNER $(printf '%q ' "${EVAL_ARGS[@]}")"
+}
 
 if $DETACH; then
   CID=$(docker compose --profile benchmark run -d \
     -e BENCHMARK_GIT_SHA="$GIT_SHA" \
     -e BENCHMARK_GIT_BRANCH="$GIT_BRANCH" \
-    -e LONGMEMEVAL_OUTPUT="$OUT" \
+    -e LONGMEMEVAL_OUTPUT="/workspace/$OUT" \
     --entrypoint bash benchmark \
-    -c "$_INNER")
+    -c "exec bash $_INNER $(printf '%q ' "${EVAL_ARGS[@]}")")
   echo "$CID" > "$CID_FILE"
   ln -sfn "runs/$(basename "$OUT")" "$LATEST"
   echo ""
@@ -80,13 +78,7 @@ if $DETACH; then
   echo "Stop early:  docker stop $CID"
   echo "CID saved:   $CID_FILE"
 else
-  # shellcheck disable=SC2086
-  docker compose --profile benchmark run --rm \
-    -e BENCHMARK_GIT_SHA="$GIT_SHA" \
-    -e BENCHMARK_GIT_BRANCH="$GIT_BRANCH" \
-    -e LONGMEMEVAL_OUTPUT="$OUT" \
-    --entrypoint bash benchmark \
-    -c "$_INNER"
+  _run
   ln -sfn "runs/$(basename "$OUT")" "$LATEST"
   echo ""
   echo "Done. Results: $OUT"
