@@ -16,6 +16,7 @@ from config import (
     CURATOR_QUEUE_DRAIN_INTERVAL, ARCHIVIST_INVALIDATION_EXPORT_PATH,
     QDRANT_HNSW_M, QDRANT_HNSW_EF_CONSTRUCT,
     METRICS_ENABLED, METRICS_AUTH_EXEMPT, METRICS_COLLECT_INTERVAL_SECONDS,
+    MCP_SSE_ENABLED,
 )
 from qdrant import qdrant_client
 import health
@@ -248,6 +249,11 @@ def _log_task_exception(task: asyncio.Task):
 async def _startup():
     """Run on app startup: init DB, load RBAC, ensure Qdrant collection, start background tasks."""
     logger.info("Archivist v1.12.0 starting up...")
+    logger.info(
+        "MCP transport: streamable_http (POST /mcp)%s",
+        " + legacy SSE (/mcp/sse, /mcp/messages/)" if MCP_SSE_ENABLED else
+        " [SSE disabled — set MCP_SSE_ENABLED=true to enable legacy SSE]",
+    )
 
     init_schema()
     logger.info("Graph schema initialized")
@@ -322,7 +328,7 @@ async def run_initial_index():
         logger.error("Initial index failed: %s", e)
 
 
-sse_transport = SseServerTransport("/mcp/messages/")
+sse_transport = SseServerTransport("/mcp/messages/") if MCP_SSE_ENABLED else None
 streamable_http_session_manager: StreamableHTTPSessionManager | None = None
 
 
@@ -337,6 +343,8 @@ class SseASGIApp:
 
         token = set_request_id_from_scope(scope)
         try:
+            if sse_transport is None:
+                raise RuntimeError("SSE transport is disabled (MCP_SSE_ENABLED=false)")
             async with sse_transport.connect_sse(scope, receive, send) as streams:
                 await server.run(
                     streams[0], streams[1], server.create_initialization_options()
@@ -541,6 +549,15 @@ async def handle_agent_import(request):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+_sse_routes = (
+    [
+        Route("/mcp/sse", endpoint=sse_app, methods=["GET"]),
+        Mount("/mcp/messages/", app=sse_transport.handle_post_message),
+    ]
+    if MCP_SSE_ENABLED and sse_transport is not None
+    else []
+)
+
 app = Starlette(
     routes=[
         Route("/health", handle_health),
@@ -556,8 +573,7 @@ app = Starlette(
         Route("/admin/export-agent", handle_agent_export, methods=["POST"]),
         Route("/admin/import-agent", handle_agent_import, methods=["POST"]),
         Route("/mcp", endpoint=streamable_http_app, methods=["GET", "POST", "DELETE"]),
-        Route("/mcp/sse", endpoint=sse_app, methods=["GET"]),
-        Mount("/mcp/messages/", app=sse_transport.handle_post_message),
+        *_sse_routes,
     ],
     middleware=[Middleware(ArchivistAuthMiddleware)],
     lifespan=lifespan,
