@@ -256,6 +256,12 @@ JOURNAL_DIR = os.getenv("JOURNAL_DIR", "/data/archivist/journal")
 # ── Server ────────────────────────────────────────────────────────────────────
 MCP_PORT = int(os.getenv("MCP_PORT", "3100"))
 
+# MCP transport selection.
+# "streamable_http" (default) — modern Streamable HTTP at /mcp (MCP spec ≥2025-03).
+# Legacy SSE endpoints (/mcp/sse + /mcp/messages/) are mounted only when
+# MCP_SSE_ENABLED=true, keeping backward compatibility for older clients.
+MCP_SSE_ENABLED = _env_bool("MCP_SSE_ENABLED", "false")
+
 # Optional: require `Authorization: Bearer <key>` or `X-API-Key` on all routes except /health
 ARCHIVIST_API_KEY = os.getenv("ARCHIVIST_API_KEY", "").strip()
 
@@ -320,6 +326,7 @@ def _log_feature_flags() -> None:
         "JOURNAL_ENABLED": JOURNAL_ENABLED,
         "METRICS_ENABLED": METRICS_ENABLED,
         "METRICS_AUTH_EXEMPT": METRICS_AUTH_EXEMPT,
+        "MCP_SSE_ENABLED": MCP_SSE_ENABLED,
     }
     enabled = [k for k, v in flags.items() if v]
     disabled = [k for k, v in flags.items() if not v]
