@@ -30,6 +30,8 @@ curl http://localhost:3100/health          # {"status":"ok"}
 
 Full Docker options (host vLLM, persistent volumes, overrides): [`docs/DOCKER.md`](docs/DOCKER.md).
 
+The default image installs **core** [`requirements.txt`](requirements.txt) only (no BEIR, no cross-encoder wheels). Optional Python extras are documented under [Development](#development).
+
 Point any MCP client at `http://localhost:3100/mcp` — done. Your agents now have long-term memory with search, RBAC, knowledge graphs, and active curation out of the box. Legacy SSE compatibility remains available at `http://localhost:3100/mcp/sse`.
 
 ---
@@ -37,6 +39,8 @@ Point any MCP client at `http://localhost:3100/mcp` — done. Your agents now ha
 ## What's New in v1.12
 
 **Semantic chunking** — parent chunks can follow markdown structure (headings, code blocks, lists) via `CHUNKING_STRATEGY=semantic` (default), with `fixed` for the previous fixed-size parent split. Improves retrieval on long technical documents without changing the child chunking API.
+
+**Lean default Python install** — `sentence-transformers` (and its PyTorch stack) is **not** in the core [`requirements.txt`](requirements.txt). Add [`requirements-rerank.txt`](requirements-rerank.txt) when you enable the v2 cross-encoder reranker (`RERANKER_ENABLED=true`), and [`requirements-benchmark.txt`](requirements-benchmark.txt) only if you run BEIR thin or other academic harnesses. The shipped [`Dockerfile`](Dockerfile) stays small; [`Dockerfile.benchmark`](Dockerfile.benchmark) installs benchmark extras for reproduction runs.
 
 **Benchmark harness in-repo** — `benchmarks/pipeline/` and `benchmarks/fixtures/corpus_small/` (plus `questions.json`) are tracked so you can reproduce retrieval evaluations locally. Sample corpus text uses **synthetic** hostnames and paths only.
 
@@ -115,6 +119,8 @@ Each stage is observable via `retrieval_trace` in every response.
 ## Benchmarks
 
 Live run (2026-04-06) — **Qdrant** vector store, **`BAAI/bge-base-en-v1.5`** embeddings (local), **`qwen3.5-122b`** via an OpenAI-compatible API. Four corpus scales (56 → 1,523 files), 107–110 questions per scale covering 8 query types. Context stuffing uses real LLM calls. All Archivist runs use `--no-refine` (pure retrieval, no generative synthesis). Context budget: **32,768 tokens** (realistic agent window after system prompt, history, and tools).
+
+**Why BEIR scores are not our headline metric.** The optional **BEIR thin** path (`benchmarks/academic/beir_thin.py`, e.g. NFCorpus with a query cap) scores **classic ad-hoc retrieval**: one bi-encoder against a static corpus, with standard nDCG / MAP / recall. That is useful as a **cheap embedding and harness sanity check** and for comparing embedding models on the same slice. Archivist’s product surface is **agent memory**: hybrid vector + BM25 fusion, graph augmentation, namespaces, lifecycle, needles, and operational behavior under real workloads. None of that appears in a plain BEIR dense run, so a high or low BEIR row does **not** map 1:1 to “good or bad Archivist.” We still record thin BEIR numbers in [`docs/ROADMAP.md`](docs/ROADMAP.md) so defaults and regressions stay visible over time. For product-shaped signal, use the **in-repo pipeline** and **LongMemEval thin** paths described in [`benchmarks/README.md`](benchmarks/README.md).
 
 ### Ship it locally: validated performance
 
@@ -719,12 +725,22 @@ Fork [NetworkBuild3r/archivist-oss](https://github.com/NetworkBuild3r/archivist-
 
 ## Development
 
+**Local install (matches CI):**
+
 ```bash
-pip install -r requirements.txt
+pip install -r requirements.txt -r requirements-test.txt
 python -m pytest tests/ -v
 ```
 
-**Pipeline benchmark (optional):** large corpora (`corpus_medium` through `corpus_stress`) are generated or downloaded locally and stay **gitignored**. The **small** fixture and `benchmarks/fixtures/questions.json` are in the repo; run `python -m benchmarks.pipeline.evaluate --help` after configuring `.env` (see [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md)).
+**Optional Python extras** — not part of the default [`Dockerfile`](Dockerfile); add them only when you need the feature:
+
+| File | Use when |
+|------|----------|
+| [`requirements-rerank.txt`](requirements-rerank.txt) | Cross-encoder reranking (`RERANKER_ENABLED=true`); pulls `sentence-transformers` / PyTorch |
+| [`requirements-benchmark.txt`](requirements-benchmark.txt) | BEIR thin and similar scripts; pulls `beir` and its dependencies |
+| [`requirements-test.txt`](requirements-test.txt) | Pytest + asyncio (included in the command above; [`.github/workflows/ci.yml`](.github/workflows/ci.yml) uses the same pair) |
+
+**Pipeline benchmark (optional):** large corpora (`corpus_medium` through `corpus_stress`) are generated or downloaded locally and stay **gitignored**. The **small** fixture and `benchmarks/fixtures/questions.json` are in the repo; run `python -m benchmarks.pipeline.evaluate --help` after configuring `.env` (see [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md)). For thin LongMemEval + BEIR from the shell script, see [`benchmarks/README.md`](benchmarks/README.md).
 
 Tests are organized by domain with markers:
 - **Unit tests** — Run by default, no external services needed
