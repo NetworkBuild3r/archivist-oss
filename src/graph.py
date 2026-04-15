@@ -166,7 +166,6 @@ def init_schema():
         CREATE INDEX IF NOT EXISTS idx_mc_qdrant ON memory_chunks(qdrant_id);
         CREATE INDEX IF NOT EXISTS idx_mc_namespace ON memory_chunks(namespace);
         CREATE INDEX IF NOT EXISTS idx_mc_agent ON memory_chunks(agent_id);
-        CREATE INDEX IF NOT EXISTS idx_mc_excluded ON memory_chunks(is_excluded);
 
         -- Tracks all Qdrant point IDs created for each memory (Phase 2).
         CREATE TABLE IF NOT EXISTS memory_points (
