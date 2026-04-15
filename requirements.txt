@@ -20,7 +20,7 @@ starlette>=0.38.0
 
 # Optional: cross-encoder reranking (Phase 1)
 # Uncomment to enable RERANK_ENABLED=true
-sentence-transformers>=3.0.0
+# sentence-transformers>=3.0.0
 # torch>=2.0.0
 
 # Optional: OpenTelemetry tracing (set OTEL_EXPORTER_OTLP_ENDPOINT; see observability.py)
