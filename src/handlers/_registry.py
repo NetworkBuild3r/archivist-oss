@@ -15,6 +15,7 @@ from .tools_trajectory import TOOLS as TRAJECTORY_TOOLS, HANDLERS as TRAJECTORY_
 from .tools_skills import TOOLS as SKILL_TOOLS, HANDLERS as SKILL_HANDLERS
 from .tools_admin import TOOLS as ADMIN_TOOLS, HANDLERS as ADMIN_HANDLERS
 from .tools_cache import TOOLS as CACHE_TOOLS, HANDLERS as CACHE_HANDLERS
+from .tools_docs import TOOLS as DOCS_TOOLS, HANDLERS as DOCS_HANDLERS
 from ._common import error_response
 
 logger = logging.getLogger("archivist.mcp")
@@ -29,6 +30,7 @@ for _handlers in (
     SKILL_HANDLERS,
     ADMIN_HANDLERS,
     CACHE_HANDLERS,
+    DOCS_HANDLERS,
 ):
     TOOL_REGISTRY.update(_handlers)
 
@@ -39,6 +41,7 @@ ALL_TOOLS: list[Tool] = (
     + SKILL_TOOLS
     + ADMIN_TOOLS
     + CACHE_TOOLS
+    + DOCS_TOOLS
 )
 
 

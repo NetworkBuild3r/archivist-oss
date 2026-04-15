@@ -7,7 +7,7 @@
 Vector search + knowledge graph + active curation — one MCP endpoint.</p>
 
 <p align="center">
-  <a href="#quick-start"><strong>Quick Start</strong></a> · <a href="#openclaw-and-agent-workspace-layout"><strong>OpenClaw Layout</strong></a> · <a href="#how-it-works"><strong>How It Works</strong></a> · <a href="#benchmarks"><strong>Benchmarks</strong></a> · <a href="#ship-it-locally-validated-performance"><strong>Ship It Locally</strong></a> · <a href="#mcp-tools-30"><strong>30 MCP Tools</strong></a> · <a href="#configuration-reference"><strong>Config</strong></a> · <a href="#architecture-deep-dive"><strong>Architecture</strong></a> · <a href="docs/ROADMAP.md"><strong>Roadmap</strong></a>
+  <a href="#quick-start"><strong>Quick Start</strong></a> · <a href="#openclaw-and-agent-workspace-layout"><strong>OpenClaw Layout</strong></a> · <a href="#how-it-works"><strong>How It Works</strong></a> · <a href="#benchmarks"><strong>Benchmarks</strong></a> · <a href="#ship-it-locally-validated-performance"><strong>Ship It Locally</strong></a> · <a href="#mcp-tools-31"><strong>31 MCP Tools</strong></a> · <a href="#configuration-reference"><strong>Config</strong></a> · <a href="#architecture-deep-dive"><strong>Architecture</strong></a> · <a href="docs/ROADMAP.md"><strong>Roadmap</strong></a>
 </p>
 
 <p align="center">
@@ -367,7 +367,7 @@ Raw MD trees **do not scale**: they blow the context window, repeat facts, and d
 
 ---
 
-## MCP Tools (30)
+## MCP Tools (31)
 
 ### Search & Retrieval (7)
 
@@ -765,7 +765,7 @@ Archivist is integration and execution on top of public work from the agent-memo
 | [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) | Three-tier benchmark results, reproduction steps, competitive comparison |
 | [`docs/DOCKER.md`](docs/DOCKER.md) | Docker Compose stack, host vLLM + cloud LLM, volume overrides |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Module map, data flow diagrams, storage schema, per-version operational notes |
-| [`docs/CURSOR_SKILL.md`](docs/CURSOR_SKILL.md) | Full parameter schemas and examples for all 30 MCP tools |
+| [`docs/CURSOR_SKILL.md`](docs/CURSOR_SKILL.md) | Full parameter schemas and examples for all 31 MCP tools |
 | [`docs/REFERENCE.md`](docs/REFERENCE.md) | Condensed tool reference table |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | Phased roadmap and differentiation goals |
 | [`docs/INSPIRATION.md`](docs/INSPIRATION.md) | Credits, research lineage, ReMe comparison |
