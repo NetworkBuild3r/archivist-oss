@@ -85,6 +85,8 @@ def _extract_metadata(filepath: str) -> dict:
         "team": team,
         "namespace": namespace,
         "file_path": rel,
+        "actor_id": "file_indexer",
+        "actor_type": "system",
     }
 
 
@@ -130,6 +132,9 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
     await delete_file_points(filepath)
 
     meta = _extract_metadata(filepath)
+    from provenance import SourceTrace, default_confidence
+    _indexer_confidence = default_confidence("system")
+    _indexer_trace = SourceTrace(tool="file_indexer", upstream_source=filepath).to_dict()
     ns_config = get_namespace_config(meta["namespace"])
     consistency = ns_config.consistency if ns_config else "eventual"
     ttl_expires_at = compute_ttl(meta["namespace"])
@@ -218,6 +223,8 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
                 "checksum": checksum,
                 "importance_score": 0.5,
                 "retention_class": "standard",
+                "confidence": _indexer_confidence,
+                "source_trace": _indexer_trace,
             }
             if ttl_expires_at is not None:
                 payload["ttl_expires_at"] = ttl_expires_at
@@ -267,6 +274,8 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
                 "checksum": checksum,
                 "importance_score": 0.5,
                 "retention_class": "standard",
+                "confidence": _indexer_confidence,
+                "source_trace": _indexer_trace,
             }
             if ttl_expires_at is not None:
                 payload["ttl_expires_at"] = ttl_expires_at
@@ -303,11 +312,15 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
                     namespace=p.payload.get("namespace", ""),
                     date=p.payload.get("date", ""),
                     memory_type=p.payload.get("memory_type", "general"),
+                    actor_id=p.payload.get("actor_id", ""),
+                    actor_type=p.payload.get("actor_type", ""),
                 )
 
         _agent = meta.get("agent_id", "")
         _src_file = meta.get("file_path", "")
         _ns = meta.get("namespace", "")
+        _actor_id = meta.get("actor_id", "")
+        _actor_type = meta.get("actor_type", "")
         _seen_entity_names: set[str] = set()
         for p in points:
             if not p.payload.get("is_parent", False):
@@ -319,14 +332,20 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
                 if ename and ename not in _seen_entity_names:
                     _seen_entity_names.add(ename)
                     etype = ent.get("type", "unknown")
-                    _eid = upsert_entity(ename, etype, namespace=_ns or "global")
-                    add_fact(_eid, p.payload.get("text", "")[:200], _src_file, _agent, namespace=_ns or "global", memory_id=str(p.id))
+                    _eid = upsert_entity(ename, etype, namespace=_ns or "global",
+                                         actor_id=_actor_id, actor_type=_actor_type)
+                    add_fact(_eid, p.payload.get("text", "")[:200], _src_file, _agent,
+                             namespace=_ns or "global", memory_id=str(p.id),
+                             confidence=_indexer_confidence, provenance="file_indexer",
+                             actor_id=_actor_id)
 
         for p in points:
             register_needle_tokens(
                 str(p.id), p.payload.get("text", ""),
                 namespace=meta.get("namespace", ""),
                 agent_id=_agent,
+                actor_id=_actor_id,
+                actor_type=_actor_type,
             )
 
         # Reverse HyDE: generate hypothetical questions for parent chunks (parallel)

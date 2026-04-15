@@ -212,6 +212,20 @@ def _migrate_schema():
         ("relationships", "namespace", "TEXT NOT NULL DEFAULT 'global'"),
         ("facts", "memory_id", "TEXT NOT NULL DEFAULT ''"),
         ("memory_chunks", "is_excluded", "INTEGER NOT NULL DEFAULT 0"),
+        # Phase 6: provenance & actor-aware memory
+        ("facts", "confidence", "REAL NOT NULL DEFAULT 1.0"),
+        ("facts", "provenance", "TEXT NOT NULL DEFAULT 'unknown'"),
+        ("facts", "actor_id", "TEXT NOT NULL DEFAULT ''"),
+        ("memory_chunks", "actor_id", "TEXT NOT NULL DEFAULT ''"),
+        ("memory_chunks", "actor_type", "TEXT NOT NULL DEFAULT ''"),
+        ("entities", "actor_id", "TEXT NOT NULL DEFAULT ''"),
+        ("entities", "actor_type", "TEXT NOT NULL DEFAULT ''"),
+    ]
+    # needle_registry may not exist yet (schema_guard creates it lazily),
+    # so these ALTER TABLEs are attempted but silently skipped on failure.
+    _needle_migrations = [
+        ("needle_registry", "actor_id", "TEXT NOT NULL DEFAULT ''"),
+        ("needle_registry", "actor_type", "TEXT NOT NULL DEFAULT ''"),
     ]
     indexes = [
         "CREATE INDEX IF NOT EXISTS idx_facts_retention ON facts(retention_class)",
@@ -222,6 +236,11 @@ def _migrate_schema():
         "CREATE INDEX IF NOT EXISTS idx_relationships_namespace ON relationships(namespace)",
         "CREATE INDEX IF NOT EXISTS idx_facts_memory_id ON facts(memory_id)",
         "CREATE INDEX IF NOT EXISTS idx_mc_excluded ON memory_chunks(is_excluded)",
+        # Phase 6: provenance indexes
+        "CREATE INDEX IF NOT EXISTS idx_facts_actor ON facts(actor_id)",
+        "CREATE INDEX IF NOT EXISTS idx_mc_actor ON memory_chunks(actor_id)",
+        "CREATE INDEX IF NOT EXISTS idx_mc_actor_type ON memory_chunks(actor_type)",
+        "CREATE INDEX IF NOT EXISTS idx_entities_actor ON entities(actor_id)",
     ]
     with GRAPH_WRITE_LOCK:
         conn = get_db()
@@ -231,6 +250,13 @@ def _migrate_schema():
                 conn.commit()
                 _logger.info("Migrated %s: added %s column", table, column)
             except sqlite3.OperationalError:
+                pass
+        for table, column, typedef in _needle_migrations:
+            try:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {typedef}")
+                conn.commit()
+                _logger.info("Migrated %s: added %s column", table, column)
+            except (sqlite3.OperationalError, Exception):
                 pass
         for ddl in indexes:
             try:
@@ -354,6 +380,8 @@ def upsert_fts_chunk(
     namespace: str = "",
     date: str = "",
     memory_type: str = "general",
+    actor_id: str = "",
+    actor_type: str = "",
 ):
     """Insert or replace a chunk in memory_chunks and sync to both FTS5 indexes."""
     with GRAPH_WRITE_LOCK:
@@ -377,9 +405,9 @@ def upsert_fts_chunk(
                 conn.execute("DELETE FROM memory_chunks WHERE qdrant_id = ?", (qdrant_id,))
 
             conn.execute(
-                "INSERT INTO memory_chunks (qdrant_id, text, file_path, chunk_index, agent_id, namespace, date, memory_type) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (qdrant_id, text, file_path, chunk_index, agent_id, namespace, date, memory_type),
+                "INSERT INTO memory_chunks (qdrant_id, text, file_path, chunk_index, agent_id, namespace, date, memory_type, actor_id, actor_type) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (qdrant_id, text, file_path, chunk_index, agent_id, namespace, date, memory_type, actor_id, actor_type),
             )
             rowid = conn.execute("SELECT rowid FROM memory_chunks WHERE qdrant_id = ?", (qdrant_id,)).fetchone()["rowid"]
             conn.execute(
@@ -456,7 +484,7 @@ def delete_fts_chunks_by_qdrant_id(qdrant_id: str) -> int:
 
 
 def search_fts(query: str, namespace: str = "", agent_id: str = "",
-               memory_type: str = "", limit: int = 30) -> list[dict]:
+               memory_type: str = "", limit: int = 30, actor_type: str = "") -> list[dict]:
     """BM25 keyword search via FTS5. Returns ranked results with qdrant_id and score."""
     conn = get_db()
     try:
@@ -472,12 +500,16 @@ def search_fts(query: str, namespace: str = "", agent_id: str = "",
         if memory_type:
             where_clauses.append("mc.memory_type = ?")
             params.append(memory_type)
+        if actor_type:
+            where_clauses.append("mc.actor_type = ?")
+            params.append(actor_type)
 
         where_sql = " AND " + " AND ".join(where_clauses)
 
         sql = (
             "SELECT mc.qdrant_id, mc.file_path, mc.chunk_index, mc.agent_id, "
             "mc.namespace, mc.date, mc.memory_type, mc.text, "
+            "mc.actor_id, mc.actor_type, "
             "rank AS bm25_rank "
             "FROM memory_fts "
             "JOIN memory_chunks mc ON memory_fts.rowid = mc.rowid "
@@ -502,7 +534,7 @@ def search_fts(query: str, namespace: str = "", agent_id: str = "",
 
 
 def search_fts_exact(query: str, namespace: str = "", agent_id: str = "",
-                     memory_type: str = "", limit: int = 30) -> list[dict]:
+                     memory_type: str = "", limit: int = 30, actor_type: str = "") -> list[dict]:
     """Non-stemmed BM25 search via memory_fts_exact for exact token matching."""
     conn = get_db()
     try:
@@ -518,12 +550,16 @@ def search_fts_exact(query: str, namespace: str = "", agent_id: str = "",
         if memory_type:
             where_clauses.append("mc.memory_type = ?")
             params.append(memory_type)
+        if actor_type:
+            where_clauses.append("mc.actor_type = ?")
+            params.append(actor_type)
 
         where_sql = " AND " + " AND ".join(where_clauses)
 
         sql = (
             "SELECT mc.qdrant_id, mc.file_path, mc.chunk_index, mc.agent_id, "
             "mc.namespace, mc.date, mc.memory_type, mc.text, "
+            "mc.actor_id, mc.actor_type, "
             "rank AS bm25_rank "
             "FROM memory_fts_exact "
             "JOIN memory_chunks mc ON memory_fts_exact.rowid = mc.rowid "
@@ -551,7 +587,8 @@ _RETENTION_RANK = {"ephemeral": 0, "standard": 1, "durable": 2, "permanent": 3}
 
 
 def upsert_entity(name: str, entity_type: str = "unknown", agent_id: str = "",
-                  retention_class: str = "standard", namespace: str = "global") -> int:
+                  retention_class: str = "standard", namespace: str = "global",
+                  actor_id: str = "", actor_type: str = "") -> int:
     now = datetime.now(timezone.utc).isoformat()
     with GRAPH_WRITE_LOCK:
         conn = get_db()
@@ -571,8 +608,9 @@ def upsert_entity(name: str, entity_type: str = "unknown", agent_id: str = "",
                 conn.commit()
                 return row["id"]
             cur = conn.execute(
-                "INSERT INTO entities (name, entity_type, first_seen, last_seen, retention_class, namespace) VALUES (?,?,?,?,?,?)",
-                (name, entity_type, now, now, retention_class, namespace),
+                "INSERT INTO entities (name, entity_type, first_seen, last_seen, retention_class, namespace, actor_id, actor_type) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (name, entity_type, now, now, retention_class, namespace, actor_id, actor_type),
             )
             conn.commit()
             return cur.lastrowid
@@ -611,7 +649,8 @@ _DATE_IN_PATH_RE = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
 def add_fact(entity_id: int, fact_text: str, source_file: str = "",
              agent_id: str = "", retention_class: str = "standard",
              valid_from: str = "", valid_until: str = "", namespace: str = "global",
-             memory_id: str = "") -> int:
+             memory_id: str = "", confidence: float = 1.0,
+             provenance: str = "unknown", actor_id: str = "") -> int:
     now = datetime.now(timezone.utc).isoformat()
     new_words = _word_set(fact_text)
 
@@ -625,10 +664,10 @@ def add_fact(entity_id: int, fact_text: str, source_file: str = "",
         try:
             cur = conn.execute(
                 "INSERT INTO facts (entity_id, fact_text, source_file, agent_id, created_at, "
-                "retention_class, valid_from, valid_until, namespace, memory_id) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                "retention_class, valid_from, valid_until, namespace, memory_id, confidence, provenance, actor_id) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (entity_id, fact_text, source_file, agent_id, now, retention_class,
-                 valid_from, valid_until, namespace, memory_id),
+                 valid_from, valid_until, namespace, memory_id, confidence, provenance, actor_id),
             )
             conn.commit()
             fid = cur.lastrowid
@@ -902,6 +941,8 @@ _ensure_needle_registry = schema_guard("""
         memory_id TEXT NOT NULL,
         namespace TEXT NOT NULL DEFAULT '',
         agent_id TEXT NOT NULL DEFAULT '',
+        actor_id TEXT NOT NULL DEFAULT '',
+        actor_type TEXT NOT NULL DEFAULT '',
         chunk_text TEXT NOT NULL DEFAULT '',
         created_at TEXT NOT NULL,
         PRIMARY KEY (token, memory_id)
@@ -911,7 +952,8 @@ _ensure_needle_registry = schema_guard("""
 """)
 
 
-def register_needle_tokens(memory_id: str, text: str, namespace: str = "", agent_id: str = ""):
+def register_needle_tokens(memory_id: str, text: str, namespace: str = "", agent_id: str = "",
+                           actor_id: str = "", actor_type: str = ""):
     """Extract and register high-specificity tokens from text for O(1) lookup."""
     _ensure_needle_registry()
     tokens: set[str] = set()
@@ -930,9 +972,9 @@ def register_needle_tokens(memory_id: str, text: str, namespace: str = "", agent
             for tok in tokens:
                 conn.execute(
                     "INSERT OR REPLACE INTO needle_registry "
-                    "(token, memory_id, namespace, agent_id, chunk_text, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (tok, memory_id, namespace, agent_id, snippet, now),
+                    "(token, memory_id, namespace, agent_id, actor_id, actor_type, chunk_text, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (tok, memory_id, namespace, agent_id, actor_id, actor_type, snippet, now),
                 )
             conn.commit()
         except Exception as e:

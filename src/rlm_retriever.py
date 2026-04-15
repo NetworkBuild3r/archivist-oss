@@ -435,6 +435,7 @@ async def search_vectors(
     thought_type: str = "",
     limit: int = 20,
     _query_vec: list[float] | None = None,
+    actor_type: str = "",
 ) -> list[dict]:
     """Stage 1: coarse vector search in Qdrant with optional filters.
 
@@ -472,6 +473,8 @@ async def search_vectors(
         must_filters.append(FieldCondition(key="topic", match=MatchValue(value=topic)))
     if thought_type:
         must_filters.append(FieldCondition(key="thought_type", match=MatchValue(value=thought_type)))
+    if actor_type:
+        must_filters.append(FieldCondition(key="actor_type", match=MatchValue(value=actor_type)))
 
     _date_range_active = bool(date_from or date_to) and date_from != date_to
     must_not_filters = [
@@ -607,6 +610,7 @@ async def recursive_retrieve(
     max_tokens: int | None = None,
     memory_type: str = "",
     _is_retry: bool = False,
+    actor_type: str = "",
 ) -> dict:
     """Full RLM pipeline: coarse → dedupe → graph augment → temporal decay → threshold → rerank → parent → refine → synthesize."""
     t0 = time.monotonic()
@@ -813,6 +817,7 @@ async def recursive_retrieve(
         agent_id=agent_id, agent_ids=agent_ids, team=team,
         namespace=namespace, date_from=date_from, date_to=date_to,
         memory_type=effective_memory_type, limit=vector_limit,
+        actor_type=actor_type,
     )
 
     async def _search_one(q: str, vec: list[float] | None, topic: str = "") -> list[dict]:
@@ -830,6 +835,7 @@ async def recursive_retrieve(
             agent_id=agent_id if not agent_ids else "",
             memory_type=effective_memory_type,
             limit=vector_limit,
+            actor_type=actor_type,
         )
 
     # Launch ALL search paths concurrently: vector variants + BM25 + literal

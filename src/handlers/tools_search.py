@@ -67,6 +67,12 @@ TOOLS: list[Tool] = [
                     "description": "Filter by memory type: experience, skill, or general. Omit for all types.",
                     "default": "",
                 },
+                "actor_type": {
+                    "type": "string",
+                    "enum": ["agent", "human", "system", "tool", ""],
+                    "description": "Filter by actor type. Omit for all types.",
+                    "default": "",
+                },
             },
             "required": ["query"],
         },
@@ -315,6 +321,7 @@ async def _handle_search(arguments: dict) -> list[TextContent]:
         date_to=arguments.get("date_to", ""),
         max_tokens=arguments.get("max_tokens"),
         memory_type=arguments.get("memory_type", ""),
+        actor_type=arguments.get("actor_type", ""),
     )
     return success_response(result)
 

@@ -48,6 +48,8 @@ CURATOR_LLM_API_KEY = os.getenv("CURATOR_LLM_API_KEY", os.getenv("LLM_API_KEY", 
 # Retrieval/indexing still use LLM_URL / LLM_MODEL. Base URL must NOT include /v1 (same as LLM_URL).
 BENCHMARK_JUDGE_LLM_URL = os.getenv("BENCHMARK_JUDGE_LLM_URL", "").strip()
 BENCHMARK_JUDGE_LLM_MODEL = os.getenv("BENCHMARK_JUDGE_LLM_MODEL", "").strip()
+# None if unset → judge uses LLM_API_KEY; set (e.g. ollama) for a dedicated Authorization header.
+BENCHMARK_JUDGE_LLM_API_KEY = os.environ.get("BENCHMARK_JUDGE_LLM_API_KEY")
 # If top hit score is >= this, skip per-chunk LLM refinement and use tier text (0 = disabled, always refine).
 REFINE_SKIP_THRESHOLD = float(os.getenv("REFINE_SKIP_THRESHOLD", "0.0"))
 
@@ -203,6 +205,17 @@ REVERSE_HYDE_QUESTIONS_PER_CHUNK = int(os.getenv("REVERSE_HYDE_QUESTIONS_PER_CHU
 SYNTHETIC_QUESTIONS_ENABLED = _env_bool("SYNTHETIC_QUESTIONS_ENABLED", "false")
 SYNTHETIC_QUESTIONS_COUNT = int(os.getenv("SYNTHETIC_QUESTIONS_COUNT", "4"))
 
+# ── Provenance & actor-aware memory (v2.3 — Phase 6) ─────────────────────────
+PROVENANCE_ENABLED = _env_bool("PROVENANCE_ENABLED", "true")
+DEFAULT_CONFIDENCE_BY_ACTOR_TYPE: dict[str, float] = {
+    "human": float(os.getenv("DEFAULT_CONFIDENCE_HUMAN", "1.0")),
+    "agent": float(os.getenv("DEFAULT_CONFIDENCE_AGENT", "0.8")),
+    "system": float(os.getenv("DEFAULT_CONFIDENCE_SYSTEM", "0.7")),
+    "tool": float(os.getenv("DEFAULT_CONFIDENCE_TOOL", "0.7")),
+    "extracted": float(os.getenv("DEFAULT_CONFIDENCE_EXTRACTED", "0.5")),
+}
+MIN_FACT_CONFIDENCE = float(os.getenv("MIN_FACT_CONFIDENCE", "0.3"))
+
 # ── Cross-encoder reranker (v2.2 — Phase 2 of v2 retrieval architecture) ─────
 # When enabled, candidates from the nomination step (vector, BM25, graph, needle)
 # are scored by a cross-encoder model instead of flowing through the
@@ -303,6 +316,7 @@ def _log_feature_flags() -> None:
         "SINGLE_COLLECTION_MODE": SINGLE_COLLECTION_MODE,
         "QUERY_CLASSIFICATION_ENABLED": QUERY_CLASSIFICATION_ENABLED,
         "CONFLICT_CHECK_ON_STORE": CONFLICT_CHECK_ON_STORE,
+        "PROVENANCE_ENABLED": PROVENANCE_ENABLED,
         "JOURNAL_ENABLED": JOURNAL_ENABLED,
         "METRICS_ENABLED": METRICS_ENABLED,
         "METRICS_AUTH_EXEMPT": METRICS_AUTH_EXEMPT,

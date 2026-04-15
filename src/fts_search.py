@@ -89,6 +89,7 @@ def search_bm25(
     agent_id: str = "",
     memory_type: str = "",
     limit: int = 30,
+    actor_type: str = "",
 ) -> list[dict]:
     """Run BM25 keyword search via FTS5 in dual AND+OR mode.
 
@@ -105,7 +106,7 @@ def search_bm25(
     if or_q:
         or_hits = search_fts(
             query=or_q, namespace=namespace, agent_id=agent_id,
-            memory_type=memory_type, limit=limit,
+            memory_type=memory_type, limit=limit, actor_type=actor_type,
         )
         if or_hits:
             rankings.append(or_hits)
@@ -119,7 +120,7 @@ def search_bm25(
             try:
                 and_hits = search_fts(
                     query=and_q, namespace=namespace, agent_id=agent_id,
-                    memory_type=memory_type, limit=limit,
+                    memory_type=memory_type, limit=limit, actor_type=actor_type,
                 )
                 if and_hits:
                     rankings.append(and_hits)
@@ -131,7 +132,7 @@ def search_bm25(
             try:
                 phrase_hits = search_fts(
                     query=phrase_q, namespace=namespace, agent_id=agent_id,
-                    memory_type=memory_type, limit=limit,
+                    memory_type=memory_type, limit=limit, actor_type=actor_type,
                 )
                 if phrase_hits:
                     rankings.append(phrase_hits)
@@ -144,7 +145,7 @@ def search_bm25(
                 try:
                     exact_hits = search_fts_exact(
                         query=exact_q, namespace=namespace, agent_id=agent_id,
-                        memory_type=memory_type, limit=limit,
+                        memory_type=memory_type, limit=limit, actor_type=actor_type,
                     )
                     if exact_hits:
                         rankings.append(exact_hits)
@@ -158,7 +159,7 @@ def search_bm25(
                 try:
                     exact_hits = search_fts_exact(
                         query=exact_q, namespace=namespace, agent_id=agent_id,
-                        memory_type=memory_type, limit=limit,
+                        memory_type=memory_type, limit=limit, actor_type=actor_type,
                     )
                     if exact_hits:
                         rankings.append(exact_hits)

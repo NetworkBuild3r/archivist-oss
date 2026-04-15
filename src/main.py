@@ -121,6 +121,12 @@ def ensure_qdrant_collection():
             ("topic", PayloadSchemaType.KEYWORD),
             ("thought_type", PayloadSchemaType.KEYWORD),
             ("text", PayloadSchemaType.TEXT),
+            # Phase 6: provenance & actor-aware memory
+            ("actor_id", PayloadSchemaType.KEYWORD),
+            ("actor_type", PayloadSchemaType.KEYWORD),
+            # confidence is stored on payload but not indexed here;
+            # the cross-encoder reranker handles ranking, not Qdrant filters.
+            # A FLOAT range index may be added later for MIN_FACT_CONFIDENCE filtering.
         ]:
             client.create_payload_index(
                 collection_name=QDRANT_COLLECTION,

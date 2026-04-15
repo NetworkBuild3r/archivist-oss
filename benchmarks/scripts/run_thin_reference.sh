@@ -53,6 +53,11 @@ echo "  Thin reference benchmarks  (repo: $ROOT)"
 echo "  LongMemEval limit: $LIMIT_LM  → $OUT_LM"
 echo "  BEIR queries:      $LIMIT_BEIR → $OUT_BEIR"
 echo "  BENCHMARK_FAST:    ${BENCHMARK_FAST:-1}  (0 = use .env only, no speed overrides)"
+if [[ -n "${BENCHMARK_JUDGE_LLM_URL:-}" ]]; then
+  echo "  Judge LLM:         ${BENCHMARK_JUDGE_LLM_URL}  (model: ${BENCHMARK_JUDGE_LLM_MODEL:-<unset>})"
+else
+  echo "  Judge LLM:         (same as LLM_URL / LLM_MODEL — BENCHMARK_JUDGE_LLM_URL empty)"
+fi
 if [[ "${SKIP_BEIR:-0}" == "1" ]]; then
   echo "  BEIR:              skipped (SKIP_BEIR=1)"
 fi

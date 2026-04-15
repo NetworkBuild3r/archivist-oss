@@ -28,6 +28,18 @@ def resolve_caller(arguments: dict) -> str:
     return (arguments.get("caller_agent_id") or "").strip() or agent_id
 
 
+def resolve_actor(arguments: dict) -> tuple[str, str]:
+    """Return ``(actor_id, actor_type)`` from tool arguments.
+
+    ``actor_id`` defaults to ``agent_id`` for backward compatibility.
+    ``actor_type`` defaults to ``"agent"`` when not provided.
+    """
+    agent_id = (arguments.get("agent_id") or "").strip()
+    actor_id = (arguments.get("actor_id") or "").strip() or agent_id
+    actor_type = (arguments.get("actor_type") or "").strip() or "agent"
+    return actor_id, actor_type
+
+
 def require_caller(caller: str) -> list[TextContent] | None:
     """Return an error response when caller is missing in strict RBAC mode.
 

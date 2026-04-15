@@ -71,7 +71,11 @@ def _run(
     evaluator = EvaluateRetrieval(dense, k_values=k_values)
 
     results = evaluator.retrieve(corpus, queries)
-    ndcg, _map, recall, precision = evaluator.evaluate(qrels, results, k_values)
+    # BEIR defaults to ignore_identical_ids=True and logs INFO every time; NFCorpus
+    # uses disjoint q/doc ids so False matches typical BEIR reporting and silences that line.
+    ndcg, _map, recall, precision = evaluator.evaluate(
+        qrels, results, k_values, ignore_identical_ids=False
+    )
 
     summary = {
         "benchmark": "BEIR",

@@ -32,7 +32,7 @@ import metrics as m
 import webhooks
 import curator_queue
 
-from ._common import _rbac_gate, error_response, success_response
+from ._common import _rbac_gate, error_response, success_response, resolve_actor
 
 logger = logging.getLogger("archivist.mcp")
 
@@ -83,6 +83,19 @@ TOOLS: list[Tool] = [
                     "type": "boolean",
                     "description": "If true, skip vector similarity conflict check against other agents' memories (use sparingly).",
                     "default": False,
+                },
+                "actor_id": {"type": "string", "description": "Who produced this content (defaults to agent_id). Can be a human username, tool name, or system process.", "default": ""},
+                "actor_type": {
+                    "type": "string",
+                    "enum": ["agent", "human", "system", "tool"],
+                    "description": "Type of actor storing this memory.",
+                    "default": "agent",
+                },
+                "confidence": {"type": "number", "description": "0.0-1.0 confidence in this memory's accuracy (default based on actor_type).", "default": -1},
+                "source_trace": {
+                    "type": "object",
+                    "description": "Structured origin context: {tool, session_id, upstream_source, parent_memory_id, extra}.",
+                    "default": {},
                 },
             },
             "required": ["text", "agent_id"],
@@ -221,6 +234,15 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
     retention = arguments.get("retention_class", "standard")
     force_skip = bool(arguments.get("force_skip_conflict_check", False))
 
+    actor_id, actor_type = resolve_actor(arguments)
+    from provenance import SourceTrace, default_confidence
+    raw_confidence = arguments.get("confidence", -1)
+    confidence = raw_confidence if isinstance(raw_confidence, (int, float)) and raw_confidence >= 0 else default_confidence(actor_type)
+    _raw_trace = arguments.get("source_trace") or {}
+    source_trace = SourceTrace.from_dict(_raw_trace) if isinstance(_raw_trace, dict) else SourceTrace()
+    if not source_trace.tool:
+        source_trace.tool = "archivist_store"
+
     if retention == "permanent":
         importance = max(importance, 1.0)
 
@@ -279,23 +301,32 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
 
     pid = str(uuid.uuid4())
 
+    _fact_kw = dict(retention_class=retention, namespace=namespace or "global", memory_id=pid,
+                    confidence=confidence, provenance=source_trace.tool or "explicit", actor_id=actor_id)
+
     for ename in entity_names:
-        eid = upsert_entity(ename.strip(), retention_class=retention, namespace=namespace or "global")
-        add_fact(eid, text[:200], f"explicit/{agent_id}", agent_id, retention_class=retention, namespace=namespace or "global", memory_id=pid)
+        eid = upsert_entity(ename.strip(), retention_class=retention, namespace=namespace or "global",
+                            actor_id=actor_id, actor_type=actor_type)
+        add_fact(eid, text[:200], f"explicit/{agent_id}", agent_id, **_fact_kw)
 
     if not entity_names:
-        eid = upsert_entity(agent_id, "agent", retention_class=retention, namespace=namespace or "global")
-        add_fact(eid, text[:200], f"explicit/{agent_id}", agent_id, retention_class=retention, namespace=namespace or "global", memory_id=pid)
+        eid = upsert_entity(agent_id, "agent", retention_class=retention, namespace=namespace or "global",
+                            actor_id=actor_id, actor_type=actor_type)
+        add_fact(eid, text[:200], f"explicit/{agent_id}", agent_id, **_fact_kw)
 
         _auto_hints = pre_extract(text)
         _auto_entities = _auto_hints.get("entities", [])
         _needle_entities = extract_needle_entities(text)
+        from config import DEFAULT_CONFIDENCE_BY_ACTOR_TYPE
+        _extracted_conf = DEFAULT_CONFIDENCE_BY_ACTOR_TYPE.get("extracted", 0.5)
+        _extracted_fact_kw = dict(_fact_kw, confidence=_extracted_conf, provenance="deterministic")
         for ent in _auto_entities + _needle_entities:
             ename = ent["name"].strip()
             if ename and ename != agent_id:
                 etype = ent.get("type", "unknown")
-                _eid = upsert_entity(ename, etype, retention_class=retention, namespace=namespace or "global")
-                add_fact(_eid, text[:200], f"explicit/{agent_id}", agent_id, retention_class=retention, namespace=namespace or "global", memory_id=pid)
+                _eid = upsert_entity(ename, etype, retention_class=retention, namespace=namespace or "global",
+                                     actor_id=actor_id, actor_type=actor_type)
+                add_fact(_eid, text[:200], f"explicit/{agent_id}", agent_id, **_extracted_fact_kw)
     else:
         _auto_hints = pre_extract(text)
 
@@ -320,6 +351,8 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
             date=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
             thought_type=thought_type,
             topic=_detected_topic,
+            actor_id=actor_id,
+            actor_type=actor_type,
         )
     vec = await embed_text(embed_input)
     client = qdrant_client()
@@ -345,6 +378,10 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
         "memory_type": arguments.get("memory_type", "general"),
         "thought_type": thought_type,
         "representation_type": "chunk",
+        "actor_id": actor_id,
+        "actor_type": actor_type,
+        "confidence": confidence,
+        "source_trace": source_trace.to_dict(),
     }
     if retention in ("durable", "permanent"):
         ttl_expires_at = None
@@ -369,9 +406,12 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
             namespace=namespace,
             date=payload["date"],
             memory_type=arguments.get("memory_type", "general"),
+            actor_id=actor_id,
+            actor_type=actor_type,
         )
 
-    register_needle_tokens(pid, text, namespace=namespace, agent_id=agent_id)
+    register_needle_tokens(pid, text, namespace=namespace, agent_id=agent_id,
+                           actor_id=actor_id, actor_type=actor_type)
 
     # Generate micro-chunks for high-specificity tokens (IPs, crons, UUIDs, etc.)
     _micro_chunks = _extract_needle_micro_chunks(text)
@@ -406,6 +446,10 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
                 "thought_type": thought_type,
                 "parent_id": pid,
                 "is_parent": False,
+                "actor_id": actor_id,
+                "actor_type": actor_type,
+                "confidence": confidence,
+                "source_trace": source_trace.to_dict(),
             }
             if retention in ("durable", "permanent"):
                 pass
@@ -420,8 +464,10 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
                     agent_id=agent_id, namespace=namespace,
                     date=now.strftime("%Y-%m-%d"),
                     memory_type=arguments.get("memory_type", "general"),
+                    actor_id=actor_id, actor_type=actor_type,
                 )
-            register_needle_tokens(_mc_id, mc, namespace=namespace, agent_id=agent_id)
+            register_needle_tokens(_mc_id, mc, namespace=namespace, agent_id=agent_id,
+                                   actor_id=actor_id, actor_type=actor_type)
 
         if _micro_points:
             client.upsert(collection_name=_coll, points=_micro_points)
@@ -442,6 +488,7 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
             _rh_points = []
             for qi, (q, qv) in enumerate(zip(_rh_questions, _rh_vecs)):
                 _q_id = str(uuid.uuid4())
+                _rh_trace = source_trace.with_parent(pid)
                 _rh_points.append(PointStruct(
                     id=_q_id,
                     vector=qv,
@@ -462,6 +509,10 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
                         "source_memory_id": pid,
                         "is_reverse_hyde": True,
                         "reverse_hyde_question": q,
+                        "actor_id": actor_id,
+                        "actor_type": actor_type,
+                        "confidence": confidence,
+                        "source_trace": _rh_trace.to_dict(),
                     },
                 ))
             if _rh_points:
@@ -492,6 +543,7 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
     if _SQ_ENABLED:
         async def _synthetic_questions_background():
             from synthetic_questions import generate_and_embed_synthetic_points
+            _sq_trace = source_trace.with_parent(pid)
             base_payload = {
                 "agent_id": agent_id,
                 "text": text,
@@ -506,6 +558,10 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
                 "retention_class": retention,
                 "memory_type": arguments.get("memory_type", "general"),
                 "thought_type": thought_type,
+                "actor_id": actor_id,
+                "actor_type": actor_type,
+                "confidence": confidence,
+                "source_trace": _sq_trace.to_dict(),
             }
             sq_points = await generate_and_embed_synthetic_points(
                 chunk_point_id=pid,
@@ -543,7 +599,9 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
         namespace=namespace,
         text_hash=checksum,
         version=1,
-        metadata={"trigger": "api", "importance_score": importance, "retention_class": retention},
+        metadata={"trigger": "api", "importance_score": importance, "retention_class": retention,
+                  "actor_id": actor_id, "actor_type": actor_type, "confidence": confidence,
+                  "source_trace": source_trace.to_dict()},
     )
 
     hot_cache.invalidate_namespace(namespace)

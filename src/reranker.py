@@ -64,6 +64,15 @@ def _build_pair(query: str, candidate: dict) -> str:
     parts = [f"Context: {chunk_text}"]
     if parent_ctx:
         parts.append(f"Parent context: {parent_ctx}")
+    _actor_type = candidate.get("actor_type", "")
+    _confidence = candidate.get("confidence")
+    if _actor_type or _confidence is not None:
+        prov_parts = []
+        if _actor_type:
+            prov_parts.append(f"Actor: {_actor_type}")
+        if _confidence is not None:
+            prov_parts.append(f"Confidence: {_confidence}")
+        parts.append(" | ".join(prov_parts))
     return "\n\n".join(parts)
 
 
