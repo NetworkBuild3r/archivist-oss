@@ -18,10 +18,8 @@ starlette>=0.38.0
 # Without tiktoken, falls back to chars//4 heuristic
 # tiktoken>=0.7.0
 
-# Optional: cross-encoder reranking (Phase 1)
-# Uncomment to enable RERANK_ENABLED=true
-# sentence-transformers>=3.0.0
-# torch>=2.0.0
+# Optional: cross-encoder reranking (RERANKER_ENABLED=true) — see requirements-rerank.txt
+# (Not in the default install: pulls PyTorch + large wheels.)
 
 # Optional: OpenTelemetry tracing (set OTEL_EXPORTER_OTLP_ENDPOINT; see observability.py)
 # opentelemetry-api>=1.20.0

@@ -5,8 +5,10 @@
 ```bash
 python -m venv .venv
 source .venv/bin/activate   # Windows: .venv\Scripts\activate
-pip install -r requirements.txt pytest
+pip install -r requirements.txt -r requirements-test.txt
 ```
+
+Optional: `requirements-rerank.txt` (cross-encoder reranker), `requirements-benchmark.txt` (BEIR and similar) — not needed for tests or the default server image.
 
 ## Tests
 

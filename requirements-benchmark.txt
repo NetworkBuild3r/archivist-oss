@@ -1,3 +1,7 @@
-# Optional: thin industry-reference benchmarks (BEIR dense baseline).
+# Optional: reproduce academic / regression benchmarks (BEIR thin, etc.).
+# Not part of the default Archivist runtime — install only when you run benchmarks.
+#
 #   pip install -r requirements-benchmark.txt
+#
+# beir pulls sentence-transformers, datasets, pytrec-eval-terrier (large download).
 beir>=2.0.0

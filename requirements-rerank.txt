@@ -1,0 +1,4 @@
+# Optional production v2 reranker (CrossEncoder in reranker.py).
+# Install when RERANKER_ENABLED=true (or legacy RERANK paths that need sentence-transformers).
+# Not included in default requirements.txt to keep Docker/runtime images small.
+sentence-transformers>=3.0.0

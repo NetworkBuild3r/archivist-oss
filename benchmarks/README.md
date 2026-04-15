@@ -6,8 +6,7 @@ Work from **your repo clone** (example: `cd /opt/appdata/archivist-oss`). Do **n
 
 - **Config:** If you already have a working `.env`, keep it. Only create one when missing:
   `cp -n .env.example .env` (`-n` = do not overwrite an existing file).
-- **Python:** Use whatever you normally use (conda base, `venv`, etc.). Install deps with that same interpreter:
-  `python -m pip install -r requirements.txt` (and `requirements-benchmark.txt` if you run BEIR).
+- **Python:** Use whatever you normally use (conda base, `venv`, etc.). Core runtime: `python -m pip install -r requirements.txt`. Benchmark-only deps (BEIR, large wheels): **add** `pip install -r requirements-benchmark.txt` when you need them — they are **not** part of the default image/install.
 - **Qdrant:** Start the stack you already use, e.g. `docker compose up -d qdrant`, and ensure `QDRANT_URL` in `.env` matches (e.g. `http://127.0.0.1:6333` when Qdrant is on the host).
 - **LongMemEval only:** `SKIP_BEIR=1 bash benchmarks/scripts/run_thin_reference.sh` skips BEIR and extra packages.
 
