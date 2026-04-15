@@ -308,10 +308,8 @@ async def _llm_judge(question: str, ground_truth: str, hypothesis: str,
     judge_url = (cfg.BENCHMARK_JUDGE_LLM_URL or "").strip()
     if judge_url:
         j_model = cfg.BENCHMARK_JUDGE_LLM_MODEL or cfg.LLM_MODEL
-        if "BENCHMARK_JUDGE_LLM_API_KEY" in os.environ:
-            j_key: str | None = os.environ["BENCHMARK_JUDGE_LLM_API_KEY"]
-        else:
-            j_key = None
+        # None → llm_query uses LLM_API_KEY; set to "" or ollama for a dedicated header.
+        j_key = cfg.BENCHMARK_JUDGE_LLM_API_KEY
     else:
         j_model = cfg.LLM_MODEL
         j_key = None

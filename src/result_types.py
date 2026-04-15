@@ -47,6 +47,10 @@ class ResultCandidate:
     l0: str = ""
     l1: str = ""
     source: RetrievalSource = RetrievalSource.VECTOR
+    actor_id: str = ""
+    actor_type: str = ""
+    confidence: float = 1.0
+    source_trace: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         """Convert to the pipeline dict format expected by all stages."""
@@ -72,6 +76,10 @@ class ResultCandidate:
             "l0": self.l0,
             "l1": self.l1,
             "retrieval_source": self.source.value,
+            "actor_id": self.actor_id,
+            "actor_type": self.actor_type,
+            "confidence": self.confidence,
+            "source_trace": self.source_trace,
         }
         return d
 
@@ -106,6 +114,10 @@ class ResultCandidate:
             l0=payload.get("l0", ""),
             l1=payload.get("l1", ""),
             source=source,
+            actor_id=payload.get("actor_id", ""),
+            actor_type=payload.get("actor_type", ""),
+            confidence=payload.get("confidence", 1.0),
+            source_trace=payload.get("source_trace") or {},
         )
 
     @classmethod
@@ -125,6 +137,8 @@ class ResultCandidate:
             date=hit.get("created_at", "")[:10] if hit.get("created_at") else "",
             file_type="needle_registry",
             source=RetrievalSource.REGISTRY,
+            actor_id=hit.get("actor_id", ""),
+            actor_type=hit.get("actor_type", ""),
         )
 
     @classmethod
@@ -140,6 +154,8 @@ class ResultCandidate:
             namespace=hit.get("namespace", ""),
             chunk_index=hit.get("chunk_index", 0),
             source=RetrievalSource.BM25,
+            actor_id=hit.get("actor_id", ""),
+            actor_type=hit.get("actor_type", ""),
         )
 
     def update_from_payload(self, payload: dict) -> None:
@@ -161,3 +177,7 @@ class ResultCandidate:
         self.thought_type = payload.get("thought_type", self.thought_type)
         self.l0 = payload.get("l0", self.l0)
         self.l1 = payload.get("l1", self.l1)
+        self.actor_id = payload.get("actor_id", self.actor_id)
+        self.actor_type = payload.get("actor_type", self.actor_type)
+        self.confidence = payload.get("confidence", self.confidence)
+        self.source_trace = payload.get("source_trace") or self.source_trace

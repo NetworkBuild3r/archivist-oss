@@ -18,6 +18,8 @@ def augment_chunk(
     date: str = "",
     topic: str = "",
     thought_type: str = "",
+    actor_id: str = "",
+    actor_type: str = "",
 ) -> str:
     """Prepend a contextual header to chunk text for embedding.
 
@@ -28,7 +30,12 @@ def augment_chunk(
     parts: list[str] = []
 
     meta_fields: list[str] = []
-    if agent_id:
+    if actor_id:
+        label = f"Actor: {actor_id}"
+        if actor_type:
+            label += f" ({actor_type})"
+        meta_fields.append(label)
+    elif agent_id:
         meta_fields.append(f"Agent: {agent_id}")
     if file_path:
         meta_fields.append(f"File: {file_path}")

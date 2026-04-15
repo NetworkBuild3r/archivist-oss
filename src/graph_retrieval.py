@@ -15,7 +15,7 @@ from graph import (
 from config import (
     GRAPH_RETRIEVAL_WEIGHT, TEMPORAL_DECAY_HALFLIFE_DAYS,
     MAX_ENTITY_FACT_INJECTIONS, ENTITY_SPECIFICITY_MAX_MENTIONS,
-    CROSS_AGENT_MAX_SHARE,
+    CROSS_AGENT_MAX_SHARE, MIN_FACT_CONFIDENCE,
 )
 
 logger = logging.getLogger("archivist.graph_retrieval")
@@ -355,6 +355,7 @@ def build_entity_fact_results(
     Uses a single bulk query for all entity facts instead of N queries.
     """
     cap = max_injected if max_injected is not None else MAX_ENTITY_FACT_INJECTIONS
+    _min_fact_confidence = MIN_FACT_CONFIDENCE
     results: list[dict] = []
     seen_texts: set[str] = set()
 
@@ -368,6 +369,9 @@ def build_entity_fact_results(
         score_boost = 0.05 if retention in ("durable", "permanent") else 0.0
 
         for f in all_facts.get(eid, []):
+            fact_confidence = f.get("confidence", 1.0)
+            if fact_confidence < _min_fact_confidence:
+                continue
             text_key = f["fact_text"][:100]
             if text_key in seen_texts:
                 continue
@@ -394,6 +398,8 @@ def build_entity_fact_results(
                 "entity_id": eid,
                 "valid_from": f.get("valid_from", ""),
                 "valid_until": f.get("valid_until", ""),
+                "confidence": fact_confidence,
+                "actor_id": f.get("actor_id", ""),
             })
 
     results = _apply_cross_agent_cap(results)

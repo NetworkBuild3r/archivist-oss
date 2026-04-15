@@ -110,6 +110,9 @@ def ensure_collection(namespace: str) -> str:
                 ("topic", PayloadSchemaType.KEYWORD),
                 ("thought_type", PayloadSchemaType.KEYWORD),
                 ("text", PayloadSchemaType.TEXT),
+                # Phase 6: provenance & actor-aware memory
+                ("actor_id", PayloadSchemaType.KEYWORD),
+                ("actor_type", PayloadSchemaType.KEYWORD),
             ]:
                 client.create_payload_index(
                     collection_name=name, field_name=field, field_schema=schema,
