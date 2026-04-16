@@ -257,10 +257,14 @@ JOURNAL_DIR = os.getenv("JOURNAL_DIR", "/data/archivist/journal")
 MCP_PORT = int(os.getenv("MCP_PORT", "3100"))
 
 # MCP transport selection.
-# "streamable_http" (default) — modern Streamable HTTP at /mcp (MCP spec ≥2025-03).
-# Legacy SSE endpoints (/mcp/sse + /mcp/messages/) are mounted only when
-# MCP_SSE_ENABLED=true, keeping backward compatibility for older clients.
-MCP_SSE_ENABLED = _env_bool("MCP_SSE_ENABLED", "false")
+# Primary:   POST /mcp  — Streamable HTTP (MCP spec ≥2025-03, default for all modern clients).
+# Legacy:    GET  /mcp/sse + POST /mcp/messages/ — SSE transport for older clients.
+#
+# MCP_SSE_ENABLED=true (default) mounts both transports simultaneously so that
+# legacy SSE clients (e.g. OpenClaw ≤v2026.4.8) can connect without reconfiguration
+# while modern clients continue to use the Streamable HTTP endpoint.
+# Set MCP_SSE_ENABLED=false to disable the legacy SSE routes (saves two routes).
+MCP_SSE_ENABLED = _env_bool("MCP_SSE_ENABLED", "true")
 
 # Optional: require `Authorization: Bearer <key>` or `X-API-Key` on all routes except /health
 ARCHIVIST_API_KEY = os.getenv("ARCHIVIST_API_KEY", "").strip()
