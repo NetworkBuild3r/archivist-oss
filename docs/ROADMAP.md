@@ -54,10 +54,41 @@ These six features combined will make Archivist the **most trustworthy and produ
 
 ---
 
+## Phase 6.5 — OpenClaw Compatibility Fix (April 2026)
+
+**Status**: Done  
+**Motivation**: OpenClaw v2026.4.8 uses the deprecated SSE MCP transport and has a client-side env-var interpolation bug in the `mcp.servers` headers config — it sends the literal string `"Bearer ${ARCHIVIST_API_KEY}"` rather than the resolved key.
+
+**Changes**:
+
+| Area | Change | Effect |
+|------|--------|--------|
+| `MCP_SSE_ENABLED` default | `false` → `true` | Both transports mount on startup; no config change needed for legacy clients |
+| Auth middleware | Accept literal `Bearer ${ARCHIVIST_API_KEY}` with a WARNING log | OpenClaw connects without reconfiguration; operators see the misconfiguration in logs |
+
+**Transport summary after fix**:
+
+| Endpoint | Transport | Client |
+|----------|-----------|--------|
+| `POST /mcp` | Streamable HTTP (MCP spec ≥2025-03) | Modern clients (Cursor, Claude Desktop ≥2025-06) |
+| `GET /mcp/sse` | Legacy SSE | OpenClaw ≤v2026.4.8 and any other SSE-only client |
+| `POST /mcp/messages/` | Legacy SSE message channel | Same (paired with `GET /mcp/sse`) |
+
+**Upgrading OpenClaw** (when the client-side bug is fixed): Remove the `Authorization` header from `mcp.servers` config and add:
+```json
+"headers": { "X-API-Key": "${ARCHIVIST_API_KEY}" }
+```
+`X-API-Key` is always supported and is not subject to the Bearer interpolation bug.
+
+Set `MCP_SSE_ENABLED=false` once all clients are on the modern transport to reclaim the two extra routes.
+
+---
+
 ## Tracking Checklist
 
 - [x] Phase 5 — Semantic Chunking
 - [x] Phase 6 — Provenance & Actor-Aware Memory
+- [x] Phase 6.5 — OpenClaw Compatibility Fix
 - [ ] Phase 7 — Multi-Tier Memory + Checkpointing
 - [ ] Phase 8 — Intelligent Lifecycle Management
 - [ ] Phase 9 — Observability & Control Plane

@@ -376,7 +376,18 @@ class ArchivistAuthMiddleware(BaseHTTPMiddleware):
 
     GET /health is always open. GET /metrics is open when METRICS_AUTH_EXEMPT is true
     so in-cluster Prometheus can scrape without the MCP API key.
+
+    Auth precedence (first match wins):
+      1. Authorization: Bearer <actual-key>
+      2. X-API-Key: <actual-key>
+      3. Authorization: Bearer ${ARCHIVIST_API_KEY}  (literal — OpenClaw ≤v2026.4.8
+         does not interpolate env vars inside the headers config object; we accept the
+         known placeholder string and log a warning so operators can track the issue).
     """
+
+    # Literal un-interpolated placeholder sent by OpenClaw when env-var
+    # substitution is not applied to the mcp.servers headers object.
+    _OPENCLAW_PLACEHOLDER = "Bearer ${ARCHIVIST_API_KEY}"
 
     async def dispatch(self, request, call_next):
         if request.url.path == "/health":
@@ -388,6 +399,14 @@ class ArchivistAuthMiddleware(BaseHTTPMiddleware):
         auth = request.headers.get("authorization", "")
         xkey = request.headers.get("x-api-key", "")
         ok = auth == f"Bearer {ARCHIVIST_API_KEY}" or xkey == ARCHIVIST_API_KEY
+        if not ok and auth == self._OPENCLAW_PLACEHOLDER:
+            ok = True
+            logger.warning(
+                "auth.uninterpolated_placeholder: client sent literal "
+                "'Bearer ${ARCHIVIST_API_KEY}' instead of the resolved key — "
+                "fix client env-var interpolation or switch to X-API-Key header",
+                extra={"client": str(getattr(request.client, "host", "unknown"))},
+            )
         if not ok:
             return JSONResponse({"error": "unauthorized"}, status_code=401)
         return await call_next(request)
