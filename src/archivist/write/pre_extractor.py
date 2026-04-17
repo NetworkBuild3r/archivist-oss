@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 from collections import Counter
 
-from chunking import NEEDLE_PATTERNS as _CHUNKING_NEEDLE_PATTERNS
+from archivist.utils.chunking import NEEDLE_PATTERNS as _CHUNKING_NEEDLE_PATTERNS
 
 # ---------------------------------------------------------------------------
 # Thought-type taxonomy (mid-granularity semantic classification)

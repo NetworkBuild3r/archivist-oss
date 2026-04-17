@@ -13,12 +13,12 @@ import time
 import threading
 from collections import OrderedDict
 
-from config import (
+from archivist.core.config import (
     LLM_REFINE_MODEL,
     LLM_MODEL,
 )
-from llm import llm_query
-import metrics as m
+from archivist.features.llm import llm_query
+import archivist.core.metrics as m
 
 logger = logging.getLogger("archivist.query_expansion")
 

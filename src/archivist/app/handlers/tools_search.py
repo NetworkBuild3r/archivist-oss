@@ -2,15 +2,15 @@
 
 from mcp.types import Tool, TextContent
 
-from rlm_retriever import recursive_retrieve, search_vectors
-from graph import search_entities, get_entity_facts, get_entity_relationships, add_entity_alias
-from compressed_index import build_namespace_index, get_cached_wake_up, cache_wake_up, format_wake_up_text
-from graph_retrieval import detect_contradictions, get_entity_brief
-from rbac import (
+from archivist.retrieval.rlm_retriever import recursive_retrieve, search_vectors
+from archivist.storage.graph import search_entities, get_entity_facts, get_entity_relationships, add_entity_alias
+from archivist.storage.compressed_index import build_namespace_index, get_cached_wake_up, cache_wake_up, format_wake_up_text
+from archivist.storage.graph_retrieval import detect_contradictions, get_entity_brief
+from archivist.core.rbac import (
     get_namespace_for_agent, filter_agents_for_read,
     can_read_agent_memory, is_permissive_mode,
 )
-from archivist_uri import memory_uri
+from archivist.core.archivist_uri import memory_uri
 
 from ._common import _rbac_gate, error_response, success_response, resolve_caller, require_caller
 
@@ -476,8 +476,8 @@ async def _handle_insights(arguments: dict) -> list[TextContent]:
 
 async def _handle_deref(arguments: dict) -> list[TextContent]:
     """Dereference a single memory point by ID — returns full L2 text + metadata."""
-    from config import QDRANT_COLLECTION
-    from qdrant import qdrant_client
+    from archivist.core.config import QDRANT_COLLECTION
+    from archivist.storage.qdrant import qdrant_client
 
     memory_id = arguments["memory_id"]
     agent_id = arguments.get("agent_id", "")

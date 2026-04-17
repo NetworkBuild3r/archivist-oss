@@ -10,10 +10,10 @@ import logging
 import time
 from datetime import datetime, timezone
 
-from graph import get_db
-from config import QDRANT_COLLECTION
-import health
-from qdrant import qdrant_client
+from archivist.storage.graph import get_db
+from archivist.core.config import QDRANT_COLLECTION
+import archivist.core.health as health
+from archivist.storage.qdrant import qdrant_client
 
 logger = logging.getLogger("archivist.dashboard")
 
@@ -39,7 +39,7 @@ def build_dashboard(window_days: int = 7) -> dict:
     stale = _stale_estimate()
 
     # Cache stats
-    import hot_cache
+    import archivist.retrieval.hot_cache as hot_cache
     cache = hot_cache.stats()
 
     conn.close()

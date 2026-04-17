@@ -19,7 +19,7 @@ When enabled:
 import logging
 import threading
 
-from config import (
+from archivist.core.config import (
     QDRANT_COLLECTION,
     VECTOR_DIM,
     NAMESPACE_SHARDING_ENABLED,
@@ -27,7 +27,7 @@ from config import (
     QDRANT_HNSW_M,
     QDRANT_HNSW_EF_CONSTRUCT,
 )
-from qdrant import qdrant_client
+from archivist.storage.qdrant import qdrant_client
 
 logger = logging.getLogger("archivist.collection_router")
 

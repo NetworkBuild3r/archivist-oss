@@ -11,8 +11,8 @@ import logging
 import math
 from datetime import datetime, timezone
 
-from graph import get_db, GRAPH_WRITE_LOCK, schema_guard
-from config import HOTNESS_WEIGHT, HOTNESS_HALFLIFE_DAYS
+from archivist.storage.graph import get_db, GRAPH_WRITE_LOCK, schema_guard
+from archivist.core.config import HOTNESS_WEIGHT, HOTNESS_HALFLIFE_DAYS
 
 logger = logging.getLogger("archivist.hotness")
 
@@ -89,7 +89,7 @@ def batch_update_hotness() -> int:
     feedback with cold-start guardrails (grace period, floor, relative frequency).
     """
     _ensure_schema()
-    from config import IMPORTANCE_FLOOR, IMPORTANCE_GRACE_DAYS
+    from archivist.core.config import IMPORTANCE_FLOOR, IMPORTANCE_GRACE_DAYS
 
     conn = get_db()
     now = datetime.now(timezone.utc)

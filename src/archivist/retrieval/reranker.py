@@ -24,7 +24,7 @@ import logging
 import time
 from typing import Optional
 
-import metrics as m
+import archivist.core.metrics as m
 
 logger = logging.getLogger("archivist.reranker")
 

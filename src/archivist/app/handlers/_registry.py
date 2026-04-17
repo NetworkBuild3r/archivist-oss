@@ -6,8 +6,8 @@ from typing import Callable, Awaitable
 
 from mcp.types import Tool, TextContent
 
-import metrics as m
-from observability import get_request_id, tool_span
+import archivist.core.metrics as m
+from archivist.core.observability import get_request_id, tool_span
 
 from .tools_search import TOOLS as SEARCH_TOOLS, HANDLERS as SEARCH_HANDLERS
 from .tools_storage import TOOLS as STORAGE_TOOLS, HANDLERS as STORAGE_HANDLERS

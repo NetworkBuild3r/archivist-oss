@@ -7,12 +7,12 @@ import math
 import logging
 from datetime import datetime, timezone
 
-from graph import (
+from archivist.storage.graph import (
     search_entities, get_entity_facts, get_entity_relationships,
     get_entity_facts_bulk, get_entity_relationships_bulk,
     get_entity_by_id, _normalize,
 )
-from config import (
+from archivist.core.config import (
     GRAPH_RETRIEVAL_WEIGHT, TEMPORAL_DECAY_HALFLIFE_DAYS,
     MAX_ENTITY_FACT_INJECTIONS, ENTITY_SPECIFICITY_MAX_MENTIONS,
     CROSS_AGENT_MAX_SHARE, MIN_FACT_CONFIDENCE,
@@ -182,7 +182,7 @@ def apply_temporal_decay(
     date was inferred from indexing time, not from the filename) are never
     decayed — they represent reference material with unknown event date.
     """
-    from config import TEMPORAL_INTENT_ENABLED, TEMPORAL_HISTORICAL_HALFLIFE_MULTIPLIER
+    from archivist.core.config import TEMPORAL_INTENT_ENABLED, TEMPORAL_HISTORICAL_HALFLIFE_MULTIPLIER
 
     hl = halflife_days or TEMPORAL_DECAY_HALFLIFE_DAYS
     if hl <= 0:

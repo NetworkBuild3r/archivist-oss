@@ -6,7 +6,7 @@ import json
 import uuid
 from datetime import datetime, timezone
 
-from graph import get_db, GRAPH_WRITE_LOCK, schema_guard
+from archivist.storage.graph import get_db, GRAPH_WRITE_LOCK, schema_guard
 
 logger = logging.getLogger("archivist.audit")
 

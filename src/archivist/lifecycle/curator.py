@@ -9,9 +9,9 @@ import asyncio
 import time
 from datetime import datetime, timezone, timedelta
 
-import metrics as m
+import archivist.core.metrics as m
 
-from config import (
+from archivist.core.config import (
     MEMORY_ROOT, CURATOR_INTERVAL_MINUTES,
     CURATOR_EXTRACT_PREFIXES, CURATOR_EXTRACT_SKIP_SEGMENTS,
     CURATOR_TIP_BUDGET, CURATOR_MAX_PARALLEL,
@@ -20,22 +20,22 @@ from config import (
     LLM_MODEL, LLM_URL,
     CURATOR_LLM_MODEL, CURATOR_LLM_URL, CURATOR_LLM_API_KEY,
 )
-from llm import llm_query
+from archivist.features.llm import llm_query
 
 # Resolve effective curator LLM settings once at import time.
 _CURATOR_MODEL = CURATOR_LLM_MODEL or LLM_MODEL
 _CURATOR_URL = CURATOR_LLM_URL or LLM_URL
 _CURATOR_KEY = CURATOR_LLM_API_KEY
-from graph import (
+from archivist.storage.graph import (
     upsert_entity, add_fact, add_relationship,
     get_curator_state, set_curator_state, get_db, GRAPH_WRITE_LOCK,
 )
-from indexer import index_file
-from hotness import batch_update_hotness
-from text_utils import strip_fences, extract_agent_id_from_path
-from trajectory import consolidate_tips
-from compressed_index import cache_wake_up
-from pre_extractor import pre_extract
+from archivist.write.indexer import index_file
+from archivist.core.hotness import batch_update_hotness
+from archivist.utils.text_utils import strip_fences, extract_agent_id_from_path
+from archivist.core.trajectory import consolidate_tips
+from archivist.storage.compressed_index import cache_wake_up
+from archivist.write.pre_extractor import pre_extract
 
 logger = logging.getLogger("archivist.curator")
 
@@ -131,7 +131,7 @@ def _retention_for_entity_type(entity_type: str) -> str:
 
 async def process_extraction(data: dict, agent_id: str, source_file: str):
     """Store extracted knowledge in the graph."""
-    from rbac import get_namespace_for_agent
+    from archivist.core.rbac import get_namespace_for_agent
     _ns = get_namespace_for_agent(agent_id) if agent_id else "global"
 
     entity_retention: dict[str, str] = {}
@@ -459,8 +459,8 @@ async def curator_loop():
             if ORPHAN_SWEEP_ENABLED and _sweep_counter >= ORPHAN_SWEEP_EVERY_N_CYCLES:
                 _sweep_counter = 0
                 try:
-                    from cascade import sweep_orphans
-                    sr = sweep_orphans()
+                    from archivist.lifecycle.cascade import sweep_orphans
+                    sr = await asyncio.to_thread(sweep_orphans)
                     orphans_cleaned = sr.get("fts_cleaned", 0) + sr.get("needle_cleaned", 0)
                     if orphans_cleaned:
                         logger.info("Orphan sweep cleaned %d rows", orphans_cleaned)

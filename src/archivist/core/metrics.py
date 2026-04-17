@@ -48,7 +48,7 @@ _gauges: dict[str, float] = {}
 
 def _metrics_enabled() -> bool:
     # Import inside the function avoids import cycles (config imports no metrics).
-    from config import METRICS_ENABLED
+    from archivist.core.config import METRICS_ENABLED
 
     return METRICS_ENABLED
 
@@ -162,7 +162,7 @@ def collect_storage_gauges_tick() -> None:
 
     import os
 
-    from config import SQLITE_PATH
+    from archivist.core.config import SQLITE_PATH
 
     # SQLite: file size, SELECT 1 liveness, and per-namespace “live” memory count from audit_log.
     try:
@@ -172,7 +172,7 @@ def collect_storage_gauges_tick() -> None:
         pass
 
     try:
-        from graph import get_db
+        from archivist.storage.graph import get_db
 
         conn = get_db()
         try:
@@ -209,9 +209,9 @@ def collect_storage_gauges_tick() -> None:
     # Qdrant: points_count per collection; availability from health.register("qdrant") if present,
     # else infer 1 after a successful list collections (startup may not have registered yet).
     try:
-        from qdrant import qdrant_client
+        from archivist.storage.qdrant import qdrant_client
 
-        import health
+        import archivist.core.health as health
 
         st = health.all_status()
         q_entry = st.get("qdrant")
@@ -234,7 +234,7 @@ def collect_storage_gauges_tick() -> None:
 
 async def run_storage_gauges_loop(interval_seconds: float) -> None:
     """Background task: refresh storage gauges periodically (first tick runs immediately)."""
-    from config import METRICS_ENABLED
+    from archivist.core.config import METRICS_ENABLED
 
     # Floor avoids tight loops if env is mis-set too low.
     interval = max(5.0, float(interval_seconds))

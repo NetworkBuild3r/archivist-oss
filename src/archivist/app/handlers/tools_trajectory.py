@@ -5,7 +5,7 @@ import logging
 
 from mcp.types import Tool, TextContent
 
-from trajectory import (
+from archivist.core.trajectory import (
     log_trajectory, attribute_decisions, extract_tips, search_tips,
     add_annotation, get_annotations, add_rating, get_rating_summary,
     session_end_summary,
@@ -175,7 +175,7 @@ async def _handle_log_trajectory(arguments: dict) -> list[TextContent]:
     except Exception as e:
         logger.warning("Tip extraction failed for trajectory %s: %s", traj_id, e)
 
-    from audit import log_memory_event
+    from archivist.core.audit import log_memory_event
     await log_memory_event(
         agent_id=arguments["agent_id"],
         action="log_trajectory",
@@ -198,7 +198,7 @@ async def _handle_annotate(arguments: dict) -> list[TextContent]:
         quality_score=arguments.get("quality_score"),
     )
 
-    from audit import log_memory_event
+    from archivist.core.audit import log_memory_event
     await log_memory_event(
         agent_id=arguments["agent_id"],
         action="annotate",
@@ -224,7 +224,7 @@ async def _handle_rate(arguments: dict) -> list[TextContent]:
         context=arguments.get("context", ""),
     )
 
-    from audit import log_memory_event
+    from archivist.core.audit import log_memory_event
     await log_memory_event(
         agent_id=arguments["agent_id"],
         action="rate",

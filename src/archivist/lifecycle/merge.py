@@ -8,14 +8,14 @@ from datetime import datetime, timezone
 
 from qdrant_client.models import PointStruct
 
-from config import QDRANT_COLLECTION, MEMORY_ROOT
-from collection_router import collection_for
-from embeddings import embed_text
-from llm import llm_query
-from qdrant import qdrant_client
-from text_utils import compute_memory_checksum
-from versioning import record_version
-from audit import log_memory_event
+from archivist.core.config import QDRANT_COLLECTION, MEMORY_ROOT
+from archivist.storage.collection_router import collection_for
+from archivist.features.embeddings import embed_text
+from archivist.features.llm import llm_query
+from archivist.storage.qdrant import qdrant_client
+from archivist.utils.text_utils import compute_memory_checksum
+from archivist.storage.versioning import record_version
+from archivist.core.audit import log_memory_event
 
 logger = logging.getLogger("archivist.merge")
 
@@ -87,7 +87,7 @@ async def merge_memories(
         points=[PointStruct(id=merged_id, vector=vec, payload=merged_payload)],
     )
 
-    from memory_lifecycle import delete_memory_complete
+    from archivist.lifecycle.memory_lifecycle import delete_memory_complete
     for mid in memory_ids:
         await delete_memory_complete(mid, ns, collection=collection_for(ns))
 

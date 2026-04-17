@@ -6,8 +6,8 @@ saving tokens when full detail is unnecessary.
 """
 
 import logging
-from config import TIERED_CONTEXT_ENABLED, L0_MAX_TOKENS, L1_MAX_TOKENS
-from llm import llm_query
+from archivist.core.config import TIERED_CONTEXT_ENABLED, L0_MAX_TOKENS, L1_MAX_TOKENS
+from archivist.features.llm import llm_query
 
 logger = logging.getLogger("archivist.tiering")
 

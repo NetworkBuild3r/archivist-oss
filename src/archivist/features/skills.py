@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime, timezone
 from collections import defaultdict
 
-from graph import get_db, GRAPH_WRITE_LOCK, schema_guard
+from archivist.storage.graph import get_db, GRAPH_WRITE_LOCK, schema_guard
 
 logger = logging.getLogger("archivist.skills")
 

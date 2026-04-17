@@ -4,7 +4,7 @@ import json
 
 from mcp.types import Tool, TextContent
 
-import hot_cache
+import archivist.retrieval.hot_cache as hot_cache
 
 from ._common import success_response
 

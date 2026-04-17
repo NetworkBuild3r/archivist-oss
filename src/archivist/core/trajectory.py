@@ -12,10 +12,10 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
-from graph import get_db, GRAPH_WRITE_LOCK, upsert_entity, add_fact, schema_guard
-from config import OUTCOME_RETRIEVAL_BOOST, OUTCOME_RETRIEVAL_PENALTY
-from text_utils import strip_fences
-from llm import llm_query
+from archivist.storage.graph import get_db, GRAPH_WRITE_LOCK, upsert_entity, add_fact, schema_guard
+from archivist.core.config import OUTCOME_RETRIEVAL_BOOST, OUTCOME_RETRIEVAL_PENALTY
+from archivist.utils.text_utils import strip_fences
+from archivist.features.llm import llm_query
 
 
 def compute_task_fingerprint(task_description: str) -> str:
@@ -163,7 +163,7 @@ async def log_trajectory(
         finally:
             conn.close()
 
-    from rbac import get_namespace_for_agent
+    from archivist.core.rbac import get_namespace_for_agent
     _ns = get_namespace_for_agent(agent_id) if agent_id else "global"
     eid = upsert_entity(agent_id, "agent", namespace=_ns)
     add_fact(eid, f"Trajectory [{outcome}]: {task_description[:200]}", f"trajectory/{traj_id}", agent_id, namespace=_ns)
@@ -461,10 +461,10 @@ async def consolidate_tips(budget: int = 20) -> dict:
 
     Returns summary of consolidation: clusters found, merged, budget used.
     """
-    from config import CURATOR_TIP_BUDGET
-    from embeddings import embed_text
-    import metrics as m
-    import curator_queue
+    from archivist.core.config import CURATOR_TIP_BUDGET
+    from archivist.features.embeddings import embed_text
+    import archivist.core.metrics as m
+    import archivist.lifecycle.curator_queue as curator_queue
 
     _ensure_trajectory_schema()
     budget = budget or CURATOR_TIP_BUDGET

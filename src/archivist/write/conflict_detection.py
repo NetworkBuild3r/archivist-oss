@@ -10,17 +10,17 @@ from dataclasses import dataclass
 
 from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchExcept
 
-from config import DEDUP_LLM_ENABLED, DEDUP_LLM_THRESHOLD
-from config import LLM_MODEL, LLM_URL, CURATOR_LLM_MODEL, CURATOR_LLM_URL, CURATOR_LLM_API_KEY
-from collection_router import collection_for
-from embeddings import embed_text
+from archivist.core.config import DEDUP_LLM_ENABLED, DEDUP_LLM_THRESHOLD
+from archivist.core.config import LLM_MODEL, LLM_URL, CURATOR_LLM_MODEL, CURATOR_LLM_URL, CURATOR_LLM_API_KEY
+from archivist.storage.collection_router import collection_for
+from archivist.features.embeddings import embed_text
 
 _CURATOR_MODEL = CURATOR_LLM_MODEL or LLM_MODEL
 _CURATOR_URL = CURATOR_LLM_URL or LLM_URL
 _CURATOR_KEY = CURATOR_LLM_API_KEY
-from llm import llm_query
-from qdrant import qdrant_client
-import metrics as m
+from archivist.features.llm import llm_query
+from archivist.storage.qdrant import qdrant_client
+import archivist.core.metrics as m
 
 logger = logging.getLogger("archivist.conflict")
 

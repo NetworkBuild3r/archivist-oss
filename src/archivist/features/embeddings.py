@@ -17,10 +17,10 @@ import threading
 import time
 import httpx
 from collections import OrderedDict
-from config import EMBED_URL, EMBED_API_KEY, EMBED_MODEL
-import health
-import metrics as m
-from observability import slow_embed_check
+from archivist.core.config import EMBED_URL, EMBED_API_KEY, EMBED_MODEL
+import archivist.core.health as health
+import archivist.core.metrics as m
+from archivist.core.observability import slow_embed_check
 
 logger = logging.getLogger("archivist.embeddings")
 

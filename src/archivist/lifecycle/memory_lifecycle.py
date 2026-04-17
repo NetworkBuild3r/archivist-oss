@@ -5,37 +5,41 @@ Adding a new artifact type to the write pipeline requires adding a corresponding
 cleanup step here and registering it in ``cascade.py``'s orphan sweeper.
 """
 
+import asyncio
 import logging
 import sqlite3
 from dataclasses import asdict, dataclass, field
 
 from qdrant_client.models import Filter, FieldCondition, MatchValue
 
-from collection_router import collection_for
-import curator_queue
-from cascade import (
+from archivist.storage.collection_router import collection_for
+import archivist.lifecycle.curator_queue as curator_queue
+from archivist.lifecycle.cascade import (
     PartialDeletionError,
     _qdrant_delete,
     _qdrant_set_payload,
     _scroll_all,
 )
-from graph import (
+from archivist.storage.graph import (
     delete_fts_chunks_batch,
     delete_needle_tokens_batch,
     delete_hotness,
     set_fts_excluded_batch,
     lookup_memory_points,
     delete_memory_points,
-    log_delete_failure,
     GRAPH_WRITE_LOCK,
     get_db,
 )
-from qdrant import qdrant_client
-from audit import log_memory_event
-import metrics as m
+from archivist.storage.qdrant import qdrant_client
+from archivist.core.audit import log_memory_event
+import archivist.core.metrics as m
 
 logger = logging.getLogger("archivist.memory_lifecycle")
 
+
+# ---------------------------------------------------------------------------
+# Result types
+# ---------------------------------------------------------------------------
 
 @dataclass
 class DeleteResult:
@@ -81,114 +85,148 @@ class ArchiveResult:
         ])
 
 
-async def delete_memory_complete(
+# ---------------------------------------------------------------------------
+# Delete helpers
+# ---------------------------------------------------------------------------
+
+async def _resolve_child_ids(
     memory_id: str,
-    namespace: str,
-    *,
-    collection: str | None = None,
-) -> DeleteResult:
-    """Delete a memory and ALL derived artifacts.
+    client,
+    col: str,
+    failed_steps: list[str],
+) -> tuple[list[str], list[str]]:
+    """Return (micro_ids, hyde_ids) for a given memory.
 
-    This is the ONLY function that should delete memories.
-
-    Args:
-        memory_id: The Qdrant point ID of the primary memory.
-        namespace: The namespace for collection routing.
-        collection: Override collection name (if known). Defaults to
-                    collection_for(namespace).
-
-    Returns:
-        DeleteResult with counts of deleted artifacts per type.
-
-    Raises:
-        PartialDeletionError: If the primary Qdrant point delete fails or
-            more than two cascade steps fail.
+    Tries the SQLite ``memory_points`` table first (O(1), no Qdrant round-trip).
+    Falls back to paginated Qdrant scroll for legacy memories that pre-date the
+    ``memory_points`` write path.
     """
-    col = collection or collection_for(namespace)
-    client = qdrant_client()
-    result = DeleteResult(memory_id=memory_id)
-
-    # 0. Enumerate child point IDs BEFORE deleting them from Qdrant.
-    #    Prefer the memory_points table (O(1) SQLite lookup, no Qdrant round-trip).
-    #    Fall back to paginated Qdrant scroll for legacy memories created before Phase 2.
-    _mp_rows = lookup_memory_points(memory_id)
-    if _mp_rows:
-        micro_ids = [r["qdrant_id"] for r in _mp_rows if r["point_type"] == "micro_chunk"]
-        hyde_ids = [r["qdrant_id"] for r in _mp_rows if r["point_type"] == "reverse_hyde"]
+    mp_rows = await asyncio.to_thread(lookup_memory_points, memory_id)
+    if mp_rows:
+        micro_ids = [r["qdrant_id"] for r in mp_rows if r["point_type"] == "micro_chunk"]
+        hyde_ids = [r["qdrant_id"] for r in mp_rows if r["point_type"] == "reverse_hyde"]
         logger.debug(
             "delete.child_lookup from memory_points: micro=%d hyde=%d",
             len(micro_ids), len(hyde_ids),
         )
-    else:
-        micro_ids = _scroll_all(
-            client, col,
-            filt=Filter(must=[FieldCondition(key="parent_id", match=MatchValue(value=memory_id))]),
-            step_name="scroll_micro_chunks", memory_id=memory_id,
-            failed_steps=result.failed_steps,
-        )
-        hyde_ids = _scroll_all(
-            client, col,
-            filt=Filter(must=[FieldCondition(key="source_memory_id", match=MatchValue(value=memory_id))]),
-            step_name="scroll_reverse_hyde", memory_id=memory_id,
-            failed_steps=result.failed_steps,
-        )
+        return micro_ids, hyde_ids
 
-    # 1. Delete primary Qdrant point
-    result.qdrant_primary = _qdrant_delete(
+    micro_ids = await asyncio.to_thread(
+        _scroll_all,
+        client, col,
+        Filter(must=[FieldCondition(key="parent_id", match=MatchValue(value=memory_id))]),
+        "scroll_micro_chunks", memory_id,
+        failed_steps,
+    )
+    hyde_ids = await asyncio.to_thread(
+        _scroll_all,
+        client, col,
+        Filter(must=[FieldCondition(key="source_memory_id", match=MatchValue(value=memory_id))]),
+        "scroll_reverse_hyde", memory_id,
+        failed_steps,
+    )
+    return micro_ids, hyde_ids
+
+
+async def _delete_qdrant_points(
+    memory_id: str,
+    micro_ids: list[str],
+    hyde_ids: list[str],
+    client,
+    col: str,
+    failed_steps: list[str],
+) -> tuple[int, int, int]:
+    """Delete primary + child Qdrant points.  Returns (primary, hyde, micro) counts.
+
+    Failures are recorded in *failed_steps* but never raised; the caller checks
+    whether critical steps failed via ``_finalize_delete``.
+    """
+    primary_count = await asyncio.to_thread(
+        _qdrant_delete,
         client, col, [memory_id],
-        "qdrant_primary", memory_id, result.failed_steps,
+        "qdrant_primary", memory_id, failed_steps,
     )
 
-    # 2. Delete all child vectors (reverse HyDE + micro-chunks) in one call
     all_child_ids = hyde_ids + micro_ids
-    result.qdrant_reverse_hyde = len(hyde_ids)
-    result.qdrant_micro_chunks = len(micro_ids)
     if all_child_ids:
-        _qdrant_delete(
+        await asyncio.to_thread(
+            _qdrant_delete,
             client, col, all_child_ids,
-            "qdrant_children", memory_id, result.failed_steps,
+            "qdrant_children", memory_id, failed_steps,
         )
 
-    # 3. Batch-delete FTS5 entries (primary + all children)
-    all_ids = [memory_id] + hyde_ids + micro_ids
+    return primary_count, len(hyde_ids), len(micro_ids)
+
+
+async def _delete_sqlite_artifacts(
+    memory_id: str,
+    all_ids: list[str],
+    failed_steps: list[str],
+) -> tuple[int, int, int]:
+    """Delete FTS, needle registry, and entity facts rows.  Returns (fts, needle, facts) counts.
+
+    Each step is independently try/excepted so a failure in one does not block
+    the others.
+    """
+    fts_count = 0
     try:
-        result.fts_entries = delete_fts_chunks_batch(all_ids)
+        fts_count = await asyncio.to_thread(delete_fts_chunks_batch, all_ids)
     except (sqlite3.Error, OSError) as e:
         logger.error("cascade.fts_batch failed for %s: %s", memory_id, e)
-        result.failed_steps.append("fts_batch")
+        failed_steps.append("fts_batch")
 
-    # 4. Batch-delete needle registry rows (primary + all children)
+    needle_count = 0
     try:
-        result.registry_tokens = delete_needle_tokens_batch(all_ids)
+        needle_count = await asyncio.to_thread(delete_needle_tokens_batch, all_ids)
     except (sqlite3.Error, OSError) as e:
         logger.error("cascade.needle_batch failed for %s: %s", memory_id, e)
-        result.failed_steps.append("needle_batch")
+        failed_steps.append("needle_batch")
 
-    # 5. Delete auto-extracted entity facts
+    facts_count = 0
     try:
-        result.entity_facts = _delete_entity_facts_for_memory(memory_id)
+        facts_count = await asyncio.to_thread(_delete_entity_facts_for_memory, memory_id)
     except (sqlite3.Error, OSError) as e:
         logger.error("cascade.entity_facts failed for %s: %s", memory_id, e)
-        result.failed_steps.append("entity_facts")
+        failed_steps.append("entity_facts")
 
-    # 6. Delete memory_hotness row
+    return fts_count, needle_count, facts_count
+
+
+async def _delete_best_effort_rows(memory_id: str) -> int:
+    """Delete memory_hotness and memory_points rows (best-effort, logged at DEBUG on miss).
+
+    Returns count from memory_hotness deletion (0 if the row was absent).
+    """
+    hotness_count = 0
     try:
-        result.memory_hotness = delete_hotness(memory_id)
+        hotness_count = await asyncio.to_thread(delete_hotness, memory_id)
     except Exception as e:
         logger.debug("cascade.memory_hotness skipped for %s: %s", memory_id, e)
 
-    # 7. Clean up memory_points tracking rows.
     try:
-        delete_memory_points(memory_id)
+        await asyncio.to_thread(delete_memory_points, memory_id)
     except Exception as e:
         logger.debug("cascade.memory_points cleanup skipped for %s: %s", memory_id, e)
 
+    return hotness_count
+
+
+async def _finalize_delete(
+    result: DeleteResult,
+    namespace: str,
+    col: str,
+) -> None:
+    """Emit metrics, structured log, audit entry, and raise PartialDeletionError if needed.
+
+    All observability and error-gate logic in one place.  Must be the last step
+    in the delete orchestrator.
+    """
     m.inc(m.DELETE_COMPLETE, {"namespace": namespace})
 
     logger.info(
         "memory.deleted_complete",
         extra={
-            "memory_id": memory_id,
+            "memory_id": result.memory_id,
             "namespace": namespace,
             "collection": col,
             "qdrant_primary": result.qdrant_primary,
@@ -208,7 +246,7 @@ async def delete_memory_complete(
     await log_memory_event(
         agent_id="system",
         action="delete",
-        memory_id=memory_id,
+        memory_id=result.memory_id,
         namespace=namespace,
         text_hash="",
         metadata=metadata,
@@ -217,78 +255,79 @@ async def delete_memory_complete(
     _critical = {"qdrant_primary", "qdrant_children"}
     if _critical & set(result.failed_steps):
         raise PartialDeletionError(result)
-    elif result.failed_steps:
+    if result.failed_steps:
         logger.warning(
             "delete_cascade partial failure for %s: %s",
-            memory_id, result.failed_steps,
+            result.memory_id, result.failed_steps,
         )
+
+
+# ---------------------------------------------------------------------------
+# Archive helpers
+# ---------------------------------------------------------------------------
+
+async def _archive_qdrant_points(
+    memory_id: str,
+    client,
+    col: str,
+    failed_steps: list[str],
+) -> ArchiveResult:
+    """Set archived=True on primary + child Qdrant points.  Returns partial ArchiveResult.
+
+    Failures are recorded into the caller-supplied *failed_steps* list; the
+    returned ``ArchiveResult.failed_steps`` is the same list object.
+    """
+    result = ArchiveResult(memory_id=memory_id, failed_steps=failed_steps)
+    payload = {"archived": True}
+
+    result.primary_archived = await asyncio.to_thread(
+        _qdrant_set_payload,
+        client, col, payload, [memory_id],
+        "archive_primary", memory_id, failed_steps,
+    )
+
+    result.reverse_hyde_archived = await asyncio.to_thread(
+        _qdrant_set_payload,
+        client, col, payload,
+        Filter(must=[FieldCondition(key="source_memory_id", match=MatchValue(value=memory_id))]),
+        "archive_reverse_hyde", memory_id, failed_steps,
+    )
+
+    result.micro_chunks_archived = await asyncio.to_thread(
+        _qdrant_set_payload,
+        client, col, payload,
+        Filter(must=[FieldCondition(key="parent_id", match=MatchValue(value=memory_id))]),
+        "archive_micro_chunks", memory_id, failed_steps,
+    )
 
     return result
 
 
-async def archive_memory_complete(
+async def _archive_fts_rows(
     memory_id: str,
-    namespace: str,
-    *,
-    collection: str | None = None,
-) -> ArchiveResult:
-    """Set archived=True on a memory and ALL derived Qdrant points.
-
-    Archives: primary point + reverse HyDE + micro-chunks.
-    Also marks all related FTS5 rows as excluded so archived memories no longer
-    appear in BM25/FTS keyword search.
-
-    Returns ArchiveResult with per-step success flags.
-    """
-    col = collection or collection_for(namespace)
-    client = qdrant_client()
-    result = ArchiveResult(memory_id=memory_id)
-    payload = {"archived": True}
-
-    # Enumerate child IDs before setting payload so we can mark them excluded in FTS.
-    micro_ids = _scroll_all(
-        client, col,
-        filt=Filter(must=[FieldCondition(key="parent_id", match=MatchValue(value=memory_id))]),
-        step_name="archive_scroll_micro", memory_id=memory_id,
-        failed_steps=result.failed_steps,
-    )
-    hyde_ids = _scroll_all(
-        client, col,
-        filt=Filter(must=[FieldCondition(key="source_memory_id", match=MatchValue(value=memory_id))]),
-        step_name="archive_scroll_hyde", memory_id=memory_id,
-        failed_steps=result.failed_steps,
-    )
-
-    result.primary_archived = _qdrant_set_payload(
-        client, col, payload, [memory_id],
-        "archive_primary", memory_id, result.failed_steps,
-    )
-
-    result.reverse_hyde_archived = _qdrant_set_payload(
-        client, col, payload,
-        Filter(must=[FieldCondition(key="source_memory_id", match=MatchValue(value=memory_id))]),
-        "archive_reverse_hyde", memory_id, result.failed_steps,
-    )
-
-    result.micro_chunks_archived = _qdrant_set_payload(
-        client, col, payload,
-        Filter(must=[FieldCondition(key="parent_id", match=MatchValue(value=memory_id))]),
-        "archive_micro_chunks", memory_id, result.failed_steps,
-    )
-
-    # Mark all related FTS5 rows as excluded so they disappear from BM25 search.
+    micro_ids: list[str],
+    hyde_ids: list[str],
+) -> None:
+    """Mark all FTS5 rows for a memory and its children as excluded (best-effort)."""
     all_ids = [memory_id] + micro_ids + hyde_ids
     try:
-        set_fts_excluded_batch(all_ids, excluded=1)
+        await asyncio.to_thread(set_fts_excluded_batch, all_ids, 1)
     except Exception as e:
         logger.warning("archive.fts_excluded failed for %s: %s", memory_id, e)
 
+
+async def _finalize_archive(
+    result: ArchiveResult,
+    namespace: str,
+    col: str,
+) -> None:
+    """Emit metrics, structured log, and audit entry for an archive operation."""
     m.inc(m.ARCHIVE_COMPLETE, {"namespace": namespace})
 
     logger.info(
         "memory.archived_complete",
         extra={
-            "memory_id": memory_id,
+            "memory_id": result.memory_id,
             "namespace": namespace,
             "collection": col,
             "primary": result.primary_archived,
@@ -303,14 +342,16 @@ async def archive_memory_complete(
     await log_memory_event(
         agent_id="system",
         action="archive",
-        memory_id=memory_id,
+        memory_id=result.memory_id,
         namespace=namespace,
         text_hash="",
         metadata=metadata,
     )
 
-    return result
 
+# ---------------------------------------------------------------------------
+# SQLite entity-facts helper (synchronous, called via asyncio.to_thread)
+# ---------------------------------------------------------------------------
 
 def _delete_entity_facts_for_memory(memory_id: str) -> int:
     """Soft-deactivate entity facts linked to *memory_id*.
@@ -350,6 +391,80 @@ def _delete_entity_facts_for_memory(memory_id: str) -> int:
             conn.close()
 
 
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+async def delete_memory_complete(
+    memory_id: str,
+    namespace: str,
+    *,
+    collection: str | None = None,
+) -> DeleteResult:
+    """Delete a memory and ALL derived artifacts.
+
+    This is the ONLY function that should delete memories.
+
+    Args:
+        memory_id: The Qdrant point ID of the primary memory.
+        namespace: The namespace for collection routing.
+        collection: Override collection name (if known). Defaults to
+                    ``collection_for(namespace)``.
+
+    Returns:
+        DeleteResult with counts of deleted artifacts per type.
+
+    Raises:
+        PartialDeletionError: If the primary Qdrant point delete fails or
+            more than two cascade steps fail.
+    """
+    col = collection or collection_for(namespace)
+    client = qdrant_client()
+    result = DeleteResult(memory_id=memory_id)
+
+    micro_ids, hyde_ids = await _resolve_child_ids(memory_id, client, col, result.failed_steps)
+
+    result.qdrant_primary, result.qdrant_reverse_hyde, result.qdrant_micro_chunks = (
+        await _delete_qdrant_points(memory_id, micro_ids, hyde_ids, client, col, result.failed_steps)
+    )
+
+    all_ids = [memory_id] + hyde_ids + micro_ids
+    result.fts_entries, result.registry_tokens, result.entity_facts = (
+        await _delete_sqlite_artifacts(memory_id, all_ids, result.failed_steps)
+    )
+
+    result.memory_hotness = await _delete_best_effort_rows(memory_id)
+
+    await _finalize_delete(result, namespace, col)
+    return result
+
+
+async def archive_memory_complete(
+    memory_id: str,
+    namespace: str,
+    *,
+    collection: str | None = None,
+) -> ArchiveResult:
+    """Set archived=True on a memory and ALL derived Qdrant points.
+
+    Archives: primary point + reverse HyDE + micro-chunks.
+    Also marks all related FTS5 rows as excluded so archived memories no longer
+    appear in BM25/FTS keyword search.
+
+    Returns ArchiveResult with per-step success flags.
+    """
+    col = collection or collection_for(namespace)
+    client = qdrant_client()
+    failed_steps: list[str] = []
+
+    micro_ids, hyde_ids = await _resolve_child_ids(memory_id, client, col, failed_steps)
+
+    result = await _archive_qdrant_points(memory_id, client, col, failed_steps)
+    await _archive_fts_rows(memory_id, micro_ids, hyde_ids)
+    await _finalize_archive(result, namespace, col)
+    return result
+
+
 async def soft_delete_memory(memory_id: str, namespace: str) -> dict:
     """Mark a memory as deleted and enqueue a background hard-cascade.
 
@@ -366,7 +481,7 @@ async def soft_delete_memory(memory_id: str, namespace: str) -> dict:
     Returns a dict with ``{"status": "soft_delete_initiated", "op_id": ...}``.
 
     Raises:
-        Exception: If the primary Qdrant ``set_payload`` call fails (critical).
+        RuntimeError: If the primary Qdrant ``set_payload`` call fails (critical).
     """
     col = collection_for(namespace)
     client = qdrant_client()
@@ -374,7 +489,8 @@ async def soft_delete_memory(memory_id: str, namespace: str) -> dict:
     deleted_payload = {"deleted": True}
 
     # 1a. Mark primary point as deleted in Qdrant.
-    _qdrant_set_payload(
+    await asyncio.to_thread(
+        _qdrant_set_payload,
         client, col, deleted_payload, [memory_id],
         "soft_delete_primary", memory_id, failed_steps,
     )
@@ -384,21 +500,22 @@ async def soft_delete_memory(memory_id: str, namespace: str) -> dict:
         )
 
     # 1b. Mark child points (micro-chunks + reverse HyDE) as deleted.
-    _qdrant_set_payload(
+    await asyncio.to_thread(
+        _qdrant_set_payload,
         client, col, deleted_payload,
         Filter(must=[FieldCondition(key="parent_id", match=MatchValue(value=memory_id))]),
         "soft_delete_micro_chunks", memory_id, failed_steps,
     )
-    _qdrant_set_payload(
+    await asyncio.to_thread(
+        _qdrant_set_payload,
         client, col, deleted_payload,
         Filter(must=[FieldCondition(key="source_memory_id", match=MatchValue(value=memory_id))]),
         "soft_delete_reverse_hyde", memory_id, failed_steps,
     )
 
-    # 2. Mark FTS entries as excluded so they disappear from BM25 search.
-    # We exclude the primary here; children will be cleaned by the hard-cascade.
+    # 2. Exclude the primary FTS entry; children cleaned by the hard-cascade.
     try:
-        set_fts_excluded_batch([memory_id], excluded=1)
+        await asyncio.to_thread(set_fts_excluded_batch, [memory_id], 1)
     except Exception as e:
         logger.warning("soft_delete.fts_excluded failed for %s: %s", memory_id, e)
 

@@ -12,7 +12,7 @@ Vector search + knowledge graph + active curation — one MCP endpoint.</p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="License" />
-  <img src="https://img.shields.io/badge/version-v1.12.0-brightgreen" alt="Version" />
+  <img src="https://img.shields.io/badge/version-v2.0.0-brightgreen" alt="Version" />
   <img src="https://img.shields.io/badge/protocol-MCP-purple" alt="MCP" />
   <img src="https://img.shields.io/badge/models-any%20OpenAI--compatible-orange" alt="Models" />
 </p>
@@ -35,6 +35,12 @@ The default image installs **core** [`requirements.txt`](requirements.txt) only 
 Point any MCP client at `http://localhost:3100/mcp` — done. Your agents now have long-term memory with search, RBAC, knowledge graphs, and active curation out of the box. Legacy SSE compatibility remains available at `http://localhost:3100/mcp/sse`.
 
 ---
+
+## What's New in v2.0
+
+**Archivist 2.0** — The codebase is now a first-class Python package under [`src/archivist/`](src/archivist/): `core`, `storage`, `lifecycle`, `retrieval`, `write`, `features`, `utils`, and `app`. Legacy `src/*.py` module names still work via compatibility shims. **Mypy** is configured for the new layout (`mypy_path` + `explicit_package_bases` in [`pyproject.toml`](pyproject.toml)).
+
+**Benchmarks** — Phase 5 pipeline evaluation (`clean_reranker` vs `vector_plus_synth`, small corpus, 108 queries per variant) is summarized in [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md). Formal release notes: [`docs/RELEASE_NOTES_v2.0.md`](docs/RELEASE_NOTES_v2.0.md).
 
 ## What's New in v1.12
 

@@ -10,27 +10,27 @@ from datetime import datetime, timezone
 from mcp.types import Tool, TextContent
 from qdrant_client.models import PointStruct
 
-from embeddings import embed_text, embed_batch
-from graph import upsert_entity, add_fact, register_needle_tokens, upsert_fts_chunk, register_memory_points_batch
-from config import (
+from archivist.features.embeddings import embed_text, embed_batch
+from archivist.storage.graph import upsert_entity, add_fact, register_needle_tokens, upsert_fts_chunk, register_memory_points_batch
+from archivist.core.config import (
     QDRANT_COLLECTION, TEAM_MAP,
     CONFLICT_CHECK_ON_STORE, CONFLICT_BLOCK_ON_STORE,
 )
-from conflict_detection import check_for_conflicts, llm_adjudicated_dedup, _query_similar
-from indexer import compute_ttl
-from qdrant import qdrant_client
-from rbac import get_namespace_for_agent, get_namespace_config
-from text_utils import compute_memory_checksum
-from archivist_uri import memory_uri
-from pre_extractor import pre_extract, extract_needle_entities
-from collection_router import ensure_collection, collection_for, collections_for_query
-from contextual_augment import augment_chunk
-from chunking import _extract_needle_micro_chunks
-import hot_cache
-import journal
-import metrics as m
-import webhooks
-import curator_queue
+from archivist.write.conflict_detection import check_for_conflicts, llm_adjudicated_dedup, _query_similar
+from archivist.write.indexer import compute_ttl
+from archivist.storage.qdrant import qdrant_client
+from archivist.core.rbac import get_namespace_for_agent, get_namespace_config
+from archivist.utils.text_utils import compute_memory_checksum
+from archivist.core.archivist_uri import memory_uri
+from archivist.write.pre_extractor import pre_extract, extract_needle_entities
+from archivist.storage.collection_router import ensure_collection, collection_for, collections_for_query
+from archivist.write.contextual_augment import augment_chunk
+from archivist.utils.chunking import _extract_needle_micro_chunks
+import archivist.retrieval.hot_cache as hot_cache
+import archivist.core.journal as journal
+import archivist.core.metrics as m
+import archivist.features.webhooks as webhooks
+import archivist.lifecycle.curator_queue as curator_queue
 
 from ._common import _rbac_gate, error_response, success_response, resolve_actor
 
@@ -235,7 +235,7 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
     force_skip = bool(arguments.get("force_skip_conflict_check", False))
 
     actor_id, actor_type = resolve_actor(arguments)
-    from provenance import SourceTrace, default_confidence
+    from archivist.core.provenance import SourceTrace, default_confidence
     raw_confidence = arguments.get("confidence", -1)
     confidence = raw_confidence if isinstance(raw_confidence, (int, float)) and raw_confidence >= 0 else default_confidence(actor_type)
     _raw_trace = arguments.get("source_trace") or {}
@@ -317,7 +317,7 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
         _auto_hints = pre_extract(text)
         _auto_entities = _auto_hints.get("entities", [])
         _needle_entities = extract_needle_entities(text)
-        from config import DEFAULT_CONFIDENCE_BY_ACTOR_TYPE
+        from archivist.core.config import DEFAULT_CONFIDENCE_BY_ACTOR_TYPE
         _extracted_conf = DEFAULT_CONFIDENCE_BY_ACTOR_TYPE.get("extracted", 0.5)
         _extracted_fact_kw = dict(_fact_kw, confidence=_extracted_conf, provenance="deterministic")
         for ent in _auto_entities + _needle_entities:
@@ -334,15 +334,15 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
     if not thought_type:
         thought_type = _auto_hints.get("thought_type", "general")
 
-    from config import TOPIC_ROUTING_ENABLED
-    from topic_detector import detect_topics
+    from archivist.core.config import TOPIC_ROUTING_ENABLED
+    from archivist.retrieval.topic_detector import detect_topics
     _detected_topic = ""
     if TOPIC_ROUTING_ENABLED:
         _topics = detect_topics(text)
         _detected_topic = _topics[0] if _topics else ""
 
     embed_input = text
-    from config import CONTEXTUAL_AUGMENTATION_ENABLED
+    from archivist.core.config import CONTEXTUAL_AUGMENTATION_ENABLED
     if CONTEXTUAL_AUGMENTATION_ENABLED:
         embed_input = augment_chunk(
             text,
@@ -395,7 +395,7 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
     )
     register_memory_points_batch([{"memory_id": pid, "qdrant_id": pid, "point_type": "primary"}])
 
-    from config import BM25_ENABLED
+    from archivist.core.config import BM25_ENABLED
     if BM25_ENABLED:
         upsert_fts_chunk(
             qdrant_id=pid,
@@ -416,7 +416,7 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
     # Generate micro-chunks for high-specificity tokens (IPs, crons, UUIDs, etc.)
     _micro_chunks = _extract_needle_micro_chunks(text)
     if _micro_chunks:
-        from config import MAX_MICRO_CHUNKS_PER_MEMORY
+        from archivist.core.config import MAX_MICRO_CHUNKS_PER_MEMORY
         _micro_chunks = _micro_chunks[:MAX_MICRO_CHUNKS_PER_MEMORY]
         _micro_embed_inputs = _micro_chunks
         if CONTEXTUAL_AUGMENTATION_ENABLED:
@@ -477,10 +477,10 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
             ])
 
     # Reverse HyDE: fire-and-forget — generate hypothetical questions in background
-    from config import REVERSE_HYDE_ENABLED
+    from archivist.core.config import REVERSE_HYDE_ENABLED
     if REVERSE_HYDE_ENABLED:
         async def _reverse_hyde_background():
-            from hyde import generate_reverse_hyde_questions
+            from archivist.write.hyde import generate_reverse_hyde_questions
             _rh_questions = await generate_reverse_hyde_questions(text)
             if not _rh_questions:
                 return
@@ -539,10 +539,10 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
         _rh_task.add_done_callback(_rh_done)
 
     # Synthetic question generation (background, non-blocking)
-    from config import SYNTHETIC_QUESTIONS_ENABLED as _SQ_ENABLED
+    from archivist.core.config import SYNTHETIC_QUESTIONS_ENABLED as _SQ_ENABLED
     if _SQ_ENABLED:
         async def _synthetic_questions_background():
-            from synthetic_questions import generate_and_embed_synthetic_points
+            from archivist.write.synthetic_questions import generate_and_embed_synthetic_points
             _sq_trace = source_trace.with_parent(pid)
             base_payload = {
                 "agent_id": agent_id,
@@ -591,7 +591,7 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
         )
         _sq_task.add_done_callback(_sq_done)
 
-    from audit import log_memory_event
+    from archivist.core.audit import log_memory_event
     await log_memory_event(
         agent_id=agent_id,
         action="create",
@@ -650,7 +650,7 @@ async def _handle_merge(arguments: dict) -> list[TextContent]:
     strategy = arguments["strategy"]
     namespace = arguments.get("namespace", "")
 
-    from merge import merge_memories
+    from archivist.lifecycle.merge import merge_memories
     result = await merge_memories(memory_ids, strategy, agent_id, namespace)
     return success_response(result, default=str)
 
@@ -661,7 +661,7 @@ async def _handle_compress(arguments: dict) -> list[TextContent]:
     Supports format="flat" (default, single paragraph) and
     format="structured" (Goal/Progress/Decisions/Next Steps JSON).
     """
-    from compaction import compact_structured, compact_flat, format_structured_summary
+    from archivist.write.compaction import compact_structured, compact_flat, format_structured_summary
 
     agent_id = arguments["agent_id"]
     namespace = arguments["namespace"]
@@ -791,7 +791,7 @@ async def _handle_pin(arguments: dict) -> list[TextContent]:
             return error_response({"error": f"Failed to pin memory: {e}"})
 
     if entity_name:
-        from graph import get_db, GRAPH_WRITE_LOCK
+        from archivist.storage.graph import get_db, GRAPH_WRITE_LOCK
         with GRAPH_WRITE_LOCK:
             conn = get_db()
             row = conn.execute(
@@ -813,7 +813,7 @@ async def _handle_pin(arguments: dict) -> list[TextContent]:
                 pinned.append({"type": "entity", "name": entity_name, "id": eid, "created": True})
             conn.close()
 
-    from audit import log_memory_event
+    from archivist.core.audit import log_memory_event
     await log_memory_event(
         agent_id=agent_id, action="pin", memory_id=memory_id or entity_name,
         namespace=namespace, text_hash="", version=0,
@@ -859,7 +859,7 @@ async def _handle_unpin(arguments: dict) -> list[TextContent]:
             return error_response({"error": f"Failed to unpin memory: {e}"})
 
     if entity_name:
-        from graph import get_db, GRAPH_WRITE_LOCK
+        from archivist.storage.graph import get_db, GRAPH_WRITE_LOCK
         with GRAPH_WRITE_LOCK:
             conn = get_db()
             row = conn.execute(
@@ -897,8 +897,8 @@ async def _handle_delete(arguments: dict) -> list[TextContent]:
     all search paths), marks the FTS entry as excluded, then enqueues a
     background hard-cascade via ``curator_queue``.  Returns in ~5 ms.
     """
-    from memory_lifecycle import soft_delete_memory
-    from rbac import get_namespace_for_agent
+    from archivist.lifecycle.memory_lifecycle import soft_delete_memory
+    from archivist.core.rbac import get_namespace_for_agent
 
     memory_id = arguments.get("memory_id", "").strip()
     agent_id = arguments.get("agent_id", "").strip()

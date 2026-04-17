@@ -6,10 +6,10 @@ v1.11: Non-stemmed exact table for identifier/IP token matching.
 
 import logging
 import re
-from config import BM25_ENABLED, BM25_WEIGHT, VECTOR_WEIGHT
-from graph import search_fts, search_fts_exact
-from rank_fusion import rrf_merge
-import health
+from archivist.core.config import BM25_ENABLED, BM25_WEIGHT, VECTOR_WEIGHT
+from archivist.storage.graph import search_fts, search_fts_exact
+from archivist.retrieval.rank_fusion import rrf_merge
+import archivist.core.health as health
 
 logger = logging.getLogger("archivist.fts")
 

@@ -4,13 +4,13 @@ import logging
 
 from mcp.types import Tool, TextContent
 
-from skills import (
+from archivist.features.skills import (
     register_skill, record_version, add_lesson, get_lessons,
     log_skill_event, get_skill_health, find_skill,
     add_skill_relation, get_skill_relations, get_skill_substitutes,
 )
-import metrics as m
-import webhooks
+import archivist.core.metrics as m
+import archivist.features.webhooks as webhooks
 
 from ._common import error_response, success_response
 

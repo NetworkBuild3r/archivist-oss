@@ -16,7 +16,7 @@ import time
 from collections import OrderedDict
 from typing import Any
 
-from config import CACHE_BACKEND, REDIS_URL, REDIS_KEY_PREFIX
+from archivist.core.config import CACHE_BACKEND, REDIS_URL, REDIS_KEY_PREFIX
 
 logger = logging.getLogger("archivist.cache_backend")
 

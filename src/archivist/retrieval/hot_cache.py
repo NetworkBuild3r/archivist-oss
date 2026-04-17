@@ -16,7 +16,7 @@ import threading
 import time
 from collections import OrderedDict
 
-from config import HOT_CACHE_ENABLED, HOT_CACHE_MAX_PER_AGENT, HOT_CACHE_TTL_SECONDS
+from archivist.core.config import HOT_CACHE_ENABLED, HOT_CACHE_MAX_PER_AGENT, HOT_CACHE_TTL_SECONDS
 
 logger = logging.getLogger("archivist.cache")
 
@@ -132,7 +132,7 @@ def invalidate_namespace(namespace: str) -> int:
     if evicted:
         logger.debug("Cache invalidation: evicted %d entries for namespace %s", evicted, namespace)
     try:
-        import namespace_inventory
+        import archivist.storage.namespace_inventory as namespace_inventory
 
         namespace_inventory.invalidate(namespace)
     except Exception:
@@ -158,7 +158,7 @@ def invalidate_all() -> int:
         _agent_caches.clear()
         _ns_index.clear()
     try:
-        import namespace_inventory
+        import archivist.storage.namespace_inventory as namespace_inventory
 
         namespace_inventory.invalidate_all()
     except Exception:

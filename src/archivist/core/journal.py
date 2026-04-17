@@ -11,7 +11,7 @@ import os
 import threading
 from datetime import datetime, timezone
 
-from config import JOURNAL_ENABLED, JOURNAL_DIR
+from archivist.core.config import JOURNAL_ENABLED, JOURNAL_DIR
 
 logger = logging.getLogger("archivist.journal")
 
