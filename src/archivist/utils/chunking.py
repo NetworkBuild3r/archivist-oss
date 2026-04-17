@@ -262,7 +262,9 @@ def chunk_text_hierarchical(
 
         child_chunks = chunk_text(parent, size=child_size, overlap=child_overlap)
         for ci, child in enumerate(child_chunks):
-            ch = hashlib.md5(f"{filepath}\0{pi}\0{ci}\0{child}".encode(), usedforsecurity=False).hexdigest()
+            ch = hashlib.md5(
+                f"{filepath}\0{pi}\0{ci}\0{child}".encode(), usedforsecurity=False
+            ).hexdigest()
             child_id = f"{ch[:8]}-{ch[8:12]}-{ch[12:16]}-{ch[16:20]}-{ch[20:32]}"
             result.append(
                 {
@@ -278,7 +280,9 @@ def chunk_text_hierarchical(
 
         micro_chunks = micro_chunks[:MAX_MICRO_CHUNKS_PER_MEMORY]
         for mi, micro in enumerate(micro_chunks):
-            mh = hashlib.md5(f"{filepath}\0{pi}\0needle\0{mi}\0{micro}".encode(), usedforsecurity=False).hexdigest()
+            mh = hashlib.md5(
+                f"{filepath}\0{pi}\0needle\0{mi}\0{micro}".encode(), usedforsecurity=False
+            ).hexdigest()
             micro_id = f"{mh[:8]}-{mh[8:12]}-{mh[12:16]}-{mh[16:20]}-{mh[20:32]}"
             result.append(
                 {
