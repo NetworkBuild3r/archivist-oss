@@ -722,7 +722,7 @@ def format_retention_slices_table(
             r5 = row.get("recall_at_5")
             ndcg = row.get("ndcg_at_5")
             n = row.get("count", 0)
-            if isinstance(r5, (int, float)) and isinstance(ndcg, (int, float)):
+            if isinstance(r5, int | float) and isinstance(ndcg, int | float):
                 cells.append(f"{r5:.4f} / {ndcg:.4f} (n={n})")
             else:
                 cells.append("---")

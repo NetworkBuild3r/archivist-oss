@@ -310,7 +310,7 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
     raw_confidence = arguments.get("confidence", -1)
     confidence = (
         raw_confidence
-        if isinstance(raw_confidence, (int, float)) and raw_confidence >= 0
+        if isinstance(raw_confidence, int | float) and raw_confidence >= 0
         else default_confidence(actor_type)
     )
     _raw_trace = arguments.get("source_trace") or {}

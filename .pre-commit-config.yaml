@@ -23,6 +23,10 @@ repos:
     rev: v1.14.1
     hooks:
       - id: mypy
+        # Informational only — pre-existing errors do not block commits.
+        # The CI ratchet gate (ceiling=90) is the hard enforcement point.
+        # Move back to stage: commit once the error count reaches 0.
         additional_dependencies: []
-        args: [--config-file=pyproject.toml]
+        args: [--config-file=pyproject.toml, --no-error-summary]
         files: ^src/archivist/
+        stages: [manual]   # run manually: pre-commit run mypy --hook-stage manual

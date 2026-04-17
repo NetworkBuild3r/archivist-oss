@@ -52,7 +52,7 @@ def _is_transient(exc: Exception) -> bool:
     """Return True if *exc* is a transient Qdrant error worth retrying."""
     if isinstance(exc, UnexpectedResponse):
         return exc.status_code in _RETRYABLE_STATUS_CODES
-    return isinstance(exc, (ResponseHandlingException, TimeoutError, ConnectionError, OSError))
+    return isinstance(exc, ResponseHandlingException | TimeoutError | ConnectionError | OSError)
 
 
 class PartialDeletionError(Exception):

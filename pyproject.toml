@@ -52,6 +52,7 @@ ignore = [
     "RUF005", # collection literal concat — intentional in some list builds
     "RUF059", # unused unpacked variable — used for side-effect unpacking
     "SIM102", # collapsible-if — readability preference
+    "SIM103", # return-negated-condition — readability preference
     "SIM105", # suppressible-exception — contextlib.suppress refactor deferred
     "SIM108", # ternary refactor — readability preference
     "SIM117", # multiple-with — readability preference
