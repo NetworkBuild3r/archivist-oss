@@ -184,8 +184,7 @@ class TestMergeSQLiteArtifacts:
         # First positional arg is memory_id
         called_mid = call_args[0][0] if call_args[0] else call_args[1].get("memory_id")
         assert called_mid == merged_id, (
-            f"register_needle_tokens called with memory_id={called_mid!r}, "
-            f"expected {merged_id!r}"
+            f"register_needle_tokens called with memory_id={called_mid!r}, expected {merged_id!r}"
         )
 
 

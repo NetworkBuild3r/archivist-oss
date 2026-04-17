@@ -349,9 +349,7 @@ async def count_outbox(pool, status: str | None = None) -> int:
     """Count outbox rows, optionally filtered by *status*."""
     async with pool.read() as conn:
         if status:
-            cur = await conn.execute(
-                "SELECT COUNT(*) FROM outbox WHERE status=?", (status,)
-            )
+            cur = await conn.execute("SELECT COUNT(*) FROM outbox WHERE status=?", (status,))
         else:
             cur = await conn.execute("SELECT COUNT(*) FROM outbox")
         row = await cur.fetchone()

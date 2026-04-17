@@ -195,8 +195,7 @@ async def test_needle_registry_bulk_insert_and_lookup_under_200ms(qa_pool):
     t0 = time.perf_counter()
     async with qa_pool.write() as conn:
         params = [
-            (memory_id, f"token-{i}", "default", "qa-agent", "2026-01-17")
-            for i in range(1000)
+            (memory_id, f"token-{i}", "default", "qa-agent", "2026-01-17") for i in range(1000)
         ]
         await conn.executemany(
             "INSERT INTO needle_registry (memory_id, token, namespace, agent_id, created_at)"
@@ -213,10 +212,7 @@ async def test_needle_registry_bulk_insert_and_lookup_under_200ms(qa_pool):
         count = (await cur.fetchone())[0]
     elapsed_read = _ms(t1)
 
-    print(
-        f"\n[perf] needle 1000 insert: {elapsed_write:.1f} ms,"
-        f" read: {elapsed_read:.1f} ms"
-    )
+    print(f"\n[perf] needle 1000 insert: {elapsed_write:.1f} ms, read: {elapsed_read:.1f} ms")
     assert count == 1000
     assert elapsed_write + elapsed_read < 200, (
         f"Needle bulk ops took {elapsed_write + elapsed_read:.1f} ms (limit 200 ms)"

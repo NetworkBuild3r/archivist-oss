@@ -82,9 +82,7 @@ async def test_crash_before_drain_event_survives_and_drains(
 
 
 @pytest.mark.chaos
-async def test_mid_drain_crash_processing_event_not_double_applied(
-    qa_pool, mock_vector_backend
-):
+async def test_mid_drain_crash_processing_event_not_double_applied(qa_pool, mock_vector_backend):
     """Event in 'processing' state (crash mid-drain) is not re-applied by a new drain."""
     from archivist.storage.outbox import OutboxProcessor
 
@@ -111,9 +109,7 @@ async def test_mid_drain_crash_processing_event_not_double_applied(
 
 
 @pytest.mark.chaos
-async def test_transient_qdrant_failure_retries_and_succeeds(
-    qa_pool, memory_factory, monkeypatch
-):
+async def test_transient_qdrant_failure_retries_and_succeeds(qa_pool, memory_factory, monkeypatch):
     """First drain raises ``ConnectionError``; second drain succeeds.
 
     Verifies retry_count increments and back-off timestamp is set.
@@ -167,9 +163,7 @@ async def test_transient_qdrant_failure_retries_and_succeeds(
 
 
 @pytest.mark.chaos
-async def test_sustained_failure_creates_dead_letter_entry(
-    qa_pool, memory_factory, monkeypatch
-):
+async def test_sustained_failure_creates_dead_letter_entry(qa_pool, memory_factory, monkeypatch):
     """After OUTBOX_MAX_RETRIES exhausted: status='dead', delete_failures row written."""
     import archivist.core.config as _cfg
     from archivist.storage.outbox import OutboxProcessor
@@ -205,9 +199,7 @@ async def test_sustained_failure_creates_dead_letter_entry(
 
 
 @pytest.mark.chaos
-async def test_concurrent_drains_apply_each_event_exactly_once(
-    qa_pool, memory_factory
-):
+async def test_concurrent_drains_apply_each_event_exactly_once(qa_pool, memory_factory):
     """Two simultaneous ``drain()`` calls: total applied == number of events, no double-apply."""
     from archivist.storage.outbox import OutboxProcessor
     from archivist.storage.transaction import MemoryTransaction
@@ -243,9 +235,7 @@ async def test_concurrent_drains_apply_each_event_exactly_once(
 
 
 @pytest.mark.chaos
-async def test_concurrent_writers_all_events_drained_exactly_once(
-    qa_pool, memory_factory
-):
+async def test_concurrent_writers_all_events_drained_exactly_once(qa_pool, memory_factory):
     """Sequential MemoryTransaction writers; each event applied exactly once after drain."""
     from archivist.storage.outbox import OutboxProcessor
     from archivist.storage.transaction import MemoryTransaction

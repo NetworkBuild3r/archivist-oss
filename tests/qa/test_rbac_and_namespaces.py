@@ -276,10 +276,7 @@ async def test_outbox_events_carry_correct_memory_ids(qa_pool, memory_factory):
     assert mem_a["memory_id"] in memory_ids_in_outbox
     assert mem_b["memory_id"] in memory_ids_in_outbox
     # No cross-contamination: each event is tagged with exactly its own memory_id
-    assert all(
-        p["memory_id"] in {mem_a["memory_id"], mem_b["memory_id"]}
-        for p in payloads
-    )
+    assert all(p["memory_id"] in {mem_a["memory_id"], mem_b["memory_id"]} for p in payloads)
 
 
 # ---------------------------------------------------------------------------

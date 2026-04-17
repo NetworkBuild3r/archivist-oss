@@ -233,12 +233,8 @@ async def test_delete_exception_leaves_no_orphan_outbox_rows(qa_pool, memory_fac
 
     with pytest.raises(RuntimeError, match="injected cascade failure"):
         async with MemoryTransaction(enabled=True) as txn:
-            await txn.execute(
-                "DELETE FROM memory_points WHERE memory_id=?", (mem["memory_id"],)
-            )
-            await txn.execute(
-                "DELETE FROM memory_chunks WHERE qdrant_id=?", (mem["qdrant_id"],)
-            )
+            await txn.execute("DELETE FROM memory_points WHERE memory_id=?", (mem["memory_id"],))
+            await txn.execute("DELETE FROM memory_chunks WHERE qdrant_id=?", (mem["qdrant_id"],))
             txn.enqueue_qdrant_delete("col", [mem["qdrant_id"]], memory_id=mem["memory_id"])
             raise RuntimeError("injected cascade failure")
 
