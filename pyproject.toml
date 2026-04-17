@@ -9,6 +9,20 @@ markers = [
     "benchmark: marks performance benchmarks (run with 'pytest benchmarks/')",
 ]
 
+[tool.mypy]
+python_version = "3.11"
+mypy_path = "src"
+explicit_package_bases = true
+
+# Suppress errors for third-party packages with no stubs
+[[tool.mypy.overrides]]
+module = ["xgboost", "xgboost.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["yaml"]
+ignore_missing_imports = true
+
 [tool.pytest-benchmark]
 disable_gc = true
 warmup = true
