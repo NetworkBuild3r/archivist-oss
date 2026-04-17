@@ -93,6 +93,21 @@ ignore_missing_imports = true
 module = ["yaml"]
 ignore_missing_imports = true
 
+# Optional reranker deps — only installed with requirements-rerank.txt
+[[tool.mypy.overrides]]
+module = ["sentence_transformers", "sentence_transformers.*"]
+ignore_missing_imports = true
+
+# MCP / Starlette / uvicorn — present at runtime, stubs vary by version
+[[tool.mypy.overrides]]
+module = ["mcp", "mcp.*", "starlette", "starlette.*", "uvicorn", "uvicorn.*", "watchfiles", "watchfiles.*"]
+ignore_missing_imports = true
+
+# Qdrant client — has stubs but version drift can cause issues
+[[tool.mypy.overrides]]
+module = ["qdrant_client", "qdrant_client.*"]
+ignore_missing_imports = true
+
 [tool.bandit]
 # B608: all SQL in this codebase uses ? placeholders — Bandit cannot detect
 # that the f-string builds only the IN (...) placeholder list, not user data.

@@ -82,17 +82,19 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt mypy types-PyYAML
 
-      - name: mypy — ratchet gate (count may not increase above 90)
-        # Error count is locked at the baseline when the pipeline was introduced.
-        # Lower MYPY_MAX_ERRORS as errors are fixed. Remove the ratchet entirely
-        # once the count reaches 0 and replace with a simple hard-fail run.
+      - name: mypy — ratchet gate (count may not increase above baseline)
+        # Only real type errors count — import-not-found / import-untyped are
+        # excluded because they vary by environment (CI installs only
+        # requirements.txt; optional rerank deps are absent).
+        # Baseline: 90 real type errors measured 2026-04-17.
+        # Lower MYPY_MAX_ERRORS as errors are fixed. Remove ratchet when = 0.
         env:
           MYPY_MAX_ERRORS: "90"
         run: |
           OUTPUT=$(python -m mypy src/archivist/ --config-file pyproject.toml 2>&1)
           echo "$OUTPUT"
-          COUNT=$(echo "$OUTPUT" | grep -c ": error:" || true)
-          echo "mypy errors: $COUNT / max allowed: $MYPY_MAX_ERRORS"
+          COUNT=$(echo "$OUTPUT" | grep ": error:" | grep -v "\[import-not-found\]\|\[import-untyped\]" | wc -l || true)
+          echo "mypy type errors (excluding import stubs): $COUNT / max allowed: $MYPY_MAX_ERRORS"
           if [ "$COUNT" -gt "$MYPY_MAX_ERRORS" ]; then
             echo "::error::mypy error count ($COUNT) exceeds ratchet ceiling ($MYPY_MAX_ERRORS). Fix errors before merging."
             exit 1
