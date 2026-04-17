@@ -7,7 +7,9 @@ markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: marks integration tests requiring external services",
     "benchmark: marks performance benchmarks (run with 'pytest benchmarks/')",
+    "chaos: marks chaos / fault-injection tests (run with '-m chaos')",
 ]
+addopts = "--strict-markers"
 
 [tool.ruff]
 target-version = "py312"

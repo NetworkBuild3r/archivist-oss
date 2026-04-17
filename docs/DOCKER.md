@@ -1,5 +1,7 @@
 # Docker deployment (dev / single node)
 
+Archivist runs as a **non-root** container image with `WORKDIR /app`; the process entrypoint is **`python3 -m archivist.app.main`** so package imports resolve correctly. This document covers Compose wiring, host vLLM, and volume overrides.
+
 The repo ships **`docker-compose.yml`** with:
 
 | Service    | Port (host) | Role |
@@ -32,7 +34,7 @@ MCP endpoint: `http://localhost:3100/mcp` (preferred Streamable HTTP; legacy SSE
 
 ## Layout
 
-- **Archivist image** is built from the root [`Dockerfile`](../Dockerfile) (`python main.py`).
+- **Archivist image** is built from the root [`Dockerfile`](../Dockerfile) (`CMD` → `python3 -m archivist.app.main`).
 - **Persistent data**: named volume `archivist-data` → `/data` (SQLite graph, config dir).
 - **Memories**: read-only mount `./sample-memories` → `/data/memories` by default; override with env **`MEMORY_DIR`** (path on the host).
 

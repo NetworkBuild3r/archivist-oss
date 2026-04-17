@@ -3,18 +3,21 @@
 </p>
 
 <h1 align="center">Archivist</h1>
-<p align="center"><strong>Memory-as-a-Service for AI agent fleets.</strong><br>
-Vector search + knowledge graph + active curation — one MCP endpoint.</p>
+<p align="center"><strong>Production-ready transactional memory for multi-agent fleets.</strong><br>
+Hybrid retrieval, knowledge graph, RBAC, active curation — one MCP endpoint.</p>
 
 <p align="center">
-  <a href="#quick-start"><strong>Quick Start</strong></a> · <a href="#openclaw-and-agent-workspace-layout"><strong>OpenClaw Layout</strong></a> · <a href="#how-it-works"><strong>How It Works</strong></a> · <a href="#benchmarks"><strong>Benchmarks</strong></a> · <a href="#ship-it-locally-validated-performance"><strong>Ship It Locally</strong></a> · <a href="#mcp-tools-31"><strong>31 MCP Tools</strong></a> · <a href="#configuration-reference"><strong>Config</strong></a> · <a href="#architecture-deep-dive"><strong>Architecture</strong></a> · <a href="docs/ROADMAP.md"><strong>Roadmap</strong></a>
+  <a href="#quick-start"><strong>Quick Start</strong></a> · <a href="#features-at-a-glance"><strong>Features</strong></a> · <a href="#architecture-deep-dive"><strong>Architecture</strong></a> · <a href="#benchmarks"><strong>Benchmarks</strong></a> · <a href="#quality-assurance--testing"><strong>QA</strong></a> · <a href="#mcp-tools-31"><strong>31 MCP Tools</strong></a> · <a href="#configuration-reference"><strong>Config</strong></a> · <a href="docs/ROADMAP.md"><strong>Roadmap</strong></a> · <a href="#development"><strong>Development</strong></a>
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="License" />
-  <img src="https://img.shields.io/badge/version-v2.0.0-brightgreen" alt="Version" />
+  <a href="https://github.com/NetworkBuild3r/archivist-oss/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="License Apache 2.0" /></a>
+  <a href="https://github.com/NetworkBuild3r/archivist-oss"><img src="https://img.shields.io/github/stars/NetworkBuild3r/archivist-oss?style=social" alt="GitHub stars" /></a>
+  <img src="https://img.shields.io/badge/python-3.12%20%7C%203.13-blue?logo=python&logoColor=white" alt="Python 3.12+" />
+  <img src="https://img.shields.io/badge/docker-compose-ready-2496ED?logo=docker&logoColor=white" alt="Docker Compose" />
+  <img src="https://img.shields.io/badge/version-v2.1.0-brightgreen" alt="Version" />
   <img src="https://img.shields.io/badge/protocol-MCP-purple" alt="MCP" />
-  <img src="https://img.shields.io/badge/models-any%20OpenAI--compatible-orange" alt="Models" />
+  <img src="https://img.shields.io/badge/models-OpenAI--compatible-orange" alt="Models" />
 </p>
 
 ---
@@ -35,6 +38,22 @@ The default image installs **core** [`requirements.txt`](requirements.txt) only 
 Point any MCP client at `http://localhost:3100/mcp` — done. Your agents now have long-term memory with search, RBAC, knowledge graphs, and active curation out of the box. Legacy SSE compatibility remains available at `http://localhost:3100/mcp/sse`.
 
 ---
+
+## Features at a glance
+
+| Capability | What you get |
+|------------|----------------|
+| **Transactional outbox** | Optional `OUTBOX_ENABLED=true`: SQLite FTS, needle registry, `memory_points`, graph rows, and outbox events commit atomically; Qdrant work is drained by a background processor with retries. Default `false` keeps legacy inline Qdrant writes. |
+| **Hybrid retrieval** | Vector + BM25 fusion, graph augmentation, reranking, tiered context — see [How It Works](#how-it-works). |
+| **MCP tool surface** | 31 tools for search, storage, trajectories, skills, admin, cache — stable signatures. |
+| **RBAC** | Namespace-level ACLs via optional `namespaces.yaml`. |
+| **Active curation** | Background curator, queue, compaction, hotness — configurable. |
+
+---
+
+## What's new in v2.1
+
+**Phase 3 + 3.5 storage** — Transactional outbox (`outbox` table), `MemoryTransaction`, `OutboxProcessor`, and `conn=` pass-through on graph helpers so FTS, needle, entities/facts, and queued Qdrant operations do not leave cross-store orphans on the primary write, indexer, merge, and delete paths when the outbox is enabled. Reference: [`docs/rearchitect_storage_phase3.md`](docs/rearchitect_storage_phase3.md), [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). **QA** — [`tests/qa/`](tests/qa/) for atomicity and chaos-style fault injection; guide: [`docs/QA.md`](docs/QA.md).
 
 ## What's New in v2.0
 
@@ -58,7 +77,7 @@ Point any MCP client at `http://localhost:3100/mcp` — done. Your agents now ha
 
 **Delete cascade hardening** — deleting a memory now fully cleans up all derived artifacts: micro-chunk FTS5 entries, reverse HyDE FTS5 entries, and per-child needle registry rows. Previously these were orphaned on delete.
 
-**Cascade consistency model** — Archivist uses two non-transactional stores (Qdrant + SQLite). The cascade makes the following contract: *(a) Detectable* — `DeleteResult.failed_steps` records every substep that failed; `PartialDeletionError` is raised when a critical Qdrant step fails. *(b) Repairable* — `sweep_orphans()` runs periodically to reconcile SQLite rows that have no corresponding Qdrant point. *(c) Auditable* — every delete and archive is written to the `audit_log` table with the full result. *(d) Retry-resilient* — transient Qdrant errors (429, 503, timeouts) are retried once; SQLite batch deletes retry once on lock contention. **Known limitation:** there is no distributed transaction across Qdrant and SQLite. A process crash mid-cascade leaves partial state; the orphan sweeper will clean it up on the next run. Deeper lifecycle notes: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+**Cascade consistency model** — Qdrant and SQLite remain separate systems. With **`OUTBOX_ENABLED=true`** (Phase 3 + 3.5), hot-path writes and deletes enqueue Qdrant work in the same SQLite transaction as FTS, needle, and `memory_points` updates, so crash windows for those paths are closed; the outbox processor applies vector changes with retries and idempotency. With **`OUTBOX_ENABLED=false`** (default), behaviour matches the pre-outbox path: inline Qdrant calls and the cascade contract below still apply. The cascade continues to guarantee: *(a) Detectable* — `DeleteResult.failed_steps`; `PartialDeletionError` on critical Qdrant failures. *(b) Repairable* — `sweep_orphans()` reconciles drift. *(c) Auditable* — `audit_log`. *(d) Retry-resilient* — transient Qdrant and SQLite lock retries. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and [`docs/rearchitect_storage_phase3.md`](docs/rearchitect_storage_phase3.md).
 
 **Structured observability** — every store and retrieval operation emits a structured log event with per-stage metrics. Feature flags are logged at startup for instant configuration visibility.
 
@@ -442,49 +461,66 @@ Raw MD trees **do not scale**: they blow the context window, repeat facts, and d
 
 ## Architecture Deep Dive
 
+Writes on critical paths use **`MemoryTransaction`** (when outbox mode is enabled) so SQLite artefacts and **`outbox`** rows commit together; **`OutboxProcessor`** applies queued Qdrant operations asynchronously. Read the full diagram in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
 ```mermaid
 graph TB
-    subgraph Clients ["Agent Frameworks (any language)"]
+    subgraph Clients ["Agent frameworks (any language)"]
         A1["Agent A"]
         A2["Agent B"]
         A3["Agent N"]
     end
 
-    subgraph Archivist ["Archivist MCP Server (:3100)"]
-        Router["Handler Registry<br/>(30 tools, dict dispatch)"]
-        RBAC["RBAC Middleware<br/>(namespace ACLs)"]
+    subgraph Archivist ["Archivist MCP server (:3100)"]
+        Router["Handler registry"]
+        RBAC["RBAC"]
 
-        subgraph Pipeline ["10-Stage RLM Pipeline"]
-            S1["Vector Search"]
-            S2["BM25 Fusion"]
-            S3["Graph Augment"]
-            S4["Dedup + Decay"]
-            S5["Rerank + Enrich"]
-            S6["LLM Refine + Synthesize"]
+        subgraph Pipeline ["10-stage RLM pipeline"]
+            S1["Vector search"]
+            S2["BM25 fusion"]
+            S3["Graph augment"]
+            S4["Dedup + decay"]
+            S5["Rerank + enrich"]
+            S6["LLM refine + synthesize"]
             S1 --> S2 --> S3 --> S4 --> S5 --> S6
         end
 
-        Curator["Background Curator<br/>(entity extraction, dedup,<br/>contradiction resolution,<br/>tip consolidation)"]
-        Context["Context Manager<br/>(token budgets, compaction)"]
-        Journal["Journal Writer<br/>(daily markdown exports)"]
+        Curator["Background curator"]
+        Context["Context manager"]
+        OBLoop["OutboxProcessor drain"]
+        Journal["Journal writer"]
 
         Router --> RBAC
         RBAC --> Pipeline
         Router --> Context
+        OBLoop --> Qdrant
+        Journal --> Files
     end
 
-    subgraph Storage ["Storage Layer"]
-        Qdrant[("Qdrant<br/>Vector Store<br/>(hierarchical chunks)")]
-        SQLite[("SQLite<br/>Knowledge Graph<br/>+ FTS5 + Audit<br/>+ Skills + Trajectories")]
-        Files[("Markdown Files<br/>Journal Exports<br/>+ MEMORY_ROOT")]
+    subgraph Storage ["Storage"]
+        Qdrant[("Qdrant\nvectors")]
+        SQLite[("SQLite\ngraph + FTS5 + outbox\n+ audit + skills")]
+        Files[("Markdown\nMEMORY_ROOT")]
     end
 
-    A1 & A2 & A3 <-->|"MCP over HTTP"| Router
+    A1 & A2 & A3 <-->|"MCP HTTP"| Router
     Pipeline <--> Qdrant
     Pipeline <--> SQLite
     Curator --> SQLite
     Curator --> Qdrant
-    Journal --> Files
+    SQLite --> OBLoop
+```
+
+```mermaid
+flowchart LR
+    subgraph w["Write path (OUTBOX_ENABLED=true)"]
+        H[Handlers / indexer / merge]
+        MT[MemoryTransaction]
+        SQL[SQLite commit]
+        H --> MT --> SQL
+    end
+    SQL --> OP[OutboxProcessor]
+    OP --> QD[Qdrant]
 ```
 
 ### Module Map (40+ Python modules)
@@ -729,6 +765,29 @@ Fork [NetworkBuild3r/archivist-oss](https://github.com/NetworkBuild3r/archivist-
 
 ---
 
+## Quality assurance & testing
+
+| Suite | Command |
+|-------|---------|
+| Default unit + integration | `python -m pytest tests/ -q --tb=no` |
+| Storage QA (outbox + chaos) | `python -m pytest tests/qa/ -q --tb=no` |
+| Lint + format | `ruff check . --fix && ruff format .` |
+| Types (CI ratchet) | `python -m mypy src/archivist/ --config-file pyproject.toml` |
+
+Manual MCP and HTTP validation: [`QA_CHECKLIST.md`](QA_CHECKLIST.md). Full guide: [`docs/QA.md`](docs/QA.md).
+
+### Roadmap snapshot
+
+| Milestone | Status |
+|-----------|--------|
+| Phase 3 + 3.5 — transactional outbox, atomic SQLite + queued Qdrant | Shipped ([`docs/rearchitect_storage_phase3.md`](docs/rearchitect_storage_phase3.md)) |
+| Pydantic config validation + stronger env validation | Planned |
+| PostgreSQL graph/outbox backend (protocols in place) | Planned |
+
+Full phased plan: [`docs/ROADMAP.md`](docs/ROADMAP.md).
+
+---
+
 ## Development
 
 **Local install (matches CI):**
@@ -762,15 +821,18 @@ Archivist is integration and execution on top of public work from the agent-memo
 
 ---
 
-## Further Documentation
+## Further documentation
 
 | Document | Covers |
 |----------|--------|
 | [`CHANGELOG.md`](CHANGELOG.md) | Version history, breaking changes, migration notes |
+| [`docs/QA.md`](docs/QA.md) | Test matrix, `tests/qa/`, lint/mypy commands, manual checklist pointer |
+| [`tests/qa/README.md`](tests/qa/README.md) | QA package scope and pytest commands |
 | [`benchmarks/README.md`](benchmarks/README.md) | Thin LongMemEval + BEIR commands (reference benchmarks) |
-| [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) | Three-tier benchmark results, reproduction steps, competitive comparison |
+| [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) | Pipeline benchmark results, reproduction steps, competitive comparison |
 | [`docs/DOCKER.md`](docs/DOCKER.md) | Docker Compose stack, host vLLM + cloud LLM, volume overrides |
-| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Module map, data flow diagrams, storage schema, per-version operational notes |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Storage transaction model, module map, diagrams, historical release notes |
+| [`docs/rearchitect_storage_phase3.md`](docs/rearchitect_storage_phase3.md) | Phase 3 + 3.5 outbox design reference |
 | [`docs/CURSOR_SKILL.md`](docs/CURSOR_SKILL.md) | Full parameter schemas and examples for all 31 MCP tools |
 | [`docs/REFERENCE.md`](docs/REFERENCE.md) | Condensed tool reference table |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | Phased roadmap and differentiation goals |

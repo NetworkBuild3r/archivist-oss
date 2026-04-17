@@ -1,8 +1,8 @@
-# Archivist Auto-Save Hooks
+# Archivist auto-save hooks
 
-Hooks that automatically persist session context to Archivist, preventing
-information loss across context window boundaries. Supports periodic
-auto-save and pre-compaction emergency save.
+Shell hooks that persist session context to Archivist over HTTP, reducing loss across context window boundaries. They are optional client-side glue — not part of the core server package.
+
+Hooks support periodic auto-save and pre-compaction emergency save.
 
 ## Hooks
 

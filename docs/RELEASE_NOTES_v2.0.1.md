@@ -37,3 +37,7 @@ Drop-in replacement for 2.0.0. No schema changes, no new environment variables.
 ```bash
 docker pull ghcr.io/networkbuild3r/archivist-oss:2.0.1
 ```
+
+---
+
+**See also:** [**v2.1.0**](../CHANGELOG.md) — transactional outbox, `MemoryTransaction`, and QA suite (`tests/qa/`). Documentation: [`docs/rearchitect_storage_phase3.md`](rearchitect_storage_phase3.md), [`docs/QA.md`](QA.md).

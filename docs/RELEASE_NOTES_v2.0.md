@@ -35,9 +35,10 @@ This release also publishes **fresh pipeline benchmark results** (Phase 5, seman
 
 ## References
 
-- [`CHANGELOG.md`](../CHANGELOG.md) — Full change list.
+- [`CHANGELOG.md`](../CHANGELOG.md) — Full change list (includes **v2.1.0** storage / outbox).
 - [`BENCHMARKS.md`](BENCHMARKS.md) — Pipeline and micro-benchmark results.
 - [`README.md`](../README.md) — Quick start and configuration.
+- [`rearchitect_storage_phase3.md`](rearchitect_storage_phase3.md) — Transactional outbox reference (v2.1.0+).
 
 ---
 

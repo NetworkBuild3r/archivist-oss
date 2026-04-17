@@ -1,12 +1,23 @@
-# Storage Phase 3 — Transactional Outbox + Pluggable Backend Abstraction
+# Storage Phase 3 — Transactional outbox + pluggable backend abstraction
 
-**Status:** Implemented (Phase 3 + Phase 3.5 hardening complete)  
-**Branch:** `feature/v2.1-storage-phase1-hardening`  
-**Preceded by:** Phase 1 (aiosqlite pool + connection management), Phase 2 (all critical missing-await and async bugs fixed)
+> **Implemented** — Phase 3 (outbox + `MemoryTransaction` + protocols) and Phase 3.5 (full `conn=` shims and atomic coverage on store, indexer, merge, delete) are complete in tree. Default **`OUTBOX_ENABLED=false`** preserves legacy inline Qdrant writes for safe rollout.
+
+**Preceded by:** Phase 1 (aiosqlite pool + connection management), Phase 2 (critical missing-await and async fixes).
+
+```mermaid
+flowchart LR
+    subgraph txn["One SQLite commit"]
+        MP[memory_points / FTS / needle / facts]
+        OB[outbox rows]
+    end
+    MP --- OB
+    OB --> DR[OutboxProcessor]
+    DR --> QD[Qdrant]
+```
 
 ---
 
-## 1. Problem Statement
+## 1. Problem statement
 
 Before Phase 3, Archivist had no cross-store transaction boundary. Qdrant (vectors) and SQLite (knowledge graph, FTS5, needle registry, memory_points, curator_queue, audit_log, etc.) were written independently. Any crash or partial failure during a write, cascade, or curator operation could produce:
 
@@ -29,9 +40,9 @@ Before Phase 3, Archivist had no cross-store transaction boundary. Qdrant (vecto
 
 ---
 
-## 2. Proposed Architecture
+## 2. Architecture
 
-### 2.1 Outbox Table (SQLite)
+### 2.1 Outbox table (SQLite)
 
 A new `outbox` table holds pending cross-store events atomically with the SQLite writes that produce them. The table lives in the same database as all other Archivist data, so it participates in the same `pool.write()` transaction.
 
@@ -56,7 +67,7 @@ CREATE INDEX IF NOT EXISTS idx_outbox_event  ON outbox(event_type, status);
 - `QDRANT_DELETE_FILTER` — delete by filter expression.
 - `QDRANT_SET_PAYLOAD` — update payload fields on a set of IDs.
 
-### 2.2 MemoryTransaction Async Context Manager
+### 2.2 MemoryTransaction async context manager
 
 `src/archivist/storage/transaction.py` — `MemoryTransaction` wraps a single `pool.write()` context. Inside the block, callers:
 
@@ -79,7 +90,7 @@ CREATE INDEX IF NOT EXISTS idx_outbox_event  ON outbox(event_type, status);
 
 **Critical design constraint:** `pool.write()` (backed by `asyncio.Lock`) is **not re-entrant**. Any helper called inside `async with MemoryTransaction()` that also tries to acquire `pool.write()` will deadlock. The solution is to pass `conn=self.conn` through to every graph helper that writes SQLite, rather than letting them acquire the lock themselves. All graph write helpers (`upsert_fts_chunk`, `register_needle_tokens`, `upsert_entity`, `add_fact`) accept an optional `conn: aiosqlite.Connection | None = None` for this reason.
 
-### 2.3 Thin Protocol Backends
+### 2.3 Thin protocol backends
 
 `src/archivist/storage/backends.py` defines two `Protocol` types:
 
@@ -102,7 +113,7 @@ class GraphBackend(Protocol):
 
 `QdrantVectorBackend` implements `VectorBackend`, wrapping the synchronous `QdrantClient` with `asyncio.to_thread`.
 
-### 2.4 OutboxProcessor Background Task
+### 2.4 OutboxProcessor background task
 
 `src/archivist/storage/outbox.py` — `OutboxProcessor` drains the `outbox` table:
 

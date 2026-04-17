@@ -1,5 +1,7 @@
 # Internal + public Git remotes
 
+Workflow notes for contributors who mirror this repository to an internal remote while keeping **`origin`** pointed at the public GitHub repo.
+
 ## UNC / “dubious ownership”
 
 If the repo lives on a network path (`\\192.168…\…`) and Git refuses commands, run **once** from the repo root:
