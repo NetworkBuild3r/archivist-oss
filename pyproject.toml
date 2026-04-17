@@ -108,7 +108,7 @@ omit = ["tests/*", "benchmarks/*", "src/*/__init__.py"]
 show_missing = true
 skip_covered = false
 precision = 1
-fail_under = 0  # raise once baseline is established
+fail_under = 46  # baseline 51.4% (2026-04-17) — raise by 2-5 pts each quarter
 
 [tool.pytest-benchmark]
 disable_gc = true

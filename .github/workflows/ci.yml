@@ -1,15 +1,14 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# Archivist CI — runs on every push / PR to main
+# Archivist CI
 #
-# Jobs (all run in parallel after checkout):
-#   lint       → Ruff (format + lint) — fastest gate, blocks everything else
-#   typecheck  → mypy strict on src/archivist/
-#   test       → pytest unit suite on Python 3.12 + 3.13 with coverage
-#   security   → Bandit + Trivy filesystem scan
-#   docker     → Build the production image and smoke-test /health
-#
-# Integration tests (Qdrant service container) run only on push to main or
-# when a PR targets main, to avoid burning minutes on every draft commit.
+# Jobs (parallel unless noted):
+#   pre-commit  → enforce local hooks — catches --no-verify bypasses
+#   lint        → Ruff format + lint
+#   typecheck   → mypy error-count ratchet (cannot increase above baseline)
+#   test        → pytest unit suite on 3.12 + 3.13, coverage enforced
+#   security    → pip-audit (CVE) + Bandit (SAST) + Trivy (filesystem)
+#   docker      → build + smoke test; edge push on main merge
+#   integration → Qdrant service container (main PRs only)
 # ─────────────────────────────────────────────────────────────────────────────
 
 name: CI
@@ -24,7 +23,6 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-# Minimal permissions — jobs that need more request them explicitly.
 permissions:
   contents: read
 
@@ -34,8 +32,20 @@ env:
   FORCE_COLOR: "1"
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
-# ─── Lint ────────────────────────────────────────────────────────────────────
+# ─── Pre-commit ───────────────────────────────────────────────────────────────
 jobs:
+  pre-commit:
+    name: Pre-commit Hooks
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - uses: pre-commit/action@v3.0.1
+
+# ─── Lint ────────────────────────────────────────────────────────────────────
   lint:
     name: Lint & Format (Ruff)
     runs-on: ubuntu-24.04
@@ -55,9 +65,9 @@ jobs:
       - name: Ruff lint
         run: ruff check src/ tests/
 
-# ─── Type check ──────────────────────────────────────────────────────────────
+# ─── Type check (ratchet — error count may only decrease) ────────────────────
   typecheck:
-    name: Type Check (mypy)
+    name: Type Check (mypy ratchet ≤ 90 errors)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -72,12 +82,21 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt mypy types-PyYAML
 
-      - name: mypy (informational — pre-existing errors do not block CI)
-        # The codebase has ~90 pre-existing mypy errors inherited before this
-        # pipeline was introduced.  We run mypy so annotations appear in the PR
-        # diff view but we do NOT fail the job.  Remove `|| true` once the
-        # error count reaches zero.
-        run: python -m mypy src/archivist/ --config-file pyproject.toml || true
+      - name: mypy — ratchet gate (count may not increase above 90)
+        # Error count is locked at the baseline when the pipeline was introduced.
+        # Lower MYPY_MAX_ERRORS as errors are fixed. Remove the ratchet entirely
+        # once the count reaches 0 and replace with a simple hard-fail run.
+        env:
+          MYPY_MAX_ERRORS: "90"
+        run: |
+          OUTPUT=$(python -m mypy src/archivist/ --config-file pyproject.toml 2>&1)
+          echo "$OUTPUT"
+          COUNT=$(echo "$OUTPUT" | grep -c ": error:" || true)
+          echo "mypy errors: $COUNT / max allowed: $MYPY_MAX_ERRORS"
+          if [ "$COUNT" -gt "$MYPY_MAX_ERRORS" ]; then
+            echo "::error::mypy error count ($COUNT) exceeds ratchet ceiling ($MYPY_MAX_ERRORS). Fix errors before merging."
+            exit 1
+          fi
 
 # ─── Unit Tests ──────────────────────────────────────────────────────────────
   test:
@@ -102,12 +121,14 @@ jobs:
           pip install -r requirements.txt -r requirements-test.txt
           pip install pytest-cov coverage[toml]
 
-      - name: Run unit tests (no external services)
+      - name: Run unit tests
         run: |
-          python -m pytest tests/ -v --tb=short \
+          python -m pytest tests/ \
             -m "not integration" \
+            --tb=short \
+            --junitxml=test-results-${{ matrix.python-version }}.xml \
             --cov=src/archivist \
-            --cov-report=xml:coverage.xml \
+            --cov-report=xml:coverage-${{ matrix.python-version }}.xml \
             --cov-report=term-missing \
             --cov-branch \
             -q
@@ -115,19 +136,26 @@ jobs:
           SQLITE_PATH: ":memory:"
           QDRANT_URL: ""
 
-      - name: Upload coverage to GitHub summary
+      - name: Upload test results (PR annotations)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.python-version }}
+          path: test-results-${{ matrix.python-version }}.xml
+          retention-days: 14
+
+      - name: Upload coverage report
         if: matrix.python-version == '3.12'
         uses: actions/upload-artifact@v4
         with:
           name: coverage-report
-          path: coverage.xml
-          retention-days: 7
+          path: coverage-3.12.xml
+          retention-days: 14
 
 # ─── Integration Tests ───────────────────────────────────────────────────────
   integration:
     name: Integration Tests (Qdrant)
     runs-on: ubuntu-24.04
-    # Only run on pushes to main/master or PRs targeting those branches
     if: |
       github.event_name == 'push' ||
       (github.event_name == 'pull_request' &&
@@ -139,8 +167,7 @@ jobs:
         ports:
           - 6333:6333
           - 6334:6334
-        # No health-cmd here — the Qdrant image is minimal and has no curl/wget.
-        # Readiness is checked from the runner in the "Wait for Qdrant" step below.
+        # No health-cmd — qdrant image has no curl/wget; polled from runner below.
 
     steps:
       - uses: actions/checkout@v4
@@ -166,10 +193,19 @@ jobs:
         run: |
           python -m pytest tests/ -v --tb=short \
             -m "integration" \
-            --timeout=120
+            --timeout=120 \
+            --junitxml=test-results-integration.xml
         env:
           QDRANT_URL: "http://localhost:6333"
           SQLITE_PATH: "/tmp/archivist-test.db"
+
+      - name: Upload integration test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-integration
+          path: test-results-integration.xml
+          retention-days: 14
 
 # ─── Security ────────────────────────────────────────────────────────────────
   security:
@@ -185,6 +221,15 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
+
+      - name: Dependency CVE scan (pip-audit)
+        # Scans requirements.txt against OSV/PyPI advisory DB.
+        # Catches known CVEs before the image is built (complements Trivy).
+        run: |
+          pip install pip-audit
+          pip-audit -r requirements.txt -r requirements-test.txt \
+            --output pip-audit-results.json --format json || true
+          pip-audit -r requirements.txt -r requirements-test.txt
 
       - name: Install Bandit
         run: pip install bandit[toml]
@@ -215,11 +260,9 @@ jobs:
   docker:
     name: Docker Build & Smoke Test
     runs-on: ubuntu-24.04
-    # Run in parallel with lint/test — gives build signal independently.
-    # Requires only checkout; no dependency on other jobs.
     permissions:
       contents: read
-      packages: write   # needed for the edge-push step on main
+      packages: write
 
     steps:
       - uses: actions/checkout@v4
@@ -282,8 +325,6 @@ jobs:
           docker logs archivist-smoke 2>&1 | tail -20 || true
           docker rm -f archivist-smoke || true
 
-      # Push edge image to ghcr.io on every merge to main (not on PRs).
-      # This gives you a always-fresh image to deploy from without waiting for a tag release.
       - name: Push edge image to ghcr.io
         if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
         uses: docker/build-push-action@v6

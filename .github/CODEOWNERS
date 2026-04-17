@@ -1,0 +1,31 @@
+# CODEOWNERS — mandatory review for critical paths
+#
+# Format: <pattern>  <owner> [<owner2> ...]
+# These rules require an approved review from the listed owners before
+# any PR touching these paths can be merged (enforced via branch protection).
+#
+# Global fallback — any file not matched below
+*                                           @NetworkBuild3r
+
+# Memory lifecycle & cascade deletion — data integrity critical
+src/archivist/lifecycle/                    @NetworkBuild3r
+
+# Storage layer — schema changes, SQLite, Qdrant client
+src/archivist/storage/                      @NetworkBuild3r
+
+# Retrieval pipeline — ranking, fusion, quality regressions are silent
+src/archivist/retrieval/                    @NetworkBuild3r
+
+# Write pipeline — affects all stored memories
+src/archivist/write/                        @NetworkBuild3r
+
+# Core config + shared utilities — changes affect the whole system
+src/archivist/core/                         @NetworkBuild3r
+src/archivist/utils/                        @NetworkBuild3r
+
+# CI/CD — pipeline changes require owner review
+.github/                                    @NetworkBuild3r
+
+# Dependency files — security-sensitive
+requirements*.txt                           @NetworkBuild3r
+pyproject.toml                              @NetworkBuild3r
