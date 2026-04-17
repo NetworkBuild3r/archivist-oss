@@ -5,7 +5,7 @@ import logging
 import uuid
 from datetime import UTC, datetime
 
-from archivist.storage.graph import GRAPH_WRITE_LOCK, get_db, schema_guard
+from archivist.storage.graph import schema_guard
 
 logger = logging.getLogger("archivist.audit")
 
@@ -38,38 +38,28 @@ async def log_memory_event(
     metadata: dict | None = None,
 ):
     """Append an immutable entry to the audit log."""
+    from archivist.storage.sqlite_pool import pool
+
     _ensure_audit_schema()
     entry_id = str(uuid.uuid4())
     now = datetime.now(UTC).isoformat()
     meta_json = json.dumps(metadata or {})
 
-    with GRAPH_WRITE_LOCK:
-        conn = get_db()
-        try:
-            conn.execute(
+    try:
+        async with pool.write() as conn:
+            await conn.execute(
                 """INSERT INTO audit_log (id, timestamp, agent_id, action, memory_id, namespace, text_hash, version, metadata)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    entry_id,
-                    now,
-                    agent_id,
-                    action,
-                    memory_id,
-                    namespace,
-                    text_hash,
-                    version,
-                    meta_json,
-                ),
+                (entry_id, now, agent_id, action, memory_id, namespace, text_hash, version, meta_json),
             )
-            conn.commit()
-        except Exception as e:
-            logger.error("Failed to write audit log: %s", e)
-        finally:
-            conn.close()
+    except Exception as e:
+        logger.error("Failed to write audit log: %s", e)
 
 
 def get_audit_trail(memory_id: str, limit: int = 50) -> list[dict]:
     """Query audit log for a specific memory ID."""
+    from archivist.storage.graph import get_db
+
     _ensure_audit_schema()
     conn = get_db()
     cur = conn.execute(
@@ -83,6 +73,8 @@ def get_audit_trail(memory_id: str, limit: int = 50) -> list[dict]:
 
 def get_agent_activity(agent_id: str, limit: int = 50) -> list[dict]:
     """Query audit log for agent activity."""
+    from archivist.storage.graph import get_db
+
     _ensure_audit_schema()
     conn = get_db()
     if agent_id:

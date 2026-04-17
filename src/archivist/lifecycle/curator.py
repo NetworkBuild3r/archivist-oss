@@ -36,11 +36,9 @@ from archivist.core.hotness import batch_update_hotness
 from archivist.core.trajectory import consolidate_tips
 from archivist.storage.compressed_index import cache_wake_up
 from archivist.storage.graph import (
-    GRAPH_WRITE_LOCK,
     add_fact,
     add_relationship,
     get_curator_state,
-    get_db,
     set_curator_state,
     upsert_entity,
 )
@@ -163,7 +161,7 @@ async def process_extraction(data: dict, agent_id: str, source_file: str):
             etype = ent.get("type", "unknown")
             rc = _retention_for_entity_type(etype)
             entity_retention[name.lower()] = rc
-            upsert_entity(name, etype, agent_id, retention_class=rc, namespace=_ns)
+            await upsert_entity(name, etype, agent_id, retention_class=rc, namespace=_ns)
 
     file_date = ""
     m = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", source_file)
@@ -175,12 +173,12 @@ async def process_extraction(data: dict, agent_id: str, source_file: str):
         ftext = fact.get("fact", "").strip()
         if ename and ftext:
             rc = entity_retention.get(ename.lower(), "standard")
-            eid = upsert_entity(ename, retention_class=rc, namespace=_ns)
+            eid = await upsert_entity(ename, retention_class=rc, namespace=_ns)
             vf = (fact.get("valid_from") or "").strip()
             vu = (fact.get("valid_until") or "").strip()
             if not vf and file_date:
                 vf = file_date
-            add_fact(
+            await add_fact(
                 eid,
                 ftext,
                 source_file,
@@ -198,9 +196,9 @@ async def process_extraction(data: dict, agent_id: str, source_file: str):
         evidence = rel.get("evidence", "").strip()
         provenance = rel.get("provenance", "inferred").strip()
         if src and tgt:
-            sid = upsert_entity(src, namespace=_ns)
-            tid = upsert_entity(tgt, namespace=_ns)
-            add_relationship(
+            sid = await upsert_entity(src, namespace=_ns)
+            tid = await upsert_entity(tgt, namespace=_ns)
+            await add_relationship(
                 sid, tid, rtype, evidence, agent_id, provenance=provenance, namespace=_ns
             )
 
@@ -219,7 +217,7 @@ async def curate_cycle():
     Files are processed concurrently (up to CURATOR_MAX_PARALLEL) to overlap
     LLM extraction latency.
     """
-    last_run = get_curator_state("last_curate_time")
+    last_run = await get_curator_state("last_curate_time")
     if last_run:
         cutoff = datetime.fromisoformat(last_run)
     else:
@@ -249,7 +247,7 @@ async def curate_cycle():
                 rel = os.path.relpath(filepath, MEMORY_ROOT)
 
                 current_checksum = _file_checksum(text)
-                stored_checksum = get_curator_state(f"checksum:{rel}")
+                stored_checksum = await get_curator_state(f"checksum:{rel}")
                 if stored_checksum == current_checksum:
                     skipped_unchanged += 1
                     continue
@@ -272,7 +270,7 @@ async def curate_cycle():
                 if data:
                     await process_extraction(data, agent_id, rel)
                 await index_file(filepath)
-                set_curator_state(f"checksum:{rel}", _file_checksum(text))
+                await set_curator_state(f"checksum:{rel}", _file_checksum(text))
                 return data is not None
             except Exception as e:
                 logger.error("Curator failed on %s: %s", filepath, e)
@@ -286,7 +284,7 @@ async def curate_cycle():
         if r is True:
             processed += 1
 
-    set_curator_state("last_curate_time", now.isoformat())
+    await set_curator_state("last_curate_time", now.isoformat())
     return {"processed": processed, "skipped": skipped_unchanged}
 
 
@@ -343,24 +341,23 @@ async def reinforce_durable_entities():
     Also boosts confidence on relationships involving these entities.
     This runs every curator cycle and is cheap (pure SQL, no LLM).
     """
+    from archivist.storage.sqlite_pool import pool
+
     now = datetime.now(UTC).isoformat()
-    with GRAPH_WRITE_LOCK:
-        conn = get_db()
-        cur = conn.execute(
+    async with pool.write() as conn:
+        cur = await conn.execute(
             "UPDATE entities SET last_seen=? WHERE retention_class IN ('durable', 'permanent')",
             (now,),
         )
         reinforced = cur.rowcount
 
-        cur2 = conn.execute(
+        cur2 = await conn.execute(
             "UPDATE relationships SET updated_at=?, confidence=MIN(confidence+0.01, 1.0) "
             "WHERE source_entity_id IN (SELECT id FROM entities WHERE retention_class IN ('durable','permanent')) "
             "OR target_entity_id IN (SELECT id FROM entities WHERE retention_class IN ('durable','permanent'))",
             (now,),
         )
         rels_boosted = cur2.rowcount
-        conn.commit()
-        conn.close()
 
     if reinforced:
         logger.info(
@@ -379,12 +376,13 @@ async def decay_old_entries() -> dict[str, int]:
 
     Returns counts for observability (curator.cycle summary).
     """
-    with GRAPH_WRITE_LOCK:
-        conn = get_db()
+    from archivist.storage.sqlite_pool import pool
+
+    async with pool.write() as conn:
         now = datetime.now(UTC)
 
         cutoff_90 = (now - timedelta(days=90)).isoformat()
-        cur1 = conn.execute(
+        cur1 = await conn.execute(
             "UPDATE facts SET is_active=0 "
             "WHERE is_active=1 AND created_at < ? AND superseded_by IS NULL "
             "AND retention_class NOT IN ('durable', 'permanent')",
@@ -393,7 +391,7 @@ async def decay_old_entries() -> dict[str, int]:
         aged_out = cur1.rowcount
 
         cutoff_30 = (now - timedelta(days=30)).isoformat()
-        cur2 = conn.execute(
+        cur2 = await conn.execute(
             "UPDATE facts SET is_active=0 "
             "WHERE is_active=1 AND created_at < ? "
             "AND (superseded_by IS NOT NULL OR retention_class = 'ephemeral') "
@@ -402,16 +400,11 @@ async def decay_old_entries() -> dict[str, int]:
         )
         superseded_out = cur2.rowcount
 
-        conn.commit()
-        conn.close()
-
     total = aged_out + superseded_out
     if total:
         logger.info(
             "Decayed %d facts (%d aged 90d, %d superseded/ephemeral 30d; durable/permanent preserved)",
-            total,
-            aged_out,
-            superseded_out,
+            total, aged_out, superseded_out,
         )
     return {"aged_out": aged_out, "superseded_out": superseded_out, "total": total}
 
@@ -424,6 +417,8 @@ def _refresh_wake_up_caches() -> int:
 
     Returns the number of namespace/agent pairs refreshed.
     """
+    from archivist.storage.graph import get_db
+
     conn = get_db()
     try:
         rows = conn.execute(

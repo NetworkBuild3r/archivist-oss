@@ -465,6 +465,8 @@ async def index_corpus(corpus_dir: str, memory_scale: str | None = None):
     from indexer import full_index
 
     init_schema()
+    from archivist.storage.sqlite_pool import initialize_pool
+    await initialize_pool()
     logger.info("Indexing corpus from %s ...", corpus_dir)
     count = await full_index(hierarchical=True)
     logger.info("Indexed %d chunks from corpus", count)

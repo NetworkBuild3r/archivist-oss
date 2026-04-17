@@ -12,7 +12,7 @@ import uuid
 from datetime import UTC, datetime
 
 from archivist.core.config import TRAJECTORY_EXPORT_ENABLED
-from archivist.storage.graph import GRAPH_WRITE_LOCK, get_db, schema_guard
+from archivist.storage.graph import schema_guard
 
 logger = logging.getLogger("archivist.retrieval_log")
 
@@ -46,7 +46,13 @@ def log_retrieval(
     cache_hit: bool = False,
     duration_ms: int | None = None,
 ) -> str:
-    """Persist a retrieval execution record."""
+    """Persist a retrieval execution record.
+
+    Note: This is a synchronous function called from sync retrieval paths.
+    It uses get_db() directly rather than the async pool.
+    """
+    from archivist.storage.graph import get_db
+
     if not TRAJECTORY_EXPORT_ENABLED:
         return ""
 
@@ -54,31 +60,22 @@ def log_retrieval(
     log_id = str(uuid.uuid4())
     now = datetime.now(UTC).isoformat()
 
-    with GRAPH_WRITE_LOCK:
-        conn = get_db()
-        try:
-            conn.execute(
-                """INSERT INTO retrieval_logs
-                   (id, agent_id, query, namespace, tier, memory_type,
-                    retrieval_trace, result_count, cache_hit, duration_ms, created_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-                (
-                    log_id,
-                    agent_id,
-                    query,
-                    namespace,
-                    tier,
-                    memory_type,
-                    json.dumps(retrieval_trace),
-                    result_count,
-                    1 if cache_hit else 0,
-                    duration_ms,
-                    now,
-                ),
-            )
-            conn.commit()
-        finally:
-            conn.close()
+    conn = get_db()
+    try:
+        conn.execute(
+            """INSERT INTO retrieval_logs
+               (id, agent_id, query, namespace, tier, memory_type,
+                retrieval_trace, result_count, cache_hit, duration_ms, created_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                log_id, agent_id, query, namespace, tier, memory_type,
+                json.dumps(retrieval_trace), result_count,
+                1 if cache_hit else 0, duration_ms, now,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
     return log_id
 
@@ -90,6 +87,8 @@ def get_retrieval_logs(
     since: str = "",
 ) -> list[dict]:
     """Retrieve recent retrieval logs for debugging/export."""
+    from archivist.storage.graph import get_db
+
     _ensure_schema()
     conn = get_db()
 
@@ -124,6 +123,8 @@ def get_retrieval_logs(
 
 def get_retrieval_stats(agent_id: str = "", window_days: int = 7) -> dict:
     """Aggregate retrieval statistics for monitoring."""
+    from archivist.storage.graph import get_db
+
     _ensure_schema()
     conn = get_db()
 

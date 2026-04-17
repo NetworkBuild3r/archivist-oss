@@ -972,30 +972,28 @@ async def _handle_pin(arguments: dict) -> list[TextContent]:
             return error_response({"error": f"Failed to pin memory: {e}"})
 
     if entity_name:
-        from archivist.storage.graph import GRAPH_WRITE_LOCK, get_db
+        from archivist.storage.sqlite_pool import pool
 
-        with GRAPH_WRITE_LOCK:
-            conn = get_db()
-            row = conn.execute(
+        async with pool.write() as conn:
+            cur = await conn.execute(
                 "SELECT id FROM entities WHERE name = ? COLLATE NOCASE AND namespace = ?",
                 (entity_name, namespace or "global"),
-            ).fetchone()
+            )
+            row = await cur.fetchone()
             if row:
-                conn.execute(
+                await conn.execute(
                     "UPDATE entities SET retention_class='permanent' WHERE id=?", (row["id"],)
                 )
-                conn.execute(
+                await conn.execute(
                     "UPDATE facts SET retention_class='permanent' WHERE entity_id=? AND is_active=1",
                     (row["id"],),
                 )
-                conn.commit()
                 pinned.append({"type": "entity", "name": entity_name, "id": row["id"]})
             else:
-                eid = upsert_entity(
+                eid = await upsert_entity(
                     entity_name, retention_class="permanent", namespace=namespace or "global"
                 )
                 pinned.append({"type": "entity", "name": entity_name, "id": eid, "created": True})
-            conn.close()
 
     from archivist.core.audit import log_memory_event
 
@@ -1050,24 +1048,22 @@ async def _handle_unpin(arguments: dict) -> list[TextContent]:
             return error_response({"error": f"Failed to unpin memory: {e}"})
 
     if entity_name:
-        from archivist.storage.graph import GRAPH_WRITE_LOCK, get_db
+        from archivist.storage.sqlite_pool import pool
 
-        with GRAPH_WRITE_LOCK:
-            conn = get_db()
-            row = conn.execute(
+        async with pool.write() as conn:
+            cur = await conn.execute(
                 "SELECT id FROM entities WHERE name = ? COLLATE NOCASE", (entity_name,)
-            ).fetchone()
+            )
+            row = await cur.fetchone()
             if row:
-                conn.execute(
+                await conn.execute(
                     "UPDATE entities SET retention_class='standard' WHERE id=?", (row["id"],)
                 )
-                conn.execute(
+                await conn.execute(
                     "UPDATE facts SET retention_class='standard' WHERE entity_id=? AND retention_class='permanent'",
                     (row["id"],),
                 )
-                conn.commit()
                 unpinned.append({"type": "entity", "name": entity_name, "id": row["id"]})
-            conn.close()
 
     hot_cache.invalidate_namespace(namespace)
 

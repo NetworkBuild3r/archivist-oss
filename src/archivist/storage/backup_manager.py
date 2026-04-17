@@ -32,7 +32,7 @@ from archivist.core.config import (
     VECTOR_DIM,
 )
 from archivist.storage.collection_router import collections_for_query
-from archivist.storage.graph import GRAPH_WRITE_LOCK
+from archivist.storage.sqlite_pool import GRAPH_WRITE_LOCK_ASYNC
 
 logger = logging.getLogger("archivist.backup")
 
@@ -338,15 +338,28 @@ def _restore_qdrant_collection(collection_name: str, snapshot_file: Path) -> Non
 
 
 def _restore_sqlite(backup_path: Path) -> None:
-    """Restore SQLite from a backup file using the backup API."""
-    with GRAPH_WRITE_LOCK:
-        source = sqlite3.connect(str(backup_path))
-        dest = sqlite3.connect(SQLITE_PATH)
-        try:
-            source.backup(dest)
-        finally:
-            dest.close()
-            source.close()
+    """Restore SQLite from a backup file using the backup API.
+
+    Acquires GRAPH_WRITE_LOCK_ASYNC via the running event loop to prevent
+    concurrent writes during the restore.  restore_snapshot() is always
+    invoked from asyncio.to_thread(), so the running loop is accessible.
+    """
+    import asyncio as _asyncio
+
+    loop = _asyncio.get_event_loop()
+
+    async def _acquire_and_restore():
+        async with GRAPH_WRITE_LOCK_ASYNC:
+            source = sqlite3.connect(str(backup_path))
+            dest = sqlite3.connect(SQLITE_PATH)
+            try:
+                source.backup(dest)
+            finally:
+                dest.close()
+                source.close()
+
+    future = _asyncio.run_coroutine_threadsafe(_acquire_and_restore(), loop)
+    future.result(timeout=120)
     logger.info("SQLite database restored from %s", backup_path.name)
 
 

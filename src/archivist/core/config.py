@@ -262,6 +262,12 @@ BACKUP_RETENTION_COUNT = int(os.getenv("BACKUP_RETENTION_COUNT", "5"))
 BACKUP_INCLUDE_FILES = _env_bool("BACKUP_INCLUDE_FILES", "false")
 BACKUP_PRE_PRUNE = _env_bool("BACKUP_PRE_PRUNE", "false")
 
+# ── SQLite async pool (v1.12) ─────────────────────────────────────────────────
+# Pages written before the WAL file is automatically checkpointed (0 = disabled).
+SQLITE_WAL_AUTOCHECKPOINT = int(os.getenv("SQLITE_WAL_AUTOCHECKPOINT", "1000"))
+# Milliseconds SQLite waits on a locked write before raising OperationalError.
+SQLITE_BUSY_TIMEOUT_MS = int(os.getenv("SQLITE_BUSY_TIMEOUT_MS", "5000"))
+
 # ── Context window management (v1.1) ─────────────────────────────────────────
 DEFAULT_CONTEXT_BUDGET = int(os.getenv("DEFAULT_CONTEXT_BUDGET", "128000"))
 
@@ -371,3 +377,36 @@ def _log_feature_flags() -> None:
 
 
 _log_feature_flags()
+
+
+# ── Startup validation (v1.12) ────────────────────────────────────────────────
+def _validate_config() -> None:
+    """Raise ValueError on fatally misconfigured values so the process fails fast."""
+    errors: list[str] = []
+    if CHUNK_SIZE < 1:
+        errors.append(f"CHUNK_SIZE must be >= 1, got {CHUNK_SIZE}")
+    if CHUNK_OVERLAP >= CHUNK_SIZE:
+        errors.append(
+            f"CHUNK_OVERLAP ({CHUNK_OVERLAP}) must be < CHUNK_SIZE ({CHUNK_SIZE})"
+        )
+    if not (0.0 <= RETRIEVAL_THRESHOLD <= 1.0):
+        errors.append(
+            f"RETRIEVAL_THRESHOLD must be in [0, 1], got {RETRIEVAL_THRESHOLD}"
+        )
+    if VECTOR_DIM < 1:
+        errors.append(f"VECTOR_DIM must be >= 1, got {VECTOR_DIM}")
+    if SQLITE_WAL_AUTOCHECKPOINT < 0:
+        errors.append(
+            f"SQLITE_WAL_AUTOCHECKPOINT must be >= 0, got {SQLITE_WAL_AUTOCHECKPOINT}"
+        )
+    if SQLITE_BUSY_TIMEOUT_MS < 0:
+        errors.append(
+            f"SQLITE_BUSY_TIMEOUT_MS must be >= 0, got {SQLITE_BUSY_TIMEOUT_MS}"
+        )
+    if errors:
+        raise ValueError(
+            "Archivist config validation failed:\n" + "\n".join(f"  - {e}" for e in errors)
+        )
+
+
+_validate_config()

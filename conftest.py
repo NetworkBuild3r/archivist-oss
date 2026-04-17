@@ -74,6 +74,36 @@ def graph_db(tmp_path, monkeypatch):
 
 
 @pytest.fixture
+async def async_pool(tmp_path, monkeypatch):
+    """Async fixture: initialize the SQLitePool singleton for async graph tests.
+
+    Tears down the pool after each test to prevent state bleed between tests.
+    Requires ``pytest-asyncio`` with asyncio_mode = "auto" or explicit marking.
+    """
+    db_path = str(tmp_path / "test_async.db")
+    monkeypatch.setenv("SQLITE_PATH", db_path)
+
+    import importlib
+
+    import config
+
+    importlib.reload(config)
+    monkeypatch.setattr("config.SQLITE_PATH", db_path)
+
+    import graph
+    from archivist.storage import sqlite_pool as _pool_mod
+
+    monkeypatch.setattr(graph, "SQLITE_PATH", db_path)
+    monkeypatch.setattr(_pool_mod, "pool", _pool_mod.SQLitePool())
+    await _pool_mod.pool.initialize(db_path)
+    graph.init_schema()
+
+    yield _pool_mod.pool
+
+    await _pool_mod.pool.close()
+
+
+@pytest.fixture
 def rbac_config(tmp_path, monkeypatch):
     """Write a test namespaces.yaml and load RBAC from it."""
     config_yaml = tmp_path / "namespaces.yaml"

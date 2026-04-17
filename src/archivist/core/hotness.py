@@ -12,7 +12,7 @@ import math
 from datetime import UTC, datetime
 
 from archivist.core.config import HOTNESS_HALFLIFE_DAYS, HOTNESS_WEIGHT
-from archivist.storage.graph import GRAPH_WRITE_LOCK, get_db, schema_guard
+from archivist.storage.graph import schema_guard
 
 logger = logging.getLogger("archivist.hotness")
 
@@ -43,6 +43,8 @@ def compute_hotness(
 
 def get_hotness_scores(memory_ids: list[str]) -> dict[str, float]:
     """Look up precomputed hotness for a batch of memory IDs."""
+    from archivist.storage.graph import get_db
+
     _ensure_schema()
     if not memory_ids:
         return {}
@@ -89,6 +91,8 @@ def batch_update_hotness() -> int:
     retrieval_logs that lack a memory_hotness entry.  Also applies importance
     feedback with cold-start guardrails (grace period, floor, relative frequency).
     """
+    from archivist.storage.graph import get_db
+
     _ensure_schema()
 
     conn = get_db()
@@ -118,6 +122,8 @@ def batch_update_hotness() -> int:
     except Exception:
         log_rows = []
 
+    conn.close()
+
     import json as _json
 
     for row in log_rows:
@@ -136,7 +142,8 @@ def batch_update_hotness() -> int:
                 memory_last_access[mid] = row["created_at"]
 
     updated = 0
-    with GRAPH_WRITE_LOCK:
+    write_conn = get_db()
+    try:
         for mid, count in memory_counts.items():
             last_str = memory_last_access.get(mid, now_iso)
             try:
@@ -146,7 +153,7 @@ def batch_update_hotness() -> int:
             days = max((now - last_dt).total_seconds() / 86400, 0.0)
             score = compute_hotness(count, days)
 
-            conn.execute(
+            write_conn.execute(
                 "INSERT INTO memory_hotness (memory_id, score, retrieval_count, last_accessed, updated_at) "
                 "VALUES (?, ?, ?, ?, ?) "
                 "ON CONFLICT(memory_id) DO UPDATE SET score=excluded.score, "
@@ -156,8 +163,9 @@ def batch_update_hotness() -> int:
             )
             updated += 1
 
-        conn.commit()
+        write_conn.commit()
+    finally:
+        write_conn.close()
 
-    conn.close()
     logger.info("Hotness batch update: %d memories scored", updated)
     return updated

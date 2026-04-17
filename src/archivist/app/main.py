@@ -266,6 +266,8 @@ def _log_task_exception(task: asyncio.Task):
 
 async def _startup():
     """Run on app startup: init DB, load RBAC, ensure Qdrant collection, start background tasks."""
+    from archivist.storage.sqlite_pool import initialize_pool
+
     logger.info("Archivist v2.0.0 starting up...")
     logger.info(
         "MCP transport: streamable_http (POST /mcp)%s",
@@ -273,6 +275,9 @@ async def _startup():
         if MCP_SSE_ENABLED
         else " [SSE disabled — set MCP_SSE_ENABLED=true to enable legacy SSE]",
     )
+
+    await initialize_pool()
+    logger.info("SQLite async pool initialized")
 
     init_schema()
     logger.info("Graph schema initialized")
@@ -315,12 +320,16 @@ async def lifespan(_app: Starlette):
             try:
                 yield
             finally:
+                from archivist.storage.sqlite_pool import close_pool
+
                 for t in _background_tasks:
                     if not t.done():
                         t.cancel()
                 if _background_tasks:
                     await asyncio.gather(*_background_tasks, return_exceptions=True)
                 _background_tasks.clear()
+                await close_pool()
+                logger.info("SQLite async pool closed")
     finally:
         streamable_http_session_manager = None
 

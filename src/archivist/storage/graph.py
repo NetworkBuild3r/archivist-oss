@@ -10,9 +10,12 @@ from datetime import UTC, datetime
 
 from archivist.core.config import SQLITE_PATH
 from archivist.utils.chunking import NEEDLE_PATTERNS
-from archivist.utils.retry import retry
 
-# Serialize writes — WAL allows concurrent readers; writers must not race.
+# ---------------------------------------------------------------------------
+# Backward-compatibility shim: keep the old threading.Lock name so any
+# remaining direct imports in backup_manager or test code don't break.
+# All internal code now uses the pool pattern.
+# ---------------------------------------------------------------------------
 GRAPH_WRITE_LOCK = threading.Lock()
 
 
@@ -21,6 +24,13 @@ def _ensure_dir():
 
 
 def get_db() -> sqlite3.Connection:
+    """Return a new synchronous sqlite3 connection.
+
+    Kept for backup_manager.py (which uses the SQLite Online Backup API that
+    requires a synchronous connection) and for test fixtures that work with
+    in-memory databases.  All normal application code should use
+    ``archivist.storage.sqlite_pool.pool`` instead.
+    """
     _ensure_dir()
     conn = sqlite3.connect(SQLITE_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
@@ -48,6 +58,9 @@ def db_conn():
 def schema_guard(ddl: str):
     """Return a zero-argument callable that runs *ddl* exactly once.
 
+    Uses double-checked locking to avoid the TOCTOU race where two coroutines
+    both see ``applied=False`` and both attempt to execute the DDL.
+
     Usage (module level)::
 
         _ensure_schema = schema_guard(\"\"\"
@@ -58,18 +71,22 @@ def schema_guard(ddl: str):
     needs the schema to be initialised.  Call ``_ensure_schema.reset()`` in
     test fixtures to force re-initialisation against a fresh database.
     """
+    _lock = threading.Lock()
 
     def _ensure():
         if _ensure.applied:
             return
-        with GRAPH_WRITE_LOCK:
+        with _lock:
+            # Double-checked: another thread may have run DDL while we waited.
+            if _ensure.applied:
+                return
             conn = get_db()
             try:
                 conn.executescript(ddl)
                 conn.commit()
             finally:
                 conn.close()
-        _ensure.applied = True
+            _ensure.applied = True
 
     def _reset():
         _ensure.applied = False
@@ -376,7 +393,7 @@ def _init_fts5():
             conn.close()
 
 
-def upsert_fts_chunk(
+async def upsert_fts_chunk(
     qdrant_id: str,
     text: str,
     file_path: str,
@@ -389,74 +406,65 @@ def upsert_fts_chunk(
     actor_type: str = "",
 ):
     """Insert or replace a chunk in memory_chunks and sync to both FTS5 indexes."""
-    with GRAPH_WRITE_LOCK:
-        conn = get_db()
-        try:
-            old = conn.execute(
-                "SELECT rowid, text FROM memory_chunks WHERE qdrant_id = ?", (qdrant_id,)
+    from archivist.storage.sqlite_pool import pool
+
+    try:
+        async with pool.write() as conn:
+            old = await (
+                await conn.execute(
+                    "SELECT rowid, text FROM memory_chunks WHERE qdrant_id = ?", (qdrant_id,)
+                )
             ).fetchone()
             if old:
-                conn.execute(
+                await conn.execute(
                     "INSERT INTO memory_fts(memory_fts, rowid, text) VALUES('delete', ?, ?)",
                     (old["rowid"], old["text"]),
                 )
                 try:
-                    conn.execute(
+                    await conn.execute(
                         "INSERT INTO memory_fts_exact(memory_fts_exact, rowid, text) VALUES('delete', ?, ?)",
                         (old["rowid"], old["text"]),
                     )
                 except Exception:
                     pass
-                conn.execute("DELETE FROM memory_chunks WHERE qdrant_id = ?", (qdrant_id,))
+                await conn.execute("DELETE FROM memory_chunks WHERE qdrant_id = ?", (qdrant_id,))
 
-            conn.execute(
+            await conn.execute(
                 "INSERT INTO memory_chunks (qdrant_id, text, file_path, chunk_index, agent_id, namespace, date, memory_type, actor_id, actor_type) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    qdrant_id,
-                    text,
-                    file_path,
-                    chunk_index,
-                    agent_id,
-                    namespace,
-                    date,
-                    memory_type,
-                    actor_id,
-                    actor_type,
-                ),
+                (qdrant_id, text, file_path, chunk_index, agent_id, namespace, date, memory_type, actor_id, actor_type),
             )
-            rowid = conn.execute(
-                "SELECT rowid FROM memory_chunks WHERE qdrant_id = ?", (qdrant_id,)
-            ).fetchone()["rowid"]
-            conn.execute(
+            rowid_row = await (
+                await conn.execute(
+                    "SELECT rowid FROM memory_chunks WHERE qdrant_id = ?", (qdrant_id,)
+                )
+            ).fetchone()
+            rowid = rowid_row["rowid"]
+            await conn.execute(
                 "INSERT INTO memory_fts (rowid, text) VALUES (?, ?)",
                 (rowid, text),
             )
             try:
-                conn.execute(
+                await conn.execute(
                     "INSERT INTO memory_fts_exact (rowid, text) VALUES (?, ?)",
                     (rowid, text),
                 )
             except Exception:
                 pass
-            conn.commit()
-        except Exception as e:
-            logging.getLogger("archivist.graph").warning(
-                "FTS upsert failed for %s: %s", qdrant_id, e
-            )
-            conn.rollback()
-        finally:
-            conn.close()
+    except Exception as e:
+        logging.getLogger("archivist.graph").warning(
+            "FTS upsert failed for %s: %s", qdrant_id, e
+        )
 
 
-def _delete_fts_rows(conn, rows):
-    """Delete FTS5 shadow-table entries for the given memory_chunks rows.
+async def _delete_fts_rows_async(conn, rows):
+    """Delete FTS5 shadow-table entries for the given memory_chunks rows (async version).
 
     Best-effort — FTS5 extension may be unavailable.
     """
     for row in rows:
         try:
-            conn.execute(
+            await conn.execute(
                 "INSERT INTO memory_fts (memory_fts, rowid, text) VALUES ('delete', ?, "
                 "(SELECT text FROM memory_chunks WHERE rowid = ?))",
                 (row["rowid"], row["rowid"]),
@@ -464,7 +472,7 @@ def _delete_fts_rows(conn, rows):
         except Exception:
             pass
         try:
-            conn.execute(
+            await conn.execute(
                 "INSERT INTO memory_fts_exact (memory_fts_exact, rowid, text) VALUES ('delete', ?, "
                 "(SELECT text FROM memory_chunks WHERE rowid = ?))",
                 (row["rowid"], row["rowid"]),
@@ -473,39 +481,38 @@ def _delete_fts_rows(conn, rows):
             pass
 
 
-def delete_fts_chunks_by_file(file_path: str):
+async def delete_fts_chunks_by_file(file_path: str):
     """Remove all FTS5 entries and memory_chunks rows for a given file path.
 
     FTS5 index cleanup is best-effort — memory_chunks rows are always deleted
     even if the FTS5 extension is unavailable.
     """
-    with GRAPH_WRITE_LOCK:
-        conn = get_db()
-        try:
-            rows = conn.execute(
-                "SELECT rowid FROM memory_chunks WHERE file_path = ?", (file_path,)
+    from archivist.storage.sqlite_pool import pool
+
+    try:
+        async with pool.write() as conn:
+            rows = await (
+                await conn.execute(
+                    "SELECT rowid FROM memory_chunks WHERE file_path = ?", (file_path,)
+                )
             ).fetchall()
-            _delete_fts_rows(conn, rows)
-            conn.execute("DELETE FROM memory_chunks WHERE file_path = ?", (file_path,))
-            conn.commit()
-        except Exception as e:
-            logging.getLogger("archivist.graph").warning(
-                "FTS delete failed for %s: %s", file_path, e
-            )
-            conn.rollback()
-        finally:
-            conn.close()
+            await _delete_fts_rows_async(conn, rows)
+            await conn.execute("DELETE FROM memory_chunks WHERE file_path = ?", (file_path,))
+    except Exception as e:
+        logging.getLogger("archivist.graph").warning(
+            "FTS delete failed for %s: %s", file_path, e
+        )
 
 
-def delete_fts_chunks_by_qdrant_id(qdrant_id: str) -> int:
+async def delete_fts_chunks_by_qdrant_id(qdrant_id: str) -> int:
     """Remove FTS5 entries and memory_chunks rows for a single Qdrant point ID.
 
     Thin wrapper around :func:`delete_fts_chunks_batch` for single-ID callers.
     """
-    return delete_fts_chunks_batch([qdrant_id])
+    return await delete_fts_chunks_batch([qdrant_id])
 
 
-def search_fts(
+async def search_fts(
     query: str,
     namespace: str = "",
     agent_id: str = "",
@@ -514,54 +521,54 @@ def search_fts(
     actor_type: str = "",
 ) -> list[dict]:
     """BM25 keyword search via FTS5. Returns ranked results with qdrant_id and score."""
-    conn = get_db()
+    from archivist.storage.sqlite_pool import pool
+
     try:
-        where_clauses = ["mc.is_excluded = 0"]
-        params: list = []
+        async with pool.read() as conn:
+            where_clauses = ["mc.is_excluded = 0"]
+            params: list = []
 
-        if namespace:
-            where_clauses.append("mc.namespace = ?")
-            params.append(namespace)
-        if agent_id:
-            where_clauses.append("mc.agent_id = ?")
-            params.append(agent_id)
-        if memory_type:
-            where_clauses.append("mc.memory_type = ?")
-            params.append(memory_type)
-        if actor_type:
-            where_clauses.append("mc.actor_type = ?")
-            params.append(actor_type)
+            if namespace:
+                where_clauses.append("mc.namespace = ?")
+                params.append(namespace)
+            if agent_id:
+                where_clauses.append("mc.agent_id = ?")
+                params.append(agent_id)
+            if memory_type:
+                where_clauses.append("mc.memory_type = ?")
+                params.append(memory_type)
+            if actor_type:
+                where_clauses.append("mc.actor_type = ?")
+                params.append(actor_type)
 
-        where_sql = " AND " + " AND ".join(where_clauses)
+            where_sql = " AND " + " AND ".join(where_clauses)
 
-        sql = (
-            "SELECT mc.qdrant_id, mc.file_path, mc.chunk_index, mc.agent_id, "
-            "mc.namespace, mc.date, mc.memory_type, mc.text, "
-            "mc.actor_id, mc.actor_type, "
-            "rank AS bm25_rank "
-            "FROM memory_fts "
-            "JOIN memory_chunks mc ON memory_fts.rowid = mc.rowid "
-            f"WHERE memory_fts MATCH ? {where_sql} "
-            "ORDER BY rank "
-            f"LIMIT ?"
-        )
-        params = [query] + params + [limit]
+            sql = (
+                "SELECT mc.qdrant_id, mc.file_path, mc.chunk_index, mc.agent_id, "
+                "mc.namespace, mc.date, mc.memory_type, mc.text, "
+                "mc.actor_id, mc.actor_type, "
+                "rank AS bm25_rank "
+                "FROM memory_fts "
+                "JOIN memory_chunks mc ON memory_fts.rowid = mc.rowid "
+                f"WHERE memory_fts MATCH ? {where_sql} "
+                "ORDER BY rank "
+                f"LIMIT ?"
+            )
+            params = [query] + params + [limit]
 
-        cur = conn.execute(sql, params)
-        results = []
-        for row in cur.fetchall():
-            r = dict(row)
-            r["bm25_score"] = -r.pop("bm25_rank", 0)
-            results.append(r)
-        return results
+            cur = await conn.execute(sql, params)
+            results = []
+            for row in await cur.fetchall():
+                r = dict(row)
+                r["bm25_score"] = -r.pop("bm25_rank", 0)
+                results.append(r)
+            return results
     except Exception as e:
         logging.getLogger("archivist.graph").warning("FTS search failed: %s", e)
         return []
-    finally:
-        conn.close()
 
 
-def search_fts_exact(
+async def search_fts_exact(
     query: str,
     namespace: str = "",
     agent_id: str = "",
@@ -570,57 +577,57 @@ def search_fts_exact(
     actor_type: str = "",
 ) -> list[dict]:
     """Non-stemmed BM25 search via memory_fts_exact for exact token matching."""
-    conn = get_db()
+    from archivist.storage.sqlite_pool import pool
+
     try:
-        where_clauses = ["mc.is_excluded = 0"]
-        params: list = []
+        async with pool.read() as conn:
+            where_clauses = ["mc.is_excluded = 0"]
+            params: list = []
 
-        if namespace:
-            where_clauses.append("mc.namespace = ?")
-            params.append(namespace)
-        if agent_id:
-            where_clauses.append("mc.agent_id = ?")
-            params.append(agent_id)
-        if memory_type:
-            where_clauses.append("mc.memory_type = ?")
-            params.append(memory_type)
-        if actor_type:
-            where_clauses.append("mc.actor_type = ?")
-            params.append(actor_type)
+            if namespace:
+                where_clauses.append("mc.namespace = ?")
+                params.append(namespace)
+            if agent_id:
+                where_clauses.append("mc.agent_id = ?")
+                params.append(agent_id)
+            if memory_type:
+                where_clauses.append("mc.memory_type = ?")
+                params.append(memory_type)
+            if actor_type:
+                where_clauses.append("mc.actor_type = ?")
+                params.append(actor_type)
 
-        where_sql = " AND " + " AND ".join(where_clauses)
+            where_sql = " AND " + " AND ".join(where_clauses)
 
-        sql = (
-            "SELECT mc.qdrant_id, mc.file_path, mc.chunk_index, mc.agent_id, "
-            "mc.namespace, mc.date, mc.memory_type, mc.text, "
-            "mc.actor_id, mc.actor_type, "
-            "rank AS bm25_rank "
-            "FROM memory_fts_exact "
-            "JOIN memory_chunks mc ON memory_fts_exact.rowid = mc.rowid "
-            f"WHERE memory_fts_exact MATCH ? {where_sql} "
-            "ORDER BY rank "
-            f"LIMIT ?"
-        )
-        params = [query] + params + [limit]
+            sql = (
+                "SELECT mc.qdrant_id, mc.file_path, mc.chunk_index, mc.agent_id, "
+                "mc.namespace, mc.date, mc.memory_type, mc.text, "
+                "mc.actor_id, mc.actor_type, "
+                "rank AS bm25_rank "
+                "FROM memory_fts_exact "
+                "JOIN memory_chunks mc ON memory_fts_exact.rowid = mc.rowid "
+                f"WHERE memory_fts_exact MATCH ? {where_sql} "
+                "ORDER BY rank "
+                f"LIMIT ?"
+            )
+            params = [query] + params + [limit]
 
-        cur = conn.execute(sql, params)
-        results = []
-        for row in cur.fetchall():
-            r = dict(row)
-            r["bm25_score"] = -r.pop("bm25_rank", 0)
-            results.append(r)
-        return results
+            cur = await conn.execute(sql, params)
+            results = []
+            for row in await cur.fetchall():
+                r = dict(row)
+                r["bm25_score"] = -r.pop("bm25_rank", 0)
+                results.append(r)
+            return results
     except Exception as e:
         logging.getLogger("archivist.graph").warning("FTS exact search failed: %s", e)
         return []
-    finally:
-        conn.close()
 
 
 _RETENTION_RANK = {"ephemeral": 0, "standard": 1, "durable": 2, "permanent": 3}
 
 
-def upsert_entity(
+async def upsert_entity(
     name: str,
     entity_type: str = "unknown",
     agent_id: str = "",
@@ -629,42 +636,39 @@ def upsert_entity(
     actor_id: str = "",
     actor_type: str = "",
 ) -> int:
+    """Insert or update an entity, returning its integer ID."""
+    from archivist.storage.sqlite_pool import pool
+
     now = datetime.now(UTC).isoformat()
-    with GRAPH_WRITE_LOCK:
-        conn = get_db()
-        try:
-            cur = conn.execute(
-                "SELECT id, mention_count, retention_class FROM entities WHERE name = ? COLLATE NOCASE AND namespace = ?",
-                (name, namespace),
+    async with pool.write() as conn:
+        cur = await conn.execute(
+            "SELECT id, mention_count, retention_class FROM entities WHERE name = ? COLLATE NOCASE AND namespace = ?",
+            (name, namespace),
+        )
+        row = await cur.fetchone()
+        if row:
+            existing_rc = (
+                row["retention_class"] if "retention_class" in row.keys() else "standard"
             )
-            row = cur.fetchone()
-            if row:
-                existing_rc = (
-                    row["retention_class"] if "retention_class" in row.keys() else "standard"
-                )
-                new_rc = (
-                    retention_class
-                    if _RETENTION_RANK.get(retention_class, 1) > _RETENTION_RANK.get(existing_rc, 1)
-                    else existing_rc
-                )
-                conn.execute(
-                    "UPDATE entities SET last_seen=?, mention_count=mention_count+1, retention_class=? WHERE id=?",
-                    (now, new_rc, row["id"]),
-                )
-                conn.commit()
-                return row["id"]
-            cur = conn.execute(
-                "INSERT INTO entities (name, entity_type, first_seen, last_seen, retention_class, namespace, actor_id, actor_type) "
-                "VALUES (?,?,?,?,?,?,?,?)",
-                (name, entity_type, now, now, retention_class, namespace, actor_id, actor_type),
+            new_rc = (
+                retention_class
+                if _RETENTION_RANK.get(retention_class, 1) > _RETENTION_RANK.get(existing_rc, 1)
+                else existing_rc
             )
-            conn.commit()
-            return cur.lastrowid
-        finally:
-            conn.close()
+            await conn.execute(
+                "UPDATE entities SET last_seen=?, mention_count=mention_count+1, retention_class=? WHERE id=?",
+                (now, new_rc, row["id"]),
+            )
+            return row["id"]
+        cur2 = await conn.execute(
+            "INSERT INTO entities (name, entity_type, first_seen, last_seen, retention_class, namespace, actor_id, actor_type) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (name, entity_type, now, now, retention_class, namespace, actor_id, actor_type),
+        )
+        return cur2.lastrowid
 
 
-def add_relationship(
+async def add_relationship(
     source_id: int,
     target_id: int,
     rel_type: str,
@@ -673,32 +677,20 @@ def add_relationship(
     provenance: str = "unknown",
     namespace: str = "global",
 ):
+    """Insert or update a relationship between two entities."""
+    from archivist.storage.sqlite_pool import pool
+
     now = datetime.now(UTC).isoformat()
-    with GRAPH_WRITE_LOCK:
-        conn = get_db()
-        try:
-            conn.execute(
-                """INSERT INTO relationships (source_entity_id, target_entity_id, relation_type,
-                   evidence, agent_id, created_at, updated_at, provenance, namespace)
-                   VALUES (?,?,?,?,?,?,?,?,?)
-                   ON CONFLICT(source_entity_id, target_entity_id, relation_type)
-                   DO UPDATE SET evidence=excluded.evidence, updated_at=excluded.updated_at,
-                   confidence=min(confidence+0.1, 1.0), provenance=excluded.provenance""",
-                (
-                    source_id,
-                    target_id,
-                    rel_type,
-                    evidence,
-                    agent_id,
-                    now,
-                    now,
-                    provenance,
-                    namespace,
-                ),
-            )
-            conn.commit()
-        finally:
-            conn.close()
+    async with pool.write() as conn:
+        await conn.execute(
+            """INSERT INTO relationships (source_entity_id, target_entity_id, relation_type,
+               evidence, agent_id, created_at, updated_at, provenance, namespace)
+               VALUES (?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(source_entity_id, target_entity_id, relation_type)
+               DO UPDATE SET evidence=excluded.evidence, updated_at=excluded.updated_at,
+               confidence=min(confidence+0.1, 1.0), provenance=excluded.provenance""",
+            (source_id, target_id, rel_type, evidence, agent_id, now, now, provenance, namespace),
+        )
 
 
 def _word_set(text: str) -> set[str]:
@@ -709,7 +701,7 @@ def _word_set(text: str) -> set[str]:
 _DATE_IN_PATH_RE = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
 
 
-def add_fact(
+async def add_fact(
     entity_id: int,
     fact_text: str,
     source_file: str = "",
@@ -723,6 +715,9 @@ def add_fact(
     provenance: str = "unknown",
     actor_id: str = "",
 ) -> int:
+    """Insert a new fact and auto-supersede overlapping existing facts."""
+    from archivist.storage.sqlite_pool import pool
+
     now = datetime.now(UTC).isoformat()
     new_words = _word_set(fact_text)
 
@@ -731,88 +726,71 @@ def add_fact(
         if m:
             valid_from = m.group(1)
 
-    with GRAPH_WRITE_LOCK:
-        conn = get_db()
-        try:
-            cur = conn.execute(
-                "INSERT INTO facts (entity_id, fact_text, source_file, agent_id, created_at, "
-                "retention_class, valid_from, valid_until, namespace, memory_id, confidence, provenance, actor_id) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    entity_id,
-                    fact_text,
-                    source_file,
-                    agent_id,
-                    now,
-                    retention_class,
-                    valid_from,
-                    valid_until,
-                    namespace,
-                    memory_id,
-                    confidence,
-                    provenance,
-                    actor_id,
-                ),
+    async with pool.write() as conn:
+        cur = await conn.execute(
+            "INSERT INTO facts (entity_id, fact_text, source_file, agent_id, created_at, "
+            "retention_class, valid_from, valid_until, namespace, memory_id, confidence, provenance, actor_id) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                entity_id, fact_text, source_file, agent_id, now,
+                retention_class, valid_from, valid_until, namespace, memory_id,
+                confidence, provenance, actor_id,
+            ),
+        )
+        fid = cur.lastrowid
+
+        if new_words:
+            old_facts_cur = await conn.execute(
+                "SELECT id, fact_text FROM facts "
+                "WHERE entity_id=? AND is_active=1 AND id!=? AND superseded_by IS NULL",
+                (entity_id, fid),
             )
-            conn.commit()
-            fid = cur.lastrowid
+            old_facts = await old_facts_cur.fetchall()
 
-            if new_words:
-                old_facts = conn.execute(
-                    "SELECT id, fact_text FROM facts "
-                    "WHERE entity_id=? AND is_active=1 AND id!=? AND superseded_by IS NULL",
-                    (entity_id, fid),
-                ).fetchall()
+            superseded_ids = []
+            for old in old_facts:
+                old_words = _word_set(old["fact_text"])
+                if not old_words:
+                    continue
+                overlap = len(new_words & old_words) / max(len(old_words), 1)
+                if overlap >= 0.6:
+                    superseded_ids.append(old["id"])
 
-                superseded_ids = []
-                for old in old_facts:
-                    old_words = _word_set(old["fact_text"])
-                    if not old_words:
-                        continue
-                    overlap = len(new_words & old_words) / max(len(old_words), 1)
-                    if overlap >= 0.6:
-                        superseded_ids.append(old["id"])
+            if superseded_ids:
+                placeholders = ",".join("?" for _ in superseded_ids)
+                await conn.execute(
+                    f"UPDATE facts SET superseded_by=? WHERE id IN ({placeholders})",
+                    [fid] + superseded_ids,
+                )
 
-                if superseded_ids:
-                    placeholders = ",".join("?" for _ in superseded_ids)
-                    conn.execute(
-                        f"UPDATE facts SET superseded_by=? WHERE id IN ({placeholders})",
-                        [fid] + superseded_ids,
-                    )
-                    conn.commit()
-
-            return fid
-        finally:
-            conn.close()
+        return fid
 
 
-def invalidate_fact(fact_id: int, ended: str = ""):
+async def invalidate_fact(fact_id: int, ended: str = ""):
     """Mark a fact as no longer valid by setting ``valid_until``.
 
     If *ended* is empty the current UTC date is used.
     """
+    from archivist.storage.sqlite_pool import pool
+
     if not ended:
         ended = datetime.now(UTC).strftime("%Y-%m-%d")
-    with GRAPH_WRITE_LOCK:
-        conn = get_db()
-        conn.execute(
+    async with pool.write() as conn:
+        await conn.execute(
             "UPDATE facts SET valid_until=? WHERE id=?",
             (ended, fact_id),
         )
-        conn.commit()
-        conn.close()
 
 
-def supersede_fact(old_fact_id: int, new_fact_id: int):
+async def supersede_fact(old_fact_id: int, new_fact_id: int):
     """Explicitly mark an old fact as superseded by a newer one."""
-    with GRAPH_WRITE_LOCK:
-        conn = get_db()
-        conn.execute(
+    from archivist.storage.sqlite_pool import pool
+
+    async with pool.write() as conn:
+        await conn.execute(
             "UPDATE facts SET superseded_by=? WHERE id=?",
             (new_fact_id, old_fact_id),
         )
-        conn.commit()
-        conn.close()
 
 
 def _normalize(text: str) -> str:
@@ -820,13 +798,14 @@ def _normalize(text: str) -> str:
     return re.sub(r"[^\w\s\-]", "", text.lower()).strip()
 
 
-def search_entities(query: str, limit: int = 10, namespace: str = "") -> list[dict]:
+async def search_entities(query: str, limit: int = 10, namespace: str = "") -> list[dict]:
     """Search entities by name or aliases (case-insensitive, normalized)."""
-    conn = get_db()
-    try:
+    from archivist.storage.sqlite_pool import pool
+
+    async with pool.read() as conn:
         norm_q = _normalize(query)
         if namespace:
-            cur = conn.execute(
+            cur = await conn.execute(
                 "SELECT * FROM entities "
                 "WHERE (name LIKE ? COLLATE NOCASE OR aliases LIKE ? COLLATE NOCASE) "
                 "AND namespace = ? "
@@ -834,54 +813,52 @@ def search_entities(query: str, limit: int = 10, namespace: str = "") -> list[di
                 (f"%{query}%", f"%{norm_q}%", namespace, limit),
             )
         else:
-            cur = conn.execute(
+            cur = await conn.execute(
                 "SELECT * FROM entities "
                 "WHERE name LIKE ? COLLATE NOCASE OR aliases LIKE ? COLLATE NOCASE "
                 "ORDER BY mention_count DESC LIMIT ?",
                 (f"%{query}%", f"%{norm_q}%", limit),
             )
-        return [dict(r) for r in cur.fetchall()]
-    finally:
-        conn.close()
+        return [dict(r) for r in await cur.fetchall()]
 
 
-def add_entity_alias(entity_id: int, alias: str):
+async def add_entity_alias(entity_id: int, alias: str):
     """Add an alias to an entity (idempotent)."""
     import json as _json
+    from archivist.storage.sqlite_pool import pool
 
     norm = _normalize(alias)
     if not norm:
         return
-    with GRAPH_WRITE_LOCK:
-        conn = get_db()
-        try:
-            row = conn.execute("SELECT aliases FROM entities WHERE id=?", (entity_id,)).fetchone()
-            if row:
-                try:
-                    current = _json.loads(row["aliases"])
-                except Exception:
-                    current = []
-                if norm not in current:
-                    current.append(norm)
-                    conn.execute(
-                        "UPDATE entities SET aliases=? WHERE id=?",
-                        (_json.dumps(current), entity_id),
-                    )
-                    conn.commit()
-        finally:
-            conn.close()
+    async with pool.write() as conn:
+        row = await (
+            await conn.execute("SELECT aliases FROM entities WHERE id=?", (entity_id,))
+        ).fetchone()
+        if row:
+            try:
+                current = _json.loads(row["aliases"])
+            except Exception:
+                current = []
+            if norm not in current:
+                current.append(norm)
+                await conn.execute(
+                    "UPDATE entities SET aliases=? WHERE id=?",
+                    (_json.dumps(current), entity_id),
+                )
 
 
-def get_entity_by_id(entity_id: int) -> dict | None:
-    conn = get_db()
-    try:
-        row = conn.execute("SELECT * FROM entities WHERE id=?", (entity_id,)).fetchone()
+async def get_entity_by_id(entity_id: int) -> dict | None:
+    """Return entity dict by primary key, or None if not found."""
+    from archivist.storage.sqlite_pool import pool
+
+    async with pool.read() as conn:
+        row = await (
+            await conn.execute("SELECT * FROM entities WHERE id=?", (entity_id,))
+        ).fetchone()
         return dict(row) if row else None
-    finally:
-        conn.close()
 
 
-def get_entity_facts(
+async def get_entity_facts(
     entity_id: int, include_superseded: bool = False, as_of: str = ""
 ) -> list[dict]:
     """Get active facts for an entity.
@@ -893,8 +870,9 @@ def get_entity_facts(
     whose validity window contains that date are returned.  Dateless facts
     (empty ``valid_from``) are always included.
     """
-    conn = get_db()
-    try:
+    from archivist.storage.sqlite_pool import pool
+
+    async with pool.read() as conn:
         base = "SELECT * FROM facts WHERE entity_id=? AND is_active=1"
         params: list = [entity_id]
 
@@ -912,21 +890,21 @@ def get_entity_facts(
         else:
             base += " ORDER BY created_at DESC"
 
-        cur = conn.execute(base, params)
+        cur = await conn.execute(base, params)
         results = []
-        for r in cur.fetchall():
+        for r in await cur.fetchall():
             d = dict(r)
             d["is_current"] = d.get("superseded_by") is None
             results.append(d)
         return results
-    finally:
-        conn.close()
 
 
-def get_entity_relationships(entity_id: int) -> list[dict]:
-    conn = get_db()
-    try:
-        cur = conn.execute(
+async def get_entity_relationships(entity_id: int) -> list[dict]:
+    """Return all relationships involving the given entity."""
+    from archivist.storage.sqlite_pool import pool
+
+    async with pool.read() as conn:
+        cur = await conn.execute(
             """SELECT r.*, e1.name AS source_name, e2.name AS target_name
                FROM relationships r
                JOIN entities e1 ON r.source_entity_id=e1.id
@@ -935,17 +913,16 @@ def get_entity_relationships(entity_id: int) -> list[dict]:
                ORDER BY r.updated_at DESC""",
             (entity_id, entity_id),
         )
-        return [dict(r) for r in cur.fetchall()]
-    finally:
-        conn.close()
+        return [dict(r) for r in await cur.fetchall()]
 
 
-def get_entity_facts_bulk(entity_ids: list[int], as_of: str = "") -> dict[int, list[dict]]:
+async def get_entity_facts_bulk(entity_ids: list[int], as_of: str = "") -> dict[int, list[dict]]:
     """Fetch active, non-superseded facts for multiple entities in one query."""
     if not entity_ids:
         return {}
-    conn = get_db()
-    try:
+    from archivist.storage.sqlite_pool import pool
+
+    async with pool.read() as conn:
         placeholders = ",".join("?" for _ in entity_ids)
         base = (
             f"SELECT * FROM facts WHERE entity_id IN ({placeholders}) "
@@ -958,26 +935,25 @@ def get_entity_facts_bulk(entity_ids: list[int], as_of: str = "") -> dict[int, l
             base += " AND (valid_until = '' OR valid_until > ?)"
             params.append(as_of)
         base += " ORDER BY entity_id, created_at DESC"
-        cur = conn.execute(base, params)
+        cur = await conn.execute(base, params)
         result: dict[int, list[dict]] = {eid: [] for eid in entity_ids}
-        for r in cur.fetchall():
+        for r in await cur.fetchall():
             d = dict(r)
             d["is_current"] = True
             result.setdefault(d["entity_id"], []).append(d)
         return result
-    finally:
-        conn.close()
 
 
-def get_entity_relationships_bulk(entity_ids: list[int]) -> dict[int, list[dict]]:
+async def get_entity_relationships_bulk(entity_ids: list[int]) -> dict[int, list[dict]]:
     """Fetch relationships for multiple entities in one query."""
     if not entity_ids:
         return {}
-    conn = get_db()
-    try:
+    from archivist.storage.sqlite_pool import pool
+
+    async with pool.read() as conn:
         placeholders = ",".join("?" for _ in entity_ids)
         params = list(entity_ids) + list(entity_ids)
-        cur = conn.execute(
+        cur = await conn.execute(
             f"""SELECT r.*, e1.name AS source_name, e2.name AS target_name
                 FROM relationships r
                 JOIN entities e1 ON r.source_entity_id=e1.id
@@ -988,36 +964,34 @@ def get_entity_relationships_bulk(entity_ids: list[int]) -> dict[int, list[dict]
             params,
         )
         result: dict[int, list[dict]] = {eid: [] for eid in entity_ids}
-        for r in cur.fetchall():
+        for r in await cur.fetchall():
             d = dict(r)
             if d["source_entity_id"] in result:
                 result[d["source_entity_id"]].append(d)
             if d["target_entity_id"] in result and d["target_entity_id"] != d["source_entity_id"]:
                 result[d["target_entity_id"]].append(d)
         return result
-    finally:
-        conn.close()
 
 
-def get_curator_state(key: str) -> str | None:
-    conn = get_db()
-    try:
-        cur = conn.execute("SELECT value FROM curator_state WHERE key=?", (key,))
-        row = cur.fetchone()
+async def get_curator_state(key: str) -> str | None:
+    """Read a single key from the curator_state table."""
+    from archivist.storage.sqlite_pool import pool
+
+    async with pool.read() as conn:
+        cur = await conn.execute("SELECT value FROM curator_state WHERE key=?", (key,))
+        row = await cur.fetchone()
         return row["value"] if row else None
-    finally:
-        conn.close()
 
 
-def set_curator_state(key: str, value: str):
-    with GRAPH_WRITE_LOCK:
-        conn = get_db()
-        conn.execute(
+async def set_curator_state(key: str, value: str):
+    """Upsert a key/value pair in the curator_state table."""
+    from archivist.storage.sqlite_pool import pool
+
+    async with pool.write() as conn:
+        await conn.execute(
             "INSERT INTO curator_state (key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             (key, value),
         )
-        conn.commit()
-        conn.close()
 
 
 # ── Deterministic needle registry (v2.0 — 100% recall for structured tokens) ─
@@ -1039,7 +1013,7 @@ _ensure_needle_registry = schema_guard("""
 """)
 
 
-def register_needle_tokens(
+async def register_needle_tokens(
     memory_id: str,
     text: str,
     namespace: str = "",
@@ -1048,6 +1022,8 @@ def register_needle_tokens(
     actor_type: str = "",
 ):
     """Extract and register high-specificity tokens from text for O(1) lookup."""
+    from archivist.storage.sqlite_pool import pool
+
     _ensure_needle_registry()
     tokens: set[str] = set()
     for pat in NEEDLE_PATTERNS:
@@ -1059,26 +1035,23 @@ def register_needle_tokens(
         return
     now = datetime.now(UTC).isoformat()
     snippet = text[:500]
-    with GRAPH_WRITE_LOCK:
-        conn = get_db()
-        try:
+    try:
+        async with pool.write() as conn:
             for tok in tokens:
-                conn.execute(
+                await conn.execute(
                     "INSERT OR REPLACE INTO needle_registry "
                     "(token, memory_id, namespace, agent_id, actor_id, actor_type, chunk_text, created_at) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (tok, memory_id, namespace, agent_id, actor_id, actor_type, snippet, now),
                 )
-            conn.commit()
-        except Exception as e:
-            logging.getLogger("archivist.graph").warning("Needle registry insert failed: %s", e)
-            conn.rollback()
-        finally:
-            conn.close()
+    except Exception as e:
+        logging.getLogger("archivist.graph").warning("Needle registry insert failed: %s", e)
 
 
-def lookup_needle_tokens(query: str, namespace: str = "", agent_id: str = "") -> list[dict]:
+async def lookup_needle_tokens(query: str, namespace: str = "", agent_id: str = "") -> list[dict]:
     """Find exact token matches in the needle registry. O(1) per token."""
+    from archivist.storage.sqlite_pool import pool
+
     _ensure_needle_registry()
     tokens: set[str] = set()
     for pat in NEEDLE_PATTERNS:
@@ -1088,82 +1061,83 @@ def lookup_needle_tokens(query: str, namespace: str = "", agent_id: str = "") ->
                 tokens.add(tok)
     if not tokens:
         return []
-    conn = get_db()
     try:
-        results: list[dict] = []
-        seen_ids: set[str] = set()
-        for tok in tokens:
-            where = "WHERE token = ?"
-            params: list = [tok]
-            if namespace:
-                where += " AND namespace = ?"
-                params.append(namespace)
-            if agent_id:
-                where += " AND agent_id = ?"
-                params.append(agent_id)
-            cur = conn.execute(f"SELECT * FROM needle_registry {where}", params)
-            for row in cur.fetchall():
-                r = dict(row)
-                if r["memory_id"] not in seen_ids:
-                    seen_ids.add(r["memory_id"])
-                    results.append(r)
-        return results
+        async with pool.read() as conn:
+            results: list[dict] = []
+            seen_ids: set[str] = set()
+            for tok in tokens:
+                where = "WHERE token = ?"
+                params: list = [tok]
+                if namespace:
+                    where += " AND namespace = ?"
+                    params.append(namespace)
+                if agent_id:
+                    where += " AND agent_id = ?"
+                    params.append(agent_id)
+                cur = await conn.execute(f"SELECT * FROM needle_registry {where}", params)
+                for row in await cur.fetchall():
+                    r = dict(row)
+                    if r["memory_id"] not in seen_ids:
+                        seen_ids.add(r["memory_id"])
+                        results.append(r)
+            return results
     except Exception as e:
         logging.getLogger("archivist.graph").warning("Needle registry lookup failed: %s", e)
         return []
-    finally:
-        conn.close()
 
 
-def delete_needle_tokens_by_memory(memory_id: str) -> int:
+async def delete_needle_tokens_by_memory(memory_id: str) -> int:
     """Remove all registry entries for a given memory ID.
 
     Thin wrapper around :func:`delete_needle_tokens_batch` for single-ID callers.
     """
-    return delete_needle_tokens_batch([memory_id])
+    return await delete_needle_tokens_batch([memory_id])
 
 
 _BATCH_CHUNK = 500
 
 
-def delete_fts_chunks_batch(qdrant_ids: list[str]) -> int:
+async def delete_fts_chunks_batch(qdrant_ids: list[str]) -> int:
     """Remove FTS5 entries and memory_chunks rows for multiple Qdrant IDs.
 
     Internally chunks the ID list into groups of 500 to stay under the
-    sqlite3 ~999-parameter limit.  Acquires ``GRAPH_WRITE_LOCK`` once.
-    Retries once on ``sqlite3.OperationalError`` (e.g. "database is locked").
+    sqlite3 ~999-parameter limit.  Retries once on ``OperationalError``
+    (e.g. "database is locked").
     """
     if not qdrant_ids:
         return 0
+    from archivist.storage.sqlite_pool import pool
 
-    @retry(max_attempts=2, delay=0.2, catch=sqlite3.OperationalError)
-    def _run() -> int:
-        total = 0
-        with GRAPH_WRITE_LOCK:
-            conn = get_db()
-            try:
+    for attempt in range(2):
+        try:
+            total = 0
+            async with pool.write() as conn:
                 for i in range(0, len(qdrant_ids), _BATCH_CHUNK):
                     chunk = qdrant_ids[i : i + _BATCH_CHUNK]
                     placeholders = ",".join("?" * len(chunk))
-                    rows = conn.execute(
-                        f"SELECT rowid FROM memory_chunks WHERE qdrant_id IN ({placeholders})",
-                        chunk,
+                    rows = await (
+                        await conn.execute(
+                            f"SELECT rowid FROM memory_chunks WHERE qdrant_id IN ({placeholders})",
+                            chunk,
+                        )
                     ).fetchall()
-                    _delete_fts_rows(conn, rows)
-                    cur = conn.execute(
+                    await _delete_fts_rows_async(conn, rows)
+                    cur = await conn.execute(
                         f"DELETE FROM memory_chunks WHERE qdrant_id IN ({placeholders})",
                         chunk,
                     )
                     total += cur.rowcount
-                conn.commit()
-            finally:
-                conn.close()
-        return total
+            return total
+        except Exception as e:
+            if attempt == 0 and "locked" in str(e).lower():
+                import asyncio as _asyncio
+                await _asyncio.sleep(0.2)
+                continue
+            raise
+    return 0
 
-    return _run()
 
-
-def set_fts_excluded_batch(qdrant_ids: list[str], excluded: int = 1) -> int:
+async def set_fts_excluded_batch(qdrant_ids: list[str], excluded: int = 1) -> int:
     """Mark memory_chunks rows as excluded (or restore them) by Qdrant ID.
 
     Sets ``is_excluded`` to *excluded* (1 = excluded from search, 0 = restored).
@@ -1171,87 +1145,84 @@ def set_fts_excluded_batch(qdrant_ids: list[str], excluded: int = 1) -> int:
     without physically removing the rows.
 
     Chunks the ID list into groups of 500 to stay under the sqlite3 ~999
-    parameter limit.  Acquires ``GRAPH_WRITE_LOCK`` once.
+    parameter limit.
     """
     if not qdrant_ids:
         return 0
+    from archivist.storage.sqlite_pool import pool
+
     total = 0
-    with GRAPH_WRITE_LOCK:
-        conn = get_db()
-        try:
+    try:
+        async with pool.write() as conn:
             for i in range(0, len(qdrant_ids), _BATCH_CHUNK):
                 chunk = qdrant_ids[i : i + _BATCH_CHUNK]
                 placeholders = ",".join("?" * len(chunk))
-                cur = conn.execute(
+                cur = await conn.execute(
                     f"UPDATE memory_chunks SET is_excluded = ? WHERE qdrant_id IN ({placeholders})",
                     [excluded] + chunk,
                 )
                 total += cur.rowcount
-            conn.commit()
-        except Exception as e:
-            logging.getLogger("archivist.graph").warning(
-                "set_fts_excluded_batch failed: %s",
-                e,
-            )
-            conn.rollback()
-        finally:
-            conn.close()
+    except Exception as e:
+        logging.getLogger("archivist.graph").warning(
+            "set_fts_excluded_batch failed: %s", e,
+        )
     return total
 
 
-def delete_needle_tokens_batch(memory_ids: list[str]) -> int:
+async def delete_needle_tokens_batch(memory_ids: list[str]) -> int:
     """Remove needle_registry rows for multiple memory IDs.
 
     Internally chunks the ID list into groups of 500 to stay under the
-    sqlite3 ~999-parameter limit.  Acquires ``GRAPH_WRITE_LOCK`` once.
-    Retries once on ``sqlite3.OperationalError`` (e.g. "database is locked").
+    sqlite3 ~999-parameter limit.  Retries once on ``OperationalError``
+    (e.g. "database is locked").
     """
     if not memory_ids:
         return 0
-    _ensure_needle_registry()
+    from archivist.storage.sqlite_pool import pool
 
-    @retry(max_attempts=2, delay=0.2, catch=sqlite3.OperationalError)
-    def _run() -> int:
-        total = 0
-        with GRAPH_WRITE_LOCK:
-            conn = get_db()
-            try:
+    _ensure_needle_registry()
+    for attempt in range(2):
+        try:
+            total = 0
+            async with pool.write() as conn:
                 for i in range(0, len(memory_ids), _BATCH_CHUNK):
                     chunk = memory_ids[i : i + _BATCH_CHUNK]
                     placeholders = ",".join("?" * len(chunk))
-                    cur = conn.execute(
+                    cur = await conn.execute(
                         f"DELETE FROM needle_registry WHERE memory_id IN ({placeholders})",
                         chunk,
                     )
                     total += cur.rowcount
-                conn.commit()
-            finally:
-                conn.close()
-        return total
+            return total
+        except Exception as e:
+            if attempt == 0 and "locked" in str(e).lower():
+                import asyncio as _asyncio
+                await _asyncio.sleep(0.2)
+                continue
+            raise
+    return 0
 
-    return _run()
 
-
-def delete_hotness(memory_id: str) -> int:
+async def delete_hotness(memory_id: str) -> int:
     """Remove the ``memory_hotness`` row for *memory_id*.
 
     Returns the number of rows deleted (0 or 1).  Silently returns 0 if the
     ``memory_hotness`` table does not yet exist (it is lazily created by
     ``hotness.refresh_hotness``).
     """
-    with GRAPH_WRITE_LOCK:
-        conn = get_db()
-        try:
-            cur = conn.execute(
+    from archivist.storage.sqlite_pool import pool
+
+    try:
+        async with pool.write() as conn:
+            cur = await conn.execute(
                 "DELETE FROM memory_hotness WHERE memory_id = ?",
                 (memory_id,),
             )
-            conn.commit()
             return cur.rowcount
-        except sqlite3.OperationalError:
+    except Exception as e:
+        if "no such table" in str(e).lower():
             return 0
-        finally:
-            conn.close()
+        return 0
 
 
 # ---------------------------------------------------------------------------
@@ -1259,7 +1230,7 @@ def delete_hotness(memory_id: str) -> int:
 # ---------------------------------------------------------------------------
 
 
-def register_memory_points_batch(
+async def register_memory_points_batch(
     points: list[dict],
 ) -> int:
     """Insert rows into ``memory_points`` for a batch of Qdrant points.
@@ -1273,21 +1244,21 @@ def register_memory_points_batch(
         }
 
     Rows are inserted with ``INSERT OR IGNORE`` so re-running on the same IDs
-    is idempotent.  Acquires ``GRAPH_WRITE_LOCK`` once for the whole batch.
+    is idempotent.
 
     Returns the number of newly inserted rows.
     """
     if not points:
         return 0
+    from archivist.storage.sqlite_pool import pool
 
     now = datetime.now(UTC).isoformat()
     total = 0
-    with GRAPH_WRITE_LOCK:
-        conn = get_db()
-        try:
+    try:
+        async with pool.write() as conn:
             for i in range(0, len(points), _BATCH_CHUNK):
                 chunk = points[i : i + _BATCH_CHUNK]
-                conn.executemany(
+                await conn.executemany(
                     "INSERT OR IGNORE INTO memory_points "
                     "(memory_id, qdrant_id, point_type, created_at) "
                     "VALUES (?, ?, ?, ?)",
@@ -1296,72 +1267,63 @@ def register_memory_points_batch(
                         for p in chunk
                     ],
                 )
-                total += sum(1 for p in chunk)
-            conn.commit()
-        except Exception as e:
-            logging.getLogger("archivist.graph").warning(
-                "register_memory_points_batch failed: %s",
-                e,
-            )
-            conn.rollback()
-        finally:
-            conn.close()
+                total += len(chunk)
+    except Exception as e:
+        logging.getLogger("archivist.graph").warning(
+            "register_memory_points_batch failed: %s", e,
+        )
     return total
 
 
-def lookup_memory_points(memory_id: str) -> list[dict]:
+async def lookup_memory_points(memory_id: str) -> list[dict]:
     """Return all ``memory_points`` rows for *memory_id*.
 
     Result rows have keys: ``memory_id``, ``qdrant_id``, ``point_type``,
     ``created_at``.  Returns an empty list if no rows exist (legacy memory
     created before Phase 2).
     """
-    conn = get_db()
+    from archivist.storage.sqlite_pool import pool
+
     try:
-        rows = conn.execute(
-            "SELECT memory_id, qdrant_id, point_type, created_at "
-            "FROM memory_points WHERE memory_id = ?",
-            (memory_id,),
-        ).fetchall()
-        return [dict(r) for r in rows]
+        async with pool.read() as conn:
+            rows = await (
+                await conn.execute(
+                    "SELECT memory_id, qdrant_id, point_type, created_at "
+                    "FROM memory_points WHERE memory_id = ?",
+                    (memory_id,),
+                )
+            ).fetchall()
+            return [dict(r) for r in rows]
     except Exception as e:
         logging.getLogger("archivist.graph").warning(
-            "lookup_memory_points failed for %s: %s",
-            memory_id,
-            e,
+            "lookup_memory_points failed for %s: %s", memory_id, e,
         )
         return []
-    finally:
-        conn.close()
 
 
-def delete_memory_points(memory_id: str) -> int:
+async def delete_memory_points(memory_id: str) -> int:
     """Remove all ``memory_points`` rows for *memory_id*.
 
     Called by the hard-delete cascade after Qdrant points have been removed.
     Returns the number of rows deleted.
     """
-    with GRAPH_WRITE_LOCK:
-        conn = get_db()
-        try:
-            cur = conn.execute(
+    from archivist.storage.sqlite_pool import pool
+
+    try:
+        async with pool.write() as conn:
+            cur = await conn.execute(
                 "DELETE FROM memory_points WHERE memory_id = ?",
                 (memory_id,),
             )
-            conn.commit()
             return cur.rowcount
-        except Exception as e:
-            logging.getLogger("archivist.graph").warning(
-                "delete_memory_points failed for %s: %s",
-                memory_id,
-                e,
-            )
-            return 0
-        finally:
-            conn.close()
+    except Exception as e:
+        logging.getLogger("archivist.graph").warning(
+            "delete_memory_points failed for %s: %s", memory_id, e,
+        )
+        return 0
 
 
-def log_delete_failure(memory_id: str, qdrant_ids: list[str], error: str) -> None:
+async def log_delete_failure(memory_id: str, qdrant_ids: list[str], error: str) -> None:
     """Record a failed Qdrant delete to the ``delete_failures`` dead-letter table.
 
     Used by the hard-delete cascade when a Qdrant batch delete fails so that
@@ -1369,22 +1331,17 @@ def log_delete_failure(memory_id: str, qdrant_ids: list[str], error: str) -> Non
     """
     import json as _json
     import uuid as _uuid
+    from archivist.storage.sqlite_pool import pool
 
     now = datetime.now(UTC).isoformat()
-    with GRAPH_WRITE_LOCK:
-        conn = get_db()
-        try:
-            conn.execute(
+    try:
+        async with pool.write() as conn:
+            await conn.execute(
                 "INSERT INTO delete_failures (id, memory_id, qdrant_ids, error, created_at) "
                 "VALUES (?, ?, ?, ?, ?)",
                 (str(_uuid.uuid4()), memory_id, _json.dumps(qdrant_ids), error, now),
             )
-            conn.commit()
-        except Exception as e:
-            logging.getLogger("archivist.graph").warning(
-                "log_delete_failure insert failed for %s: %s",
-                memory_id,
-                e,
-            )
-        finally:
-            conn.close()
+    except Exception as e:
+        logging.getLogger("archivist.graph").warning(
+            "log_delete_failure insert failed for %s: %s", memory_id, e,
+        )

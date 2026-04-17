@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 
 from archivist.core.config import OUTCOME_RETRIEVAL_BOOST, OUTCOME_RETRIEVAL_PENALTY
 from archivist.features.llm import llm_query
-from archivist.storage.graph import GRAPH_WRITE_LOCK, add_fact, get_db, schema_guard, upsert_entity
+from archivist.storage.graph import add_fact, schema_guard, upsert_entity
 from archivist.utils.text_utils import strip_fences
 
 
@@ -140,44 +140,33 @@ async def log_trajectory(
     task_fingerprint: str = "",
 ) -> dict:
     """Log an execution trajectory and auto-extract tips via LLM."""
+    from archivist.storage.sqlite_pool import pool
+
     _ensure_trajectory_schema()
 
     traj_id = str(uuid.uuid4())
     now = datetime.now(UTC).isoformat()
     fp = task_fingerprint or compute_task_fingerprint(task_description)
 
-    with GRAPH_WRITE_LOCK:
-        conn = get_db()
-        try:
-            conn.execute(
-                """INSERT INTO trajectories
-                   (id, agent_id, session_id, task_description, task_fingerprint,
-                    actions, outcome, outcome_score,
-                    memory_ids_used, created_at, metadata)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-                (
-                    traj_id,
-                    agent_id,
-                    session_id,
-                    task_description,
-                    fp,
-                    json.dumps(actions),
-                    outcome,
-                    outcome_score,
-                    json.dumps(memory_ids_used or []),
-                    now,
-                    json.dumps(metadata or {}),
-                ),
-            )
-            conn.commit()
-        finally:
-            conn.close()
+    async with pool.write() as conn:
+        await conn.execute(
+            """INSERT INTO trajectories
+               (id, agent_id, session_id, task_description, task_fingerprint,
+                actions, outcome, outcome_score,
+                memory_ids_used, created_at, metadata)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                traj_id, agent_id, session_id, task_description, fp,
+                json.dumps(actions), outcome, outcome_score,
+                json.dumps(memory_ids_used or []), now, json.dumps(metadata or {}),
+            ),
+        )
 
     from archivist.core.rbac import get_namespace_for_agent
 
     _ns = get_namespace_for_agent(agent_id) if agent_id else "global"
-    eid = upsert_entity(agent_id, "agent", namespace=_ns)
-    add_fact(
+    eid = await upsert_entity(agent_id, "agent", namespace=_ns)
+    await add_fact(
         eid,
         f"Trajectory [{outcome}]: {task_description[:200]}",
         f"trajectory/{traj_id}",
@@ -190,6 +179,9 @@ async def log_trajectory(
 
 async def attribute_decisions(trajectory_id: str) -> list[dict]:
     """Use LLM to identify which memories most influenced decisions in a trajectory."""
+    from archivist.storage.graph import get_db
+    from archivist.storage.sqlite_pool import pool
+
     _ensure_trajectory_schema()
 
     conn = get_db()
@@ -224,31 +216,29 @@ async def attribute_decisions(trajectory_id: str) -> list[dict]:
         ]
 
     now = datetime.now(UTC).isoformat()
-    with GRAPH_WRITE_LOCK:
-        conn = get_db()
-        try:
-            for a in attributions:
-                conn.execute(
-                    """INSERT INTO memory_outcomes (memory_id, trajectory_id, influence, outcome, outcome_score, created_at)
-                       VALUES (?,?,?,?,?,?)""",
-                    (
-                        a.get("memory_id", ""),
-                        trajectory_id,
-                        a.get("influence", "medium"),
-                        traj["outcome"],
-                        traj.get("outcome_score"),
-                        now,
-                    ),
-                )
-            conn.commit()
-        finally:
-            conn.close()
+    async with pool.write() as conn:
+        for a in attributions:
+            await conn.execute(
+                """INSERT INTO memory_outcomes (memory_id, trajectory_id, influence, outcome, outcome_score, created_at)
+                   VALUES (?,?,?,?,?,?)""",
+                (
+                    a.get("memory_id", ""),
+                    trajectory_id,
+                    a.get("influence", "medium"),
+                    traj["outcome"],
+                    traj.get("outcome_score"),
+                    now,
+                ),
+            )
 
     return attributions
 
 
 async def extract_tips(trajectory_id: str) -> list[dict]:
     """Extract actionable tips from a trajectory via LLM analysis."""
+    from archivist.storage.graph import get_db
+    from archivist.storage.sqlite_pool import pool
+
     _ensure_trajectory_schema()
 
     conn = get_db()
@@ -275,28 +265,19 @@ async def extract_tips(trajectory_id: str) -> list[dict]:
 
     now = datetime.now(UTC).isoformat()
     stored_tips = []
-    with GRAPH_WRITE_LOCK:
-        conn = get_db()
-        try:
-            for t in tips_data:
-                tip_id = str(uuid.uuid4())
-                conn.execute(
-                    """INSERT INTO tips (id, trajectory_id, agent_id, category, tip_text, context, created_at)
-                       VALUES (?,?,?,?,?,?,?)""",
-                    (
-                        tip_id,
-                        trajectory_id,
-                        traj["agent_id"],
-                        t.get("category", "strategy"),
-                        t.get("tip", ""),
-                        t.get("context", ""),
-                        now,
-                    ),
-                )
-                stored_tips.append({"tip_id": tip_id, **t})
-            conn.commit()
-        finally:
-            conn.close()
+    async with pool.write() as conn:
+        for t in tips_data:
+            tip_id = str(uuid.uuid4())
+            await conn.execute(
+                """INSERT INTO tips (id, trajectory_id, agent_id, category, tip_text, context, created_at)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (
+                    tip_id, trajectory_id, traj["agent_id"],
+                    t.get("category", "strategy"), t.get("tip", ""),
+                    t.get("context", ""), now,
+                ),
+            )
+            stored_tips.append({"tip_id": tip_id, **t})
 
     return stored_tips
 
@@ -307,6 +288,8 @@ def get_outcome_adjustments(memory_ids: list[str]) -> dict[str, float]:
     Memories linked to successful trajectories get a positive boost;
     those linked to failures get a negative penalty.
     """
+    from archivist.storage.graph import get_db
+
     _ensure_trajectory_schema()
     if not memory_ids:
         return {}
@@ -338,6 +321,8 @@ def get_outcome_adjustments(memory_ids: list[str]) -> dict[str, float]:
 
 def search_tips(agent_id: str, category: str = "", limit: int = 10) -> list[dict]:
     """Retrieve non-archived tips for an agent, optionally filtered by category."""
+    from archivist.storage.graph import get_db
+
     _ensure_trajectory_schema()
     conn = get_db()
     if category:
@@ -355,7 +340,7 @@ def search_tips(agent_id: str, category: str = "", limit: int = 10) -> list[dict
     return rows
 
 
-def add_annotation(
+async def add_annotation(
     memory_id: str,
     agent_id: str,
     content: str,
@@ -363,25 +348,24 @@ def add_annotation(
     quality_score: float | None = None,
 ) -> str:
     """Add an annotation to a memory point."""
+    from archivist.storage.sqlite_pool import pool
+
     _ensure_trajectory_schema()
     ann_id = str(uuid.uuid4())
     now = datetime.now(UTC).isoformat()
-    with GRAPH_WRITE_LOCK:
-        conn = get_db()
-        try:
-            conn.execute(
-                """INSERT INTO annotations (id, memory_id, agent_id, annotation_type, content, quality_score, created_at)
-                   VALUES (?,?,?,?,?,?,?)""",
-                (ann_id, memory_id, agent_id, annotation_type, content, quality_score, now),
-            )
-            conn.commit()
-        finally:
-            conn.close()
+    async with pool.write() as conn:
+        await conn.execute(
+            """INSERT INTO annotations (id, memory_id, agent_id, annotation_type, content, quality_score, created_at)
+               VALUES (?,?,?,?,?,?,?)""",
+            (ann_id, memory_id, agent_id, annotation_type, content, quality_score, now),
+        )
     return ann_id
 
 
 def get_annotations(memory_id: str) -> list[dict]:
     """Get all annotations for a memory point."""
+    from archivist.storage.graph import get_db
+
     _ensure_trajectory_schema()
     conn = get_db()
     cur = conn.execute(
@@ -393,26 +377,25 @@ def get_annotations(memory_id: str) -> list[dict]:
     return rows
 
 
-def add_rating(memory_id: str, agent_id: str, rating: int, context: str = "") -> str:
+async def add_rating(memory_id: str, agent_id: str, rating: int, context: str = "") -> str:
     """Rate a memory (positive = +1, negative = -1)."""
+    from archivist.storage.sqlite_pool import pool
+
     _ensure_trajectory_schema()
     rating_id = str(uuid.uuid4())
     now = datetime.now(UTC).isoformat()
-    with GRAPH_WRITE_LOCK:
-        conn = get_db()
-        try:
-            conn.execute(
-                "INSERT INTO ratings (id, memory_id, agent_id, rating, context, created_at) VALUES (?,?,?,?,?,?)",
-                (rating_id, memory_id, agent_id, max(-1, min(1, rating)), context, now),
-            )
-            conn.commit()
-        finally:
-            conn.close()
+    async with pool.write() as conn:
+        await conn.execute(
+            "INSERT INTO ratings (id, memory_id, agent_id, rating, context, created_at) VALUES (?,?,?,?,?,?)",
+            (rating_id, memory_id, agent_id, max(-1, min(1, rating)), context, now),
+        )
     return rating_id
 
 
 def get_rating_summary(memory_id: str) -> dict:
     """Get aggregate rating stats for a memory point."""
+    from archivist.storage.graph import get_db
+
     _ensure_trajectory_schema()
     conn = get_db()
     cur = conn.execute(
@@ -432,6 +415,8 @@ def get_rating_summary(memory_id: str) -> dict:
 
 async def session_end_summary(agent_id: str, session_id: str) -> dict:
     """Generate a durable summary from a session's trajectories and store it as a memory."""
+    from archivist.storage.graph import get_db
+
     _ensure_trajectory_schema()
 
     conn = get_db()
@@ -504,6 +489,7 @@ async def consolidate_tips(budget: int = 20) -> dict:
     import archivist.lifecycle.curator_queue as curator_queue
     from archivist.core.config import CURATOR_TIP_BUDGET
     from archivist.features.embeddings import embed_text
+    from archivist.storage.graph import get_db
 
     _ensure_trajectory_schema()
     budget = budget or CURATOR_TIP_BUDGET
@@ -624,6 +610,8 @@ def contrastive_consolidation_candidates(min_agents: int = 2, limit: int = 20) -
     Returns fingerprints with agent counts and outcome distributions so the
     curator can decide which clusters warrant LLM-driven contrastive merging.
     """
+    from archivist.storage.graph import get_db
+
     _ensure_trajectory_schema()
     conn = get_db()
     try:

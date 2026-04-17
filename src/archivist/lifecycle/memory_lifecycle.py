@@ -23,12 +23,10 @@ from archivist.lifecycle.cascade import (
 )
 from archivist.storage.collection_router import collection_for
 from archivist.storage.graph import (
-    GRAPH_WRITE_LOCK,
     delete_fts_chunks_batch,
     delete_hotness,
     delete_memory_points,
     delete_needle_tokens_batch,
-    get_db,
     lookup_memory_points,
     set_fts_excluded_batch,
 )
@@ -203,7 +201,7 @@ async def _delete_sqlite_artifacts(
 
     facts_count = 0
     try:
-        facts_count = await asyncio.to_thread(_delete_entity_facts_for_memory, memory_id)
+        facts_count = await _delete_entity_facts_for_memory(memory_id)
     except (sqlite3.Error, OSError) as e:
         logger.error("cascade.entity_facts failed for %s: %s", memory_id, e)
         failed_steps.append("entity_facts")
@@ -388,7 +386,7 @@ async def _finalize_archive(
 # ---------------------------------------------------------------------------
 
 
-def _delete_entity_facts_for_memory(memory_id: str) -> int:
+async def _delete_entity_facts_for_memory(memory_id: str) -> int:
     """Soft-deactivate entity facts linked to *memory_id*.
 
     Primary path: exact match on the ``memory_id`` column (indexed, O(log n)).
@@ -398,23 +396,23 @@ def _delete_entity_facts_for_memory(memory_id: str) -> int:
 
     Returns count of soft-deactivated facts.
     """
-    with GRAPH_WRITE_LOCK:
-        conn = get_db()
+    from archivist.storage.sqlite_pool import pool
+
+    async with pool.write() as conn:
         try:
-            cur = conn.execute(
+            cur = await conn.execute(
                 "UPDATE facts SET is_active = 0 WHERE memory_id = ? AND is_active = 1",
                 (memory_id,),
             )
             deactivated = cur.rowcount
 
-            cur2 = conn.execute(
+            cur2 = await conn.execute(
                 "UPDATE facts SET is_active = 0 "
                 "WHERE source_file LIKE ? AND is_active = 1 AND memory_id = ''",
                 (f"%{memory_id}%",),
             )
             deactivated += cur2.rowcount
 
-            conn.commit()
             return deactivated
         except Exception as e:
             logger.warning(
