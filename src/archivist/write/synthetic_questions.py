@@ -49,7 +49,7 @@ _JSON_ARRAY_RE = re.compile(r"\[.*\]", re.DOTALL)
 
 
 def _cache_key(text: str) -> str:
-    return hashlib.md5(text.encode()).hexdigest()
+    return hashlib.md5(text.encode(), usedforsecurity=False).hexdigest()
 
 
 def _cache_get(key: str) -> list[str] | None:

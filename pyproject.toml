@@ -92,6 +92,13 @@ ignore_missing_imports = true
 module = ["yaml"]
 ignore_missing_imports = true
 
+[tool.bandit]
+# B608: all SQL in this codebase uses ? placeholders — Bandit cannot detect
+# that the f-string builds only the IN (...) placeholder list, not user data.
+# Every flagged site has been manually verified as parameterised.
+# B104: 0.0.0.0 bind is intentional for the MCP server container entrypoint.
+skips = ["B608", "B104"]
+
 [tool.coverage.run]
 branch = true
 source = ["src/archivist"]

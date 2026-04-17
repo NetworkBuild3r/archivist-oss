@@ -106,7 +106,7 @@ def _extract_metadata(filepath: str) -> dict:
 
 def _point_id(filepath: str, chunk_idx: int) -> str:
     """Deterministic UUID from file path + chunk index."""
-    h = hashlib.md5(f"{filepath}:{chunk_idx}".encode()).hexdigest()
+    h = hashlib.md5(f"{filepath}:{chunk_idx}".encode(), usedforsecurity=False).hexdigest()
     return f"{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:32]}"
 
 

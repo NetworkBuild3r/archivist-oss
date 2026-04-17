@@ -187,7 +187,7 @@ async def generate_reverse_hyde_questions(
     if not count:
         count = REVERSE_HYDE_QUESTIONS_PER_CHUNK
 
-    cache_key = hashlib.md5(text.encode()).hexdigest()
+    cache_key = hashlib.md5(text.encode(), usedforsecurity=False).hexdigest()
     cached = _reverse_cache_get(cache_key)
     if cached is not None:
         return cached[:count]

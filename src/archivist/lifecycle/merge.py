@@ -61,7 +61,7 @@ async def merge_memories(
 
     merged_text = result["merged_text"]
     vec = await embed_text(merged_text)
-    merged_id = hashlib.md5(f"merge:{':'.join(memory_ids)}".encode()).hexdigest()
+    merged_id = hashlib.md5(f"merge:{':'.join(memory_ids)}".encode(), usedforsecurity=False).hexdigest()
     checksum = compute_memory_checksum(merged_text, agent_id, namespace)
 
     ns = namespace or payloads[0][1].get("namespace", "default")
@@ -165,7 +165,7 @@ async def _merge_manual(payloads: list[tuple[str, dict]], namespace: str) -> dic
     conflict_dir = os.path.join(MEMORY_ROOT, "memory-conflicts")
     os.makedirs(conflict_dir, exist_ok=True)
 
-    conflict_id = hashlib.md5(":".join(str(pid) for pid, _ in payloads).encode()).hexdigest()[:12]
+    conflict_id = hashlib.md5(":".join(str(pid) for pid, _ in payloads).encode(), usedforsecurity=False).hexdigest()[:12]
     filepath = os.path.join(conflict_dir, f"conflict-{conflict_id}.md")
 
     lines = [f"# Memory Conflict — {datetime.now(UTC).strftime('%Y-%m-%d %H:%M')}", ""]
