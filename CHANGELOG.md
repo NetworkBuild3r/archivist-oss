@@ -5,6 +5,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-04-17
+
+### Fixed
+
+- **Async write-path data loss** — All graph writes (`upsert_entity`, `add_fact`, `upsert_fts_chunk`, `register_needle_tokens`, `register_memory_points_batch`) in `tools_storage._handle_store` were fire-and-forget coroutines; they are now properly awaited.
+- **`merge.py` correctness** — Merged memory now correctly writes FTS chunks, needle tokens, and memory-point batch registrations for the merged ID; Qdrant upsert uses `collection_for(ns)` instead of a hardcoded collection; `record_version` is awaited; originals deletion loop is guarded against `PartialDeletionError`.
+- **`sweep_orphans` async** — `sweep_orphans()` is now a proper `async def` using `pool.read()`/`pool.write()`; `delete_fts_chunks_batch` and `delete_needle_tokens_batch` are awaited; `curator.py` call site updated.
+- **`retrieval_log.log_retrieval` sync block removed** — Converted to `async def` using `pool.write()`; all callers in `rlm_retriever.py` now await it.
+- **`cascade._qdrant_delete` async** — Made async so `log_delete_failure` can be awaited on the failure path.
+- **`memory_lifecycle` threading** — Replaced `asyncio.to_thread` wrappers for `_qdrant_delete` and `set_fts_excluded_batch` with direct awaits; removed invalid `conn.close()` inside an `async with pool.write()` block.
+- **Dockerfile CMD** — Changed from `python archivist/app/main.py` to `python3 -m archivist.app.main`; the previous form ran the file without the package on `sys.path`, breaking all relative imports.
+
+### Added
+
+- `tests/test_missing_awaits.py` — regression tests asserting all async write-path calls are properly awaited.
+- `tests/test_merge_consistency.py` — regression tests for merge correctness (FTS/needle/memory-point propagation, namespace-aware collection routing).
+
 ## [2.0.0] - 2026-04-17
 
 ### Added

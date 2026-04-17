@@ -179,7 +179,7 @@ async def file_watcher():
 
 
 async def handle_health(_request):
-    return JSONResponse({"status": "ok", "service": "archivist", "version": "2.0.0"})
+    return JSONResponse({"status": "ok", "service": "archivist", "version": "2.0.1"})
 
 
 async def handle_invalidate(_request):

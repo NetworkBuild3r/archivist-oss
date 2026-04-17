@@ -37,7 +37,7 @@ from archivist.storage.sqlite_pool import GRAPH_WRITE_LOCK_ASYNC
 logger = logging.getLogger("archivist.backup")
 
 MANIFEST_VERSION = 1
-ARCHIVIST_VERSION = "2.0.0"
+ARCHIVIST_VERSION = "2.0.1"
 
 
 def _snapshot_dir(snapshot_id: str) -> Path:
