@@ -14,7 +14,7 @@ from pathlib import Path
 
 from qdrant_client.models import PointStruct, Filter, FieldCondition, MatchValue
 
-from config import (
+from archivist.core.config import (
     QDRANT_COLLECTION, MEMORY_ROOT,
     TEAM_MAP,
     PARENT_CHUNK_SIZE, PARENT_CHUNK_OVERLAP,
@@ -24,18 +24,18 @@ from config import (
     CONTEXTUAL_AUGMENTATION_ENABLED,
     CHUNKING_STRATEGY,
 )
-from chunking import chunk_text, chunk_text_hierarchical
-from embeddings import embed_batch
-from graph import upsert_fts_chunk, delete_fts_chunks_by_file, upsert_entity, add_fact, register_needle_tokens, register_memory_points_batch
-from qdrant import qdrant_client
-from rbac import get_namespace_for_agent, get_namespace_config
-from text_utils import extract_agent_id_from_path, compute_memory_checksum
-from tiering import generate_tiers
-from topic_detector import detect_topics
-from pre_extractor import pre_extract, extract_needle_entities
-from collection_router import ensure_collection, collections_for_query
-from contextual_augment import augment_chunk
-import metrics as _metrics
+from archivist.utils.chunking import chunk_text, chunk_text_hierarchical
+from archivist.features.embeddings import embed_batch
+from archivist.storage.graph import upsert_fts_chunk, delete_fts_chunks_by_file, upsert_entity, add_fact, register_needle_tokens, register_memory_points_batch
+from archivist.storage.qdrant import qdrant_client
+from archivist.core.rbac import get_namespace_for_agent, get_namespace_config
+from archivist.utils.text_utils import extract_agent_id_from_path, compute_memory_checksum
+from archivist.write.tiering import generate_tiers
+from archivist.retrieval.topic_detector import detect_topics
+from archivist.write.pre_extractor import pre_extract, extract_needle_entities
+from archivist.storage.collection_router import ensure_collection, collections_for_query
+from archivist.write.contextual_augment import augment_chunk
+import archivist.core.metrics as _metrics
 
 logger = logging.getLogger("archivist.indexer")
 
@@ -132,7 +132,7 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
     await delete_file_points(filepath)
 
     meta = _extract_metadata(filepath)
-    from provenance import SourceTrace, default_confidence
+    from archivist.core.provenance import SourceTrace, default_confidence
     _indexer_confidence = default_confidence("system")
     _indexer_trace = SourceTrace(tool="file_indexer", upstream_source=filepath).to_dict()
     ns_config = get_namespace_config(meta["namespace"])
@@ -349,9 +349,9 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
             )
 
         # Reverse HyDE: generate hypothetical questions for parent chunks (parallel)
-        from config import REVERSE_HYDE_ENABLED
+        from archivist.core.config import REVERSE_HYDE_ENABLED
         if REVERSE_HYDE_ENABLED:
-            from hyde import generate_reverse_hyde_questions
+            from archivist.write.hyde import generate_reverse_hyde_questions
             _rh_semaphore = asyncio.Semaphore(3)
             _parent_points = [p for p in points if p.payload.get("is_parent", False)]
 
@@ -414,9 +414,9 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
                     logger.debug("indexer.register_memory_points (reverse_hyde) failed: %s", _e)
 
         # Synthetic question generation: multi-representation indexing
-        import config as _cfg
+        import archivist.core.config as _cfg
         if _cfg.SYNTHETIC_QUESTIONS_ENABLED:
-            from synthetic_questions import generate_and_embed_synthetic_points
+            from archivist.write.synthetic_questions import generate_and_embed_synthetic_points
             _sq_semaphore = asyncio.Semaphore(3)
             _parent_points_sq = [p for p in points if p.payload.get("is_parent", False)]
 

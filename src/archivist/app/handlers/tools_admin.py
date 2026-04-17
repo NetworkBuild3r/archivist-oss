@@ -4,10 +4,10 @@ import logging
 
 from mcp.types import Tool, TextContent
 
-from rbac import get_namespace_for_agent, list_accessible_namespaces
-from skills import find_skill, get_skill_health, get_lessons
-from retrieval_log import get_retrieval_logs, get_retrieval_stats
-from dashboard import build_dashboard, batch_heuristic
+from archivist.core.rbac import get_namespace_for_agent, list_accessible_namespaces
+from archivist.features.skills import find_skill, get_skill_health, get_lessons
+from archivist.retrieval.retrieval_log import get_retrieval_logs, get_retrieval_stats
+from archivist.app.dashboard import build_dashboard, batch_heuristic
 
 from ._common import _rbac_gate, error_response, success_response
 
@@ -217,8 +217,8 @@ TOOLS: list[Tool] = [
 
 async def _handle_context_check(arguments: dict) -> list[TextContent]:
     """Token-count messages or memory texts against a budget."""
-    from config import DEFAULT_CONTEXT_BUDGET
-    from context_manager import check_context, check_memories_budget
+    from archivist.core.config import DEFAULT_CONTEXT_BUDGET
+    from archivist.utils.context_manager import check_context, check_memories_budget
 
     budget = arguments.get("budget_tokens", DEFAULT_CONTEXT_BUDGET)
     messages = arguments.get("messages")
@@ -257,7 +257,7 @@ async def _handle_namespaces(arguments: dict) -> list[TextContent]:
 
 
 async def _handle_audit_trail(arguments: dict) -> list[TextContent]:
-    from audit import get_audit_trail, get_agent_activity
+    from archivist.core.audit import get_audit_trail, get_agent_activity
 
     memory_id = arguments.get("memory_id", "")
     target_agent = arguments.get("target_agent", "")
@@ -275,7 +275,7 @@ async def _handle_audit_trail(arguments: dict) -> list[TextContent]:
 
 async def _handle_resolve_uri(arguments: dict) -> list[TextContent]:
     """Resolve an archivist:// URI to the underlying resource."""
-    from archivist_uri import parse_uri
+    from archivist.core.archivist_uri import parse_uri
 
     raw_uri = arguments["uri"]
     uri = parse_uri(raw_uri)
@@ -354,7 +354,7 @@ async def _handle_batch_heuristic(arguments: dict) -> list[TextContent]:
 
 async def _handle_backup(arguments: dict) -> list[TextContent]:
     """Create, list, restore, or delete memory snapshots."""
-    from backup_manager import (
+    from archivist.storage.backup_manager import (
         create_snapshot, list_snapshots, restore_snapshot,
         delete_snapshot, prune_snapshots, export_agent, import_agent,
     )

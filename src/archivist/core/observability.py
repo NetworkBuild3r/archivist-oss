@@ -14,7 +14,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from typing import Any, Iterator
 
-from config import SLOW_EMBED_MS, SLOW_LLM_MS, SLOW_QDRANT_MS
+from archivist.core.config import SLOW_EMBED_MS, SLOW_LLM_MS, SLOW_QDRANT_MS
 
 logger = logging.getLogger("archivist.observability")
 

@@ -12,7 +12,7 @@ from typing import Optional
 
 import yaml
 
-from config import TEAM_MAP, NAMESPACES_CONFIG_PATH
+from archivist.core.config import TEAM_MAP, NAMESPACES_CONFIG_PATH
 
 logger = logging.getLogger("archivist.rbac")
 

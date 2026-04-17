@@ -3,9 +3,9 @@
 import json
 import logging
 
-import llm as llm_mod
-from config import LLM_MODEL, LLM_URL, CURATOR_LLM_MODEL, CURATOR_LLM_URL, CURATOR_LLM_API_KEY
-from text_utils import strip_fences
+import archivist.features.llm as llm_mod
+from archivist.core.config import LLM_MODEL, LLM_URL, CURATOR_LLM_MODEL, CURATOR_LLM_URL, CURATOR_LLM_API_KEY
+from archivist.utils.text_utils import strip_fences
 
 logger = logging.getLogger("archivist.compaction")
 

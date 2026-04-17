@@ -14,8 +14,8 @@ import uuid
 from collections import deque
 from datetime import datetime, timezone
 
-from graph import get_db, GRAPH_WRITE_LOCK, schema_guard
-from config import TRAJECTORY_EXPORT_ENABLED, TRAJECTORY_EXPORT_MAX
+from archivist.storage.graph import get_db, GRAPH_WRITE_LOCK, schema_guard
+from archivist.core.config import TRAJECTORY_EXPORT_ENABLED, TRAJECTORY_EXPORT_MAX
 
 logger = logging.getLogger("archivist.retrieval_log")
 

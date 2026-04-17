@@ -21,7 +21,7 @@ from pathlib import Path
 
 import httpx
 
-from config import (
+from archivist.core.config import (
     BACKUP_DIR,
     BACKUP_RETENTION_COUNT,
     BACKUP_INCLUDE_FILES,
@@ -31,13 +31,13 @@ from config import (
     MEMORY_ROOT,
     VECTOR_DIM,
 )
-from collection_router import collections_for_query
-from graph import get_db, GRAPH_WRITE_LOCK
+from archivist.storage.collection_router import collections_for_query
+from archivist.storage.graph import get_db, GRAPH_WRITE_LOCK
 
 logger = logging.getLogger("archivist.backup")
 
 MANIFEST_VERSION = 1
-ARCHIVIST_VERSION = "1.10.0"
+ARCHIVIST_VERSION = "2.0.0"
 
 
 def _snapshot_dir(snapshot_id: str) -> Path:
@@ -392,7 +392,7 @@ def export_agent(agent_id: str, output_dir: str = "") -> dict:
     filename = f"agent_{safe_agent}_{ts}.ndjson"
     out_path = out_dir / filename
 
-    from qdrant import qdrant_client as get_client
+    from archivist.storage.qdrant import qdrant_client as get_client
     client = get_client()
 
     agent_filter = Filter(
@@ -481,15 +481,15 @@ def import_agent(ndjson_path: str, dry_run: bool = False) -> dict:
     Upserts points back into Qdrant and rebuilds FTS entries.
     """
     from qdrant_client.models import PointStruct
-    from collection_router import ensure_collection
-    from graph import upsert_fts_chunk
-    from config import BM25_ENABLED
+    from archivist.storage.collection_router import ensure_collection
+    from archivist.storage.graph import upsert_fts_chunk
+    from archivist.core.config import BM25_ENABLED
 
     path = Path(ndjson_path)
     if not path.is_file():
         raise FileNotFoundError(f"Import file not found: {ndjson_path}")
 
-    from qdrant import qdrant_client as get_client
+    from archivist.storage.qdrant import qdrant_client as get_client
     client = get_client()
 
     imported = 0

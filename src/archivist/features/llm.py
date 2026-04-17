@@ -9,10 +9,10 @@ import logging
 import time
 
 import httpx
-from config import LLM_URL, LLM_MODEL, LLM_API_KEY
-import health
-import metrics as m
-from observability import slow_llm_check
+from archivist.core.config import LLM_URL, LLM_MODEL, LLM_API_KEY
+import archivist.core.health as health
+import archivist.core.metrics as m
+from archivist.core.observability import slow_llm_check
 
 logger = logging.getLogger("archivist.llm")
 

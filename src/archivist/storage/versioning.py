@@ -4,7 +4,7 @@ import json
 import logging
 from datetime import datetime, timezone
 
-from graph import get_db, GRAPH_WRITE_LOCK
+from archivist.storage.graph import get_db, GRAPH_WRITE_LOCK
 
 logger = logging.getLogger("archivist.versioning")
 

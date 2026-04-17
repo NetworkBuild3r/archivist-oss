@@ -8,7 +8,7 @@ in the payload for display.  This is a pure function with no external
 dependencies (no LLM calls for the basic variant).
 """
 
-from pre_extractor import pre_extract
+from archivist.write.pre_extractor import pre_extract
 
 
 def augment_chunk(

@@ -19,7 +19,7 @@ from collections import OrderedDict
 
 from qdrant_client.models import PointStruct
 
-from config import (
+from archivist.core.config import (
     SYNTHETIC_QUESTIONS_ENABLED,
     SYNTHETIC_QUESTIONS_COUNT,
     LLM_REFINE_MODEL,
@@ -28,9 +28,9 @@ from config import (
     CURATOR_LLM_MODEL,
     CURATOR_LLM_API_KEY,
 )
-from llm import llm_query
-from embeddings import embed_batch
-import metrics as m
+from archivist.features.llm import llm_query
+from archivist.features.embeddings import embed_batch
+import archivist.core.metrics as m
 
 logger = logging.getLogger("archivist.synthetic_questions")
 
@@ -80,7 +80,7 @@ async def generate_synthetic_questions(
 ) -> list[str]:
     """Generate synthetic questions for a chunk. Returns [] if disabled or on failure."""
     if not SYNTHETIC_QUESTIONS_ENABLED:
-        import config as _cfg
+        import archivist.core.config as _cfg
         if not _cfg.SYNTHETIC_QUESTIONS_ENABLED:
             return []
     if not count:

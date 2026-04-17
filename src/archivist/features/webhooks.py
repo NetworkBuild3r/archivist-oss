@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 
 import httpx
 
-from config import WEBHOOK_URL, WEBHOOK_TIMEOUT, WEBHOOK_EVENTS
+from archivist.core.config import WEBHOOK_URL, WEBHOOK_TIMEOUT, WEBHOOK_EVENTS
 
 logger = logging.getLogger("archivist.webhooks")
 
@@ -32,7 +32,7 @@ async def fire(event: str, payload: dict) -> bool:
         "data": payload,
     }
 
-    from metrics import inc, WEBHOOK_FIRE, WEBHOOK_FAIL
+    from archivist.core.metrics import inc, WEBHOOK_FIRE, WEBHOOK_FAIL
     inc(WEBHOOK_FIRE, {"event": event})
 
     try:

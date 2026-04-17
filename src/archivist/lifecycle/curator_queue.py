@@ -11,8 +11,8 @@ import time
 import uuid
 from datetime import datetime, timezone
 
-from graph import get_db, GRAPH_WRITE_LOCK, schema_guard
-import metrics as m
+from archivist.storage.graph import get_db, GRAPH_WRITE_LOCK, schema_guard
+import archivist.core.metrics as m
 
 logger = logging.getLogger("archivist.curator_queue")
 
@@ -125,7 +125,8 @@ async def _apply_op(op_type: str, payload: dict):
 
 async def _apply_archive(payload: dict):
     """Set archived=true on all Qdrant points for each memory."""
-    from memory_lifecycle import archive_memory_complete
+    from archivist.lifecycle.memory_lifecycle import archive_memory_complete
+    from archivist.lifecycle.cascade import PartialDeletionError
 
     memory_ids = payload.get("memory_ids", [])
     namespace = payload.get("namespace", "")
@@ -135,6 +136,8 @@ async def _apply_archive(payload: dict):
     for mid in memory_ids:
         try:
             await archive_memory_complete(mid, namespace)
+        except PartialDeletionError:
+            raise
         except Exception as e:
             logger.warning("Failed to archive memory %s: %s", mid, e)
 
@@ -151,7 +154,7 @@ _PRE_PRUNE_DEBOUNCE_SECONDS = 300
 def _maybe_pre_prune_snapshot() -> None:
     """Create a backup snapshot before destructive operations (debounced)."""
     global _last_pre_prune_snapshot
-    from config import BACKUP_PRE_PRUNE
+    from archivist.core.config import BACKUP_PRE_PRUNE
 
     if not BACKUP_PRE_PRUNE:
         return
@@ -162,7 +165,7 @@ def _maybe_pre_prune_snapshot() -> None:
 
     _last_pre_prune_snapshot = now
     try:
-        from backup_manager import create_snapshot, prune_snapshots
+        from archivist.storage.backup_manager import create_snapshot, prune_snapshots
         create_snapshot(label="pre-prune")
         prune_snapshots()
         logger.info("Pre-prune backup snapshot created")
@@ -172,7 +175,8 @@ def _maybe_pre_prune_snapshot() -> None:
 
 async def _apply_delete(payload: dict):
     """Delete memories and ALL derived artifacts via the lifecycle module."""
-    from memory_lifecycle import delete_memory_complete
+    from archivist.lifecycle.memory_lifecycle import delete_memory_complete
+    from archivist.lifecycle.cascade import PartialDeletionError
 
     memory_ids = payload.get("memory_ids", [])
     namespace = payload.get("namespace", "")
@@ -184,6 +188,8 @@ async def _apply_delete(payload: dict):
     for mid in memory_ids:
         try:
             await delete_memory_complete(mid, namespace)
+        except PartialDeletionError:
+            raise
         except Exception as e:
             logger.warning("Failed to delete memory %s: %s", mid, e)
 

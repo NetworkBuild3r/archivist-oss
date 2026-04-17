@@ -12,8 +12,8 @@ import re
 import threading
 import time
 
-import llm as llm_mod
-from namespace_inventory import NamespaceInventory
+import archivist.features.llm as llm_mod
+from archivist.storage.namespace_inventory import NamespaceInventory
 
 logger = logging.getLogger("archivist.query_classifier")
 

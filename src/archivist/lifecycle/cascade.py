@@ -25,19 +25,19 @@ through a cascade will leave partial state.  The contract:
 """
 
 import logging
-import time
 
 from qdrant_client.http.exceptions import UnexpectedResponse, ResponseHandlingException
 from qdrant_client.models import Filter, FieldCondition, MatchValue
 
-from collection_router import collections_for_query
-from graph import (
+from archivist.storage.collection_router import collections_for_query
+from archivist.storage.graph import (
     get_db, GRAPH_WRITE_LOCK, _delete_fts_rows,
     delete_fts_chunks_batch, delete_needle_tokens_batch,
     _ensure_needle_registry, log_delete_failure,
 )
-from qdrant import qdrant_client
-import metrics as m
+from archivist.storage.qdrant import qdrant_client
+from archivist.utils.retry import retry_call
+import archivist.core.metrics as m
 
 logger = logging.getLogger("archivist.cascade")
 
@@ -99,29 +99,33 @@ def _qdrant_delete(
     except Exception as e:
         logger.error("cascade.%s count failed for %s: %s", step_name, memory_id, e)
 
-    last_err = None
-    for attempt in range(1 + retries):
-        try:
-            client.delete(collection_name=col, points_selector=selector)
-            return count
-        except Exception as e:
-            last_err = e
-            if not _is_transient(e) or attempt >= retries:
-                break
-            time.sleep(0.5)
+    def _do_delete():
+        client.delete(collection_name=col, points_selector=selector)
+        return count
 
-    logger.error(
-        "cascade.%s failed for %s after %d attempt(s): %s",
-        step_name, memory_id, attempt + 1, last_err,
+    result = retry_call(
+        _do_delete,
+        max_attempts=1 + retries,
+        delay=0.5,
+        is_transient=_is_transient,
+        step_name=step_name,
+        failed_steps=failed_steps,
+        reraise=False,
     )
-    failed_steps.append(step_name)
-    # Record the failed IDs in the dead-letter table for later inspection/replay.
-    if isinstance(selector, list) and selector:
-        try:
-            log_delete_failure(memory_id, selector, str(last_err))
-        except Exception as _dlq_err:
-            logger.debug("cascade.log_delete_failure failed: %s", _dlq_err)
-    return count
+
+    if step_name in failed_steps:
+        logger.error(
+            "cascade.%s failed for %s after %d attempt(s)",
+            step_name, memory_id, 1 + retries,
+        )
+        # Record the failed IDs in the dead-letter table for later inspection/replay.
+        if isinstance(selector, list) and selector:
+            try:
+                log_delete_failure(memory_id, selector, f"retry exhausted after {1 + retries} attempt(s)")
+            except Exception as _dlq_err:
+                logger.debug("cascade.log_delete_failure failed: %s", _dlq_err)
+
+    return count if result is None else result
 
 
 def _qdrant_set_payload(
@@ -140,25 +144,28 @@ def _qdrant_set_payload(
     Returns ``True`` on success.  On failure the *step_name* is appended to
     *failed_steps* and ``False`` is returned.
     """
-    last_err = None
-    for attempt in range(1 + retries):
-        try:
-            client.set_payload(
-                collection_name=col, payload=payload, points=selector,
-            )
-            return True
-        except Exception as e:
-            last_err = e
-            if not _is_transient(e) or attempt >= retries:
-                break
-            time.sleep(0.5)
+    def _do_set():
+        client.set_payload(collection_name=col, payload=payload, points=selector)
+        return True
 
-    logger.error(
-        "cascade.%s failed for %s after %d attempt(s): %s",
-        step_name, memory_id, attempt + 1, last_err,
+    result = retry_call(
+        _do_set,
+        max_attempts=1 + retries,
+        delay=0.5,
+        is_transient=_is_transient,
+        step_name=step_name,
+        failed_steps=failed_steps,
+        reraise=False,
     )
-    failed_steps.append(step_name)
-    return False
+
+    if step_name in failed_steps:
+        logger.error(
+            "cascade.%s failed for %s after %d attempt(s)",
+            step_name, memory_id, 1 + retries,
+        )
+        return False
+
+    return result if result is not None else True
 
 
 # ---------------------------------------------------------------------------

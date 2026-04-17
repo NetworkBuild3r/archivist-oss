@@ -5,12 +5,12 @@ import re
 import sqlite3
 import os
 import threading
-import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
-from config import SQLITE_PATH
-from chunking import NEEDLE_PATTERNS
+from archivist.core.config import SQLITE_PATH
+from archivist.utils.chunking import NEEDLE_PATTERNS
+from archivist.utils.retry import retry
 
 # Serialize writes — WAL allows concurrent readers; writers must not race.
 GRAPH_WRITE_LOCK = threading.Lock()
@@ -346,7 +346,7 @@ def _init_fts5():
     On success we run a trivial read and register ``fts5`` as healthy;
     on failure we register unhealthy so downstream BM25 search can skip FTS.
     """
-    import health
+    import archivist.core.health as health
 
     with GRAPH_WRITE_LOCK:
         conn = get_db()
@@ -1042,34 +1042,32 @@ def delete_fts_chunks_batch(qdrant_ids: list[str]) -> int:
     """
     if not qdrant_ids:
         return 0
-    for attempt in range(2):
+
+    @retry(max_attempts=2, delay=0.2, catch=sqlite3.OperationalError)
+    def _run() -> int:
         total = 0
-        try:
-            with GRAPH_WRITE_LOCK:
-                conn = get_db()
-                try:
-                    for i in range(0, len(qdrant_ids), _BATCH_CHUNK):
-                        chunk = qdrant_ids[i : i + _BATCH_CHUNK]
-                        placeholders = ",".join("?" * len(chunk))
-                        rows = conn.execute(
-                            f"SELECT rowid FROM memory_chunks WHERE qdrant_id IN ({placeholders})",
-                            chunk,
-                        ).fetchall()
-                        _delete_fts_rows(conn, rows)
-                        cur = conn.execute(
-                            f"DELETE FROM memory_chunks WHERE qdrant_id IN ({placeholders})",
-                            chunk,
-                        )
-                        total += cur.rowcount
-                    conn.commit()
-                finally:
-                    conn.close()
-            return total
-        except sqlite3.OperationalError:
-            if attempt == 0:
-                time.sleep(0.2)
-                continue
-            raise
+        with GRAPH_WRITE_LOCK:
+            conn = get_db()
+            try:
+                for i in range(0, len(qdrant_ids), _BATCH_CHUNK):
+                    chunk = qdrant_ids[i : i + _BATCH_CHUNK]
+                    placeholders = ",".join("?" * len(chunk))
+                    rows = conn.execute(
+                        f"SELECT rowid FROM memory_chunks WHERE qdrant_id IN ({placeholders})",
+                        chunk,
+                    ).fetchall()
+                    _delete_fts_rows(conn, rows)
+                    cur = conn.execute(
+                        f"DELETE FROM memory_chunks WHERE qdrant_id IN ({placeholders})",
+                        chunk,
+                    )
+                    total += cur.rowcount
+                conn.commit()
+            finally:
+                conn.close()
+        return total
+
+    return _run()
 
 
 def set_fts_excluded_batch(qdrant_ids: list[str], excluded: int = 1) -> int:
@@ -1118,29 +1116,27 @@ def delete_needle_tokens_batch(memory_ids: list[str]) -> int:
     if not memory_ids:
         return 0
     _ensure_needle_registry()
-    for attempt in range(2):
+
+    @retry(max_attempts=2, delay=0.2, catch=sqlite3.OperationalError)
+    def _run() -> int:
         total = 0
-        try:
-            with GRAPH_WRITE_LOCK:
-                conn = get_db()
-                try:
-                    for i in range(0, len(memory_ids), _BATCH_CHUNK):
-                        chunk = memory_ids[i : i + _BATCH_CHUNK]
-                        placeholders = ",".join("?" * len(chunk))
-                        cur = conn.execute(
-                            f"DELETE FROM needle_registry WHERE memory_id IN ({placeholders})",
-                            chunk,
-                        )
-                        total += cur.rowcount
-                    conn.commit()
-                finally:
-                    conn.close()
-            return total
-        except sqlite3.OperationalError:
-            if attempt == 0:
-                time.sleep(0.2)
-                continue
-            raise
+        with GRAPH_WRITE_LOCK:
+            conn = get_db()
+            try:
+                for i in range(0, len(memory_ids), _BATCH_CHUNK):
+                    chunk = memory_ids[i : i + _BATCH_CHUNK]
+                    placeholders = ",".join("?" * len(chunk))
+                    cur = conn.execute(
+                        f"DELETE FROM needle_registry WHERE memory_id IN ({placeholders})",
+                        chunk,
+                    )
+                    total += cur.rowcount
+                conn.commit()
+            finally:
+                conn.close()
+        return total
+
+    return _run()
 
 
 def delete_hotness(memory_id: str) -> int:

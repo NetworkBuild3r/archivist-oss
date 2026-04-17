@@ -12,7 +12,7 @@ import logging
 import time
 from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchAny, MatchText, SearchParams
 
-from config import (
+from archivist.core.config import (
     QDRANT_COLLECTION,
     LLM_MODEL,
     LLM_REFINE_MODEL,
@@ -37,41 +37,41 @@ from config import (
     RERANKER_ENABLED, RERANKER_MODEL, RERANKER_TOP_K,
     SYNTHETIC_QUESTIONS_ENABLED,
 )
-from embeddings import embed_text, embed_batch
-from llm import llm_query
-from memory_fusion import dedupe_vector_hits
-from retrieval_filters import apply_retrieval_threshold, apply_dynamic_threshold
-from rank_fusion import rrf_merge
-from graph_retrieval import (
+from archivist.features.embeddings import embed_text, embed_batch
+from archivist.features.llm import llm_query
+from archivist.retrieval.memory_fusion import dedupe_vector_hits
+from archivist.retrieval.retrieval_filters import apply_retrieval_threshold, apply_dynamic_threshold
+from archivist.retrieval.rank_fusion import rrf_merge
+from archivist.storage.graph_retrieval import (
     extract_entity_mentions,
     graph_context_for_entities,
     apply_temporal_decay,
     merge_graph_context_into_results,
     build_entity_fact_results,
 )
-from fts_search import search_bm25, merge_vector_and_bm25
-import health
-import metrics as m
-from observability import slow_qdrant_check
-from qdrant import qdrant_client
-from tiering import select_tier
-from tokenizer import count_tokens
-from trajectory import get_outcome_adjustments
-from hotness import apply_hotness_to_results
-from query_intent import classify_temporal_intent
-from topic_detector import detect_query_topic
-from ranker import ltr_available, rank_results as ltr_rank_results
-from collection_router import collection_for
-from latency_budget import LatencyBudget, budget_for_query_type
-from query_expansion import expand_query
-from hyde import is_needle_query, generate_hypothetical_document
-from result_types import ResultCandidate, RetrievalSource
-from graph import lookup_needle_tokens
-from chunking import NEEDLE_PATTERNS as LITERAL_NEEDLE_PATTERNS
-import hot_cache
-import retrieval_log
-from namespace_inventory import NamespaceInventory, get_inventory
-from query_classifier import classify_query_full, SUBCATEGORY_TO_TOPIC
+from archivist.storage.fts_search import search_bm25, merge_vector_and_bm25
+import archivist.core.health as health
+import archivist.core.metrics as m
+from archivist.core.observability import slow_qdrant_check
+from archivist.storage.qdrant import qdrant_client
+from archivist.write.tiering import select_tier
+from archivist.utils.tokenizer import count_tokens
+from archivist.core.trajectory import get_outcome_adjustments
+from archivist.core.hotness import apply_hotness_to_results
+from archivist.retrieval.query_intent import classify_temporal_intent
+from archivist.retrieval.topic_detector import detect_query_topic
+from archivist.retrieval.ranker import ltr_available, rank_results as ltr_rank_results
+from archivist.storage.collection_router import collection_for
+from archivist.core.latency_budget import LatencyBudget, budget_for_query_type
+from archivist.retrieval.query_expansion import expand_query
+from archivist.write.hyde import is_needle_query, generate_hypothetical_document
+from archivist.core.result_types import ResultCandidate, RetrievalSource
+from archivist.storage.graph import lookup_needle_tokens
+from archivist.utils.chunking import NEEDLE_PATTERNS as LITERAL_NEEDLE_PATTERNS
+import archivist.retrieval.hot_cache as hot_cache
+import archivist.retrieval.retrieval_log as retrieval_log
+from archivist.storage.namespace_inventory import NamespaceInventory, get_inventory
+from archivist.retrieval.query_classifier import classify_query_full, SUBCATEGORY_TO_TOPIC
 
 logger = logging.getLogger("archivist.rlm")
 
@@ -583,7 +583,7 @@ async def _apply_rerank(query: str, results: list[dict]) -> list[dict]:
     if not RERANK_ENABLED:
         return results
     try:
-        from reranker import rerank_results
+        from archivist.retrieval.reranker import rerank_results
         return await rerank_results(query, results, model_name=RERANK_MODEL, limit=RERANK_TOP_K)
     except Exception as e:
         logger.warning("Reranking failed, using original order: %s", e)
@@ -1042,7 +1042,7 @@ async def recursive_retrieve(
 
         # Cross-encoder rerank: the sole ranking authority
         # Parent text is already stored in the payload at index time — no runtime fetch needed
-        from reranker import rerank_candidates
+        from archivist.retrieval.reranker import rerank_candidates
         reranked = await rerank_candidates(
             query, pool,
             model_name=RERANKER_MODEL,

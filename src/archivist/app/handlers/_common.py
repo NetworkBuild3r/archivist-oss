@@ -5,7 +5,7 @@ import logging
 
 from mcp.types import TextContent
 
-from rbac import check_access, is_permissive_mode
+from archivist.core.rbac import check_access, is_permissive_mode
 
 logger = logging.getLogger("archivist.mcp")
 

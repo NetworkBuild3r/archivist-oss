@@ -12,7 +12,7 @@ import json
 import logging
 from collections import defaultdict
 
-from graph import get_db, get_curator_state, set_curator_state
+from archivist.storage.graph import get_db, get_curator_state, set_curator_state
 
 logger = logging.getLogger("archivist.compressed_index")
 

@@ -11,7 +11,7 @@ import threading
 import time
 from dataclasses import dataclass
 
-from graph import get_db
+from archivist.storage.graph import get_db
 
 logger = logging.getLogger("archivist.inventory")
 
@@ -37,7 +37,7 @@ def invalidate(namespace: str) -> None:
     with _lock:
         _cache.pop(namespace, None)
     try:
-        import query_classifier
+        import archivist.retrieval.query_classifier as query_classifier
 
         query_classifier.invalidate_cache(namespace)
     except Exception:
@@ -48,7 +48,7 @@ def invalidate_all() -> None:
     with _lock:
         _cache.clear()
     try:
-        import query_classifier
+        import archivist.retrieval.query_classifier as query_classifier
 
         query_classifier.invalidate_all_cache()
     except Exception:
