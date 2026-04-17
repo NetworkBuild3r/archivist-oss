@@ -218,16 +218,25 @@ jobs:
   docker:
     name: Docker Build & Smoke Test
     runs-on: ubuntu-24.04
-    needs: [lint]  # Don't waste build minutes on broken code
+    # Run in parallel with lint/test — gives build signal independently.
+    # Requires only checkout; no dependency on other jobs.
     permissions:
       contents: read
-      packages: read
+      packages: write   # needed for the edge-push step on main
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr.io (push steps only)
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build image (linux/amd64 only for CI speed)
         uses: docker/build-push-action@v6
@@ -241,19 +250,22 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Smoke test — image imports
+      - name: Smoke test — package imports
         run: |
           docker run --rm archivist:ci-${{ github.sha }} \
             python -c "
-          import sys, os
+          import sys
           sys.path.insert(0, '/app')
           import archivist
           print(f'archivist {archivist.__version__} OK')
+          from archivist.core import config
+          from archivist.storage import qdrant
+          from archivist.lifecycle import cascade
+          print('core imports OK')
           "
 
       - name: Smoke test — /health endpoint
         run: |
-          # Start the container with dummy env vars (no real LLM/Qdrant needed for health)
           docker run -d --name archivist-smoke \
             -p 3100:3100 \
             -e QDRANT_URL=http://127.0.0.1:6333 \
@@ -263,12 +275,28 @@ jobs:
             -e EMBED_MODEL=test \
             archivist:ci-${{ github.sha }} || true
 
-          # Give the MCP server 10 s to start (it may error on missing Qdrant — that's OK)
-          sleep 10
+          echo "Waiting for server to start..."
+          sleep 12
 
-          # The health endpoint should respond 200 even without backends
-          curl -sf --retry 3 --retry-delay 2 http://localhost:3100/health \
+          curl -sf --retry 5 --retry-delay 2 http://localhost:3100/health \
             && echo "Health OK" \
-            || echo "Health endpoint not available (expected in pure-CI mode)"
+            || echo "Health endpoint not available (expected without Qdrant/LLM backends)"
 
+          docker logs archivist-smoke 2>&1 | tail -20 || true
           docker rm -f archivist-smoke || true
+
+      # Push edge image to ghcr.io on every merge to main (not on PRs).
+      # This gives you a always-fresh image to deploy from without waiting for a tag release.
+      - name: Push edge image to ghcr.io
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:edge
+            ghcr.io/${{ github.repository }}:sha-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
