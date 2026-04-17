@@ -11,10 +11,18 @@ logger = logging.getLogger("archivist.mcp")
 
 
 def _rbac_gate(agent_id: str, action: str, namespace: str) -> str | None:
-    """Return error JSON string if access denied, None if allowed."""
+    """Return error JSON string if access denied, None if allowed.
+
+    The JSON payload includes an optional ``hint`` field when the policy
+    provides one so callers receive actionable guidance without a separate
+    namespace lookup.
+    """
     policy = check_access(agent_id, action, namespace)
     if not policy.allowed:
-        return json.dumps({"error": "access_denied", "reason": policy.reason})
+        payload: dict = {"error": "access_denied", "reason": policy.reason}
+        if policy.hint:
+            payload["hint"] = policy.hint
+        return json.dumps(payload)
     return None
 
 

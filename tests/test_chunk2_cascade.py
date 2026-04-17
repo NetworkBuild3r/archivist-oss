@@ -102,22 +102,30 @@ class TestDeleteMemoryComplete:
 
     @pytest.fixture
     def mock_fts(self):
-        with patch("memory_lifecycle.delete_fts_chunks_batch", return_value=1) as m:
+        with patch(
+            "memory_lifecycle.delete_fts_chunks_batch", new_callable=AsyncMock, return_value=1
+        ) as m:
             yield m
 
     @pytest.fixture
     def mock_needle(self):
-        with patch("memory_lifecycle.delete_needle_tokens_batch", return_value=3) as m:
+        with patch(
+            "memory_lifecycle.delete_needle_tokens_batch", new_callable=AsyncMock, return_value=3
+        ) as m:
             yield m
 
     @pytest.fixture
     def mock_entity_facts(self):
-        with patch("memory_lifecycle._delete_entity_facts_for_memory", return_value=2) as m:
+        with patch(
+            "memory_lifecycle._delete_entity_facts_for_memory",
+            new_callable=AsyncMock,
+            return_value=2,
+        ) as m:
             yield m
 
     @pytest.fixture
     def mock_hotness(self):
-        with patch("memory_lifecycle.delete_hotness", return_value=1) as m:
+        with patch("memory_lifecycle.delete_hotness", new_callable=AsyncMock, return_value=1) as m:
             yield m
 
     @pytest.fixture
@@ -398,13 +406,13 @@ class TestArchiveMemoryComplete:
 class TestDeleteFtsChunksByQdrantId:
     """graph.delete_fts_chunks_by_qdrant_id works correctly."""
 
-    def test_deletes_matching_rows(self):
+    async def test_deletes_matching_rows(self, async_pool):
         from graph import delete_fts_chunks_by_qdrant_id, get_db, upsert_fts_chunk
 
-        upsert_fts_chunk("qid-1", "some text", "test.md", 0, "agent", "ns")
-        upsert_fts_chunk("qid-2", "other text", "test.md", 1, "agent", "ns")
+        await upsert_fts_chunk("qid-1", "some text", "test.md", 0, "agent", "ns")
+        await upsert_fts_chunk("qid-2", "other text", "test.md", 1, "agent", "ns")
 
-        deleted = delete_fts_chunks_by_qdrant_id("qid-1")
+        deleted = await delete_fts_chunks_by_qdrant_id("qid-1")
         assert deleted == 1
 
         conn = get_db()
@@ -414,18 +422,18 @@ class TestDeleteFtsChunksByQdrantId:
         conn.close()
         assert remaining == 0
 
-    def test_returns_zero_for_missing_id(self):
+    async def test_returns_zero_for_missing_id(self, async_pool):
         from graph import delete_fts_chunks_by_qdrant_id
 
-        assert delete_fts_chunks_by_qdrant_id("nonexistent") == 0
+        assert await delete_fts_chunks_by_qdrant_id("nonexistent") == 0
 
-    def test_leaves_other_rows_intact(self):
+    async def test_leaves_other_rows_intact(self, async_pool):
         from graph import delete_fts_chunks_by_qdrant_id, get_db, upsert_fts_chunk
 
-        upsert_fts_chunk("keep-me", "important text", "f.md", 0, "a", "ns")
-        upsert_fts_chunk("delete-me", "trash text", "f.md", 1, "a", "ns")
+        await upsert_fts_chunk("keep-me", "important text", "f.md", 0, "a", "ns")
+        await upsert_fts_chunk("delete-me", "trash text", "f.md", 1, "a", "ns")
 
-        delete_fts_chunks_by_qdrant_id("delete-me")
+        await delete_fts_chunks_by_qdrant_id("delete-me")
 
         conn = get_db()
         kept = conn.execute(
@@ -438,13 +446,13 @@ class TestDeleteFtsChunksByQdrantId:
 class TestBatchFtsDelete:
     """delete_fts_chunks_batch handles chunking correctly."""
 
-    def test_batch_deletes_multiple_ids(self):
+    async def test_batch_deletes_multiple_ids(self, async_pool):
         from graph import delete_fts_chunks_batch, get_db, upsert_fts_chunk
 
         for i in range(5):
-            upsert_fts_chunk(f"batch-{i}", f"text {i}", "f.md", i, "a", "ns")
+            await upsert_fts_chunk(f"batch-{i}", f"text {i}", "f.md", i, "a", "ns")
 
-        deleted = delete_fts_chunks_batch([f"batch-{i}" for i in range(5)])
+        deleted = await delete_fts_chunks_batch([f"batch-{i}" for i in range(5)])
         assert deleted == 5
 
         conn = get_db()
@@ -454,45 +462,45 @@ class TestBatchFtsDelete:
         conn.close()
         assert remaining == 0
 
-    def test_batch_empty_list(self):
+    async def test_batch_empty_list(self, async_pool):
         from graph import delete_fts_chunks_batch
 
-        assert delete_fts_chunks_batch([]) == 0
+        assert await delete_fts_chunks_batch([]) == 0
 
-    def test_batch_chunking_under_parameter_limit(self):
+    async def test_batch_chunking_under_parameter_limit(self, async_pool):
         """Passing >999 IDs doesn't crash sqlite3 thanks to internal chunking."""
         from graph import delete_fts_chunks_batch, upsert_fts_chunk
 
         ids = [f"chunk-test-{i}" for i in range(1200)]
         for qid in ids[:5]:
-            upsert_fts_chunk(qid, "text", "f.md", 0, "a", "ns")
+            await upsert_fts_chunk(qid, "text", "f.md", 0, "a", "ns")
 
-        deleted = delete_fts_chunks_batch(ids)
+        deleted = await delete_fts_chunks_batch(ids)
         assert deleted == 5
 
 
 class TestBatchNeedleDelete:
     """delete_needle_tokens_batch handles chunking correctly."""
 
-    def test_batch_empty_list(self):
+    async def test_batch_empty_list(self, async_pool):
         from graph import delete_needle_tokens_batch
 
-        assert delete_needle_tokens_batch([]) == 0
+        assert await delete_needle_tokens_batch([]) == 0
 
 
 class TestDeleteEntityFactsForMemory:
     """_delete_entity_facts_for_memory soft-deactivates linked facts."""
 
-    def test_deactivates_matching_facts(self):
+    async def test_deactivates_matching_facts(self, async_pool):
         from graph import add_fact, get_db, upsert_entity
         from memory_lifecycle import _delete_entity_facts_for_memory
 
-        eid = upsert_entity("test-entity")
-        add_fact(eid, "some fact", source_file="explicit/mem-xyz-agent", agent_id="agent")
-        add_fact(eid, "other fact", source_file="explicit/mem-xyz-agent", agent_id="agent")
-        add_fact(eid, "unrelated fact", source_file="explicit/other-agent", agent_id="other")
+        eid = await upsert_entity("test-entity")
+        await add_fact(eid, "some fact", source_file="explicit/mem-xyz-agent", agent_id="agent")
+        await add_fact(eid, "other fact", source_file="explicit/mem-xyz-agent", agent_id="agent")
+        await add_fact(eid, "unrelated fact", source_file="explicit/other-agent", agent_id="other")
 
-        count = _delete_entity_facts_for_memory("mem-xyz")
+        count = await _delete_entity_facts_for_memory("mem-xyz")
         assert count == 2
 
         conn = get_db()
@@ -502,14 +510,14 @@ class TestDeleteEntityFactsForMemory:
         conn.close()
         assert active == 0
 
-    def test_does_not_affect_unrelated_facts(self):
+    async def test_does_not_affect_unrelated_facts(self, async_pool):
         from graph import add_fact, get_db, upsert_entity
         from memory_lifecycle import _delete_entity_facts_for_memory
 
-        eid = upsert_entity("test-entity-2")
-        add_fact(eid, "safe fact", source_file="explicit/safe-agent", agent_id="safe")
+        eid = await upsert_entity("test-entity-2")
+        await add_fact(eid, "safe fact", source_file="explicit/safe-agent", agent_id="safe")
 
-        _delete_entity_facts_for_memory("dangerous-id")
+        await _delete_entity_facts_for_memory("dangerous-id")
 
         conn = get_db()
         active = conn.execute(
@@ -522,12 +530,12 @@ class TestDeleteEntityFactsForMemory:
 class TestOrphanSweeper:
     """sweep_orphans reconciles SQLite rows against Qdrant."""
 
-    def test_cleans_orphaned_fts_rows(self):
+    async def test_cleans_orphaned_fts_rows(self, async_pool):
         """FTS rows with no corresponding Qdrant point are cleaned."""
         from graph import get_db, upsert_fts_chunk
 
-        upsert_fts_chunk("exists-in-qdrant", "text", "f.md", 0, "a", "ns")
-        upsert_fts_chunk("orphaned-id", "text2", "f.md", 1, "a", "ns")
+        await upsert_fts_chunk("exists-in-qdrant", "text", "f.md", 0, "a", "ns")
+        await upsert_fts_chunk("orphaned-id", "text2", "f.md", 1, "a", "ns")
 
         mock_client = MagicMock()
         p1 = MagicMock()
@@ -541,7 +549,7 @@ class TestOrphanSweeper:
         ):
             from cascade import sweep_orphans
 
-            result = sweep_orphans()
+            result = await sweep_orphans()
 
         assert result["fts_cleaned"] >= 1
 
@@ -552,11 +560,11 @@ class TestOrphanSweeper:
         conn.close()
         assert orphan_count == 0
 
-    def test_does_not_clean_existing_points(self):
+    async def test_does_not_clean_existing_points(self, async_pool):
         """FTS rows with matching Qdrant points are kept."""
         from graph import get_db, upsert_fts_chunk
 
-        upsert_fts_chunk("keep-this", "text", "f.md", 0, "a", "ns")
+        await upsert_fts_chunk("keep-this", "text", "f.md", 0, "a", "ns")
 
         mock_client = MagicMock()
         p1 = MagicMock()
@@ -570,7 +578,7 @@ class TestOrphanSweeper:
         ):
             from cascade import sweep_orphans
 
-            result = sweep_orphans()
+            result = await sweep_orphans()
 
         conn = get_db()
         count = conn.execute(
@@ -592,7 +600,7 @@ class TestCuratorQueueDrainAsync:
         assert inspect.iscoroutinefunction(drain)
 
     @pytest.mark.asyncio
-    async def test_delete_op_calls_lifecycle(self):
+    async def test_delete_op_calls_lifecycle(self, async_pool):
         from curator_queue import drain, enqueue
 
         with patch("curator_queue._apply_delete", new_callable=AsyncMock) as mock_del:
@@ -604,7 +612,7 @@ class TestCuratorQueueDrainAsync:
         mock_del.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_archive_op_calls_lifecycle(self):
+    async def test_archive_op_calls_lifecycle(self, async_pool):
         from curator_queue import drain, enqueue
 
         with patch("curator_queue._apply_archive", new_callable=AsyncMock) as mock_arc:
@@ -616,7 +624,7 @@ class TestCuratorQueueDrainAsync:
         mock_arc.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_failed_op_marked_failed(self):
+    async def test_failed_op_marked_failed(self, async_pool):
         from curator_queue import drain, enqueue
 
         with patch(
@@ -656,7 +664,10 @@ class TestMergeUsesLifecycle:
             patch("merge.qdrant_client", return_value=mock_client),
             patch("merge.embed_text", new_callable=AsyncMock, return_value=[0.1] * 1024),
             patch("merge.llm_query", new_callable=AsyncMock, return_value="merged text"),
-            patch("merge.record_version", return_value=2),
+            patch("merge.record_version", new_callable=AsyncMock, return_value=2),
+            patch("merge.register_memory_points_batch", new_callable=AsyncMock),
+            patch("merge.upsert_fts_chunk", new_callable=AsyncMock),
+            patch("merge.register_needle_tokens", new_callable=AsyncMock),
             patch("merge.log_memory_event", new_callable=AsyncMock),
             patch("memory_lifecycle.delete_memory_complete", mock_del),
         ):
@@ -670,7 +681,7 @@ class TestMergeUsesLifecycle:
 class TestQdrantRetry:
     """Transient-only retry behaviour in _qdrant_delete and _qdrant_set_payload."""
 
-    def test_transient_retry_succeeds_on_second_attempt(self):
+    async def test_transient_retry_succeeds_on_second_attempt(self, async_pool):
         """First delete raises a transient error, second attempt succeeds."""
         from qdrant_client.http.exceptions import ResponseHandlingException
 
@@ -685,13 +696,13 @@ class TestQdrantRetry:
         filt = Filter(must=[FieldCondition(key="parent_id", match=MatchValue(value="mem-1"))])
         failed = []
 
-        count = _qdrant_delete(client, "col", filt, "test_step", "mem-1", failed)
+        count = await _qdrant_delete(client, "col", filt, "test_step", "mem-1", failed)
 
         assert count == 5
         assert failed == []
         assert client.delete.call_count == 2
 
-    def test_permanent_error_does_not_retry(self):
+    async def test_permanent_error_does_not_retry(self, async_pool):
         """A non-transient error (e.g. 404) fails immediately without retry."""
         from qdrant_client.http.exceptions import UnexpectedResponse
 
@@ -706,12 +717,12 @@ class TestQdrantRetry:
         client.count.return_value = MagicMock(count=0)
 
         failed = []
-        _qdrant_delete(client, "col", ["point-1"], "perm_step", "mem-1", failed)
+        await _qdrant_delete(client, "col", ["point-1"], "perm_step", "mem-1", failed)
 
         assert client.delete.call_count == 1
         assert "perm_step" in failed
 
-    def test_precount_returned_on_final_failure(self):
+    async def test_precount_returned_on_final_failure(self, async_pool):
         """Both attempts fail with transient errors; pre-count is still returned."""
         from qdrant_client.http.exceptions import ResponseHandlingException
 
@@ -721,7 +732,7 @@ class TestQdrantRetry:
         client.delete.side_effect = ResponseHandlingException("network")
 
         failed = []
-        count = _qdrant_delete(client, "col", ["p1", "p2", "p3"], "step_x", "mem-1", failed)
+        count = await _qdrant_delete(client, "col", ["p1", "p2", "p3"], "step_x", "mem-1", failed)
 
         assert count == 3  # pre-count = len(selector)
         assert "step_x" in failed
@@ -783,7 +794,7 @@ class TestQdrantRetry:
 class TestOrphanSweeperAdvanced:
     """Extended sweep_orphans tests for health guard, needle scan, retrieve failures."""
 
-    def test_sweeper_aborts_on_qdrant_down(self):
+    async def test_sweeper_aborts_on_qdrant_down(self, async_pool):
         """Sweeper returns skipped when Qdrant is unreachable."""
         mock_client = MagicMock()
         mock_client.get_collections.side_effect = ConnectionError("refused")
@@ -791,13 +802,13 @@ class TestOrphanSweeperAdvanced:
         with patch("cascade.qdrant_client", return_value=mock_client):
             from cascade import sweep_orphans
 
-            result = sweep_orphans()
+            result = await sweep_orphans()
 
         assert result.get("skipped") == "qdrant_unavailable"
         assert result["fts_cleaned"] == 0
         assert result["needle_cleaned"] == 0
 
-    def test_needle_orphan_cleanup_primary(self):
+    async def test_needle_orphan_cleanup_primary(self, async_pool):
         """Needle rows keyed on a primary memory_id with no Qdrant point are cleaned."""
         from graph import _ensure_needle_registry, get_db
 
@@ -821,7 +832,7 @@ class TestOrphanSweeperAdvanced:
         ):
             from cascade import sweep_orphans
 
-            result = sweep_orphans()
+            result = await sweep_orphans()
 
         assert result["needle_cleaned"] >= 1
 
@@ -832,7 +843,7 @@ class TestOrphanSweeperAdvanced:
         conn.close()
         assert remaining == 0
 
-    def test_needle_orphan_cleanup_child(self):
+    async def test_needle_orphan_cleanup_child(self, async_pool):
         """Needle rows where memory_id is a micro-chunk Qdrant ID are cleaned when orphaned."""
         from graph import _ensure_needle_registry, get_db
 
@@ -856,7 +867,7 @@ class TestOrphanSweeperAdvanced:
         ):
             from cascade import sweep_orphans
 
-            result = sweep_orphans()
+            result = await sweep_orphans()
 
         assert result["needle_cleaned"] >= 1
 
@@ -867,11 +878,11 @@ class TestOrphanSweeperAdvanced:
         conn.close()
         assert remaining == 0
 
-    def test_retrieve_failure_skips_subbatch(self):
+    async def test_retrieve_failure_skips_subbatch(self, async_pool):
         """If client.retrieve fails for one collection, sub-batch is conservatively kept."""
         from graph import get_db, upsert_fts_chunk
 
-        upsert_fts_chunk("maybe-orphan", "text", "f.md", 0, "a", "ns")
+        await upsert_fts_chunk("maybe-orphan", "text", "f.md", 0, "a", "ns")
 
         mock_client = MagicMock()
         mock_client.get_collections.return_value = MagicMock()
@@ -883,7 +894,7 @@ class TestOrphanSweeperAdvanced:
         ):
             from cascade import sweep_orphans
 
-            result = sweep_orphans()
+            result = await sweep_orphans()
 
         assert result["fts_cleaned"] == 0
 
@@ -894,13 +905,13 @@ class TestOrphanSweeperAdvanced:
         conn.close()
         assert count == 1
 
-    def test_keyset_pagination_processes_all_pages(self):
+    async def test_keyset_pagination_processes_all_pages(self, async_pool):
         """Sweeper uses keyset pagination (WHERE id > ?) to process multiple pages."""
         from graph import get_db, upsert_fts_chunk
 
         ids_to_insert = [f"ks-{i:04d}" for i in range(3)]
         for qid in ids_to_insert:
-            upsert_fts_chunk(qid, f"text for {qid}", "f.md", 0, "a", "ns")
+            await upsert_fts_chunk(qid, f"text for {qid}", "f.md", 0, "a", "ns")
 
         mock_client = MagicMock()
         mock_client.get_collections.return_value = MagicMock()
@@ -913,7 +924,7 @@ class TestOrphanSweeperAdvanced:
         ):
             from cascade import sweep_orphans
 
-            result = sweep_orphans()
+            result = await sweep_orphans()
 
         assert result["fts_cleaned"] == 3
 
@@ -928,7 +939,7 @@ class TestOrphanSweeperAdvanced:
 class TestDeleteHotness:
     """graph.delete_hotness removes memory_hotness rows."""
 
-    def test_deletes_existing_row(self):
+    async def test_deletes_existing_row(self, async_pool):
         from graph import delete_hotness, get_db
 
         conn = get_db()
@@ -946,7 +957,7 @@ class TestDeleteHotness:
         conn.commit()
         conn.close()
 
-        deleted = delete_hotness("hot-mem-1")
+        deleted = await delete_hotness("hot-mem-1")
         assert deleted == 1
 
         conn = get_db()
@@ -956,7 +967,7 @@ class TestDeleteHotness:
         conn.close()
         assert remaining == 0
 
-    def test_returns_zero_for_missing_id(self):
+    async def test_returns_zero_for_missing_id(self, async_pool):
         from graph import delete_hotness, get_db
 
         conn = get_db()
@@ -969,9 +980,9 @@ class TestDeleteHotness:
         conn.commit()
         conn.close()
 
-        assert delete_hotness("nonexistent") == 0
+        assert await delete_hotness("nonexistent") == 0
 
-    def test_returns_zero_when_table_missing(self):
+    async def test_returns_zero_when_table_missing(self, async_pool):
         """Silently returns 0 if memory_hotness table doesn't exist yet."""
         from graph import delete_hotness, get_db
 
@@ -980,44 +991,45 @@ class TestDeleteHotness:
         conn.commit()
         conn.close()
 
-        assert delete_hotness("any-id") == 0
+        assert await delete_hotness("any-id") == 0
 
 
 class TestBatchSqliteRetry:
-    """SQLite batch functions retry on OperationalError."""
+    """SQLite batch functions retry on OperationalError (database is locked)."""
 
-    def test_fts_retry_on_operational_error(self):
-        """delete_fts_chunks_batch retries once on sqlite3.OperationalError."""
+    async def test_fts_retry_on_operational_error(self, async_pool):
+        """delete_fts_chunks_batch retries once when the pool raises a locked error."""
         import sqlite3 as _sqlite3
 
-        from graph import delete_fts_chunks_batch
+        from graph import delete_fts_chunks_batch, upsert_fts_chunk
+
+        await upsert_fts_chunk("retry-id", "text", "f.md", 0, "a", "ns")
 
         call_count = 0
-        _orig_get_db = None
+        original_write = async_pool.write
 
-        def _flaky_get_db():
-            nonlocal call_count, _orig_get_db
+        from contextlib import asynccontextmanager
+
+        @asynccontextmanager
+        async def flaky_write():
+            nonlocal call_count
             call_count += 1
             if call_count == 1:
                 raise _sqlite3.OperationalError("database is locked")
-            return _orig_get_db()
+            async with original_write() as conn:
+                yield conn
 
-        from graph import get_db as orig_get_db
-
-        _orig_get_db = orig_get_db
-
-        from graph import upsert_fts_chunk
-
-        upsert_fts_chunk("retry-id", "text", "f.md", 0, "a", "ns")
-
-        with patch("graph.get_db", side_effect=_flaky_get_db):
-            deleted = delete_fts_chunks_batch(["retry-id"])
+        with (
+            patch.object(async_pool, "write", flaky_write),
+            patch("asyncio.sleep"),
+        ):
+            deleted = await delete_fts_chunks_batch(["retry-id"])
 
         assert deleted == 1
         assert call_count == 2
 
-    def test_needle_retry_on_operational_error(self):
-        """delete_needle_tokens_batch retries once on sqlite3.OperationalError."""
+    async def test_needle_retry_on_operational_error(self, async_pool):
+        """delete_needle_tokens_batch retries once when the pool raises a locked error."""
         import sqlite3 as _sqlite3
 
         from graph import _ensure_needle_registry, delete_needle_tokens_batch, get_db
@@ -1033,17 +1045,24 @@ class TestBatchSqliteRetry:
         conn.close()
 
         call_count = 0
-        _orig_get_db = get_db
+        original_write = async_pool.write
 
-        def _flaky_get_db():
+        from contextlib import asynccontextmanager
+
+        @asynccontextmanager
+        async def flaky_write():
             nonlocal call_count
             call_count += 1
             if call_count == 1:
                 raise _sqlite3.OperationalError("database is locked")
-            return _orig_get_db()
+            async with original_write() as conn:
+                yield conn
 
-        with patch("graph.get_db", side_effect=_flaky_get_db):
-            deleted = delete_needle_tokens_batch(["retry-needle-id"])
+        with (
+            patch.object(async_pool, "write", flaky_write),
+            patch("asyncio.sleep"),
+        ):
+            deleted = await delete_needle_tokens_batch(["retry-needle-id"])
 
         assert deleted == 1
         assert call_count == 2
@@ -1074,11 +1093,11 @@ class TestMetricsExist:
 class TestEntityFactsMemoryId:
     """_delete_entity_facts_for_memory uses indexed memory_id column."""
 
-    def _insert_fact(self, memory_id: str, source_file: str = "") -> int:
+    async def _insert_fact(self, async_pool, memory_id: str, source_file: str = "") -> int:
         """Insert a test fact row and return its id."""
         from graph import get_db, upsert_entity
 
-        eid = upsert_entity("test-entity", "concept", namespace="global")
+        eid = await upsert_entity("test-entity", "concept", namespace="global")
         from datetime import datetime
 
         conn = get_db()
@@ -1099,15 +1118,15 @@ class TestEntityFactsMemoryId:
         conn.close()
         return row_id
 
-    def test_exact_match_deactivates_by_memory_id(self):
+    async def test_exact_match_deactivates_by_memory_id(self, async_pool):
         """Primary path: rows with matching memory_id are deactivated."""
         from graph import get_db
         from memory_lifecycle import _delete_entity_facts_for_memory
 
         mid = "mem-exact-test-001"
-        self._insert_fact(mid, source_file="explicit/agent")
+        await self._insert_fact(async_pool, mid, source_file="explicit/agent")
 
-        count = _delete_entity_facts_for_memory(mid)
+        count = await _delete_entity_facts_for_memory(mid)
         assert count == 1
 
         conn = get_db()
@@ -1116,16 +1135,16 @@ class TestEntityFactsMemoryId:
         assert active is not None
         assert active[0] == 0
 
-    def test_like_fallback_for_pre_migration_rows(self):
+    async def test_like_fallback_for_pre_migration_rows(self, async_pool):
         """Fallback: rows with memory_id='' but matching source_file are deactivated."""
         from graph import get_db
         from memory_lifecycle import _delete_entity_facts_for_memory
 
         mid = "mem-fallback-test-002"
         # Pre-migration row: memory_id is empty, but source_file contains the UUID
-        self._insert_fact("", source_file=f"explicit/{mid}")
+        await self._insert_fact(async_pool, "", source_file=f"explicit/{mid}")
 
-        count = _delete_entity_facts_for_memory(mid)
+        count = await _delete_entity_facts_for_memory(mid)
         assert count == 1
 
         conn = get_db()
@@ -1136,28 +1155,28 @@ class TestEntityFactsMemoryId:
         assert row is not None
         assert row[0] == 0
 
-    def test_like_fallback_does_not_touch_rows_with_memory_id_set(self):
+    async def test_like_fallback_does_not_touch_rows_with_memory_id_set(self, async_pool):
         """LIKE fallback is scoped to memory_id='' only — does not double-deactivate."""
         from memory_lifecycle import _delete_entity_facts_for_memory
 
         mid = "mem-scope-test-003"
         # Row already has memory_id set correctly
-        self._insert_fact(mid, source_file=f"explicit/{mid}")
+        await self._insert_fact(async_pool, mid, source_file=f"explicit/{mid}")
 
-        count = _delete_entity_facts_for_memory(mid)
+        count = await _delete_entity_facts_for_memory(mid)
         # Should be found by the primary exact-match path only (count = 1)
         assert count == 1
 
-    def test_non_matching_rows_untouched(self):
+    async def test_non_matching_rows_untouched(self, async_pool):
         """Facts belonging to a different memory are not deactivated."""
         from graph import get_db
         from memory_lifecycle import _delete_entity_facts_for_memory
 
         mid_target = "mem-target-004"
         mid_other = "mem-other-004"
-        self._insert_fact(mid_other, source_file="explicit/other-agent")
+        await self._insert_fact(async_pool, mid_other, source_file="explicit/other-agent")
 
-        count = _delete_entity_facts_for_memory(mid_target)
+        count = await _delete_entity_facts_for_memory(mid_target)
         assert count == 0
 
         conn = get_db()
@@ -1168,22 +1187,22 @@ class TestEntityFactsMemoryId:
         assert row is not None
         assert row[0] == 1  # untouched
 
-    def test_returns_zero_for_unknown_memory(self):
+    async def test_returns_zero_for_unknown_memory(self, async_pool):
         """Returns 0 and does not crash for a memory_id with no matching facts."""
         from memory_lifecycle import _delete_entity_facts_for_memory
 
-        assert _delete_entity_facts_for_memory("completely-unknown-id") == 0
+        assert await _delete_entity_facts_for_memory("completely-unknown-id") == 0
 
 
 class TestAddFactMemoryId:
     """add_fact stores memory_id and it can be queried."""
 
-    def test_stores_memory_id(self):
+    async def test_stores_memory_id(self, async_pool):
         from graph import add_fact, get_db, upsert_entity
 
-        eid = upsert_entity("test-entity-af", "concept", namespace="global")
+        eid = await upsert_entity("test-entity-af", "concept", namespace="global")
         mid = "mem-add-fact-test-001"
-        add_fact(
+        await add_fact(
             eid, "test fact text", "explicit/agent", "agent", namespace="global", memory_id=mid
         )
 
@@ -1193,12 +1212,12 @@ class TestAddFactMemoryId:
         assert row is not None
         assert row[0] == mid
 
-    def test_default_memory_id_is_empty(self):
+    async def test_default_memory_id_is_empty(self, async_pool):
         """Existing call sites that don't pass memory_id get empty string."""
         from graph import add_fact, get_db, upsert_entity
 
-        eid = upsert_entity("entity-no-mid", "concept", namespace="global")
-        fact_id = add_fact(
+        eid = await upsert_entity("entity-no-mid", "concept", namespace="global")
+        fact_id = await add_fact(
             eid, "fact with no memory_id", "trajectory/abc", "agent", namespace="global"
         )
 

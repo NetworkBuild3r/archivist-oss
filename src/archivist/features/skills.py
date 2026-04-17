@@ -10,7 +10,7 @@ import logging
 import uuid
 from datetime import UTC, datetime
 
-from archivist.storage.graph import GRAPH_WRITE_LOCK, get_db, schema_guard
+from archivist.storage.graph import schema_guard
 
 logger = logging.getLogger("archivist.skills")
 
@@ -103,65 +103,66 @@ def register_skill(
     metadata: dict | None = None,
 ) -> dict:
     """Register a new skill or update an existing one."""
+    from archivist.storage.graph import get_db
+
     _ensure_skill_schema()
     now = datetime.now(UTC).isoformat()
 
-    with GRAPH_WRITE_LOCK:
-        conn = get_db()
-        try:
-            cur = conn.execute(
-                "SELECT id, current_version FROM skills WHERE name=? AND provider=?",
-                (name, provider),
-            )
-            existing = cur.fetchone()
+    conn = get_db()
+    try:
+        cur = conn.execute(
+            "SELECT id, current_version FROM skills WHERE name=? AND provider=?",
+            (name, provider),
+        )
+        existing = cur.fetchone()
 
-            if existing:
-                skill_id = existing["id"]
-                old_version = existing["current_version"]
+        if existing:
+            skill_id = existing["id"]
+            old_version = existing["current_version"]
+            conn.execute(
+                """UPDATE skills SET current_version=?, mcp_endpoint=?, description=?,
+                   status='active', updated_at=?, metadata=? WHERE id=?""",
+                (version, mcp_endpoint, description, now, json.dumps(metadata or {}), skill_id),
+            )
+            if version != old_version:
                 conn.execute(
-                    """UPDATE skills SET current_version=?, mcp_endpoint=?, description=?,
-                       status='active', updated_at=?, metadata=? WHERE id=?""",
-                    (version, mcp_endpoint, description, now, json.dumps(metadata or {}), skill_id),
-                )
-                if version != old_version:
-                    conn.execute(
-                        """INSERT OR IGNORE INTO skill_versions
-                           (skill_id, version, observed_at, reported_by)
-                           VALUES (?,?,?,?)""",
-                        (skill_id, version, now, registered_by),
-                    )
-                conn.commit()
-                return {"skill_id": skill_id, "action": "updated", "version": version}
-            else:
-                skill_id = str(uuid.uuid4())
-                conn.execute(
-                    """INSERT INTO skills
-                       (id, name, provider, mcp_endpoint, current_version, description,
-                        registered_by, registered_at, updated_at, metadata)
-                       VALUES (?,?,?,?,?,?,?,?,?,?)""",
-                    (
-                        skill_id,
-                        name,
-                        provider,
-                        mcp_endpoint,
-                        version,
-                        description,
-                        registered_by,
-                        now,
-                        now,
-                        json.dumps(metadata or {}),
-                    ),
-                )
-                conn.execute(
-                    """INSERT INTO skill_versions
+                    """INSERT OR IGNORE INTO skill_versions
                        (skill_id, version, observed_at, reported_by)
                        VALUES (?,?,?,?)""",
                     (skill_id, version, now, registered_by),
                 )
-                conn.commit()
-                return {"skill_id": skill_id, "action": "registered", "version": version}
-        finally:
-            conn.close()
+            conn.commit()
+            return {"skill_id": skill_id, "action": "updated", "version": version}
+        else:
+            skill_id = str(uuid.uuid4())
+            conn.execute(
+                """INSERT INTO skills
+                   (id, name, provider, mcp_endpoint, current_version, description,
+                    registered_by, registered_at, updated_at, metadata)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    skill_id,
+                    name,
+                    provider,
+                    mcp_endpoint,
+                    version,
+                    description,
+                    registered_by,
+                    now,
+                    now,
+                    json.dumps(metadata or {}),
+                ),
+            )
+            conn.execute(
+                """INSERT INTO skill_versions
+                   (skill_id, version, observed_at, reported_by)
+                   VALUES (?,?,?,?)""",
+                (skill_id, version, now, registered_by),
+            )
+            conn.commit()
+            return {"skill_id": skill_id, "action": "registered", "version": version}
+    finally:
+        conn.close()
 
 
 def record_version(
@@ -172,26 +173,27 @@ def record_version(
     reported_by: str = "",
 ) -> dict:
     """Record a new version observation for a skill."""
+    from archivist.storage.graph import get_db
+
     _ensure_skill_schema()
     now = datetime.now(UTC).isoformat()
 
-    with GRAPH_WRITE_LOCK:
-        conn = get_db()
-        try:
-            conn.execute(
-                """INSERT INTO skill_versions (skill_id, version, changelog, breaking_changes, observed_at, reported_by)
-                   VALUES (?,?,?,?,?,?)
-                   ON CONFLICT(skill_id, version) DO UPDATE SET
-                   changelog=excluded.changelog, breaking_changes=excluded.breaking_changes""",
-                (skill_id, version, changelog, breaking_changes, now, reported_by),
-            )
-            conn.execute(
-                "UPDATE skills SET current_version=?, updated_at=? WHERE id=?",
-                (version, now, skill_id),
-            )
-            conn.commit()
-        finally:
-            conn.close()
+    conn = get_db()
+    try:
+        conn.execute(
+            """INSERT INTO skill_versions (skill_id, version, changelog, breaking_changes, observed_at, reported_by)
+               VALUES (?,?,?,?,?,?)
+               ON CONFLICT(skill_id, version) DO UPDATE SET
+               changelog=excluded.changelog, breaking_changes=excluded.breaking_changes""",
+            (skill_id, version, changelog, breaking_changes, now, reported_by),
+        )
+        conn.execute(
+            "UPDATE skills SET current_version=?, updated_at=? WHERE id=?",
+            (version, now, skill_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
     return {"skill_id": skill_id, "version": version, "recorded_at": now}
 
@@ -205,28 +207,31 @@ def add_lesson(
     agent_id: str = "",
 ) -> str:
     """Add a lesson learned to a skill."""
+    from archivist.storage.graph import get_db
+
     _ensure_skill_schema()
     lesson_id = str(uuid.uuid4())
     now = datetime.now(UTC).isoformat()
 
-    with GRAPH_WRITE_LOCK:
-        conn = get_db()
-        try:
-            conn.execute(
-                """INSERT INTO skill_lessons
-                   (id, skill_id, lesson_type, title, content, skill_version, agent_id, created_at)
-                   VALUES (?,?,?,?,?,?,?,?)""",
-                (lesson_id, skill_id, lesson_type, title, content, skill_version, agent_id, now),
-            )
-            conn.commit()
-        finally:
-            conn.close()
+    conn = get_db()
+    try:
+        conn.execute(
+            """INSERT INTO skill_lessons
+               (id, skill_id, lesson_type, title, content, skill_version, agent_id, created_at)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            (lesson_id, skill_id, lesson_type, title, content, skill_version, agent_id, now),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
     return lesson_id
 
 
 def get_lessons(skill_id: str, lesson_type: str = "", limit: int = 20) -> list[dict]:
     """Retrieve lessons learned for a skill."""
+    from archivist.storage.graph import get_db
+
     _ensure_skill_schema()
     conn = get_db()
     if lesson_type:
@@ -256,6 +261,8 @@ def log_skill_event(
     metadata: dict | None = None,
 ) -> str:
     """Log a skill usage event (invocation, failure, etc.)."""
+    from archivist.storage.graph import get_db
+
     _ensure_skill_schema()
     event_id = str(uuid.uuid4())
     now = datetime.now(UTC).isoformat()
@@ -268,37 +275,38 @@ def log_skill_event(
         if row:
             skill_version = row["current_version"]
 
-    with GRAPH_WRITE_LOCK:
-        conn = get_db()
-        try:
-            conn.execute(
-                """INSERT INTO skill_events
-                   (id, skill_id, agent_id, event_type, outcome, skill_version,
-                    duration_ms, error_message, trajectory_id, created_at, metadata)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-                (
-                    event_id,
-                    skill_id,
-                    agent_id,
-                    event_type,
-                    outcome,
-                    skill_version,
-                    duration_ms,
-                    error_message,
-                    trajectory_id,
-                    now,
-                    json.dumps(metadata or {}),
-                ),
-            )
-            conn.commit()
-        finally:
-            conn.close()
+    conn = get_db()
+    try:
+        conn.execute(
+            """INSERT INTO skill_events
+               (id, skill_id, agent_id, event_type, outcome, skill_version,
+                duration_ms, error_message, trajectory_id, created_at, metadata)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                event_id,
+                skill_id,
+                agent_id,
+                event_type,
+                outcome,
+                skill_version,
+                duration_ms,
+                error_message,
+                trajectory_id,
+                now,
+                json.dumps(metadata or {}),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
     return event_id
 
 
 def get_skill_health(skill_id: str, window_days: int = 30) -> dict:
     """Compute health metrics for a skill from its event history."""
+    from archivist.storage.graph import get_db
+
     _ensure_skill_schema()
     conn = get_db()
 
@@ -389,6 +397,8 @@ def get_skill_health(skill_id: str, window_days: int = 30) -> dict:
 
 def find_skill(name: str, provider: str = "") -> dict | None:
     """Look up a skill by name (and optionally provider)."""
+    from archivist.storage.graph import get_db
+
     _ensure_skill_schema()
     conn = get_db()
     if provider:
@@ -408,6 +418,8 @@ def find_skill(name: str, provider: str = "") -> dict | None:
 
 def list_skills(status: str = "", limit: int = 100) -> list[dict]:
     """Return all registered skills, optionally filtered by status."""
+    from archivist.storage.graph import get_db
+
     _ensure_skill_schema()
     conn = get_db()
     if status:
@@ -424,18 +436,19 @@ def list_skills(status: str = "", limit: int = 100) -> list[dict]:
 
 def update_skill_status(skill_id: str, status: str) -> None:
     """Update a skill's status (active, deprecated, disabled)."""
+    from archivist.storage.graph import get_db
+
     _ensure_skill_schema()
     now = datetime.now(UTC).isoformat()
-    with GRAPH_WRITE_LOCK:
-        conn = get_db()
-        try:
-            conn.execute(
-                "UPDATE skills SET status=?, updated_at=? WHERE id=?",
-                (status, now, skill_id),
-            )
-            conn.commit()
-        finally:
-            conn.close()
+    conn = get_db()
+    try:
+        conn.execute(
+            "UPDATE skills SET status=?, updated_at=? WHERE id=?",
+            (status, now, skill_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 # ── Skill relation graph (v1.0) ─────────────────────────────────────────────
@@ -452,6 +465,8 @@ def add_skill_relation(
     created_by: str = "",
 ) -> int:
     """Create or update a relation between two skills."""
+    from archivist.storage.graph import get_db
+
     _ensure_skill_schema()
     if relation_type not in VALID_RELATION_TYPES:
         raise ValueError(
@@ -460,36 +475,37 @@ def add_skill_relation(
 
     now = datetime.now(UTC).isoformat()
 
-    with GRAPH_WRITE_LOCK:
-        conn = get_db()
-        try:
-            cur = conn.execute(
-                "SELECT id FROM skill_relations WHERE skill_a=? AND skill_b=? AND relation_type=?",
-                (skill_a_id, skill_b_id, relation_type),
-            )
-            existing = cur.fetchone()
+    conn = get_db()
+    try:
+        cur = conn.execute(
+            "SELECT id FROM skill_relations WHERE skill_a=? AND skill_b=? AND relation_type=?",
+            (skill_a_id, skill_b_id, relation_type),
+        )
+        existing = cur.fetchone()
 
-            if existing:
-                conn.execute(
-                    "UPDATE skill_relations SET confidence=?, evidence=?, created_by=?, created_at=? WHERE id=?",
-                    (confidence, evidence, created_by, now, existing["id"]),
-                )
-                conn.commit()
-                return existing["id"]
-            else:
-                cur = conn.execute(
-                    """INSERT INTO skill_relations (skill_a, skill_b, relation_type, confidence, evidence, created_by, created_at)
-                       VALUES (?,?,?,?,?,?,?)""",
-                    (skill_a_id, skill_b_id, relation_type, confidence, evidence, created_by, now),
-                )
-                conn.commit()
-                return cur.lastrowid
-        finally:
-            conn.close()
+        if existing:
+            conn.execute(
+                "UPDATE skill_relations SET confidence=?, evidence=?, created_by=?, created_at=? WHERE id=?",
+                (confidence, evidence, created_by, now, existing["id"]),
+            )
+            conn.commit()
+            return existing["id"]
+        else:
+            cur = conn.execute(
+                """INSERT INTO skill_relations (skill_a, skill_b, relation_type, confidence, evidence, created_by, created_at)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (skill_a_id, skill_b_id, relation_type, confidence, evidence, created_by, now),
+            )
+            conn.commit()
+            return cur.lastrowid
+    finally:
+        conn.close()
 
 
 def get_skill_relations(skill_id: str, depth: int = 1) -> list[dict]:
     """Get the relation graph for a skill. depth=1 for direct, depth>1 for multi-hop."""
+    from archivist.storage.graph import get_db
+
     _ensure_skill_schema()
     conn = get_db()
 
@@ -530,6 +546,8 @@ def get_skill_relations(skill_id: str, depth: int = 1) -> list[dict]:
 
 def get_skill_substitutes(skill_id: str) -> list[dict]:
     """Find skills that can substitute for this one (similar_to or replaced_by)."""
+    from archivist.storage.graph import get_db
+
     _ensure_skill_schema()
     conn = get_db()
     rows = conn.execute(

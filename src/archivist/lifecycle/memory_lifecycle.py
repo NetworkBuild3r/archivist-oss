@@ -23,12 +23,10 @@ from archivist.lifecycle.cascade import (
 )
 from archivist.storage.collection_router import collection_for
 from archivist.storage.graph import (
-    GRAPH_WRITE_LOCK,
     delete_fts_chunks_batch,
     delete_hotness,
     delete_memory_points,
     delete_needle_tokens_batch,
-    get_db,
     lookup_memory_points,
     set_fts_excluded_batch,
 )
@@ -107,7 +105,7 @@ async def _resolve_child_ids(
     Falls back to paginated Qdrant scroll for legacy memories that pre-date the
     ``memory_points`` write path.
     """
-    mp_rows = await asyncio.to_thread(lookup_memory_points, memory_id)
+    mp_rows = await lookup_memory_points(memory_id)
     if mp_rows:
         micro_ids = [r["qdrant_id"] for r in mp_rows if r["point_type"] == "micro_chunk"]
         hyde_ids = [r["qdrant_id"] for r in mp_rows if r["point_type"] == "reverse_hyde"]
@@ -152,8 +150,7 @@ async def _delete_qdrant_points(
     Failures are recorded in *failed_steps* but never raised; the caller checks
     whether critical steps failed via ``_finalize_delete``.
     """
-    primary_count = await asyncio.to_thread(
-        _qdrant_delete,
+    primary_count = await _qdrant_delete(
         client,
         col,
         [memory_id],
@@ -164,8 +161,7 @@ async def _delete_qdrant_points(
 
     all_child_ids = hyde_ids + micro_ids
     if all_child_ids:
-        await asyncio.to_thread(
-            _qdrant_delete,
+        await _qdrant_delete(
             client,
             col,
             all_child_ids,
@@ -189,21 +185,21 @@ async def _delete_sqlite_artifacts(
     """
     fts_count = 0
     try:
-        fts_count = await asyncio.to_thread(delete_fts_chunks_batch, all_ids)
+        fts_count = await delete_fts_chunks_batch(all_ids)
     except (sqlite3.Error, OSError) as e:
         logger.error("cascade.fts_batch failed for %s: %s", memory_id, e)
         failed_steps.append("fts_batch")
 
     needle_count = 0
     try:
-        needle_count = await asyncio.to_thread(delete_needle_tokens_batch, all_ids)
+        needle_count = await delete_needle_tokens_batch(all_ids)
     except (sqlite3.Error, OSError) as e:
         logger.error("cascade.needle_batch failed for %s: %s", memory_id, e)
         failed_steps.append("needle_batch")
 
     facts_count = 0
     try:
-        facts_count = await asyncio.to_thread(_delete_entity_facts_for_memory, memory_id)
+        facts_count = await _delete_entity_facts_for_memory(memory_id)
     except (sqlite3.Error, OSError) as e:
         logger.error("cascade.entity_facts failed for %s: %s", memory_id, e)
         failed_steps.append("entity_facts")
@@ -218,12 +214,12 @@ async def _delete_best_effort_rows(memory_id: str) -> int:
     """
     hotness_count = 0
     try:
-        hotness_count = await asyncio.to_thread(delete_hotness, memory_id)
+        hotness_count = await delete_hotness(memory_id)
     except Exception as e:
         logger.debug("cascade.memory_hotness skipped for %s: %s", memory_id, e)
 
     try:
-        await asyncio.to_thread(delete_memory_points, memory_id)
+        await delete_memory_points(memory_id)
     except Exception as e:
         logger.debug("cascade.memory_points cleanup skipped for %s: %s", memory_id, e)
 
@@ -345,7 +341,7 @@ async def _archive_fts_rows(
     """Mark all FTS5 rows for a memory and its children as excluded (best-effort)."""
     all_ids = [memory_id] + micro_ids + hyde_ids
     try:
-        await asyncio.to_thread(set_fts_excluded_batch, all_ids, 1)
+        await set_fts_excluded_batch(all_ids, 1)
     except Exception as e:
         logger.warning("archive.fts_excluded failed for %s: %s", memory_id, e)
 
@@ -388,7 +384,7 @@ async def _finalize_archive(
 # ---------------------------------------------------------------------------
 
 
-def _delete_entity_facts_for_memory(memory_id: str) -> int:
+async def _delete_entity_facts_for_memory(memory_id: str) -> int:
     """Soft-deactivate entity facts linked to *memory_id*.
 
     Primary path: exact match on the ``memory_id`` column (indexed, O(log n)).
@@ -398,23 +394,23 @@ def _delete_entity_facts_for_memory(memory_id: str) -> int:
 
     Returns count of soft-deactivated facts.
     """
-    with GRAPH_WRITE_LOCK:
-        conn = get_db()
+    from archivist.storage.sqlite_pool import pool
+
+    async with pool.write() as conn:
         try:
-            cur = conn.execute(
+            cur = await conn.execute(
                 "UPDATE facts SET is_active = 0 WHERE memory_id = ? AND is_active = 1",
                 (memory_id,),
             )
             deactivated = cur.rowcount
 
-            cur2 = conn.execute(
+            cur2 = await conn.execute(
                 "UPDATE facts SET is_active = 0 "
                 "WHERE source_file LIKE ? AND is_active = 1 AND memory_id = ''",
                 (f"%{memory_id}%",),
             )
             deactivated += cur2.rowcount
 
-            conn.commit()
             return deactivated
         except Exception as e:
             logger.warning(
@@ -423,8 +419,6 @@ def _delete_entity_facts_for_memory(memory_id: str) -> int:
                 e,
             )
             return 0
-        finally:
-            conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -569,7 +563,7 @@ async def soft_delete_memory(memory_id: str, namespace: str) -> dict:
 
     # 2. Exclude the primary FTS entry; children cleaned by the hard-cascade.
     try:
-        await asyncio.to_thread(set_fts_excluded_batch, [memory_id], 1)
+        await set_fts_excluded_batch([memory_id], 1)
     except Exception as e:
         logger.warning("soft_delete.fts_excluded failed for %s: %s", memory_id, e)
 

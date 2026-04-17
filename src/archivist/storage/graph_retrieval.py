@@ -182,7 +182,7 @@ _STOPWORDS = frozenset(
 )
 
 
-def extract_entity_mentions(query: str, namespace: str = "") -> list[dict]:
+async def extract_entity_mentions(query: str, namespace: str = "") -> list[dict]:
     """Find entities from the KG whose names appear in the query.
 
     Uses N-gram expansion (1, 2, 3-word windows) to match multi-word
@@ -204,7 +204,7 @@ def extract_entity_mentions(query: str, namespace: str = "") -> list[dict]:
             # Skip single stopwords — they match too many entities
             if n == 1 and phrase in _STOPWORDS:
                 continue
-            found = search_entities(phrase, limit=3, namespace=namespace)
+            found = await search_entities(phrase, limit=3, namespace=namespace)
             for e in found:
                 if e["id"] in seen:
                     continue
@@ -223,7 +223,7 @@ def extract_entity_mentions(query: str, namespace: str = "") -> list[dict]:
 _MAX_GRAPH_CONTEXT_ITEMS = 50
 
 
-def graph_context_for_entities(entity_ids: list[int], depth: int = 1) -> list[dict]:
+async def graph_context_for_entities(entity_ids: list[int], depth: int = 1) -> list[dict]:
     """Gather facts and relationships for a set of entities up to `depth` hops.
 
     Uses bulk queries per hop to avoid N+1 DB round-trips.
@@ -240,8 +240,8 @@ def graph_context_for_entities(entity_ids: list[int], depth: int = 1) -> list[di
             break
         visited.update(unvisited)
 
-        all_facts = get_entity_facts_bulk(unvisited)
-        all_rels = get_entity_relationships_bulk(unvisited)
+        all_facts = await get_entity_facts_bulk(unvisited)
+        all_rels = await get_entity_relationships_bulk(unvisited)
 
         next_frontier: list[int] = []
         for eid in unvisited:

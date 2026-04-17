@@ -35,7 +35,6 @@ from archivist.storage.graph import (
     _ensure_needle_registry,
     delete_fts_chunks_batch,
     delete_needle_tokens_batch,
-    get_db,
     log_delete_failure,
 )
 from archivist.storage.qdrant import qdrant_client
@@ -70,7 +69,7 @@ class PartialDeletionError(Exception):
 # ---------------------------------------------------------------------------
 
 
-def _qdrant_delete(
+async def _qdrant_delete(
     client,
     col: str,
     selector,
@@ -125,7 +124,7 @@ def _qdrant_delete(
         # Record the failed IDs in the dead-letter table for later inspection/replay.
         if isinstance(selector, list) and selector:
             try:
-                log_delete_failure(
+                await log_delete_failure(
                     memory_id, selector, f"retry exhausted after {1 + retries} attempt(s)"
                 )
             except Exception as _dlq_err:
@@ -244,7 +243,7 @@ def _scroll_all(
 _SWEEP_PAGE_SIZE = 5000
 
 
-def sweep_orphans() -> dict[str, int | str]:
+async def sweep_orphans() -> dict[str, int | str]:
     """Reconcile SQLite rows against Qdrant point existence.
 
     Scans ``memory_chunks`` (by ``qdrant_id``) and ``needle_registry``
@@ -257,6 +256,8 @@ def sweep_orphans() -> dict[str, int | str]:
 
     Returns a dict with counts of cleaned rows per table.
     """
+    from archivist.storage.sqlite_pool import pool
+
     client = qdrant_client()
 
     try:
@@ -271,15 +272,13 @@ def sweep_orphans() -> dict[str, int | str]:
     orphan_ids: list[str] = []
     last_id = ""
     while True:
-        conn = get_db()
-        try:
-            rows = conn.execute(
+        async with pool.read() as conn:
+            cursor = await conn.execute(
                 "SELECT DISTINCT qdrant_id FROM memory_chunks "
                 "WHERE qdrant_id > ? ORDER BY qdrant_id LIMIT ?",
                 (last_id, _SWEEP_PAGE_SIZE),
-            ).fetchall()
-        finally:
-            conn.close()
+            )
+            rows = await cursor.fetchall()
 
         if not rows:
             break
@@ -310,11 +309,11 @@ def sweep_orphans() -> dict[str, int | str]:
 
     if orphan_ids:
         try:
-            fts_cleaned = delete_fts_chunks_batch(orphan_ids)
+            fts_cleaned = await delete_fts_chunks_batch(orphan_ids)
         except Exception as e:
             logger.warning("sweep_orphans.fts_batch failed: %s", e)
         try:
-            needle_cleaned_from_fts = delete_needle_tokens_batch(orphan_ids)
+            needle_cleaned_from_fts = await delete_needle_tokens_batch(orphan_ids)
         except Exception as e:
             logger.warning("sweep_orphans.needle_batch (fts pass) failed: %s", e)
 
@@ -323,15 +322,13 @@ def sweep_orphans() -> dict[str, int | str]:
     needle_orphan_ids: list[str] = []
     last_id = ""
     while True:
-        conn = get_db()
-        try:
-            rows = conn.execute(
+        async with pool.read() as conn:
+            cursor = await conn.execute(
                 "SELECT DISTINCT memory_id FROM needle_registry "
                 "WHERE memory_id > ? ORDER BY memory_id LIMIT ?",
                 (last_id, _SWEEP_PAGE_SIZE),
-            ).fetchall()
-        finally:
-            conn.close()
+            )
+            rows = await cursor.fetchall()
 
         if not rows:
             break
@@ -360,7 +357,7 @@ def sweep_orphans() -> dict[str, int | str]:
     needle_cleaned_direct = 0
     if needle_orphan_ids:
         try:
-            needle_cleaned_direct = delete_needle_tokens_batch(needle_orphan_ids)
+            needle_cleaned_direct = await delete_needle_tokens_batch(needle_orphan_ids)
         except Exception as e:
             logger.warning("sweep_orphans.needle_batch (direct) failed: %s", e)
 

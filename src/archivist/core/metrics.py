@@ -307,3 +307,7 @@ EMBED_CACHE_MISS = "archivist_embed_cache_miss_total"
 HYDE_DURATION = "archivist_hyde_duration_ms"
 REVERSE_HYDE_DURATION = "archivist_reverse_hyde_duration_ms"
 QUERY_EXPANSION_DURATION = "archivist_query_expansion_duration_ms"
+
+# ── SQLite async pool observability (v1.12) ──────────────────────────────────
+SQLITE_POOL_ACQUIRE_MS = "archivist_sqlite_pool_acquire_ms"
+SQLITE_POOL_WRITE_ERRORS = "archivist_sqlite_pool_write_errors_total"

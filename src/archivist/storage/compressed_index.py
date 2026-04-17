@@ -16,6 +16,11 @@ from archivist.storage.graph import get_curator_state, get_db, set_curator_state
 
 logger = logging.getLogger("archivist.compressed_index")
 
+_WAKE_UP_PRIMARY_TOOLS = (
+    "archivist_search, archivist_store, archivist_wake_up, archivist_recall,"
+    " archivist_timeline, archivist_namespaces"
+)
+
 
 def _query_entities(conn, agent_ids: list[str] | None, limit: int = 100) -> list[dict]:
     """Fetch top entities, optionally scoped by agent_ids."""
@@ -298,22 +303,67 @@ def cache_wake_up(namespace: str, agent_id: str = "") -> dict:
     return ctx
 
 
-def format_wake_up_text(ctx: dict) -> str:
-    """Render a wake-up context dict as a compact text block for agent consumption."""
-    parts = [
+def format_wake_up_text(ctx: dict, agent_id: str = "") -> str:
+    """Render a wake-up context dict as a compact text block for agent consumption.
+
+    Args:
+        ctx: Wake-up context produced by :func:`build_wake_up_context`.
+        agent_id: The requesting agent. When provided, a one-line access summary
+            is prepended listing the agent's namespace and access rights so the
+            agent does not need a separate ``archivist_namespaces`` call.
+    """
+    lines: list[str] = []
+
+    # Compact one-line summary — prepended when agent_id is known.
+    if agent_id:
+        from archivist.core.rbac import (
+            list_accessible_namespaces,  # local to avoid circular import at module load
+        )
+
+        namespace = ctx.get("l0_identity", "")
+        # Extract namespace from the l0_identity string ("Namespace: X; Agent: Y; ...")
+        ns_display = ""
+        for part in namespace.split(";"):
+            part = part.strip()
+            if part.startswith("Namespace:"):
+                ns_display = part.split(":", 1)[1].strip()
+                break
+
+        accessible = list_accessible_namespaces(agent_id)
+        _MAX_SUMMARY_NS = 8
+        access_parts: list[str] = []
+        for entry in accessible[:_MAX_SUMMARY_NS]:
+            perm = ""
+            if entry["can_read"] and entry["can_write"]:
+                perm = "rw"
+            elif entry["can_read"]:
+                perm = "r"
+            else:
+                perm = "w"
+            access_parts.append(f"{entry['namespace']}({perm})")
+        if len(accessible) > _MAX_SUMMARY_NS:
+            access_parts.append("...")
+        access_str = ", ".join(access_parts) if access_parts else "(none)"
+
+        summary_parts = [f"Namespace: {ns_display}" if ns_display else f"Agent: {agent_id}"]
+        summary_parts.append(f"Access: {access_str}")
+        summary_parts.append(f"Tools: {_WAKE_UP_PRIMARY_TOOLS}")
+        lines.append(" | ".join(summary_parts))
+
+    lines += [
         "## Wake-Up Context",
         f"**Identity:** {ctx.get('l0_identity', 'unknown')}",
         f"**Memories:** {ctx.get('total_memories', 0)} | **Last active:** {ctx.get('last_activity', 'n/a')}",
     ]
     l1 = ctx.get("l1_critical", "")
     if l1 and l1 != "No facts recorded yet.":
-        parts.append(f"\n**Critical facts:**\n{l1}")
+        lines.append(f"\n**Critical facts:**\n{l1}")
     fleet_tips = ctx.get("fleet_tips", [])
     if fleet_tips:
-        parts.append("\n**Fleet tips:**")
+        lines.append("\n**Fleet tips:**")
         for tip in fleet_tips:
-            parts.append(f"  - {tip}")
+            lines.append(f"  - {tip}")
     toc = ctx.get("namespace_toc", "")
     if toc and "No indexed knowledge" not in toc:
-        parts.append(f"\n{toc}")
-    return "\n".join(parts)
+        lines.append(f"\n{toc}")
+    return "\n".join(lines)

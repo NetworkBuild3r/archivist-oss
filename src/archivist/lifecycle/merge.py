@@ -8,10 +8,15 @@ from datetime import UTC, datetime
 from qdrant_client.models import PointStruct
 
 from archivist.core.audit import log_memory_event
-from archivist.core.config import MEMORY_ROOT, QDRANT_COLLECTION
+from archivist.core.config import MEMORY_ROOT
 from archivist.features.embeddings import embed_text
 from archivist.features.llm import llm_query
 from archivist.storage.collection_router import collection_for
+from archivist.storage.graph import (
+    register_memory_points_batch,
+    register_needle_tokens,
+    upsert_fts_chunk,
+)
 from archivist.storage.qdrant import qdrant_client
 from archivist.storage.versioning import record_version
 from archivist.utils.text_utils import compute_memory_checksum
@@ -34,9 +39,10 @@ async def merge_memories(
 ) -> dict:
     """Merge multiple memory points using the specified strategy."""
     client = qdrant_client()
+    ns = namespace or "default"
 
     points = client.retrieve(
-        collection_name=QDRANT_COLLECTION,
+        collection_name=collection_for(ns),
         ids=memory_ids,
         with_payload=True,
         with_vectors=False,
@@ -66,7 +72,8 @@ async def merge_memories(
     ).hexdigest()
     checksum = compute_memory_checksum(merged_text, agent_id, namespace)
 
-    ns = namespace or payloads[0][1].get("namespace", "default")
+    # Refine ns from actual point payload if namespace was not explicitly provided.
+    ns = namespace or payloads[0][1].get("namespace", "default") or "default"
     merged_payload = {
         "agent_id": agent_id,
         "text": merged_text,
@@ -83,17 +90,51 @@ async def merge_memories(
         "chunk_index": 0,
     }
 
+    _coll = collection_for(ns)
     client.upsert(
-        collection_name=QDRANT_COLLECTION,
+        collection_name=_coll,
         points=[PointStruct(id=merged_id, vector=vec, payload=merged_payload)],
     )
 
+    # Write all SQLite artifacts for the merged point so it is visible to
+    # BM25, needle, and memory_points lookups.
+    await register_memory_points_batch(
+        [{"memory_id": merged_id, "qdrant_id": merged_id, "point_type": "primary"}]
+    )
+    await upsert_fts_chunk(
+        qdrant_id=merged_id,
+        text=merged_text,
+        file_path=f"merge/{agent_id}",
+        chunk_index=0,
+        agent_id=agent_id,
+        namespace=ns,
+        date=datetime.now(UTC).strftime("%Y-%m-%d"),
+        memory_type="merged",
+    )
+    await register_needle_tokens(merged_id, merged_text, namespace=ns, agent_id=agent_id)
+
+    from archivist.lifecycle.cascade import PartialDeletionError
     from archivist.lifecycle.memory_lifecycle import delete_memory_complete
 
     for mid in memory_ids:
-        await delete_memory_complete(mid, ns, collection=collection_for(ns))
+        try:
+            await delete_memory_complete(mid, ns, collection=_coll)
+        except PartialDeletionError as exc:
+            logger.error(
+                "merge.delete_original.partial_failure",
+                extra={
+                    "memory_id": mid,
+                    "merged_id": merged_id,
+                    "failed_steps": exc.result.failed_steps,
+                },
+            )
+        except Exception as exc:
+            logger.error(
+                "merge.delete_original.failed",
+                extra={"memory_id": mid, "merged_id": merged_id, "error": str(exc)},
+            )
 
-    version = record_version(
+    version = await record_version(
         merged_id,
         agent_id,
         checksum,

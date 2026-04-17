@@ -7,12 +7,12 @@ def test_outcome_adjustments_empty():
     assert get_outcome_adjustments([]) == {}
 
 
-def test_add_annotation_and_retrieve():
+async def test_add_annotation_and_retrieve(async_pool):
     from trajectory import _ensure_trajectory_schema, add_annotation, get_annotations
 
     _ensure_trajectory_schema()
 
-    ann_id = add_annotation("mem-1", "agent-a", "This fact is outdated", "stale", 0.3)
+    ann_id = await add_annotation("mem-1", "agent-a", "This fact is outdated", "stale", 0.3)
     assert ann_id
 
     anns = get_annotations("mem-1")
@@ -22,14 +22,14 @@ def test_add_annotation_and_retrieve():
     assert anns[0]["quality_score"] == 0.3
 
 
-def test_add_rating_and_summary():
+async def test_add_rating_and_summary(async_pool):
     from trajectory import _ensure_trajectory_schema, add_rating, get_rating_summary
 
     _ensure_trajectory_schema()
 
-    add_rating("mem-1", "agent-a", 1, "very helpful")
-    add_rating("mem-1", "agent-b", 1)
-    add_rating("mem-1", "agent-c", -1, "outdated")
+    await add_rating("mem-1", "agent-a", 1, "very helpful")
+    await add_rating("mem-1", "agent-b", 1)
+    await add_rating("mem-1", "agent-c", -1, "outdated")
 
     summary = get_rating_summary("mem-1")
     assert summary["total"] == 3
@@ -67,12 +67,12 @@ def test_retrieval_trace_v06_fields():
     assert "graph_retrieval_enabled" in trace
 
 
-def test_rating_clamp():
+async def test_rating_clamp(async_pool):
     from trajectory import _ensure_trajectory_schema, add_rating, get_rating_summary
 
     _ensure_trajectory_schema()
-    add_rating("mem-2", "agent-a", 5)  # clamps to 1
-    add_rating("mem-2", "agent-b", -10)  # clamps to -1
+    await add_rating("mem-2", "agent-a", 5)  # clamps to 1
+    await add_rating("mem-2", "agent-b", -10)  # clamps to -1
 
     summary = get_rating_summary("mem-2")
     assert summary["up"] == 1

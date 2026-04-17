@@ -148,19 +148,19 @@ class TestNeedleRegistrySchema:
 class TestDeleteNeedleTokensLogsError:
     """delete_needle_tokens_by_memory must log errors, not silently pass."""
 
-    def test_returns_count(self, graph_db):
+    async def test_returns_count(self, async_pool):
         from graph import delete_needle_tokens_by_memory, register_needle_tokens
 
-        register_needle_tokens(
+        await register_needle_tokens(
             "mem-1", "Server 192.168.1.1 on :8443", namespace="ns1", agent_id="a1"
         )
-        count = delete_needle_tokens_by_memory("mem-1")
+        count = await delete_needle_tokens_by_memory("mem-1")
         assert count >= 1, "Should return count of deleted rows"
 
-    def test_returns_zero_for_missing(self, graph_db):
+    async def test_returns_zero_for_missing(self, async_pool):
         from graph import delete_needle_tokens_by_memory
 
-        count = delete_needle_tokens_by_memory("nonexistent-id")
+        count = await delete_needle_tokens_by_memory("nonexistent-id")
         assert count == 0
 
 

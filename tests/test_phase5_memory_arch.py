@@ -130,10 +130,10 @@ def test_cache_stats():
 # ── Retrieval log ────────────────────────────────────────────────────────────
 
 
-def test_retrieval_log_roundtrip():
+async def test_retrieval_log_roundtrip(async_pool):
     from retrieval_log import get_retrieval_logs, log_retrieval
 
-    lid = log_retrieval(
+    lid = await log_retrieval(
         agent_id="agent-x",
         query="test query",
         namespace="ns1",
@@ -154,11 +154,11 @@ def test_retrieval_log_roundtrip():
     assert logs[0]["cache_hit"] is False
 
 
-def test_retrieval_stats():
+async def test_retrieval_stats(async_pool):
     from retrieval_log import get_retrieval_stats, log_retrieval
 
     for i in range(5):
-        log_retrieval(
+        await log_retrieval(
             "a1",
             f"q{i}",
             "ns",

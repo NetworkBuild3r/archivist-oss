@@ -321,13 +321,13 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
                     {"memory_id": pid_str, "qdrant_id": pid_str, "point_type": "primary"}
                 )
         try:
-            register_memory_points_batch(_mp_records)
+            await register_memory_points_batch(_mp_records)
         except Exception as _e:
             logger.debug("indexer.register_memory_points failed: %s", _e)
 
         if BM25_ENABLED:
             for p in points:
-                upsert_fts_chunk(
+                await upsert_fts_chunk(
                     qdrant_id=str(p.id),
                     text=p.payload.get("text", ""),
                     file_path=p.payload.get("file_path", ""),
@@ -356,14 +356,14 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
                 if ename and ename not in _seen_entity_names:
                     _seen_entity_names.add(ename)
                     etype = ent.get("type", "unknown")
-                    _eid = upsert_entity(
+                    _eid = await upsert_entity(
                         ename,
                         etype,
                         namespace=_ns or "global",
                         actor_id=_actor_id,
                         actor_type=_actor_type,
                     )
-                    add_fact(
+                    await add_fact(
                         _eid,
                         p.payload.get("text", "")[:200],
                         _src_file,
@@ -376,7 +376,7 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
                     )
 
         for p in points:
-            register_needle_tokens(
+            await register_needle_tokens(
                 str(p.id),
                 p.payload.get("text", ""),
                 namespace=meta.get("namespace", ""),
@@ -443,7 +443,7 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
                 client.upsert(collection_name=_coll, points=_rh_points)
                 _metrics.inc(_metrics.INDEX_CHUNKS, value=len(_rh_points))
                 try:
-                    register_memory_points_batch(
+                    await register_memory_points_batch(
                         [
                             {
                                 "memory_id": rp.payload.get("source_memory_id", str(rp.id)),
@@ -496,7 +496,7 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
                 client.upsert(collection_name=_coll, points=_sq_points)
                 _metrics.inc(_metrics.INDEX_CHUNKS, value=len(_sq_points))
                 try:
-                    register_memory_points_batch(
+                    await register_memory_points_batch(
                         [
                             {
                                 "memory_id": sp.payload.get("source_memory_id", str(sp.id)),
@@ -543,7 +543,7 @@ async def delete_file_points(filepath: str):
         except Exception:
             pass
     if BM25_ENABLED:
-        delete_fts_chunks_by_file(rel)
+        await delete_fts_chunks_by_file(rel)
 
 
 _SKIP_DIRS = {"node_modules", ".git", ".cache", "__pycache__", ".pnpm", "dist", "build"}

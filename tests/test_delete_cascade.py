@@ -251,140 +251,152 @@ class TestNeedleTokenRegistration:
 
     # ── Token type coverage ─────────────────────────────────────────────────
 
-    def test_ip_address_registered_and_found(self):
+    async def test_ip_address_registered_and_found(self, async_pool):
         import graph
 
-        graph.register_needle_tokens(
+        await graph.register_needle_tokens(
             "mem-ip", "Gateway is at 192.168.10.1 for subnet", namespace="ns1"
         )
-        hits = graph.lookup_needle_tokens("what is 192.168.10.1?", namespace="ns1")
+        hits = await graph.lookup_needle_tokens("what is 192.168.10.1?", namespace="ns1")
         ids = [h["memory_id"] for h in hits]
         assert "mem-ip" in ids
 
-    def test_cidr_block_registered_and_found(self):
+    async def test_cidr_block_registered_and_found(self, async_pool):
         import graph
 
-        graph.register_needle_tokens(
+        await graph.register_needle_tokens(
             "mem-cidr", "VPC range is 10.0.0.0/16 for prod", namespace="ns1"
         )
-        hits = graph.lookup_needle_tokens("what is the 10.0.0.0/16 range?", namespace="ns1")
+        hits = await graph.lookup_needle_tokens("what is the 10.0.0.0/16 range?", namespace="ns1")
         assert any(h["memory_id"] == "mem-cidr" for h in hits)
 
-    def test_uuid_registered_and_found(self):
+    async def test_uuid_registered_and_found(self, async_pool):
         import graph
 
         uid = "550e8400-e29b-41d4-a716-446655440000"
-        graph.register_needle_tokens("mem-uuid", f"Service identifier: {uid}", namespace="ns1")
-        hits = graph.lookup_needle_tokens(f"find {uid}", namespace="ns1")
+        await graph.register_needle_tokens(
+            "mem-uuid", f"Service identifier: {uid}", namespace="ns1"
+        )
+        hits = await graph.lookup_needle_tokens(f"find {uid}", namespace="ns1")
         assert any(h["memory_id"] == "mem-uuid" for h in hits)
 
-    def test_cron_expression_registered_and_found(self):
+    async def test_cron_expression_registered_and_found(self, async_pool):
         import graph
 
-        graph.register_needle_tokens(
+        await graph.register_needle_tokens(
             "mem-cron", "Backup runs on schedule: 0 3 * * 0", namespace="ns1"
         )
-        hits = graph.lookup_needle_tokens("what is the cron 0 3 * * 0?", namespace="ns1")
+        hits = await graph.lookup_needle_tokens("what is the cron 0 3 * * 0?", namespace="ns1")
         assert any(h["memory_id"] == "mem-cron" for h in hits)
 
-    def test_key_value_registered_and_found(self):
+    async def test_key_value_registered_and_found(self, async_pool):
         import graph
 
-        graph.register_needle_tokens(
+        await graph.register_needle_tokens(
             "mem-kv", "Set ENV_TOKEN=abc123XYZ in the env", namespace="ns1"
         )
         # Query must not trail a punctuation char that would change the matched token
-        hits = graph.lookup_needle_tokens("what is ENV_TOKEN=abc123XYZ value", namespace="ns1")
+        hits = await graph.lookup_needle_tokens(
+            "what is ENV_TOKEN=abc123XYZ value", namespace="ns1"
+        )
         assert any(h["memory_id"] == "mem-kv" for h in hits)
 
-    def test_ticket_id_registered_and_found(self):
+    async def test_ticket_id_registered_and_found(self, async_pool):
         import graph
 
-        graph.register_needle_tokens(
+        await graph.register_needle_tokens(
             "mem-ticket", "Tracked in JIRA-10042 for the backend team", namespace="ns1"
         )
-        hits = graph.lookup_needle_tokens("details about JIRA-10042", namespace="ns1")
+        hits = await graph.lookup_needle_tokens("details about JIRA-10042", namespace="ns1")
         assert any(h["memory_id"] == "mem-ticket" for h in hits)
 
-    def test_datetime_stamp_registered_and_found(self):
+    async def test_datetime_stamp_registered_and_found(self, async_pool):
         import graph
 
-        graph.register_needle_tokens(
-            "mem-dt", "Outage started 2024-03-15T02:47 and lasted 20 minutes", namespace="ns1"
+        await graph.register_needle_tokens(
+            "mem-dt",
+            "Outage started 2024-03-15T02:47 and lasted 20 minutes",
+            namespace="ns1",
         )
-        hits = graph.lookup_needle_tokens("what happened at 2024-03-15T02:47?", namespace="ns1")
+        hits = await graph.lookup_needle_tokens(
+            "what happened at 2024-03-15T02:47?", namespace="ns1"
+        )
         assert any(h["memory_id"] == "mem-dt" for h in hits)
 
-    def test_plain_prose_yields_no_tokens(self):
+    async def test_plain_prose_yields_no_tokens(self, async_pool):
         import graph
 
-        graph.register_needle_tokens(
-            "mem-prose", "The architecture uses microservices and containers", namespace="ns1"
+        await graph.register_needle_tokens(
+            "mem-prose",
+            "The architecture uses microservices and containers",
+            namespace="ns1",
         )
         # Prose has no high-specificity tokens — lookup returns nothing for it
-        hits = graph.lookup_needle_tokens("architecture microservices containers", namespace="ns1")
+        hits = await graph.lookup_needle_tokens(
+            "architecture microservices containers", namespace="ns1"
+        )
         assert hits == []
 
     # ── Namespace isolation ─────────────────────────────────────────────────
 
-    def test_namespace_isolation_different_ns_returns_nothing(self):
+    async def test_namespace_isolation_different_ns_returns_nothing(self, async_pool):
         import graph
 
-        graph.register_needle_tokens("mem-nsA", "internal addr 172.16.0.5", namespace="ns-A")
-        hits = graph.lookup_needle_tokens("172.16.0.5", namespace="ns-B")
+        await graph.register_needle_tokens("mem-nsA", "internal addr 172.16.0.5", namespace="ns-A")
+        hits = await graph.lookup_needle_tokens("172.16.0.5", namespace="ns-B")
         assert hits == [], "Token registered in ns-A must not appear in ns-B lookup"
 
-    def test_namespace_isolation_same_ns_returns_match(self):
+    async def test_namespace_isolation_same_ns_returns_match(self, async_pool):
         import graph
 
-        graph.register_needle_tokens("mem-nsX", "service ip 172.16.1.1", namespace="ns-X")
-        hits = graph.lookup_needle_tokens("172.16.1.1", namespace="ns-X")
+        await graph.register_needle_tokens("mem-nsX", "service ip 172.16.1.1", namespace="ns-X")
+        hits = await graph.lookup_needle_tokens("172.16.1.1", namespace="ns-X")
         assert any(h["memory_id"] == "mem-nsX" for h in hits)
 
-    def test_empty_namespace_query_skips_ns_filter(self):
+    async def test_empty_namespace_query_skips_ns_filter(self, async_pool):
         """Passing namespace='' returns matches regardless of stored namespace."""
         import graph
 
-        graph.register_needle_tokens("mem-open", "address 10.1.2.3", namespace="some-ns")
-        hits = graph.lookup_needle_tokens("10.1.2.3", namespace="")
+        await graph.register_needle_tokens("mem-open", "address 10.1.2.3", namespace="some-ns")
+        hits = await graph.lookup_needle_tokens("10.1.2.3", namespace="")
         assert any(h["memory_id"] == "mem-open" for h in hits)
 
     # ── Multi-token memory ──────────────────────────────────────────────────
 
-    def test_multi_token_memory_all_tokens_find_same_memory(self):
+    async def test_multi_token_memory_all_tokens_find_same_memory(self, async_pool):
         """A memory containing IP + UUID + ticket — each token resolves to that memory."""
         import graph
 
         uid = "aaaabbbb-cccc-dddd-eeee-ffffffffffff"
         text = f"Host 10.20.30.40 with id {uid} tracked in ENG-9999"
-        graph.register_needle_tokens("mem-multi", text, namespace="ns1")
+        await graph.register_needle_tokens("mem-multi", text, namespace="ns1")
 
         for query in ["10.20.30.40", uid, "ENG-9999"]:
-            hits = graph.lookup_needle_tokens(query, namespace="ns1")
+            hits = await graph.lookup_needle_tokens(query, namespace="ns1")
             assert any(h["memory_id"] == "mem-multi" for h in hits), (
                 f"Token '{query}' should resolve to mem-multi"
             )
 
-    def test_multi_token_no_duplicates_per_lookup(self):
+    async def test_multi_token_no_duplicates_per_lookup(self, async_pool):
         """When a query matches multiple tokens in the same memory, it appears once."""
         import graph
 
         text = "Hosts: 10.0.0.1 and 10.0.0.2 in the same cluster"
-        graph.register_needle_tokens("mem-dedup", text, namespace="ns1")
+        await graph.register_needle_tokens("mem-dedup", text, namespace="ns1")
         # If both IPs appear in the query, the memory should still appear once
-        hits = graph.lookup_needle_tokens("compare 10.0.0.1 with 10.0.0.2", namespace="ns1")
+        hits = await graph.lookup_needle_tokens("compare 10.0.0.1 with 10.0.0.2", namespace="ns1")
         mem_ids = [h["memory_id"] for h in hits if h["memory_id"] == "mem-dedup"]
         assert len(mem_ids) == 1, "Same memory must not appear multiple times in a single lookup"
 
     # ── Token collision across memories ────────────────────────────────────
 
-    def test_token_collision_both_memories_returned(self):
+    async def test_token_collision_both_memories_returned(self, async_pool):
         """Two memories sharing the same IP are both returned for that IP query."""
         import graph
 
-        graph.register_needle_tokens("mem-A", "Primary node at 192.0.2.1", namespace="ns1")
-        graph.register_needle_tokens("mem-B", "Replica node at 192.0.2.1", namespace="ns1")
-        hits = graph.lookup_needle_tokens("tell me about 192.0.2.1", namespace="ns1")
+        await graph.register_needle_tokens("mem-A", "Primary node at 192.0.2.1", namespace="ns1")
+        await graph.register_needle_tokens("mem-B", "Replica node at 192.0.2.1", namespace="ns1")
+        hits = await graph.lookup_needle_tokens("tell me about 192.0.2.1", namespace="ns1")
         ids = {h["memory_id"] for h in hits}
         assert "mem-A" in ids and "mem-B" in ids, (
             "Both memories sharing the same token must appear in results"
@@ -428,7 +440,7 @@ class TestNeedleHaystackIsolation:
         ("hay-8", "On-call rotation uses pagerduty with fifteen-minute escalation"),
     ]
 
-    def _populate(self, conn, ns: str = "ns-test"):
+    async def _populate(self, conn, ns: str = "ns-test"):
         """Insert haystack + needle FTS rows and needle registry entry."""
         import graph
 
@@ -458,87 +470,93 @@ class TestNeedleHaystackIsolation:
                 pass
         conn.commit()
 
-        graph.register_needle_tokens("needle-id", self._NEEDLE_TEXT, namespace=ns)
+        await graph.register_needle_tokens("needle-id", self._NEEDLE_TEXT, namespace=ns)
 
     # ── FTS path (unique word, no special chars) ────────────────────────────
 
-    def test_needle_found_in_fts_before_exclusion(self, graph_db):
+    async def test_needle_found_in_fts_before_exclusion(self, async_pool):
         """Needle unique word appears in search_fts results before archive."""
+        import config
         import graph
 
-        conn = sqlite3.connect(graph_db)
-        self._populate(conn, "ns-test")
+        conn = sqlite3.connect(config.SQLITE_PATH)
+        await self._populate(conn, "ns-test")
         conn.close()
 
-        results = graph.search_fts(self._NEEDLE_FTS_WORD, namespace="ns-test")
+        results = await graph.search_fts(self._NEEDLE_FTS_WORD, namespace="ns-test")
         ids = [r["qdrant_id"] for r in results]
         assert "needle-id" in ids, "Needle must appear in FTS before exclusion"
 
-    def test_needle_absent_from_fts_after_exclusion(self, graph_db):
+    async def test_needle_absent_from_fts_after_exclusion(self, async_pool):
         """After is_excluded=1, the needle word no longer appears in search_fts."""
+        import config
         import graph
 
-        conn = sqlite3.connect(graph_db)
-        self._populate(conn, "ns-test")
+        conn = sqlite3.connect(config.SQLITE_PATH)
+        await self._populate(conn, "ns-test")
         conn.close()
 
-        graph.set_fts_excluded_batch(["needle-id"], excluded=1)
-        results = graph.search_fts(self._NEEDLE_FTS_WORD, namespace="ns-test")
+        await graph.set_fts_excluded_batch(["needle-id"], excluded=1)
+        results = await graph.search_fts(self._NEEDLE_FTS_WORD, namespace="ns-test")
         ids = [r["qdrant_id"] for r in results]
         assert "needle-id" not in ids, "Needle must be hidden from FTS after is_excluded=1"
 
-    def test_needle_found_in_fts_exact_before_exclusion(self, graph_db):
+    async def test_needle_found_in_fts_exact_before_exclusion(self, async_pool):
         """Needle unique word appears in search_fts_exact results before archive."""
+        import config
         import graph
 
-        conn = sqlite3.connect(graph_db)
-        self._populate(conn, "ns-test")
+        conn = sqlite3.connect(config.SQLITE_PATH)
+        await self._populate(conn, "ns-test")
         conn.close()
 
-        results = graph.search_fts_exact(self._NEEDLE_FTS_WORD, namespace="ns-test")
+        results = await graph.search_fts_exact(self._NEEDLE_FTS_WORD, namespace="ns-test")
         ids = [r["qdrant_id"] for r in results]
         assert "needle-id" in ids, "Needle must appear in FTS exact before exclusion"
 
-    def test_needle_absent_from_fts_exact_after_exclusion(self, graph_db):
+    async def test_needle_absent_from_fts_exact_after_exclusion(self, async_pool):
         """After is_excluded=1, the needle word no longer appears in search_fts_exact."""
+        import config
         import graph
 
-        conn = sqlite3.connect(graph_db)
-        self._populate(conn, "ns-test")
+        conn = sqlite3.connect(config.SQLITE_PATH)
+        await self._populate(conn, "ns-test")
         conn.close()
 
-        graph.set_fts_excluded_batch(["needle-id"], excluded=1)
-        results = graph.search_fts_exact(self._NEEDLE_FTS_WORD, namespace="ns-test")
+        await graph.set_fts_excluded_batch(["needle-id"], excluded=1)
+        results = await graph.search_fts_exact(self._NEEDLE_FTS_WORD, namespace="ns-test")
         ids = [r["qdrant_id"] for r in results]
         assert "needle-id" not in ids, "Needle must be hidden from FTS exact after is_excluded=1"
 
     # ── Haystack integrity ──────────────────────────────────────────────────
 
-    def test_haystack_unaffected_by_needle_exclusion(self, graph_db):
+    async def test_haystack_unaffected_by_needle_exclusion(self, async_pool):
         """Excluding the needle does not remove haystack chunks from FTS."""
+        import config
         import graph
 
-        conn = sqlite3.connect(graph_db)
-        self._populate(conn, "ns-test")
+        conn = sqlite3.connect(config.SQLITE_PATH)
+        await self._populate(conn, "ns-test")
         conn.close()
 
-        graph.set_fts_excluded_batch(["needle-id"], excluded=1)
+        await graph.set_fts_excluded_batch(["needle-id"], excluded=1)
 
         # Each haystack chunk has a unique single term — search for several
         visible: set[str] = set()
         for term in ("pagerduty", "fluentd", "kubernetes"):
-            for r in graph.search_fts(term, namespace="ns-test"):
+            for r in await graph.search_fts(term, namespace="ns-test"):
                 visible.add(r["qdrant_id"])
 
         hay_ids = {qid for qid, _ in self._HAYSTACK}
         assert visible & hay_ids, "Haystack chunks must remain visible after needle exclusion"
         assert "needle-id" not in visible
 
-    def test_only_needle_ns_excluded_not_sibling_ns(self, graph_db):
+    async def test_only_needle_ns_excluded_not_sibling_ns(self, async_pool):
         """Excluding needle in ns-A does not touch chunks in ns-B."""
+        import config
         import graph
 
-        conn = sqlite3.connect(graph_db)
+        conn = sqlite3.connect(config.SQLITE_PATH)
         # Populate needle in ns-A and a generic chunk in ns-B
         conn.execute(
             "INSERT INTO memory_chunks (qdrant_id, text, file_path, chunk_index, namespace, is_excluded) "
@@ -555,46 +573,48 @@ class TestNeedleHaystackIsolation:
         conn.close()
 
         # Exclude only the ns-A needle
-        graph.set_fts_excluded_batch(["needle-nsA"], excluded=1)
+        await graph.set_fts_excluded_batch(["needle-nsA"], excluded=1)
 
         # ns-B chunk is unaffected
-        results_b = graph.search_fts(self._NEEDLE_FTS_WORD, namespace="ns-B")
+        results_b = await graph.search_fts(self._NEEDLE_FTS_WORD, namespace="ns-B")
         ids_b = [r["qdrant_id"] for r in results_b]
         assert "generic-nsB" in ids_b, "ns-B chunk must not be affected by ns-A exclusion"
 
     # ── Registry path (IPs via lookup_needle_tokens) ────────────────────────
 
-    def test_registry_token_survives_fts_exclusion(self, graph_db):
+    async def test_registry_token_survives_fts_exclusion(self, async_pool):
         """set_fts_excluded_batch does NOT clean the needle registry — delete cascade does.
 
         lookup_needle_tokens still returns the row after FTS exclusion.  The
         registry payload filter (archived/deleted check) is the second gate.
         """
+        import config
         import graph
 
-        conn = sqlite3.connect(graph_db)
-        self._populate(conn, "ns-test")
+        conn = sqlite3.connect(config.SQLITE_PATH)
+        await self._populate(conn, "ns-test")
         conn.close()
 
-        graph.set_fts_excluded_batch(["needle-id"], excluded=1)
-        hits = graph.lookup_needle_tokens(self._NEEDLE_IP, namespace="ns-test")
+        await graph.set_fts_excluded_batch(["needle-id"], excluded=1)
+        hits = await graph.lookup_needle_tokens(self._NEEDLE_IP, namespace="ns-test")
         assert any(h["memory_id"] == "needle-id" for h in hits), (
             "Registry row must still exist after FTS exclusion (only cascade delete removes it)"
         )
 
-    def test_excluded_needle_payload_flag_stops_registry_hit(self, graph_db):
+    async def test_excluded_needle_payload_flag_stops_registry_hit(self, async_pool):
         """When the Qdrant payload for a registry hit carries deleted=True, the
         rlm_retriever filter predicate drops it even though the registry row exists.
         """
+        import config
         import graph
 
-        conn = sqlite3.connect(graph_db)
-        self._populate(conn, "ns-test")
+        conn = sqlite3.connect(config.SQLITE_PATH)
+        await self._populate(conn, "ns-test")
         conn.close()
 
-        graph.set_fts_excluded_batch(["needle-id"], excluded=1)
+        await graph.set_fts_excluded_batch(["needle-id"], excluded=1)
 
-        hits = graph.lookup_needle_tokens(self._NEEDLE_IP, namespace="ns-test")
+        hits = await graph.lookup_needle_tokens(self._NEEDLE_IP, namespace="ns-test")
         assert hits, "Registry row must exist before payload filter"
 
         simulated_qdrant_payload = {"text": self._NEEDLE_TEXT, "deleted": True}
@@ -613,12 +633,13 @@ class TestNeedleHaystackIsolation:
 class TestFTSExcludedFilter:
     """search_fts and search_fts_exact skip rows with is_excluded=1."""
 
-    def test_search_fts_excludes_is_excluded_rows(self, graph_db):
+    async def test_search_fts_excludes_is_excluded_rows(self, async_pool):
         """Rows with is_excluded=1 do not appear in search_fts results."""
+        import config
         import graph
 
         # Insert an active chunk and an excluded chunk
-        conn = sqlite3.connect(graph_db)
+        conn = sqlite3.connect(config.SQLITE_PATH)
         conn.row_factory = sqlite3.Row
         conn.execute(
             "INSERT INTO memory_chunks (qdrant_id, text, file_path, chunk_index, agent_id, namespace, date, memory_type, is_excluded) "
@@ -631,16 +652,17 @@ class TestFTSExcludedFilter:
         conn.commit()
         conn.close()
 
-        results = graph.search_fts("quick brown fox", namespace="ns1")
+        results = await graph.search_fts("quick brown fox", namespace="ns1")
         ids = [r["qdrant_id"] for r in results]
         assert "id-active" in ids
         assert "id-excluded" not in ids
 
-    def test_search_fts_exact_excludes_is_excluded_rows(self, graph_db):
+    async def test_search_fts_exact_excludes_is_excluded_rows(self, async_pool):
         """Rows with is_excluded=1 do not appear in search_fts_exact results."""
+        import config
         import graph
 
-        conn = sqlite3.connect(graph_db)
+        conn = sqlite3.connect(config.SQLITE_PATH)
         conn.row_factory = sqlite3.Row
         conn.execute(
             "INSERT INTO memory_chunks (qdrant_id, text, file_path, chunk_index, agent_id, namespace, date, memory_type, is_excluded) "
@@ -657,7 +679,7 @@ class TestFTSExcludedFilter:
         conn.commit()
         conn.close()
 
-        results = graph.search_fts_exact("unique_token_xyz", namespace="ns1")
+        results = await graph.search_fts_exact("unique_token_xyz", namespace="ns1")
         ids = [r["qdrant_id"] for r in results]
         assert "ex-active" in ids
         assert "ex-excluded" not in ids
@@ -666,10 +688,11 @@ class TestFTSExcludedFilter:
 class TestSetFtsExcludedBatch:
     """set_fts_excluded_batch marks and restores memory_chunks rows."""
 
-    def test_marks_rows_excluded(self, graph_db):
+    async def test_marks_rows_excluded(self, async_pool):
+        import config
         import graph
 
-        conn = sqlite3.connect(graph_db)
+        conn = sqlite3.connect(config.SQLITE_PATH)
         conn.execute(
             "INSERT INTO memory_chunks (qdrant_id, text, file_path, chunk_index) "
             "VALUES ('qid-1', 'text', 'f.md', 0), ('qid-2', 'text', 'f.md', 1)"
@@ -677,20 +700,21 @@ class TestSetFtsExcludedBatch:
         conn.commit()
         conn.close()
 
-        count = graph.set_fts_excluded_batch(["qid-1", "qid-2"], excluded=1)
+        count = await graph.set_fts_excluded_batch(["qid-1", "qid-2"], excluded=1)
         assert count == 2
 
-        conn = sqlite3.connect(graph_db)
+        conn = sqlite3.connect(config.SQLITE_PATH)
         rows = conn.execute("SELECT qdrant_id, is_excluded FROM memory_chunks").fetchall()
         conn.close()
         excluded = {r[0]: r[1] for r in rows}
         assert excluded["qid-1"] == 1
         assert excluded["qid-2"] == 1
 
-    def test_restores_rows(self, graph_db):
+    async def test_restores_rows(self, async_pool):
+        import config
         import graph
 
-        conn = sqlite3.connect(graph_db)
+        conn = sqlite3.connect(config.SQLITE_PATH)
         conn.execute(
             "INSERT INTO memory_chunks (qdrant_id, text, file_path, chunk_index, is_excluded) "
             "VALUES ('qid-r', 'text', 'f.md', 0, 1)"
@@ -698,27 +722,28 @@ class TestSetFtsExcludedBatch:
         conn.commit()
         conn.close()
 
-        graph.set_fts_excluded_batch(["qid-r"], excluded=0)
+        await graph.set_fts_excluded_batch(["qid-r"], excluded=0)
 
-        conn = sqlite3.connect(graph_db)
+        conn = sqlite3.connect(config.SQLITE_PATH)
         row = conn.execute(
             "SELECT is_excluded FROM memory_chunks WHERE qdrant_id='qid-r'"
         ).fetchone()
         conn.close()
         assert row[0] == 0
 
-    def test_empty_list_is_noop(self, graph_db):
+    async def test_empty_list_is_noop(self, async_pool):
         import graph
 
-        count = graph.set_fts_excluded_batch([])
+        count = await graph.set_fts_excluded_batch([])
         assert count == 0
 
-    def test_chunks_large_batches(self, graph_db):
+    async def test_chunks_large_batches(self, async_pool):
         """Works with >500 IDs without sqlite3 parameter overflow."""
+        import config
         import graph
 
         ids = [f"qid-{i}" for i in range(600)]
-        conn = sqlite3.connect(graph_db)
+        conn = sqlite3.connect(config.SQLITE_PATH)
         conn.executemany(
             "INSERT INTO memory_chunks (qdrant_id, text, file_path, chunk_index) VALUES (?, 'text', 'f.md', 0)",
             [(i,) for i in ids],
@@ -726,10 +751,10 @@ class TestSetFtsExcludedBatch:
         conn.commit()
         conn.close()
 
-        count = graph.set_fts_excluded_batch(ids, excluded=1)
+        count = await graph.set_fts_excluded_batch(ids, excluded=1)
         assert count == 600
 
-        conn = sqlite3.connect(graph_db)
+        conn = sqlite3.connect(config.SQLITE_PATH)
         n_excluded = conn.execute(
             "SELECT COUNT(*) FROM memory_chunks WHERE is_excluded=1"
         ).fetchone()[0]
@@ -740,13 +765,14 @@ class TestSetFtsExcludedBatch:
 class TestArchiveMemoryCompleteFTSExclusion:
     """archive_memory_complete marks related FTS rows as excluded."""
 
-    async def test_archive_marks_fts_excluded(self, graph_db):
+    async def test_archive_marks_fts_excluded(self, async_pool):
+        import config
         from memory_lifecycle import archive_memory_complete
 
         memory_id = "mem-arch-1"
 
         # Insert the primary chunk in memory_chunks
-        conn = sqlite3.connect(graph_db)
+        conn = sqlite3.connect(config.SQLITE_PATH)
         conn.execute(
             "INSERT INTO memory_chunks (qdrant_id, text, file_path, chunk_index, is_excluded) "
             "VALUES (?, 'archived text', 'test.md', 0, 0)",
@@ -764,7 +790,7 @@ class TestArchiveMemoryCompleteFTSExclusion:
         ):
             await archive_memory_complete(memory_id, namespace="test-ns")
 
-        conn = sqlite3.connect(graph_db)
+        conn = sqlite3.connect(config.SQLITE_PATH)
         row = conn.execute(
             "SELECT is_excluded FROM memory_chunks WHERE qdrant_id=?", (memory_id,)
         ).fetchone()
@@ -855,13 +881,14 @@ class TestSoftDeleteMemory:
         assert log_calls[0]["action"] == "soft_delete"
         assert log_calls[0]["memory_id"] == "mem-3"
 
-    async def test_marks_fts_excluded(self, graph_db):
+    async def test_marks_fts_excluded(self, async_pool):
         """The primary memory_chunk row is marked is_excluded=1."""
         import sqlite3
 
+        import config
         from memory_lifecycle import soft_delete_memory
 
-        conn = sqlite3.connect(graph_db)
+        conn = sqlite3.connect(config.SQLITE_PATH)
         conn.execute(
             "INSERT INTO memory_chunks (qdrant_id, text, file_path, chunk_index) "
             "VALUES ('mem-fts', 'test text', 'f.md', 0)"
@@ -878,7 +905,7 @@ class TestSoftDeleteMemory:
             mock_cq.enqueue.return_value = "op-0"
             await soft_delete_memory("mem-fts", "test-ns")
 
-        conn = sqlite3.connect(graph_db)
+        conn = sqlite3.connect(config.SQLITE_PATH)
         row = conn.execute(
             "SELECT is_excluded FROM memory_chunks WHERE qdrant_id='mem-fts'"
         ).fetchone()
@@ -913,7 +940,8 @@ class TestSoftDeleteMemory:
 class TestRegisterMemoryPointsBatch:
     """register_memory_points_batch inserts correct rows."""
 
-    def test_registers_primary_and_children(self, graph_db):
+    async def test_registers_primary_and_children(self, async_pool):
+        import config
         import graph
 
         points = [
@@ -921,10 +949,10 @@ class TestRegisterMemoryPointsBatch:
             {"memory_id": "m1", "qdrant_id": "mc-1", "point_type": "micro_chunk"},
             {"memory_id": "m1", "qdrant_id": "rh-1", "point_type": "reverse_hyde"},
         ]
-        count = graph.register_memory_points_batch(points)
+        count = await graph.register_memory_points_batch(points)
         assert count == 3
 
-        conn = sqlite3.connect(graph_db)
+        conn = sqlite3.connect(config.SQLITE_PATH)
         rows = conn.execute(
             "SELECT qdrant_id, point_type FROM memory_points WHERE memory_id='m1'"
         ).fetchall()
@@ -934,90 +962,91 @@ class TestRegisterMemoryPointsBatch:
         assert by_id["mc-1"] == "micro_chunk"
         assert by_id["rh-1"] == "reverse_hyde"
 
-    def test_idempotent_on_duplicate(self, graph_db):
+    async def test_idempotent_on_duplicate(self, async_pool):
+        import config
         import graph
 
         points = [{"memory_id": "m2", "qdrant_id": "m2", "point_type": "primary"}]
-        graph.register_memory_points_batch(points)
-        graph.register_memory_points_batch(points)  # should not raise or duplicate
+        await graph.register_memory_points_batch(points)
+        await graph.register_memory_points_batch(points)  # should not raise or duplicate
 
-        conn = sqlite3.connect(graph_db)
+        conn = sqlite3.connect(config.SQLITE_PATH)
         n = conn.execute("SELECT COUNT(*) FROM memory_points WHERE memory_id='m2'").fetchone()[0]
         conn.close()
         assert n == 1
 
-    def test_empty_list_noop(self, graph_db):
+    async def test_empty_list_noop(self, async_pool):
         import graph
 
-        count = graph.register_memory_points_batch([])
+        count = await graph.register_memory_points_batch([])
         assert count == 0
 
-    def test_large_batch_no_parameter_overflow(self, graph_db):
+    async def test_large_batch_no_parameter_overflow(self, async_pool):
         import graph
 
         points = [
             {"memory_id": "big-m", "qdrant_id": f"qid-{i}", "point_type": "micro_chunk"}
             for i in range(600)
         ]
-        count = graph.register_memory_points_batch(points)
+        count = await graph.register_memory_points_batch(points)
         assert count == 600
 
 
 class TestLookupMemoryPoints:
     """lookup_memory_points returns correct rows or empty list."""
 
-    def test_returns_rows_for_known_memory(self, graph_db):
+    async def test_returns_rows_for_known_memory(self, async_pool):
         import graph
 
-        graph.register_memory_points_batch(
+        await graph.register_memory_points_batch(
             [
                 {"memory_id": "mem-A", "qdrant_id": "mem-A", "point_type": "primary"},
                 {"memory_id": "mem-A", "qdrant_id": "child-1", "point_type": "micro_chunk"},
             ]
         )
 
-        rows = graph.lookup_memory_points("mem-A")
+        rows = await graph.lookup_memory_points("mem-A")
         assert len(rows) == 2
         types = {r["point_type"] for r in rows}
         assert "primary" in types
         assert "micro_chunk" in types
 
-    def test_returns_empty_for_unknown_memory(self, graph_db):
+    async def test_returns_empty_for_unknown_memory(self, async_pool):
         import graph
 
-        rows = graph.lookup_memory_points("nonexistent-id")
+        rows = await graph.lookup_memory_points("nonexistent-id")
         assert rows == []
 
 
 class TestDeleteMemoryPoints:
     """delete_memory_points removes rows for a memory_id."""
 
-    def test_removes_all_rows(self, graph_db):
+    async def test_removes_all_rows(self, async_pool):
         import graph
 
-        graph.register_memory_points_batch(
+        await graph.register_memory_points_batch(
             [
                 {"memory_id": "dm-1", "qdrant_id": "dm-1", "point_type": "primary"},
                 {"memory_id": "dm-1", "qdrant_id": "dm-child", "point_type": "micro_chunk"},
             ]
         )
-        count = graph.delete_memory_points("dm-1")
+        count = await graph.delete_memory_points("dm-1")
         assert count == 2
 
-        rows = graph.lookup_memory_points("dm-1")
+        rows = await graph.lookup_memory_points("dm-1")
         assert rows == []
 
-    def test_noop_for_unknown(self, graph_db):
+    async def test_noop_for_unknown(self, async_pool):
         import graph
 
-        count = graph.delete_memory_points("does-not-exist")
+        count = await graph.delete_memory_points("does-not-exist")
         assert count == 0
 
 
 class TestDeleteMemoryCompleteUsesMemoryPoints:
     """delete_memory_complete uses memory_points table when rows exist."""
 
-    async def test_uses_table_when_rows_present(self, graph_db):
+    async def test_uses_table_when_rows_present(self, async_pool, graph_db):
         """No Qdrant scroll when memory_points has rows."""
         import graph
         from memory_lifecycle import delete_memory_complete
@@ -1026,7 +1055,7 @@ class TestDeleteMemoryCompleteUsesMemoryPoints:
         micro_id = "micro-table-1"
 
         # Pre-populate memory_points
-        graph.register_memory_points_batch(
+        await graph.register_memory_points_batch(
             [
                 {"memory_id": memory_id, "qdrant_id": memory_id, "point_type": "primary"},
                 {"memory_id": memory_id, "qdrant_id": micro_id, "point_type": "micro_chunk"},
@@ -1046,7 +1075,7 @@ class TestDeleteMemoryCompleteUsesMemoryPoints:
         mock_client.scroll.assert_not_called()
         assert result.qdrant_micro_chunks == 1
 
-    async def test_falls_back_to_scroll_when_no_rows(self):
+    async def test_falls_back_to_scroll_when_no_rows(self, async_pool):
         """Falls back to Qdrant scroll for legacy memories."""
         from memory_lifecycle import delete_memory_complete
 
@@ -1063,13 +1092,13 @@ class TestDeleteMemoryCompleteUsesMemoryPoints:
         # scroll IS called for fallback path (at least once for micro-chunks)
         assert mock_client.scroll.called
 
-    async def test_cleans_up_memory_points_rows(self, graph_db):
+    async def test_cleans_up_memory_points_rows(self, async_pool, graph_db):
         """delete_memory_complete removes the memory_points rows on success."""
         import graph
         from memory_lifecycle import delete_memory_complete
 
         memory_id = "mem-cleanup-1"
-        graph.register_memory_points_batch(
+        await graph.register_memory_points_batch(
             [
                 {"memory_id": memory_id, "qdrant_id": memory_id, "point_type": "primary"},
             ]
@@ -1084,21 +1113,22 @@ class TestDeleteMemoryCompleteUsesMemoryPoints:
         ):
             await delete_memory_complete(memory_id, "test-ns")
 
-        remaining = graph.lookup_memory_points(memory_id)
+        remaining = await graph.lookup_memory_points(memory_id)
         assert remaining == [], "memory_points rows must be deleted after hard-cascade"
 
 
 class TestLogDeleteFailure:
     """log_delete_failure writes to delete_failures table."""
 
-    def test_writes_failure_record(self, graph_db):
+    async def test_writes_failure_record(self, async_pool):
         import json
 
+        import config
         import graph
 
-        graph.log_delete_failure("mem-fail", ["qid-1", "qid-2"], "connection refused")
+        await graph.log_delete_failure("mem-fail", ["qid-1", "qid-2"], "connection refused")
 
-        conn = sqlite3.connect(graph_db)
+        conn = sqlite3.connect(config.SQLITE_PATH)
         rows = conn.execute(
             "SELECT memory_id, qdrant_ids, error FROM delete_failures WHERE memory_id='mem-fail'"
         ).fetchall()
@@ -1113,8 +1143,9 @@ class TestLogDeleteFailure:
 class TestDeadLetterOnCascadeFailure:
     """Dead-letter table is populated when a Qdrant delete fails."""
 
-    async def test_delete_failure_logged_to_dead_letter(self, graph_db):
+    async def test_delete_failure_logged_to_dead_letter(self, async_pool):
         """When Qdrant primary delete fails, delete_failures is written."""
+        import config
         from cascade import PartialDeletionError
         from memory_lifecycle import delete_memory_complete
 
@@ -1130,7 +1161,7 @@ class TestDeadLetterOnCascadeFailure:
             with pytest.raises(PartialDeletionError):
                 await delete_memory_complete(memory_id, "test-ns")
 
-        conn = sqlite3.connect(graph_db)
+        conn = sqlite3.connect(config.SQLITE_PATH)
         rows = conn.execute("SELECT memory_id FROM delete_failures").fetchall()
         conn.close()
         assert any(r[0] == memory_id for r in rows), (

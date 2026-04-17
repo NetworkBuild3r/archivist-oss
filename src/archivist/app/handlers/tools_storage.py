@@ -407,17 +407,17 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
     )
 
     for ename in entity_names:
-        eid = upsert_entity(
+        eid = await upsert_entity(
             ename.strip(),
             retention_class=retention,
             namespace=namespace or "global",
             actor_id=actor_id,
             actor_type=actor_type,
         )
-        add_fact(eid, text[:200], f"explicit/{agent_id}", agent_id, **_fact_kw)
+        await add_fact(eid, text[:200], f"explicit/{agent_id}", agent_id, **_fact_kw)
 
     if not entity_names:
-        eid = upsert_entity(
+        eid = await upsert_entity(
             agent_id,
             "agent",
             retention_class=retention,
@@ -425,7 +425,7 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
             actor_id=actor_id,
             actor_type=actor_type,
         )
-        add_fact(eid, text[:200], f"explicit/{agent_id}", agent_id, **_fact_kw)
+        await add_fact(eid, text[:200], f"explicit/{agent_id}", agent_id, **_fact_kw)
 
         _auto_hints = pre_extract(text)
         _auto_entities = _auto_hints.get("entities", [])
@@ -438,7 +438,7 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
             ename = ent["name"].strip()
             if ename and ename != agent_id:
                 etype = ent.get("type", "unknown")
-                _eid = upsert_entity(
+                _eid = await upsert_entity(
                     ename,
                     etype,
                     retention_class=retention,
@@ -446,7 +446,9 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
                     actor_id=actor_id,
                     actor_type=actor_type,
                 )
-                add_fact(_eid, text[:200], f"explicit/{agent_id}", agent_id, **_extracted_fact_kw)
+                await add_fact(
+                    _eid, text[:200], f"explicit/{agent_id}", agent_id, **_extracted_fact_kw
+                )
     else:
         _auto_hints = pre_extract(text)
 
@@ -515,12 +517,14 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
         collection_name=_coll,
         points=[PointStruct(id=pid, vector=vec, payload=payload)],
     )
-    register_memory_points_batch([{"memory_id": pid, "qdrant_id": pid, "point_type": "primary"}])
+    await register_memory_points_batch(
+        [{"memory_id": pid, "qdrant_id": pid, "point_type": "primary"}]
+    )
 
     from archivist.core.config import BM25_ENABLED
 
     if BM25_ENABLED:
-        upsert_fts_chunk(
+        await upsert_fts_chunk(
             qdrant_id=pid,
             text=text,
             file_path=payload["file_path"],
@@ -533,7 +537,7 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
             actor_type=actor_type,
         )
 
-    register_needle_tokens(
+    await register_needle_tokens(
         pid, text, namespace=namespace, agent_id=agent_id, actor_id=actor_id, actor_type=actor_type
     )
 
@@ -587,7 +591,7 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
             _micro_points.append(PointStruct(id=_mc_id, vector=mv, payload=_mc_payload))
 
             if BM25_ENABLED:
-                upsert_fts_chunk(
+                await upsert_fts_chunk(
                     qdrant_id=_mc_id,
                     text=mc,
                     file_path=f"explicit/{agent_id}",
@@ -599,7 +603,7 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
                     actor_id=actor_id,
                     actor_type=actor_type,
                 )
-            register_needle_tokens(
+            await register_needle_tokens(
                 _mc_id,
                 mc,
                 namespace=namespace,
@@ -610,7 +614,7 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
 
         if _micro_points:
             client.upsert(collection_name=_coll, points=_micro_points)
-            register_memory_points_batch(
+            await register_memory_points_batch(
                 [
                     {"memory_id": pid, "qdrant_id": str(mp.id), "point_type": "micro_chunk"}
                     for mp in _micro_points
@@ -663,7 +667,7 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
                 )
             if _rh_points:
                 client.upsert(collection_name=_coll, points=_rh_points)
-                register_memory_points_batch(
+                await register_memory_points_batch(
                     [
                         {"memory_id": pid, "qdrant_id": str(rp.id), "point_type": "reverse_hyde"}
                         for rp in _rh_points
@@ -719,7 +723,7 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
             )
             if sq_points:
                 client.upsert(collection_name=_coll, points=sq_points)
-                register_memory_points_batch(
+                await register_memory_points_batch(
                     [
                         {
                             "memory_id": pid,
@@ -972,30 +976,28 @@ async def _handle_pin(arguments: dict) -> list[TextContent]:
             return error_response({"error": f"Failed to pin memory: {e}"})
 
     if entity_name:
-        from archivist.storage.graph import GRAPH_WRITE_LOCK, get_db
+        from archivist.storage.sqlite_pool import pool
 
-        with GRAPH_WRITE_LOCK:
-            conn = get_db()
-            row = conn.execute(
+        async with pool.write() as conn:
+            cur = await conn.execute(
                 "SELECT id FROM entities WHERE name = ? COLLATE NOCASE AND namespace = ?",
                 (entity_name, namespace or "global"),
-            ).fetchone()
+            )
+            row = await cur.fetchone()
             if row:
-                conn.execute(
+                await conn.execute(
                     "UPDATE entities SET retention_class='permanent' WHERE id=?", (row["id"],)
                 )
-                conn.execute(
+                await conn.execute(
                     "UPDATE facts SET retention_class='permanent' WHERE entity_id=? AND is_active=1",
                     (row["id"],),
                 )
-                conn.commit()
                 pinned.append({"type": "entity", "name": entity_name, "id": row["id"]})
             else:
-                eid = upsert_entity(
+                eid = await upsert_entity(
                     entity_name, retention_class="permanent", namespace=namespace or "global"
                 )
                 pinned.append({"type": "entity", "name": entity_name, "id": eid, "created": True})
-            conn.close()
 
     from archivist.core.audit import log_memory_event
 
@@ -1050,24 +1052,22 @@ async def _handle_unpin(arguments: dict) -> list[TextContent]:
             return error_response({"error": f"Failed to unpin memory: {e}"})
 
     if entity_name:
-        from archivist.storage.graph import GRAPH_WRITE_LOCK, get_db
+        from archivist.storage.sqlite_pool import pool
 
-        with GRAPH_WRITE_LOCK:
-            conn = get_db()
-            row = conn.execute(
+        async with pool.write() as conn:
+            cur = await conn.execute(
                 "SELECT id FROM entities WHERE name = ? COLLATE NOCASE", (entity_name,)
-            ).fetchone()
+            )
+            row = await cur.fetchone()
             if row:
-                conn.execute(
+                await conn.execute(
                     "UPDATE entities SET retention_class='standard' WHERE id=?", (row["id"],)
                 )
-                conn.execute(
+                await conn.execute(
                     "UPDATE facts SET retention_class='standard' WHERE entity_id=? AND retention_class='permanent'",
                     (row["id"],),
                 )
-                conn.commit()
                 unpinned.append({"type": "entity", "name": entity_name, "id": row["id"]})
-            conn.close()
 
     hot_cache.invalidate_namespace(namespace)
 

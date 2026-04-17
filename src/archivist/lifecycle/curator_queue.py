@@ -12,7 +12,7 @@ import uuid
 from datetime import UTC, datetime
 
 import archivist.core.metrics as m
-from archivist.storage.graph import GRAPH_WRITE_LOCK, get_db, schema_guard
+from archivist.storage.graph import schema_guard
 
 logger = logging.getLogger("archivist.curator_queue")
 
@@ -41,6 +41,8 @@ _ensure_schema = schema_guard("""
 
 def enqueue(op_type: str, payload: dict) -> str:
     """Add a curation operation to the queue. Returns the operation ID."""
+    from archivist.storage.graph import get_db
+
     _ensure_schema()
     if op_type not in VALID_OP_TYPES:
         raise ValueError(f"Invalid op_type: {op_type}. Must be one of {VALID_OP_TYPES}")
@@ -48,13 +50,14 @@ def enqueue(op_type: str, payload: dict) -> str:
     op_id = str(uuid.uuid4())
     now = datetime.now(UTC).isoformat()
 
-    with GRAPH_WRITE_LOCK:
-        conn = get_db()
+    conn = get_db()
+    try:
         conn.execute(
             "INSERT INTO curator_queue (id, op_type, payload, status, created_at) VALUES (?, ?, ?, 'pending', ?)",
             (op_id, op_type, json.dumps(payload), now),
         )
         conn.commit()
+    finally:
         conn.close()
 
     _update_depth_gauge()
@@ -64,16 +67,19 @@ def enqueue(op_type: str, payload: dict) -> str:
 
 async def drain(limit: int = 50) -> list[dict]:
     """Apply pending operations up to limit. Returns list of applied ops."""
+    from archivist.storage.graph import get_db
+
     _ensure_schema()
     start = time.time()
     applied = []
 
-    with GRAPH_WRITE_LOCK:
-        conn = get_db()
+    conn = get_db()
+    try:
         rows = conn.execute(
             "SELECT id, op_type, payload FROM curator_queue WHERE status = 'pending' ORDER BY created_at ASC LIMIT ?",
             (limit,),
         ).fetchall()
+    finally:
         conn.close()
 
     now = datetime.now(UTC).isoformat()
@@ -83,11 +89,11 @@ async def drain(limit: int = 50) -> list[dict]:
         try:
             payload = json.loads(payload_json) if payload_json else {}
             await _apply_op(op_type, payload)
-            _mark_op(op_id, "applied", now)
+            await _mark_op(op_id, "applied", now)
             applied.append({"id": op_id, "op_type": op_type, "status": "applied"})
         except Exception as e:
             logger.error("Failed to apply curator op %s (%s): %s", op_id, op_type, e)
-            _mark_op(op_id, "failed", now)
+            await _mark_op(op_id, "failed", now)
             applied.append({"id": op_id, "op_type": op_type, "status": "failed", "error": str(e)})
 
     elapsed = (time.time() - start) * 1000
@@ -99,16 +105,15 @@ async def drain(limit: int = 50) -> list[dict]:
     return applied
 
 
-def _mark_op(op_id: str, status: str, timestamp: str):
-    """Update a queue entry's status under the write lock."""
-    with GRAPH_WRITE_LOCK:
-        conn = get_db()
-        conn.execute(
+async def _mark_op(op_id: str, status: str, timestamp: str):
+    """Update a queue entry's status using the async pool."""
+    from archivist.storage.sqlite_pool import pool
+
+    async with pool.write() as conn:
+        await conn.execute(
             "UPDATE curator_queue SET status = ?, applied_at = ? WHERE id = ?",
             (status, timestamp, op_id),
         )
-        conn.commit()
-        conn.close()
 
 
 async def _apply_op(op_type: str, payload: dict):
@@ -120,9 +125,9 @@ async def _apply_op(op_type: str, payload: dict):
     elif op_type == "delete_memory":
         await _apply_delete(payload)
     elif op_type == "consolidate_tips":
-        _apply_consolidate_tips(payload)
+        await _apply_consolidate_tips(payload)
     elif op_type == "update_hotness":
-        _apply_hotness(payload)
+        await _apply_hotness(payload)
     elif op_type == "skip_store":
         pass
 
@@ -199,70 +204,66 @@ async def _apply_delete(payload: dict):
             logger.warning("Failed to delete memory %s: %s", mid, e)
 
 
-def _apply_consolidate_tips(payload: dict):
+async def _apply_consolidate_tips(payload: dict):
     """Insert consolidated tip and archive originals."""
+    from archivist.storage.sqlite_pool import pool
+
     consolidated = payload.get("consolidated_tip")
     original_ids = payload.get("original_tip_ids", [])
 
-    with GRAPH_WRITE_LOCK:
-        conn = get_db()
-        try:
-            if consolidated:
-                tip_id = str(uuid.uuid4())
-                now = datetime.now(UTC).isoformat()
-                conn.execute(
-                    "INSERT INTO tips (id, trajectory_id, agent_id, category, tip_text, context, negative_example, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        tip_id,
-                        consolidated.get("trajectory_id", "consolidated"),
-                        consolidated.get("agent_id", "curator"),
-                        consolidated.get("category", "strategy"),
-                        consolidated.get("tip", ""),
-                        consolidated.get("context", ""),
-                        consolidated.get("negative_example", ""),
-                        now,
-                    ),
-                )
+    async with pool.write() as conn:
+        if consolidated:
+            tip_id = str(uuid.uuid4())
+            now = datetime.now(UTC).isoformat()
+            await conn.execute(
+                "INSERT INTO tips (id, trajectory_id, agent_id, category, tip_text, context, negative_example, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    tip_id,
+                    consolidated.get("trajectory_id", "consolidated"),
+                    consolidated.get("agent_id", "curator"),
+                    consolidated.get("category", "strategy"),
+                    consolidated.get("tip", ""),
+                    consolidated.get("context", ""),
+                    consolidated.get("negative_example", ""),
+                    now,
+                ),
+            )
 
-            if original_ids:
-                placeholders = ",".join("?" for _ in original_ids)
-                conn.execute(
-                    f"UPDATE tips SET archived = 1 WHERE id IN ({placeholders})",
-                    original_ids,
-                )
-            conn.commit()
-        finally:
-            conn.close()
+        if original_ids:
+            placeholders = ",".join("?" for _ in original_ids)
+            await conn.execute(
+                f"UPDATE tips SET archived = 1 WHERE id IN ({placeholders})",
+                original_ids,
+            )
 
 
-def _apply_hotness(payload: dict):
+async def _apply_hotness(payload: dict):
     """Update hotness scores in the memory_hotness table."""
+    from archivist.storage.sqlite_pool import pool
+
     scores = payload.get("scores", {})
     now = datetime.now(UTC).isoformat()
 
-    with GRAPH_WRITE_LOCK:
-        conn = get_db()
-        try:
-            for memory_id, score in scores.items():
-                conn.execute(
-                    "INSERT OR REPLACE INTO memory_hotness (memory_id, score, retrieval_count, last_accessed, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (
-                        memory_id,
-                        score,
-                        payload.get("counts", {}).get(memory_id, 0),
-                        payload.get("last_access", {}).get(memory_id, now),
-                        now,
-                    ),
-                )
-            conn.commit()
-        finally:
-            conn.close()
+    async with pool.write() as conn:
+        for memory_id, score in scores.items():
+            await conn.execute(
+                "INSERT OR REPLACE INTO memory_hotness (memory_id, score, retrieval_count, last_accessed, updated_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    memory_id,
+                    score,
+                    payload.get("counts", {}).get(memory_id, 0),
+                    payload.get("last_access", {}).get(memory_id, now),
+                    now,
+                ),
+            )
 
 
 def stats() -> dict:
     """Return queue statistics."""
+    from archivist.storage.graph import get_db
+
     _ensure_schema()
     conn = get_db()
     rows = conn.execute("SELECT status, COUNT(*) FROM curator_queue GROUP BY status").fetchall()

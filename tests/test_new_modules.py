@@ -220,24 +220,24 @@ class TestFTSSearch:
 
 
 class TestEntityExtraction:
-    def test_ngram_expansion(self, graph_db):
+    async def test_ngram_expansion(self, async_pool):
         from graph import upsert_entity
         from graph_retrieval import extract_entity_mentions
 
-        upsert_entity("Argo CD", "tool")
-        upsert_entity("hot cache", "concept")
+        await upsert_entity("Argo CD", "tool")
+        await upsert_entity("hot cache", "concept")
 
-        results = extract_entity_mentions("How does Argo CD use the hot cache?")
+        results = await extract_entity_mentions("How does Argo CD use the hot cache?")
         names = [e["name"] for e in results]
         assert any("Argo CD" in n for n in names)
         assert any("hot cache" in n for n in names)
 
-    def test_short_entities(self, graph_db):
+    async def test_short_entities(self, async_pool):
         from graph import upsert_entity
         from graph_retrieval import extract_entity_mentions
 
-        upsert_entity("AI", "concept")
-        results = extract_entity_mentions("How does AI work?")
+        await upsert_entity("AI", "concept")
+        results = await extract_entity_mentions("How does AI work?")
         names = [e["name"] for e in results]
         assert any("AI" in n for n in names)
 
