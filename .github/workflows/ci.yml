@@ -139,12 +139,8 @@ jobs:
         ports:
           - 6333:6333
           - 6334:6334
-        options: >-
-          --health-cmd "curl -sf http://localhost:6333/readyz || exit 1"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 12
-          --health-start-period 20s
+        # No health-cmd here — the Qdrant image is minimal and has no curl/wget.
+        # Readiness is checked from the runner in the "Wait for Qdrant" step below.
 
     steps:
       - uses: actions/checkout@v4
@@ -203,7 +199,7 @@ jobs:
           bandit -r src/ -ll --exclude src/archivist/app/main.py
 
       - name: Trivy filesystem scan
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@0.35.0
         with:
           scan-type: fs
           scan-ref: .
