@@ -11,21 +11,21 @@ Covers:
 - catch parameter: only catches specified exception types.
 """
 
+import os
 import sqlite3
 import sys
-import os
 
 import pytest
 
 # Ensure src/ is on the path for direct imports.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from retry import retry, retry_call  # noqa: E402
-
+from retry import retry, retry_call
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 class _Transient(Exception):
     """Simulated transient error."""
@@ -42,6 +42,7 @@ def _is_transient(exc: Exception) -> bool:
 # ---------------------------------------------------------------------------
 # retry_call tests
 # ---------------------------------------------------------------------------
+
 
 class TestRetryCallHappyPath:
     def test_returns_value_on_first_attempt(self):
@@ -79,7 +80,9 @@ class TestRetryCallTransientRetry:
             return "ok"
 
         result = retry_call(
-            fn, max_attempts=3, delay=0,
+            fn,
+            max_attempts=3,
+            delay=0,
             is_transient=_is_transient,
         )
         assert result == "ok"
@@ -94,7 +97,9 @@ class TestRetryCallTransientRetry:
 
         with pytest.raises(_Permanent):
             retry_call(
-                fn, max_attempts=3, delay=0,
+                fn,
+                max_attempts=3,
+                delay=0,
                 is_transient=_is_transient,
                 reraise=True,
             )
@@ -137,7 +142,8 @@ class TestRetryCallFailedSteps:
 
         retry_call(
             fn,
-            max_attempts=2, delay=0,
+            max_attempts=2,
+            delay=0,
             step_name="my_step",
             failed_steps=failed,
             reraise=False,
@@ -152,7 +158,8 @@ class TestRetryCallFailedSteps:
 
         retry_call(
             fn,
-            max_attempts=2, delay=0,
+            max_attempts=2,
+            delay=0,
             step_name="my_step",
             failed_steps=failed,
         )
@@ -167,7 +174,9 @@ class TestRetryCallFailedSteps:
 
         # Should not raise:
         retry_call(
-            fn, max_attempts=2, delay=0,
+            fn,
+            max_attempts=2,
+            delay=0,
             step_name="exploding_step",
             failed_steps=failed,
         )
@@ -183,7 +192,8 @@ class TestRetryCallCatchParam:
         with pytest.raises(ValueError):
             retry_call(
                 fn,
-                max_attempts=3, delay=0,
+                max_attempts=3,
+                delay=0,
                 catch=_Transient,
             )
 
@@ -198,7 +208,8 @@ class TestRetryCallCatchParam:
 
         result = retry_call(
             fn,
-            max_attempts=3, delay=0,
+            max_attempts=3,
+            delay=0,
             catch=(sqlite3.OperationalError, _Transient),
         )
         assert result == "done"
@@ -208,6 +219,7 @@ class TestRetryCallCatchParam:
 # ---------------------------------------------------------------------------
 # @retry decorator tests
 # ---------------------------------------------------------------------------
+
 
 class TestRetryDecorator:
     def test_decorator_happy_path(self):
@@ -256,6 +268,7 @@ class TestRetryDecorator:
     def test_decorator_sqlite_pattern(self):
         """Mirrors the exact usage pattern from graph.delete_fts_chunks_batch."""
         import threading
+
         lock = threading.Lock()
         calls = []
 

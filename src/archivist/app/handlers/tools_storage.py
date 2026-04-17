@@ -2,37 +2,52 @@
 
 import asyncio
 import json
+import logging
 import time
 import uuid
-import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-from mcp.types import Tool, TextContent
+from mcp.types import TextContent, Tool
 from qdrant_client.models import PointStruct
 
-from archivist.features.embeddings import embed_text, embed_batch
-from archivist.storage.graph import upsert_entity, add_fact, register_needle_tokens, upsert_fts_chunk, register_memory_points_batch
-from archivist.core.config import (
-    QDRANT_COLLECTION, TEAM_MAP,
-    CONFLICT_CHECK_ON_STORE, CONFLICT_BLOCK_ON_STORE,
-)
-from archivist.write.conflict_detection import check_for_conflicts, llm_adjudicated_dedup, _query_similar
-from archivist.write.indexer import compute_ttl
-from archivist.storage.qdrant import qdrant_client
-from archivist.core.rbac import get_namespace_for_agent, get_namespace_config
-from archivist.utils.text_utils import compute_memory_checksum
-from archivist.core.archivist_uri import memory_uri
-from archivist.write.pre_extractor import pre_extract, extract_needle_entities
-from archivist.storage.collection_router import ensure_collection, collection_for, collections_for_query
-from archivist.write.contextual_augment import augment_chunk
-from archivist.utils.chunking import _extract_needle_micro_chunks
-import archivist.retrieval.hot_cache as hot_cache
 import archivist.core.journal as journal
 import archivist.core.metrics as m
 import archivist.features.webhooks as webhooks
 import archivist.lifecycle.curator_queue as curator_queue
+import archivist.retrieval.hot_cache as hot_cache
+from archivist.core.archivist_uri import memory_uri
+from archivist.core.config import (
+    CONFLICT_BLOCK_ON_STORE,
+    CONFLICT_CHECK_ON_STORE,
+    TEAM_MAP,
+)
+from archivist.core.rbac import get_namespace_config, get_namespace_for_agent
+from archivist.features.embeddings import embed_batch, embed_text
+from archivist.storage.collection_router import (
+    collection_for,
+    collections_for_query,
+    ensure_collection,
+)
+from archivist.storage.graph import (
+    add_fact,
+    register_memory_points_batch,
+    register_needle_tokens,
+    upsert_entity,
+    upsert_fts_chunk,
+)
+from archivist.storage.qdrant import qdrant_client
+from archivist.utils.chunking import _extract_needle_micro_chunks
+from archivist.utils.text_utils import compute_memory_checksum
+from archivist.write.conflict_detection import (
+    _query_similar,
+    check_for_conflicts,
+    llm_adjudicated_dedup,
+)
+from archivist.write.contextual_augment import augment_chunk
+from archivist.write.indexer import compute_ttl
+from archivist.write.pre_extractor import extract_needle_entities, pre_extract
 
-from ._common import _rbac_gate, error_response, success_response, resolve_actor
+from ._common import _rbac_gate, error_response, resolve_actor, success_response
 
 logger = logging.getLogger("archivist.mcp")
 
@@ -52,14 +67,22 @@ TOOLS: list[Tool] = [
             "properties": {
                 "text": {"type": "string", "description": "The memory or fact to store"},
                 "agent_id": {"type": "string", "description": "Which agent is storing this"},
-                "namespace": {"type": "string", "description": "Target namespace (default: auto-detect from agent_id)", "default": ""},
+                "namespace": {
+                    "type": "string",
+                    "description": "Target namespace (default: auto-detect from agent_id)",
+                    "default": "",
+                },
                 "entities": {
                     "type": "array",
                     "items": {"type": "string"},
                     "description": "Entity names mentioned (optional, will auto-extract if empty)",
                     "default": [],
                 },
-                "importance_score": {"type": "number", "description": "0.0-1.0 importance score (higher = longer retention and retrieval boost)", "default": 0.5},
+                "importance_score": {
+                    "type": "number",
+                    "description": "0.0-1.0 importance score (higher = longer retention and retrieval boost)",
+                    "default": 0.5,
+                },
                 "retention_class": {
                     "type": "string",
                     "enum": ["ephemeral", "standard", "durable", "permanent"],
@@ -74,8 +97,16 @@ TOOLS: list[Tool] = [
                 },
                 "thought_type": {
                     "type": "string",
-                    "enum": ["decision", "lesson", "constraint", "insight",
-                             "preference", "milestone", "correction", "general"],
+                    "enum": [
+                        "decision",
+                        "lesson",
+                        "constraint",
+                        "insight",
+                        "preference",
+                        "milestone",
+                        "correction",
+                        "general",
+                    ],
                     "description": "Semantic thought type for precise filtering. Auto-detected if omitted.",
                     "default": "",
                 },
@@ -84,14 +115,22 @@ TOOLS: list[Tool] = [
                     "description": "If true, skip vector similarity conflict check against other agents' memories (use sparingly).",
                     "default": False,
                 },
-                "actor_id": {"type": "string", "description": "Who produced this content (defaults to agent_id). Can be a human username, tool name, or system process.", "default": ""},
+                "actor_id": {
+                    "type": "string",
+                    "description": "Who produced this content (defaults to agent_id). Can be a human username, tool name, or system process.",
+                    "default": "",
+                },
                 "actor_type": {
                     "type": "string",
                     "enum": ["agent", "human", "system", "tool"],
                     "description": "Type of actor storing this memory.",
                     "default": "agent",
                 },
-                "confidence": {"type": "number", "description": "0.0-1.0 confidence in this memory's accuracy (default based on actor_type).", "default": -1},
+                "confidence": {
+                    "type": "number",
+                    "description": "0.0-1.0 confidence in this memory's accuracy (default based on actor_type).",
+                    "default": -1,
+                },
                 "source_trace": {
                     "type": "object",
                     "description": "Structured origin context: {tool, session_id, upstream_source, parent_memory_id, extra}.",
@@ -111,9 +150,16 @@ TOOLS: list[Tool] = [
         inputSchema={
             "type": "object",
             "properties": {
-                "memory_id": {"type": "string", "description": "Qdrant point ID of the memory to delete"},
+                "memory_id": {
+                    "type": "string",
+                    "description": "Qdrant point ID of the memory to delete",
+                },
                 "agent_id": {"type": "string", "description": "Agent requesting the deletion"},
-                "namespace": {"type": "string", "description": "Namespace (default: auto-detect from agent_id)", "default": ""},
+                "namespace": {
+                    "type": "string",
+                    "description": "Namespace (default: auto-detect from agent_id)",
+                    "default": "",
+                },
             },
             "required": ["memory_id", "agent_id"],
         },
@@ -138,7 +184,11 @@ TOOLS: list[Tool] = [
                     "enum": ["latest", "concat", "semantic", "manual"],
                     "description": "Merge strategy",
                 },
-                "namespace": {"type": "string", "description": "Namespace for the merged result", "default": ""},
+                "namespace": {
+                    "type": "string",
+                    "description": "Namespace for the merged result",
+                    "default": "",
+                },
             },
             "required": ["agent_id", "memory_ids", "strategy"],
         },
@@ -192,9 +242,21 @@ TOOLS: list[Tool] = [
             "type": "object",
             "properties": {
                 "agent_id": {"type": "string", "description": "Calling agent"},
-                "memory_id": {"type": "string", "description": "Qdrant point ID to pin (optional if entity_name given)", "default": ""},
-                "entity_name": {"type": "string", "description": "Entity name to pin (optional if memory_id given)", "default": ""},
-                "reason": {"type": "string", "description": "Why this is being pinned (stored in audit log)", "default": ""},
+                "memory_id": {
+                    "type": "string",
+                    "description": "Qdrant point ID to pin (optional if entity_name given)",
+                    "default": "",
+                },
+                "entity_name": {
+                    "type": "string",
+                    "description": "Entity name to pin (optional if memory_id given)",
+                    "default": "",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Why this is being pinned (stored in audit log)",
+                    "default": "",
+                },
                 "namespace": {"type": "string", "description": "Namespace context", "default": ""},
             },
             "required": ["agent_id"],
@@ -210,8 +272,16 @@ TOOLS: list[Tool] = [
             "type": "object",
             "properties": {
                 "agent_id": {"type": "string", "description": "Calling agent"},
-                "memory_id": {"type": "string", "description": "Qdrant point ID to unpin (optional if entity_name given)", "default": ""},
-                "entity_name": {"type": "string", "description": "Entity name to unpin (optional if memory_id given)", "default": ""},
+                "memory_id": {
+                    "type": "string",
+                    "description": "Qdrant point ID to unpin (optional if entity_name given)",
+                    "default": "",
+                },
+                "entity_name": {
+                    "type": "string",
+                    "description": "Entity name to unpin (optional if memory_id given)",
+                    "default": "",
+                },
                 "namespace": {"type": "string", "description": "Namespace context", "default": ""},
             },
             "required": ["agent_id"],
@@ -236,10 +306,17 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
 
     actor_id, actor_type = resolve_actor(arguments)
     from archivist.core.provenance import SourceTrace, default_confidence
+
     raw_confidence = arguments.get("confidence", -1)
-    confidence = raw_confidence if isinstance(raw_confidence, (int, float)) and raw_confidence >= 0 else default_confidence(actor_type)
+    confidence = (
+        raw_confidence
+        if isinstance(raw_confidence, (int, float)) and raw_confidence >= 0
+        else default_confidence(actor_type)
+    )
     _raw_trace = arguments.get("source_trace") or {}
-    source_trace = SourceTrace.from_dict(_raw_trace) if isinstance(_raw_trace, dict) else SourceTrace()
+    source_trace = (
+        SourceTrace.from_dict(_raw_trace) if isinstance(_raw_trace, dict) else SourceTrace()
+    )
     if not source_trace.tool:
         source_trace.tool = "archivist_store"
 
@@ -252,80 +329,123 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
 
     if CONFLICT_CHECK_ON_STORE and not force_skip:
         _shared_vec, _shared_results = await _query_similar(text, namespace)
-        cr = await check_for_conflicts(text, namespace, agent_id,
-                                       _shared_vec=_shared_vec, _shared_results=_shared_results)
+        cr = await check_for_conflicts(
+            text, namespace, agent_id, _shared_vec=_shared_vec, _shared_results=_shared_results
+        )
         if cr.has_conflict and CONFLICT_BLOCK_ON_STORE:
             m.inc(m.STORE_CONFLICT, {"namespace": namespace})
-            webhooks.fire_background("memory_conflict", {
-                "agent_id": agent_id, "namespace": namespace,
-                "max_similarity": cr.max_similarity,
-                "conflicting_ids": cr.conflicting_ids,
-            })
-            return error_response({
-                "stored": False,
-                "conflict": True,
-                "max_similarity": cr.max_similarity,
-                "conflicting_ids": cr.conflicting_ids,
-                "recommendation": cr.recommendation,
-                "hint": "Set force_skip_conflict_check true to store anyway, or merge with conflicting memories.",
-            })
+            webhooks.fire_background(
+                "memory_conflict",
+                {
+                    "agent_id": agent_id,
+                    "namespace": namespace,
+                    "max_similarity": cr.max_similarity,
+                    "conflicting_ids": cr.conflicting_ids,
+                },
+            )
+            return error_response(
+                {
+                    "stored": False,
+                    "conflict": True,
+                    "max_similarity": cr.max_similarity,
+                    "conflicting_ids": cr.conflicting_ids,
+                    "recommendation": cr.recommendation,
+                    "hint": "Set force_skip_conflict_check true to store anyway, or merge with conflicting memories.",
+                }
+            )
     else:
         _shared_results = None
 
     if not force_skip:
-        dedup = await llm_adjudicated_dedup(text, namespace, agent_id,
-                                            _shared_results=_shared_results)
+        dedup = await llm_adjudicated_dedup(
+            text, namespace, agent_id, _shared_results=_shared_results
+        )
         if dedup and dedup.action == "skip":
-            return error_response({
-                "stored": False,
-                "dedup_action": "skip",
-                "reason": "LLM determined this memory is a duplicate",
-                "existing_ids": dedup.existing_ids,
-                "decisions": dedup.decisions,
-            })
+            return error_response(
+                {
+                    "stored": False,
+                    "dedup_action": "skip",
+                    "reason": "LLM determined this memory is a duplicate",
+                    "existing_ids": dedup.existing_ids,
+                    "decisions": dedup.decisions,
+                }
+            )
         if dedup and dedup.action == "merge":
-            curator_queue.enqueue("merge_memory", {
-                "new_text": text, "agent_id": agent_id, "namespace": namespace,
-                "existing_ids": dedup.existing_ids, "decisions": dedup.decisions,
-            })
+            curator_queue.enqueue(
+                "merge_memory",
+                {
+                    "new_text": text,
+                    "agent_id": agent_id,
+                    "namespace": namespace,
+                    "existing_ids": dedup.existing_ids,
+                    "decisions": dedup.decisions,
+                },
+            )
         if dedup and dedup.action == "delete_old":
             for d in dedup.decisions:
                 if d.get("decision") == "delete":
-                    curator_queue.enqueue("archive_memory", {
-                        "memory_ids": [d.get("existing_id", "")],
-                        "reason": "superseded",
-                    })
+                    curator_queue.enqueue(
+                        "archive_memory",
+                        {
+                            "memory_ids": [d.get("existing_id", "")],
+                            "reason": "superseded",
+                        },
+                    )
 
     ns_config = get_namespace_config(namespace)
     consistency = ns_config.consistency if ns_config else "eventual"
 
     pid = str(uuid.uuid4())
 
-    _fact_kw = dict(retention_class=retention, namespace=namespace or "global", memory_id=pid,
-                    confidence=confidence, provenance=source_trace.tool or "explicit", actor_id=actor_id)
+    _fact_kw = dict(
+        retention_class=retention,
+        namespace=namespace or "global",
+        memory_id=pid,
+        confidence=confidence,
+        provenance=source_trace.tool or "explicit",
+        actor_id=actor_id,
+    )
 
     for ename in entity_names:
-        eid = upsert_entity(ename.strip(), retention_class=retention, namespace=namespace or "global",
-                            actor_id=actor_id, actor_type=actor_type)
+        eid = upsert_entity(
+            ename.strip(),
+            retention_class=retention,
+            namespace=namespace or "global",
+            actor_id=actor_id,
+            actor_type=actor_type,
+        )
         add_fact(eid, text[:200], f"explicit/{agent_id}", agent_id, **_fact_kw)
 
     if not entity_names:
-        eid = upsert_entity(agent_id, "agent", retention_class=retention, namespace=namespace or "global",
-                            actor_id=actor_id, actor_type=actor_type)
+        eid = upsert_entity(
+            agent_id,
+            "agent",
+            retention_class=retention,
+            namespace=namespace or "global",
+            actor_id=actor_id,
+            actor_type=actor_type,
+        )
         add_fact(eid, text[:200], f"explicit/{agent_id}", agent_id, **_fact_kw)
 
         _auto_hints = pre_extract(text)
         _auto_entities = _auto_hints.get("entities", [])
         _needle_entities = extract_needle_entities(text)
         from archivist.core.config import DEFAULT_CONFIDENCE_BY_ACTOR_TYPE
+
         _extracted_conf = DEFAULT_CONFIDENCE_BY_ACTOR_TYPE.get("extracted", 0.5)
         _extracted_fact_kw = dict(_fact_kw, confidence=_extracted_conf, provenance="deterministic")
         for ent in _auto_entities + _needle_entities:
             ename = ent["name"].strip()
             if ename and ename != agent_id:
                 etype = ent.get("type", "unknown")
-                _eid = upsert_entity(ename, etype, retention_class=retention, namespace=namespace or "global",
-                                     actor_id=actor_id, actor_type=actor_type)
+                _eid = upsert_entity(
+                    ename,
+                    etype,
+                    retention_class=retention,
+                    namespace=namespace or "global",
+                    actor_id=actor_id,
+                    actor_type=actor_type,
+                )
                 add_fact(_eid, text[:200], f"explicit/{agent_id}", agent_id, **_extracted_fact_kw)
     else:
         _auto_hints = pre_extract(text)
@@ -336,6 +456,7 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
 
     from archivist.core.config import TOPIC_ROUTING_ENABLED
     from archivist.retrieval.topic_detector import detect_topics
+
     _detected_topic = ""
     if TOPIC_ROUTING_ENABLED:
         _topics = detect_topics(text)
@@ -343,12 +464,13 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
 
     embed_input = text
     from archivist.core.config import CONTEXTUAL_AUGMENTATION_ENABLED
+
     if CONTEXTUAL_AUGMENTATION_ENABLED:
         embed_input = augment_chunk(
             text,
             agent_id=agent_id,
             file_path=f"explicit/{agent_id}",
-            date=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+            date=datetime.now(UTC).strftime("%Y-%m-%d"),
             thought_type=thought_type,
             topic=_detected_topic,
             actor_id=actor_id,
@@ -356,7 +478,7 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
         )
     vec = await embed_text(embed_input)
     client = qdrant_client()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     checksum = compute_memory_checksum(text, agent_id, namespace)
 
     ttl_expires_at = compute_ttl(namespace, importance=importance)
@@ -396,6 +518,7 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
     register_memory_points_batch([{"memory_id": pid, "qdrant_id": pid, "point_type": "primary"}])
 
     from archivist.core.config import BM25_ENABLED
+
     if BM25_ENABLED:
         upsert_fts_chunk(
             qdrant_id=pid,
@@ -410,19 +533,25 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
             actor_type=actor_type,
         )
 
-    register_needle_tokens(pid, text, namespace=namespace, agent_id=agent_id,
-                           actor_id=actor_id, actor_type=actor_type)
+    register_needle_tokens(
+        pid, text, namespace=namespace, agent_id=agent_id, actor_id=actor_id, actor_type=actor_type
+    )
 
     # Generate micro-chunks for high-specificity tokens (IPs, crons, UUIDs, etc.)
     _micro_chunks = _extract_needle_micro_chunks(text)
     if _micro_chunks:
         from archivist.core.config import MAX_MICRO_CHUNKS_PER_MEMORY
+
         _micro_chunks = _micro_chunks[:MAX_MICRO_CHUNKS_PER_MEMORY]
         _micro_embed_inputs = _micro_chunks
         if CONTEXTUAL_AUGMENTATION_ENABLED:
             _micro_embed_inputs = [
-                augment_chunk(mc, agent_id=agent_id, file_path=f"explicit/{agent_id}",
-                              date=now.strftime("%Y-%m-%d"))
+                augment_chunk(
+                    mc,
+                    agent_id=agent_id,
+                    file_path=f"explicit/{agent_id}",
+                    date=now.strftime("%Y-%m-%d"),
+                )
                 for mc in _micro_chunks
             ]
         _micro_vecs = await embed_batch(_micro_embed_inputs)
@@ -459,28 +588,43 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
 
             if BM25_ENABLED:
                 upsert_fts_chunk(
-                    qdrant_id=_mc_id, text=mc,
-                    file_path=f"explicit/{agent_id}", chunk_index=mi + 1,
-                    agent_id=agent_id, namespace=namespace,
+                    qdrant_id=_mc_id,
+                    text=mc,
+                    file_path=f"explicit/{agent_id}",
+                    chunk_index=mi + 1,
+                    agent_id=agent_id,
+                    namespace=namespace,
                     date=now.strftime("%Y-%m-%d"),
                     memory_type=arguments.get("memory_type", "general"),
-                    actor_id=actor_id, actor_type=actor_type,
+                    actor_id=actor_id,
+                    actor_type=actor_type,
                 )
-            register_needle_tokens(_mc_id, mc, namespace=namespace, agent_id=agent_id,
-                                   actor_id=actor_id, actor_type=actor_type)
+            register_needle_tokens(
+                _mc_id,
+                mc,
+                namespace=namespace,
+                agent_id=agent_id,
+                actor_id=actor_id,
+                actor_type=actor_type,
+            )
 
         if _micro_points:
             client.upsert(collection_name=_coll, points=_micro_points)
-            register_memory_points_batch([
-                {"memory_id": pid, "qdrant_id": str(mp.id), "point_type": "micro_chunk"}
-                for mp in _micro_points
-            ])
+            register_memory_points_batch(
+                [
+                    {"memory_id": pid, "qdrant_id": str(mp.id), "point_type": "micro_chunk"}
+                    for mp in _micro_points
+                ]
+            )
 
     # Reverse HyDE: fire-and-forget — generate hypothetical questions in background
     from archivist.core.config import REVERSE_HYDE_ENABLED
+
     if REVERSE_HYDE_ENABLED:
+
         async def _reverse_hyde_background():
             from archivist.write.hyde import generate_reverse_hyde_questions
+
             _rh_questions = await generate_reverse_hyde_questions(text)
             if not _rh_questions:
                 return
@@ -489,38 +633,42 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
             for qi, (q, qv) in enumerate(zip(_rh_questions, _rh_vecs)):
                 _q_id = str(uuid.uuid4())
                 _rh_trace = source_trace.with_parent(pid)
-                _rh_points.append(PointStruct(
-                    id=_q_id,
-                    vector=qv,
-                    payload={
-                        "agent_id": agent_id,
-                        "text": text,
-                        "file_path": f"explicit/{agent_id}",
-                        "file_type": "reverse_hyde",
-                        "date": now.strftime("%Y-%m-%d"),
-                        "team": TEAM_MAP.get(agent_id, "unknown"),
-                        "chunk_index": 0,
-                        "namespace": namespace,
-                        "version": 1,
-                        "importance_score": importance,
-                        "retention_class": retention,
-                        "memory_type": arguments.get("memory_type", "general"),
-                        "thought_type": thought_type,
-                        "source_memory_id": pid,
-                        "is_reverse_hyde": True,
-                        "reverse_hyde_question": q,
-                        "actor_id": actor_id,
-                        "actor_type": actor_type,
-                        "confidence": confidence,
-                        "source_trace": _rh_trace.to_dict(),
-                    },
-                ))
+                _rh_points.append(
+                    PointStruct(
+                        id=_q_id,
+                        vector=qv,
+                        payload={
+                            "agent_id": agent_id,
+                            "text": text,
+                            "file_path": f"explicit/{agent_id}",
+                            "file_type": "reverse_hyde",
+                            "date": now.strftime("%Y-%m-%d"),
+                            "team": TEAM_MAP.get(agent_id, "unknown"),
+                            "chunk_index": 0,
+                            "namespace": namespace,
+                            "version": 1,
+                            "importance_score": importance,
+                            "retention_class": retention,
+                            "memory_type": arguments.get("memory_type", "general"),
+                            "thought_type": thought_type,
+                            "source_memory_id": pid,
+                            "is_reverse_hyde": True,
+                            "reverse_hyde_question": q,
+                            "actor_id": actor_id,
+                            "actor_type": actor_type,
+                            "confidence": confidence,
+                            "source_trace": _rh_trace.to_dict(),
+                        },
+                    )
+                )
             if _rh_points:
                 client.upsert(collection_name=_coll, points=_rh_points)
-                register_memory_points_batch([
-                    {"memory_id": pid, "qdrant_id": str(rp.id), "point_type": "reverse_hyde"}
-                    for rp in _rh_points
-                ])
+                register_memory_points_batch(
+                    [
+                        {"memory_id": pid, "qdrant_id": str(rp.id), "point_type": "reverse_hyde"}
+                        for rp in _rh_points
+                    ]
+                )
             logger.info(
                 "reverse_hyde.background_complete",
                 extra={"memory_id": pid, "question_count": len(_rh_questions)},
@@ -533,16 +681,17 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
             if exc:
                 logger.warning("Reverse HyDE background task failed for %s: %s", pid, exc)
 
-        _rh_task = asyncio.create_task(
-            _reverse_hyde_background(), name=f"reverse_hyde_{pid}"
-        )
+        _rh_task = asyncio.create_task(_reverse_hyde_background(), name=f"reverse_hyde_{pid}")
         _rh_task.add_done_callback(_rh_done)
 
     # Synthetic question generation (background, non-blocking)
     from archivist.core.config import SYNTHETIC_QUESTIONS_ENABLED as _SQ_ENABLED
+
     if _SQ_ENABLED:
+
         async def _synthetic_questions_background():
             from archivist.write.synthetic_questions import generate_and_embed_synthetic_points
+
             _sq_trace = source_trace.with_parent(pid)
             base_payload = {
                 "agent_id": agent_id,
@@ -570,10 +719,16 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
             )
             if sq_points:
                 client.upsert(collection_name=_coll, points=sq_points)
-                register_memory_points_batch([
-                    {"memory_id": pid, "qdrant_id": str(sp.id), "point_type": "synthetic_question"}
-                    for sp in sq_points
-                ])
+                register_memory_points_batch(
+                    [
+                        {
+                            "memory_id": pid,
+                            "qdrant_id": str(sp.id),
+                            "point_type": "synthetic_question",
+                        }
+                        for sp in sq_points
+                    ]
+                )
             logger.info(
                 "synthetic_questions.background_complete",
                 extra={"memory_id": pid, "question_count": len(sq_points)},
@@ -586,12 +741,11 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
             if exc:
                 logger.warning("Synthetic questions background task failed for %s: %s", pid, exc)
 
-        _sq_task = asyncio.create_task(
-            _synthetic_questions_background(), name=f"synthetic_q_{pid}"
-        )
+        _sq_task = asyncio.create_task(_synthetic_questions_background(), name=f"synthetic_q_{pid}")
         _sq_task.add_done_callback(_sq_done)
 
     from archivist.core.audit import log_memory_event
+
     await log_memory_event(
         agent_id=agent_id,
         action="create",
@@ -599,17 +753,28 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
         namespace=namespace,
         text_hash=checksum,
         version=1,
-        metadata={"trigger": "api", "importance_score": importance, "retention_class": retention,
-                  "actor_id": actor_id, "actor_type": actor_type, "confidence": confidence,
-                  "source_trace": source_trace.to_dict()},
+        metadata={
+            "trigger": "api",
+            "importance_score": importance,
+            "retention_class": retention,
+            "actor_id": actor_id,
+            "actor_type": actor_type,
+            "confidence": confidence,
+            "source_trace": source_trace.to_dict(),
+        },
     )
 
     hot_cache.invalidate_namespace(namespace)
 
     m.inc(m.STORE_TOTAL, {"namespace": namespace})
-    webhooks.fire_background("memory_store", {
-        "memory_id": pid, "agent_id": agent_id, "namespace": namespace,
-    })
+    webhooks.fire_background(
+        "memory_store",
+        {
+            "memory_id": pid,
+            "agent_id": agent_id,
+            "namespace": namespace,
+        },
+    )
 
     journal.append_entry(
         memory_id=pid,
@@ -634,14 +799,16 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
         },
     )
 
-    return success_response({
-        "stored": True,
-        "memory_id": pid,
-        "uri": memory_uri(namespace, pid),
-        "namespace": namespace,
-        "entities": entity_names or [agent_id],
-        "version": 1,
-    })
+    return success_response(
+        {
+            "stored": True,
+            "memory_id": pid,
+            "uri": memory_uri(namespace, pid),
+            "namespace": namespace,
+            "entities": entity_names or [agent_id],
+            "version": 1,
+        }
+    )
 
 
 async def _handle_merge(arguments: dict) -> list[TextContent]:
@@ -651,6 +818,7 @@ async def _handle_merge(arguments: dict) -> list[TextContent]:
     namespace = arguments.get("namespace", "")
 
     from archivist.lifecycle.merge import merge_memories
+
     result = await merge_memories(memory_ids, strategy, agent_id, namespace)
     return success_response(result, default=str)
 
@@ -661,7 +829,11 @@ async def _handle_compress(arguments: dict) -> list[TextContent]:
     Supports format="flat" (default, single paragraph) and
     format="structured" (Goal/Progress/Decisions/Next Steps JSON).
     """
-    from archivist.write.compaction import compact_structured, compact_flat, format_structured_summary
+    from archivist.write.compaction import (
+        compact_flat,
+        compact_structured,
+        format_structured_summary,
+    )
 
     agent_id = arguments["agent_id"]
     namespace = arguments["namespace"]
@@ -684,7 +856,9 @@ async def _handle_compress(arguments: dict) -> list[TextContent]:
     for mid in memory_ids:
         try:
             points = client.retrieve(
-                collection_name=_colls[0], ids=[mid], with_payload=True,
+                collection_name=_colls[0],
+                ids=[mid],
+                with_payload=True,
             )
             if points:
                 pl = points[0].payload or {}
@@ -712,14 +886,16 @@ async def _handle_compress(arguments: dict) -> list[TextContent]:
         summary_text = await compact_flat(texts, multi_agent=multi_agent)
         structured_data = None
 
-    store_result = await _handle_store({
-        "text": f"[Compressed summary]\n{summary_text}",
-        "agent_id": agent_id,
-        "namespace": namespace,
-        "importance_score": 0.8,
-        "memory_type": "general",
-        "force_skip_conflict_check": True,
-    })
+    store_result = await _handle_store(
+        {
+            "text": f"[Compressed summary]\n{summary_text}",
+            "agent_id": agent_id,
+            "namespace": namespace,
+            "importance_score": 0.8,
+            "memory_type": "general",
+            "force_skip_conflict_check": True,
+        }
+    )
 
     stored_data = {}
     try:
@@ -728,17 +904,22 @@ async def _handle_compress(arguments: dict) -> list[TextContent]:
         pass
 
     if not stored_data.get("stored"):
-        return error_response({
-            "compressed": False,
-            "error": "Failed to store compressed summary",
-            "store_result": stored_data,
-        })
+        return error_response(
+            {
+                "compressed": False,
+                "error": "Failed to store compressed summary",
+                "store_result": stored_data,
+            }
+        )
 
-    curator_queue.enqueue("archive_memory", {
-        "memory_ids": memory_ids,
-        "reason": "compressed",
-        "compressed_into": stored_data.get("memory_id", ""),
-    })
+    curator_queue.enqueue(
+        "archive_memory",
+        {
+            "memory_ids": memory_ids,
+            "reason": "compressed",
+            "compressed_into": stored_data.get("memory_id", ""),
+        },
+    )
 
     hot_cache.invalidate_namespace(namespace)
 
@@ -791,7 +972,8 @@ async def _handle_pin(arguments: dict) -> list[TextContent]:
             return error_response({"error": f"Failed to pin memory: {e}"})
 
     if entity_name:
-        from archivist.storage.graph import get_db, GRAPH_WRITE_LOCK
+        from archivist.storage.graph import GRAPH_WRITE_LOCK, get_db
+
         with GRAPH_WRITE_LOCK:
             conn = get_db()
             row = conn.execute(
@@ -809,25 +991,34 @@ async def _handle_pin(arguments: dict) -> list[TextContent]:
                 conn.commit()
                 pinned.append({"type": "entity", "name": entity_name, "id": row["id"]})
             else:
-                eid = upsert_entity(entity_name, retention_class="permanent", namespace=namespace or "global")
+                eid = upsert_entity(
+                    entity_name, retention_class="permanent", namespace=namespace or "global"
+                )
                 pinned.append({"type": "entity", "name": entity_name, "id": eid, "created": True})
             conn.close()
 
     from archivist.core.audit import log_memory_event
+
     await log_memory_event(
-        agent_id=agent_id, action="pin", memory_id=memory_id or entity_name,
-        namespace=namespace, text_hash="", version=0,
+        agent_id=agent_id,
+        action="pin",
+        memory_id=memory_id or entity_name,
+        namespace=namespace,
+        text_hash="",
+        version=0,
         metadata={"reason": reason, "pinned": pinned},
     )
 
     hot_cache.invalidate_namespace(namespace)
 
-    return success_response({
-        "pinned": True,
-        "items": pinned,
-        "retention_class": "permanent",
-        "reason": reason,
-    })
+    return success_response(
+        {
+            "pinned": True,
+            "items": pinned,
+            "retention_class": "permanent",
+            "reason": reason,
+        }
+    )
 
 
 async def _handle_unpin(arguments: dict) -> list[TextContent]:
@@ -859,7 +1050,8 @@ async def _handle_unpin(arguments: dict) -> list[TextContent]:
             return error_response({"error": f"Failed to unpin memory: {e}"})
 
     if entity_name:
-        from archivist.storage.graph import get_db, GRAPH_WRITE_LOCK
+        from archivist.storage.graph import GRAPH_WRITE_LOCK, get_db
+
         with GRAPH_WRITE_LOCK:
             conn = get_db()
             row = conn.execute(
@@ -879,16 +1071,19 @@ async def _handle_unpin(arguments: dict) -> list[TextContent]:
 
     hot_cache.invalidate_namespace(namespace)
 
-    return success_response({
-        "unpinned": True,
-        "items": unpinned,
-        "retention_class": "standard",
-    })
+    return success_response(
+        {
+            "unpinned": True,
+            "items": unpinned,
+            "retention_class": "standard",
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
 # Handler registry
 # ---------------------------------------------------------------------------
+
 
 async def _handle_delete(arguments: dict) -> list[TextContent]:
     """Soft-delete a memory by ID.
@@ -897,8 +1092,8 @@ async def _handle_delete(arguments: dict) -> list[TextContent]:
     all search paths), marks the FTS entry as excluded, then enqueues a
     background hard-cascade via ``curator_queue``.  Returns in ~5 ms.
     """
-    from archivist.lifecycle.memory_lifecycle import soft_delete_memory
     from archivist.core.rbac import get_namespace_for_agent
+    from archivist.lifecycle.memory_lifecycle import soft_delete_memory
 
     memory_id = arguments.get("memory_id", "").strip()
     agent_id = arguments.get("agent_id", "").strip()
@@ -923,12 +1118,14 @@ async def _handle_delete(arguments: dict) -> list[TextContent]:
 
     hot_cache.invalidate_namespace(namespace)
 
-    return success_response({
-        "deleted": True,
-        "memory_id": memory_id,
-        "namespace": namespace,
-        **result,
-    })
+    return success_response(
+        {
+            "deleted": True,
+            "memory_id": memory_id,
+            "namespace": namespace,
+            **result,
+        }
+    )
 
 
 HANDLERS: dict[str, object] = {

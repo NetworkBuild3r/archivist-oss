@@ -20,13 +20,16 @@ class TestMaxMicroChunksConfig:
 
     def test_config_exists(self):
         from config import MAX_MICRO_CHUNKS_PER_MEMORY
+
         assert isinstance(MAX_MICRO_CHUNKS_PER_MEMORY, int)
         assert MAX_MICRO_CHUNKS_PER_MEMORY == 5
 
     def test_config_overridable(self, monkeypatch):
         monkeypatch.setenv("MAX_MICRO_CHUNKS_PER_MEMORY", "10")
         import importlib
+
         import config
+
         importlib.reload(config)
         assert config.MAX_MICRO_CHUNKS_PER_MEMORY == 10
         monkeypatch.setenv("MAX_MICRO_CHUNKS_PER_MEMORY", "5")
@@ -40,18 +43,38 @@ class TestMicroChunkCap:
     async def test_micro_chunks_capped(self, monkeypatch):
         many_chunks = [f"chunk-{i}: 192.168.1.{i}" for i in range(20)]
 
-        with patch("handlers.tools_storage._extract_needle_micro_chunks", return_value=many_chunks), \
-             patch("handlers.tools_storage.embed_text", new_callable=AsyncMock, return_value=[0.1] * 1024), \
-             patch("conflict_detection.embed_text", new_callable=AsyncMock, return_value=[0.1] * 1024), \
-             patch("handlers.tools_storage.embed_batch", new_callable=AsyncMock, return_value=[[0.1] * 1024] * 5), \
-             patch("handlers.tools_storage.check_for_conflicts", new_callable=AsyncMock, return_value=MagicMock(has_conflict=False)), \
-             patch("handlers.tools_storage.llm_adjudicated_dedup", new_callable=AsyncMock, return_value=None), \
-             patch("handlers.tools_storage.qdrant_client") as mock_qc, \
-             patch("handlers.tools_storage.ensure_collection", return_value="test_col"), \
-             patch("audit.log_memory_event", new_callable=AsyncMock), \
-             patch("handlers.tools_storage.get_namespace_for_agent", return_value="test-ns"), \
-             patch("handlers.tools_storage.get_namespace_config", return_value=None), \
-             patch("handlers.tools_storage._rbac_gate", return_value=None):
+        with (
+            patch("handlers.tools_storage._extract_needle_micro_chunks", return_value=many_chunks),
+            patch(
+                "handlers.tools_storage.embed_text",
+                new_callable=AsyncMock,
+                return_value=[0.1] * 1024,
+            ),
+            patch(
+                "conflict_detection.embed_text", new_callable=AsyncMock, return_value=[0.1] * 1024
+            ),
+            patch(
+                "handlers.tools_storage.embed_batch",
+                new_callable=AsyncMock,
+                return_value=[[0.1] * 1024] * 5,
+            ),
+            patch(
+                "handlers.tools_storage.check_for_conflicts",
+                new_callable=AsyncMock,
+                return_value=MagicMock(has_conflict=False),
+            ),
+            patch(
+                "handlers.tools_storage.llm_adjudicated_dedup",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch("handlers.tools_storage.qdrant_client") as mock_qc,
+            patch("handlers.tools_storage.ensure_collection", return_value="test_col"),
+            patch("audit.log_memory_event", new_callable=AsyncMock),
+            patch("handlers.tools_storage.get_namespace_for_agent", return_value="test-ns"),
+            patch("handlers.tools_storage.get_namespace_config", return_value=None),
+            patch("handlers.tools_storage._rbac_gate", return_value=None),
+        ):
             monkeypatch.setattr("config.REVERSE_HYDE_ENABLED", False)
             monkeypatch.setattr("config.BM25_ENABLED", False)
             monkeypatch.setattr("config.MAX_MICRO_CHUNKS_PER_MEMORY", 3)
@@ -60,6 +83,7 @@ class TestMicroChunkCap:
             mock_qc.return_value = mock_client
 
             from handlers.tools_storage import _handle_store
+
             await _handle_store({"text": "test text with 10.0.0.1", "agent_id": "test"})
 
             upsert_calls = mock_client.upsert.call_args_list
@@ -85,19 +109,39 @@ class TestReverseHydeFireAndForget:
             await hyde_gate.wait()
             return ["What is this?"]
 
-        with patch("handlers.tools_storage.embed_text", new_callable=AsyncMock, return_value=[0.1] * 1024), \
-             patch("conflict_detection.embed_text", new_callable=AsyncMock, return_value=[0.1] * 1024), \
-             patch("handlers.tools_storage.embed_batch", new_callable=AsyncMock, return_value=[[0.1] * 1024]), \
-             patch("handlers.tools_storage.check_for_conflicts", new_callable=AsyncMock, return_value=MagicMock(has_conflict=False)), \
-             patch("handlers.tools_storage.llm_adjudicated_dedup", new_callable=AsyncMock, return_value=None), \
-             patch("handlers.tools_storage.qdrant_client") as mock_qc, \
-             patch("handlers.tools_storage.ensure_collection", return_value="test_col"), \
-             patch("audit.log_memory_event", new_callable=AsyncMock), \
-             patch("handlers.tools_storage._extract_needle_micro_chunks", return_value=[]), \
-             patch("handlers.tools_storage.get_namespace_for_agent", return_value="test-ns"), \
-             patch("handlers.tools_storage.get_namespace_config", return_value=None), \
-             patch("handlers.tools_storage._rbac_gate", return_value=None), \
-             patch("hyde.generate_reverse_hyde_questions", side_effect=slow_hyde):
+        with (
+            patch(
+                "handlers.tools_storage.embed_text",
+                new_callable=AsyncMock,
+                return_value=[0.1] * 1024,
+            ),
+            patch(
+                "conflict_detection.embed_text", new_callable=AsyncMock, return_value=[0.1] * 1024
+            ),
+            patch(
+                "handlers.tools_storage.embed_batch",
+                new_callable=AsyncMock,
+                return_value=[[0.1] * 1024],
+            ),
+            patch(
+                "handlers.tools_storage.check_for_conflicts",
+                new_callable=AsyncMock,
+                return_value=MagicMock(has_conflict=False),
+            ),
+            patch(
+                "handlers.tools_storage.llm_adjudicated_dedup",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch("handlers.tools_storage.qdrant_client") as mock_qc,
+            patch("handlers.tools_storage.ensure_collection", return_value="test_col"),
+            patch("audit.log_memory_event", new_callable=AsyncMock),
+            patch("handlers.tools_storage._extract_needle_micro_chunks", return_value=[]),
+            patch("handlers.tools_storage.get_namespace_for_agent", return_value="test-ns"),
+            patch("handlers.tools_storage.get_namespace_config", return_value=None),
+            patch("handlers.tools_storage._rbac_gate", return_value=None),
+            patch("hyde.generate_reverse_hyde_questions", side_effect=slow_hyde),
+        ):
             monkeypatch.setattr("config.REVERSE_HYDE_ENABLED", True)
             monkeypatch.setattr("config.BM25_ENABLED", False)
 
@@ -109,6 +153,7 @@ class TestReverseHydeFireAndForget:
             result = await _handle_store({"text": "test text", "agent_id": "test"})
 
             import json
+
             data = json.loads(result[0].text)
             assert data["stored"] is True
 
@@ -121,6 +166,7 @@ class TestReverseHydeFireAndForget:
         original_warning = None
 
         import logging
+
         test_logger = logging.getLogger("archivist.mcp")
         original_warning = test_logger.warning
 
@@ -130,19 +176,35 @@ class TestReverseHydeFireAndForget:
         async def failing_hyde(text):
             raise RuntimeError("LLM is down")
 
-        with patch("handlers.tools_storage.embed_text", new_callable=AsyncMock, return_value=[0.1] * 1024), \
-             patch("conflict_detection.embed_text", new_callable=AsyncMock, return_value=[0.1] * 1024), \
-             patch("handlers.tools_storage.check_for_conflicts", new_callable=AsyncMock, return_value=MagicMock(has_conflict=False)), \
-             patch("handlers.tools_storage.llm_adjudicated_dedup", new_callable=AsyncMock, return_value=None), \
-             patch("handlers.tools_storage.qdrant_client") as mock_qc, \
-             patch("handlers.tools_storage.ensure_collection", return_value="test_col"), \
-             patch("audit.log_memory_event", new_callable=AsyncMock), \
-             patch("handlers.tools_storage._extract_needle_micro_chunks", return_value=[]), \
-             patch("handlers.tools_storage.get_namespace_for_agent", return_value="test-ns"), \
-             patch("handlers.tools_storage.get_namespace_config", return_value=None), \
-             patch("handlers.tools_storage._rbac_gate", return_value=None), \
-             patch("hyde.generate_reverse_hyde_questions", side_effect=failing_hyde), \
-             patch.object(test_logger, "warning", side_effect=capture_warning):
+        with (
+            patch(
+                "handlers.tools_storage.embed_text",
+                new_callable=AsyncMock,
+                return_value=[0.1] * 1024,
+            ),
+            patch(
+                "conflict_detection.embed_text", new_callable=AsyncMock, return_value=[0.1] * 1024
+            ),
+            patch(
+                "handlers.tools_storage.check_for_conflicts",
+                new_callable=AsyncMock,
+                return_value=MagicMock(has_conflict=False),
+            ),
+            patch(
+                "handlers.tools_storage.llm_adjudicated_dedup",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch("handlers.tools_storage.qdrant_client") as mock_qc,
+            patch("handlers.tools_storage.ensure_collection", return_value="test_col"),
+            patch("audit.log_memory_event", new_callable=AsyncMock),
+            patch("handlers.tools_storage._extract_needle_micro_chunks", return_value=[]),
+            patch("handlers.tools_storage.get_namespace_for_agent", return_value="test-ns"),
+            patch("handlers.tools_storage.get_namespace_config", return_value=None),
+            patch("handlers.tools_storage._rbac_gate", return_value=None),
+            patch("hyde.generate_reverse_hyde_questions", side_effect=failing_hyde),
+            patch.object(test_logger, "warning", side_effect=capture_warning),
+        ):
             monkeypatch.setattr("config.REVERSE_HYDE_ENABLED", True)
             monkeypatch.setattr("config.BM25_ENABLED", False)
 
@@ -150,12 +212,15 @@ class TestReverseHydeFireAndForget:
             mock_qc.return_value = mock_client
 
             from handlers.tools_storage import _handle_store
+
             await _handle_store({"text": "test text", "agent_id": "test"})
 
             await asyncio.sleep(0.1)
 
         hyde_warnings = [w for w in logged_warnings if "Reverse HyDE" in w]
-        assert len(hyde_warnings) >= 1, f"Expected warning about HyDE failure, got: {logged_warnings}"
+        assert len(hyde_warnings) >= 1, (
+            f"Expected warning about HyDE failure, got: {logged_warnings}"
+        )
 
 
 class TestIndexerParallelReverseHyde:
@@ -163,12 +228,13 @@ class TestIndexerParallelReverseHyde:
 
     def test_indexer_imports_asyncio(self):
         import indexer
+
         assert hasattr(indexer, "asyncio"), "indexer must import asyncio for gather/semaphore"
 
     def test_gather_uses_return_exceptions(self):
         """asyncio.gather call must have return_exceptions=True for resilience."""
-        import inspect
         import indexer
+
         source = inspect.getsource(indexer.index_file)
         assert "return_exceptions=True" in source, (
             "asyncio.gather in indexer must use return_exceptions=True"
@@ -195,15 +261,18 @@ class TestIndexerParallelReverseHyde:
         monkeypatch.setattr("config.MEMORY_ROOT", str(tmp_path / "memories"))
 
         import indexer
+
         monkeypatch.setattr(indexer, "MEMORY_ROOT", str(tmp_path / "memories"))
 
-        with patch("indexer.embed_batch", new_callable=AsyncMock, return_value=[[0.1] * 1024] * 50), \
-             patch("indexer.qdrant_client") as mock_qc, \
-             patch("indexer.ensure_collection", return_value="test_col"), \
-             patch("indexer.delete_file_points", new_callable=AsyncMock), \
-             patch("indexer.get_namespace_for_agent", return_value="test-ns"), \
-             patch("indexer.get_namespace_config", return_value=None), \
-             patch("hyde.generate_reverse_hyde_questions", side_effect=tracked_hyde):
+        with (
+            patch("indexer.embed_batch", new_callable=AsyncMock, return_value=[[0.1] * 1024] * 50),
+            patch("indexer.qdrant_client") as mock_qc,
+            patch("indexer.ensure_collection", return_value="test_col"),
+            patch("indexer.delete_file_points", new_callable=AsyncMock),
+            patch("indexer.get_namespace_for_agent", return_value="test-ns"),
+            patch("indexer.get_namespace_config", return_value=None),
+            patch("hyde.generate_reverse_hyde_questions", side_effect=tracked_hyde),
+        ):
             mock_client = MagicMock()
             mock_qc.return_value = mock_client
 

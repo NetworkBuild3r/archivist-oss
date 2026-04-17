@@ -2,9 +2,9 @@
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-from archivist.storage.graph import get_db, GRAPH_WRITE_LOCK
+from archivist.storage.graph import GRAPH_WRITE_LOCK, get_db
 
 logger = logging.getLogger("archivist.versioning")
 
@@ -17,7 +17,7 @@ def record_version(
     parent_versions: list[int] | None = None,
 ) -> int:
     """Record a new version for a memory_id. Returns the new version number."""
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     with GRAPH_WRITE_LOCK:
         conn = get_db()
         try:
@@ -38,5 +38,3 @@ def record_version(
         finally:
             conn.close()
     return new_version
-
-

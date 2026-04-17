@@ -8,11 +8,11 @@ checkpoints.
 
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-from archivist.storage.graph import get_db
-from archivist.core.config import QDRANT_COLLECTION
 import archivist.core.health as health
+from archivist.core.config import QDRANT_COLLECTION
+from archivist.storage.graph import get_db
 from archivist.storage.qdrant import qdrant_client
 
 logger = logging.getLogger("archivist.dashboard")
@@ -21,7 +21,7 @@ logger = logging.getLogger("archivist.dashboard")
 def build_dashboard(window_days: int = 7) -> dict:
     """Aggregate health metrics across all subsystems."""
     conn = get_db()
-    now_iso = datetime.now(timezone.utc).isoformat()
+    now_iso = datetime.now(UTC).isoformat()
 
     # Memory counts from Qdrant
     qdrant_stats = _qdrant_stats()
@@ -40,6 +40,7 @@ def build_dashboard(window_days: int = 7) -> dict:
 
     # Cache stats
     import archivist.retrieval.hot_cache as hot_cache
+
     cache = hot_cache.stats()
 
     conn.close()
@@ -138,7 +139,8 @@ def _qdrant_stats() -> dict:
 
 def _stale_estimate() -> dict:
     try:
-        from qdrant_client.models import Filter, FieldCondition, Range
+        from qdrant_client.models import FieldCondition, Filter, Range
+
         client = qdrant_client()
         now_ts = int(time.time())
 
@@ -153,7 +155,11 @@ def _stale_estimate() -> dict:
             count_filter=stale_filter,
             exact=False,
         ).count
-        return {"stale_count": stale_count, "total": total, "stale_pct": round(stale_count / total * 100, 1)}
+        return {
+            "stale_count": stale_count,
+            "total": total,
+            "stale_pct": round(stale_count / total * 100, 1),
+        }
     except Exception as e:
         return {"error": str(e), "stale_pct": 0}
 
@@ -220,8 +226,7 @@ def _skill_overview(conn, window_days: int) -> dict:
         event_counts = {row["outcome"]: row["cnt"] for row in cur2.fetchall()}
         total_events = sum(event_counts.values())
         success_rate = (
-            round(event_counts.get("success", 0) / total_events, 3)
-            if total_events > 0 else None
+            round(event_counts.get("success", 0) / total_events, 3) if total_events > 0 else None
         )
 
         return {
@@ -232,4 +237,9 @@ def _skill_overview(conn, window_days: int) -> dict:
             "skill_success_rate": success_rate,
         }
     except Exception:
-        return {"total_skills": 0, "degraded_count": 0, "events_in_window": 0, "skill_success_rate": None}
+        return {
+            "total_skills": 0,
+            "degraded_count": 0,
+            "events_in_window": 0,
+            "skill_success_rate": None,
+        }

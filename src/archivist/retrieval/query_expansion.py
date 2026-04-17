@@ -9,16 +9,16 @@ The expansion prompt is deliberately compact to keep latency low
 """
 
 import logging
-import time
 import threading
+import time
 from collections import OrderedDict
 
+import archivist.core.metrics as m
 from archivist.core.config import (
-    LLM_REFINE_MODEL,
     LLM_MODEL,
+    LLM_REFINE_MODEL,
 )
 from archivist.features.llm import llm_query
-import archivist.core.metrics as m
 
 logger = logging.getLogger("archivist.query_expansion")
 
@@ -105,7 +105,10 @@ async def expand_query(
         _cache_put(query, variants)
         logger.debug(
             "query_expansion count=%d dur_ms=%.1f original=%r variants=%r",
-            len(variants) - 1, dur_ms, query, cleaned[:count],
+            len(variants) - 1,
+            dur_ms,
+            query,
+            cleaned[:count],
         )
         return variants
 

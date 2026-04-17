@@ -1,8 +1,6 @@
 """MCP tool handlers — hot cache stats and invalidation."""
 
-import json
-
-from mcp.types import Tool, TextContent
+from mcp.types import TextContent, Tool
 
 import archivist.retrieval.hot_cache as hot_cache
 
@@ -23,15 +21,25 @@ TOOLS: list[Tool] = [
     ),
     Tool(
         name="archivist_cache_invalidate",
-        description=(
-            "Manually invalidate the hot cache. Useful after bulk writes or migrations."
-        ),
+        description=("Manually invalidate the hot cache. Useful after bulk writes or migrations."),
         inputSchema={
             "type": "object",
             "properties": {
-                "namespace": {"type": "string", "description": "Invalidate entries for this namespace (optional)", "default": ""},
-                "agent_id": {"type": "string", "description": "Invalidate entries for this agent (optional)", "default": ""},
-                "all": {"type": "boolean", "description": "Invalidate entire cache", "default": False},
+                "namespace": {
+                    "type": "string",
+                    "description": "Invalidate entries for this namespace (optional)",
+                    "default": "",
+                },
+                "agent_id": {
+                    "type": "string",
+                    "description": "Invalidate entries for this agent (optional)",
+                    "default": "",
+                },
+                "all": {
+                    "type": "boolean",
+                    "description": "Invalidate entire cache",
+                    "default": False,
+                },
             },
             "required": [],
         },

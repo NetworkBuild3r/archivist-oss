@@ -4,38 +4,48 @@ Phase 1 addition: hierarchical parent-child chunking for richer retrieval contex
 """
 
 import asyncio
+import hashlib
+import logging
 import os
 import re
 import uuid
-import hashlib
-import logging
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from qdrant_client.models import PointStruct, Filter, FieldCondition, MatchValue
+from qdrant_client.models import FieldCondition, Filter, MatchValue, PointStruct
 
-from archivist.core.config import (
-    QDRANT_COLLECTION, MEMORY_ROOT,
-    TEAM_MAP,
-    PARENT_CHUNK_SIZE, PARENT_CHUNK_OVERLAP,
-    CHILD_CHUNK_SIZE, CHILD_CHUNK_OVERLAP,
-    TIERED_CONTEXT_ENABLED,
-    BM25_ENABLED, TOPIC_ROUTING_ENABLED,
-    CONTEXTUAL_AUGMENTATION_ENABLED,
-    CHUNKING_STRATEGY,
-)
-from archivist.utils.chunking import chunk_text, chunk_text_hierarchical
-from archivist.features.embeddings import embed_batch
-from archivist.storage.graph import upsert_fts_chunk, delete_fts_chunks_by_file, upsert_entity, add_fact, register_needle_tokens, register_memory_points_batch
-from archivist.storage.qdrant import qdrant_client
-from archivist.core.rbac import get_namespace_for_agent, get_namespace_config
-from archivist.utils.text_utils import extract_agent_id_from_path, compute_memory_checksum
-from archivist.write.tiering import generate_tiers
-from archivist.retrieval.topic_detector import detect_topics
-from archivist.write.pre_extractor import pre_extract, extract_needle_entities
-from archivist.storage.collection_router import ensure_collection, collections_for_query
-from archivist.write.contextual_augment import augment_chunk
 import archivist.core.metrics as _metrics
+from archivist.core.config import (
+    BM25_ENABLED,
+    CHILD_CHUNK_OVERLAP,
+    CHILD_CHUNK_SIZE,
+    CHUNKING_STRATEGY,
+    CONTEXTUAL_AUGMENTATION_ENABLED,
+    MEMORY_ROOT,
+    PARENT_CHUNK_OVERLAP,
+    PARENT_CHUNK_SIZE,
+    TEAM_MAP,
+    TIERED_CONTEXT_ENABLED,
+    TOPIC_ROUTING_ENABLED,
+)
+from archivist.core.rbac import get_namespace_config, get_namespace_for_agent
+from archivist.features.embeddings import embed_batch
+from archivist.retrieval.topic_detector import detect_topics
+from archivist.storage.collection_router import collections_for_query, ensure_collection
+from archivist.storage.graph import (
+    add_fact,
+    delete_fts_chunks_by_file,
+    register_memory_points_batch,
+    register_needle_tokens,
+    upsert_entity,
+    upsert_fts_chunk,
+)
+from archivist.storage.qdrant import qdrant_client
+from archivist.utils.chunking import chunk_text, chunk_text_hierarchical
+from archivist.utils.text_utils import compute_memory_checksum, extract_agent_id_from_path
+from archivist.write.contextual_augment import augment_chunk
+from archivist.write.pre_extractor import extract_needle_entities, pre_extract
+from archivist.write.tiering import generate_tiers
 
 logger = logging.getLogger("archivist.indexer")
 
@@ -43,6 +53,7 @@ _DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
 
 
 # ── Metadata extraction ───────────────────────────────────────────────────────
+
 
 def _extract_metadata(filepath: str) -> dict:
     """Extract metadata from file path: agent_id, date, file_type, team, namespace."""
@@ -68,13 +79,13 @@ def _extract_metadata(filepath: str) -> dict:
         file_type = "daily"
     elif fname.upper() == "MEMORY":
         file_type = "durable"
-    elif "weekly" in str(filepath).lower() or fname.startswith("20") and "-W" in fname:
+    elif "weekly" in str(filepath).lower() or (fname.startswith("20") and "-W" in fname):
         file_type = "weekly"
     elif fname.upper() in ("IDENTITY", "SOUL", "TOOLS", "USER", "HEARTBEAT", "AGENTS"):
         file_type = "system"
 
     namespace = get_namespace_for_agent(agent_id) if agent_id else "default"
-    indexed_at = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    indexed_at = datetime.now(UTC).strftime("%Y-%m-%d")
 
     return {
         "agent_id": agent_id,
@@ -92,6 +103,7 @@ def _extract_metadata(filepath: str) -> dict:
 
 # ── Point ID generation ──────────────────────────────────────────────────────
 
+
 def _point_id(filepath: str, chunk_idx: int) -> str:
     """Deterministic UUID from file path + chunk index."""
     h = hashlib.md5(f"{filepath}:{chunk_idx}".encode()).hexdigest()
@@ -104,12 +116,13 @@ def compute_ttl(namespace: str, importance: float = 0.5) -> int | None:
         return None
     ns_config = get_namespace_config(namespace)
     if ns_config and ns_config.ttl_days is not None:
-        expires = datetime.now(timezone.utc) + timedelta(days=ns_config.ttl_days)
+        expires = datetime.now(UTC) + timedelta(days=ns_config.ttl_days)
         return int(expires.timestamp())
     return None
 
 
 # ── Indexing ──────────────────────────────────────────────────────────────────
+
 
 async def index_file(filepath: str, hierarchical: bool = True) -> int:
     """Index a single .md file into Qdrant. Returns number of points upserted.
@@ -120,7 +133,7 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
                       If False, use flat chunking.
     """
     try:
-        with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+        with open(filepath, encoding="utf-8", errors="replace") as f:
             text = f.read()
     except Exception as e:
         logger.warning("Failed to read %s: %s", filepath, e)
@@ -133,6 +146,7 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
 
     meta = _extract_metadata(filepath)
     from archivist.core.provenance import SourceTrace, default_confidence
+
     _indexer_confidence = default_confidence("system")
     _indexer_trace = SourceTrace(tool="file_indexer", upstream_source=filepath).to_dict()
     ns_config = get_namespace_config(meta["namespace"])
@@ -191,7 +205,9 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
         _hints_by_id: dict[str, dict] = {}
         for i, (chunk_meta, vec) in enumerate(zip(hier_chunks, vectors)):
             pid = chunk_meta["id"] if chunk_meta["id"] else _point_id(filepath, i)
-            checksum = compute_memory_checksum(chunk_meta["content"], meta["agent_id"], meta["namespace"])
+            checksum = compute_memory_checksum(
+                chunk_meta["content"], meta["agent_id"], meta["namespace"]
+            )
 
             tiers = tier_map.get(chunk_meta["id"], {})
             # Children inherit their parent's L0/L1 as context hint
@@ -202,7 +218,11 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
             if not chunk_meta["is_parent"] and chunk_meta["parent_id"]:
                 parent_text = _parent_text_map.get(chunk_meta["parent_id"], "")
 
-            topics = _chunk_topics[i] if _chunk_topics else (detect_topics(chunk_meta["content"]) if TOPIC_ROUTING_ENABLED else [])
+            topics = (
+                _chunk_topics[i]
+                if _chunk_topics
+                else (detect_topics(chunk_meta["content"]) if TOPIC_ROUTING_ENABLED else [])
+            )
             hints = _chunk_hints[i]
             _hints_by_id[pid] = hints
             payload = {
@@ -293,9 +313,13 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
             pid_str = str(p.id)
             parent = p.payload.get("parent_id")
             if parent:
-                _mp_records.append({"memory_id": parent, "qdrant_id": pid_str, "point_type": "micro_chunk"})
+                _mp_records.append(
+                    {"memory_id": parent, "qdrant_id": pid_str, "point_type": "micro_chunk"}
+                )
             else:
-                _mp_records.append({"memory_id": pid_str, "qdrant_id": pid_str, "point_type": "primary"})
+                _mp_records.append(
+                    {"memory_id": pid_str, "qdrant_id": pid_str, "point_type": "primary"}
+                )
         try:
             register_memory_points_batch(_mp_records)
         except Exception as _e:
@@ -332,16 +356,29 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
                 if ename and ename not in _seen_entity_names:
                     _seen_entity_names.add(ename)
                     etype = ent.get("type", "unknown")
-                    _eid = upsert_entity(ename, etype, namespace=_ns or "global",
-                                         actor_id=_actor_id, actor_type=_actor_type)
-                    add_fact(_eid, p.payload.get("text", "")[:200], _src_file, _agent,
-                             namespace=_ns or "global", memory_id=str(p.id),
-                             confidence=_indexer_confidence, provenance="file_indexer",
-                             actor_id=_actor_id)
+                    _eid = upsert_entity(
+                        ename,
+                        etype,
+                        namespace=_ns or "global",
+                        actor_id=_actor_id,
+                        actor_type=_actor_type,
+                    )
+                    add_fact(
+                        _eid,
+                        p.payload.get("text", "")[:200],
+                        _src_file,
+                        _agent,
+                        namespace=_ns or "global",
+                        memory_id=str(p.id),
+                        confidence=_indexer_confidence,
+                        provenance="file_indexer",
+                        actor_id=_actor_id,
+                    )
 
         for p in points:
             register_needle_tokens(
-                str(p.id), p.payload.get("text", ""),
+                str(p.id),
+                p.payload.get("text", ""),
                 namespace=meta.get("namespace", ""),
                 agent_id=_agent,
                 actor_id=_actor_id,
@@ -350,8 +387,10 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
 
         # Reverse HyDE: generate hypothetical questions for parent chunks (parallel)
         from archivist.core.config import REVERSE_HYDE_ENABLED
+
         if REVERSE_HYDE_ENABLED:
             from archivist.write.hyde import generate_reverse_hyde_questions
+
             _rh_semaphore = asyncio.Semaphore(3)
             _parent_points = [p for p in points if p.payload.get("is_parent", False)]
 
@@ -365,24 +404,26 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
                         result = []
                         for qi, (q, qv) in enumerate(zip(_rh_qs, _rh_vecs)):
                             _q_id = str(uuid.uuid4())
-                            result.append(PointStruct(
-                                id=_q_id,
-                                vector=qv,
-                                payload={
-                                    **meta,
-                                    "text": p.payload.get("text", ""),
-                                    "chunk_index": 0,
-                                    "file_type": "reverse_hyde",
-                                    "source_memory_id": str(p.id),
-                                    "is_reverse_hyde": True,
-                                    "reverse_hyde_question": q,
-                                    "parent_id": str(p.id),
-                                    "is_parent": False,
-                                    "importance_score": 0.5,
-                                    "retention_class": "standard",
-                                    "version": 1,
-                                },
-                            ))
+                            result.append(
+                                PointStruct(
+                                    id=_q_id,
+                                    vector=qv,
+                                    payload={
+                                        **meta,
+                                        "text": p.payload.get("text", ""),
+                                        "chunk_index": 0,
+                                        "file_type": "reverse_hyde",
+                                        "source_memory_id": str(p.id),
+                                        "is_reverse_hyde": True,
+                                        "reverse_hyde_question": q,
+                                        "parent_id": str(p.id),
+                                        "is_parent": False,
+                                        "importance_score": 0.5,
+                                        "retention_class": "standard",
+                                        "version": 1,
+                                    },
+                                )
+                            )
                         return result
                     except Exception as e:
                         logger.warning("Reverse HyDE failed for chunk %s: %s", p.id, e)
@@ -402,21 +443,25 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
                 client.upsert(collection_name=_coll, points=_rh_points)
                 _metrics.inc(_metrics.INDEX_CHUNKS, value=len(_rh_points))
                 try:
-                    register_memory_points_batch([
-                        {
-                            "memory_id": rp.payload.get("source_memory_id", str(rp.id)),
-                            "qdrant_id": str(rp.id),
-                            "point_type": "reverse_hyde",
-                        }
-                        for rp in _rh_points
-                    ])
+                    register_memory_points_batch(
+                        [
+                            {
+                                "memory_id": rp.payload.get("source_memory_id", str(rp.id)),
+                                "qdrant_id": str(rp.id),
+                                "point_type": "reverse_hyde",
+                            }
+                            for rp in _rh_points
+                        ]
+                    )
                 except Exception as _e:
                     logger.debug("indexer.register_memory_points (reverse_hyde) failed: %s", _e)
 
         # Synthetic question generation: multi-representation indexing
         import archivist.core.config as _cfg
+
         if _cfg.SYNTHETIC_QUESTIONS_ENABLED:
             from archivist.write.synthetic_questions import generate_and_embed_synthetic_points
+
             _sq_semaphore = asyncio.Semaphore(3)
             _parent_points_sq = [p for p in points if p.payload.get("is_parent", False)]
 
@@ -424,7 +469,8 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
                 async with _sq_semaphore:
                     try:
                         base_payload = {
-                            k: v for k, v in p.payload.items()
+                            k: v
+                            for k, v in p.payload.items()
                             if k not in ("text_augmented", "l0", "l1", "checksum")
                         }
                         return await generate_and_embed_synthetic_points(
@@ -450,21 +496,34 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
                 client.upsert(collection_name=_coll, points=_sq_points)
                 _metrics.inc(_metrics.INDEX_CHUNKS, value=len(_sq_points))
                 try:
-                    register_memory_points_batch([
-                        {
-                            "memory_id": sp.payload.get("source_memory_id", str(sp.id)),
-                            "qdrant_id": str(sp.id),
-                            "point_type": "synthetic_question",
-                        }
-                        for sp in _sq_points
-                    ])
+                    register_memory_points_batch(
+                        [
+                            {
+                                "memory_id": sp.payload.get("source_memory_id", str(sp.id)),
+                                "qdrant_id": str(sp.id),
+                                "point_type": "synthetic_question",
+                            }
+                            for sp in _sq_points
+                        ]
+                    )
                 except Exception as _e:
-                    logger.debug("indexer.register_memory_points (synthetic_questions) failed: %s", _e)
-                logger.info("Indexed %d synthetic question points for %s",
-                            len(_sq_points), meta["file_path"])
+                    logger.debug(
+                        "indexer.register_memory_points (synthetic_questions) failed: %s", _e
+                    )
+                logger.info(
+                    "Indexed %d synthetic question points for %s",
+                    len(_sq_points),
+                    meta["file_path"],
+                )
 
-        logger.info("Indexed %s: %d chunks (ns=%s, hierarchical=%s, fts=%s)",
-                     meta["file_path"], len(points), meta["namespace"], hierarchical, BM25_ENABLED)
+        logger.info(
+            "Indexed %s: %d chunks (ns=%s, hierarchical=%s, fts=%s)",
+            meta["file_path"],
+            len(points),
+            meta["namespace"],
+            hierarchical,
+            BM25_ENABLED,
+        )
 
     return len(points)
 

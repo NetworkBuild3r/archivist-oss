@@ -26,14 +26,16 @@ import hashlib
 import re
 
 NEEDLE_PATTERNS = [
-    re.compile(r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(?:/\d{1,2})?"),      # IP / CIDR
-    re.compile(r"(?:[\d*]+\s){4}[\d*]+"),                                    # cron expression
-    re.compile(r"[\d,]+\s*(?:MiB|GiB|KiB|TiB|ms|KB|MB|GB|TB|PB)\b"),       # numeric with units
-    re.compile(r"[A-Z]{2,}-\d{4,}"),                                         # employee / ticket IDs
-    re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}"),                        # datetime stamps
+    re.compile(r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(?:/\d{1,2})?"),  # IP / CIDR
+    re.compile(r"(?:[\d*]+\s){4}[\d*]+"),  # cron expression
+    re.compile(r"[\d,]+\s*(?:MiB|GiB|KiB|TiB|ms|KB|MB|GB|TB|PB)\b"),  # numeric with units
+    re.compile(r"[A-Z]{2,}-\d{4,}"),  # employee / ticket IDs
+    re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}"),  # datetime stamps
     re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I),  # UUID
-    re.compile(r"[A-Z_]{2,}=\S+"),                                           # key=value pairs
-    re.compile(r"(?:(?<=\s)|(?<=^)):\d{2,5}\b", re.MULTILINE),              # port numbers (require preceding whitespace)
+    re.compile(r"[A-Z_]{2,}=\S+"),  # key=value pairs
+    re.compile(
+        r"(?:(?<=\s)|(?<=^)):\d{2,5}\b", re.MULTILINE
+    ),  # port numbers (require preceding whitespace)
 ]
 
 _NEEDLE_MICRO_SIZE = 200
@@ -85,7 +87,7 @@ def chunk_text(text: str, size: int = 800, overlap: int = 100) -> list[str]:
         if len(current) + len(para) + 2 > size and current:
             chunks.append(current.strip())
             words = current.split()
-            overlap_words = words[-overlap // 4:] if len(words) > overlap // 4 else []
+            overlap_words = words[-overlap // 4 :] if len(words) > overlap // 4 else []
             current = " ".join(overlap_words) + "\n\n" + para
         else:
             current = current + "\n\n" + para if current else para
@@ -164,7 +166,7 @@ def _split_preserving_fences(text: str, size: int, overlap: int) -> list[str]:
         if current and len(current) + len(block) + 2 > size:
             chunks.append(current.strip())
             words = current.split()
-            overlap_words = words[-overlap // 4:] if len(words) > overlap // 4 else []
+            overlap_words = words[-overlap // 4 :] if len(words) > overlap // 4 else []
             current = " ".join(overlap_words) + "\n\n" + block if overlap_words else block
         else:
             current = current + "\n\n" + block if current else block
@@ -249,35 +251,42 @@ def chunk_text_hierarchical(
     for pi, parent in enumerate(parent_chunks):
         h = hashlib.md5(f"{filepath}\0{pi}\0{parent}".encode()).hexdigest()
         parent_id = f"{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:32]}"
-        result.append({
-            "id": parent_id,
-            "parent_id": None,
-            "content": parent,
-            "is_parent": True,
-        })
+        result.append(
+            {
+                "id": parent_id,
+                "parent_id": None,
+                "content": parent,
+                "is_parent": True,
+            }
+        )
 
         child_chunks = chunk_text(parent, size=child_size, overlap=child_overlap)
         for ci, child in enumerate(child_chunks):
             ch = hashlib.md5(f"{filepath}\0{pi}\0{ci}\0{child}".encode()).hexdigest()
             child_id = f"{ch[:8]}-{ch[8:12]}-{ch[12:16]}-{ch[16:20]}-{ch[20:32]}"
-            result.append({
-                "id": child_id,
-                "parent_id": parent_id,
-                "content": child,
-                "is_parent": False,
-            })
+            result.append(
+                {
+                    "id": child_id,
+                    "parent_id": parent_id,
+                    "content": child,
+                    "is_parent": False,
+                }
+            )
 
         micro_chunks = _extract_needle_micro_chunks(parent)
         from archivist.core.config import MAX_MICRO_CHUNKS_PER_MEMORY
+
         micro_chunks = micro_chunks[:MAX_MICRO_CHUNKS_PER_MEMORY]
         for mi, micro in enumerate(micro_chunks):
             mh = hashlib.md5(f"{filepath}\0{pi}\0needle\0{mi}\0{micro}".encode()).hexdigest()
             micro_id = f"{mh[:8]}-{mh[8:12]}-{mh[12:16]}-{mh[16:20]}-{mh[20:32]}"
-            result.append({
-                "id": micro_id,
-                "parent_id": parent_id,
-                "content": micro,
-                "is_parent": False,
-            })
+            result.append(
+                {
+                    "id": micro_id,
+                    "parent_id": parent_id,
+                    "content": micro,
+                    "is_parent": False,
+                }
+            )
 
     return result

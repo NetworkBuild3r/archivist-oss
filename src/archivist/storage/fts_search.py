@@ -6,38 +6,111 @@ v1.11: Non-stemmed exact table for identifier/IP token matching.
 
 import logging
 import re
-from archivist.core.config import BM25_ENABLED, BM25_WEIGHT, VECTOR_WEIGHT
-from archivist.storage.graph import search_fts, search_fts_exact
-from archivist.retrieval.rank_fusion import rrf_merge
+
 import archivist.core.health as health
+from archivist.core.config import BM25_ENABLED, BM25_WEIGHT
+from archivist.retrieval.rank_fusion import rrf_merge
+from archivist.storage.graph import search_fts, search_fts_exact
 
 logger = logging.getLogger("archivist.fts")
 
-_STOPWORDS = frozenset({
-    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
-    "have", "has", "had", "do", "does", "did", "will", "would", "shall",
-    "should", "may", "might", "must", "can", "could",
-    "i", "me", "my", "we", "our", "you", "your", "he", "she", "it",
-    "they", "them", "their", "this", "that", "these", "those",
-    "in", "on", "at", "to", "for", "of", "with", "by", "from", "as",
-    "into", "about", "between", "through", "after", "before",
-    "and", "or", "but", "not", "no", "nor", "so", "if", "then",
-    "what", "which", "who", "whom", "how", "when", "where", "why",
-    "all", "each", "every", "any", "some",
-})
+_STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "the",
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "being",
+        "have",
+        "has",
+        "had",
+        "do",
+        "does",
+        "did",
+        "will",
+        "would",
+        "shall",
+        "should",
+        "may",
+        "might",
+        "must",
+        "can",
+        "could",
+        "i",
+        "me",
+        "my",
+        "we",
+        "our",
+        "you",
+        "your",
+        "he",
+        "she",
+        "it",
+        "they",
+        "them",
+        "their",
+        "this",
+        "that",
+        "these",
+        "those",
+        "in",
+        "on",
+        "at",
+        "to",
+        "for",
+        "of",
+        "with",
+        "by",
+        "from",
+        "as",
+        "into",
+        "about",
+        "between",
+        "through",
+        "after",
+        "before",
+        "and",
+        "or",
+        "but",
+        "not",
+        "no",
+        "nor",
+        "so",
+        "if",
+        "then",
+        "what",
+        "which",
+        "who",
+        "whom",
+        "how",
+        "when",
+        "where",
+        "why",
+        "all",
+        "each",
+        "every",
+        "any",
+        "some",
+    }
+)
 
 _EXACT_TOKEN_RE = re.compile(
-    r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}"   # IP addresses
-    r"|[A-Z]{2,}-\d{4,}"                       # ticket/employee IDs
-    r"|[0-9a-f]{8}-[0-9a-f]{4}"                # UUID prefix
-    r"|:\d{2,5}\b"                              # port numbers
+    r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}"  # IP addresses
+    r"|[A-Z]{2,}-\d{4,}"  # ticket/employee IDs
+    r"|[0-9a-f]{8}-[0-9a-f]{4}"  # UUID prefix
+    r"|:\d{2,5}\b"  # port numbers
     r"|[\d,]+\s*(?:MiB|GiB|KiB|ms|KB|MB|GB)",  # numeric with units
     re.I,
 )
 
 
 def _clean_token(t: str) -> str:
-    return t.strip('"\'()[]{}*:!?,.')
+    return t.strip("\"'()[]{}*:!?,.")
 
 
 def _fts5_safe_query(raw_query: str) -> str:
@@ -105,8 +178,12 @@ def search_bm25(
     or_hits: list[dict] = []
     if or_q:
         or_hits = search_fts(
-            query=or_q, namespace=namespace, agent_id=agent_id,
-            memory_type=memory_type, limit=limit, actor_type=actor_type,
+            query=or_q,
+            namespace=namespace,
+            agent_id=agent_id,
+            memory_type=memory_type,
+            limit=limit,
+            actor_type=actor_type,
         )
         if or_hits:
             rankings.append(or_hits)
@@ -119,8 +196,12 @@ def search_bm25(
         if and_q:
             try:
                 and_hits = search_fts(
-                    query=and_q, namespace=namespace, agent_id=agent_id,
-                    memory_type=memory_type, limit=limit, actor_type=actor_type,
+                    query=and_q,
+                    namespace=namespace,
+                    agent_id=agent_id,
+                    memory_type=memory_type,
+                    limit=limit,
+                    actor_type=actor_type,
                 )
                 if and_hits:
                     rankings.append(and_hits)
@@ -131,8 +212,12 @@ def search_bm25(
         if phrase_q and phrase_q != and_q:
             try:
                 phrase_hits = search_fts(
-                    query=phrase_q, namespace=namespace, agent_id=agent_id,
-                    memory_type=memory_type, limit=limit, actor_type=actor_type,
+                    query=phrase_q,
+                    namespace=namespace,
+                    agent_id=agent_id,
+                    memory_type=memory_type,
+                    limit=limit,
+                    actor_type=actor_type,
                 )
                 if phrase_hits:
                     rankings.append(phrase_hits)
@@ -144,8 +229,12 @@ def search_bm25(
             if exact_q:
                 try:
                     exact_hits = search_fts_exact(
-                        query=exact_q, namespace=namespace, agent_id=agent_id,
-                        memory_type=memory_type, limit=limit, actor_type=actor_type,
+                        query=exact_q,
+                        namespace=namespace,
+                        agent_id=agent_id,
+                        memory_type=memory_type,
+                        limit=limit,
+                        actor_type=actor_type,
                     )
                     if exact_hits:
                         rankings.append(exact_hits)
@@ -158,8 +247,12 @@ def search_bm25(
             if exact_q:
                 try:
                     exact_hits = search_fts_exact(
-                        query=exact_q, namespace=namespace, agent_id=agent_id,
-                        memory_type=memory_type, limit=limit, actor_type=actor_type,
+                        query=exact_q,
+                        namespace=namespace,
+                        agent_id=agent_id,
+                        memory_type=memory_type,
+                        limit=limit,
+                        actor_type=actor_type,
                     )
                     if exact_hits:
                         rankings.append(exact_hits)

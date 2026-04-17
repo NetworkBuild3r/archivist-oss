@@ -9,16 +9,20 @@ import json
 import logging
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-from archivist.storage.graph import get_db, GRAPH_WRITE_LOCK, schema_guard
 import archivist.core.metrics as m
+from archivist.storage.graph import GRAPH_WRITE_LOCK, get_db, schema_guard
 
 logger = logging.getLogger("archivist.curator_queue")
 
 VALID_OP_TYPES = {
-    "merge_memory", "delete_memory", "consolidate_tips",
-    "update_hotness", "skip_store", "archive_memory",
+    "merge_memory",
+    "delete_memory",
+    "consolidate_tips",
+    "update_hotness",
+    "skip_store",
+    "archive_memory",
 }
 
 _ensure_schema = schema_guard("""
@@ -42,7 +46,7 @@ def enqueue(op_type: str, payload: dict) -> str:
         raise ValueError(f"Invalid op_type: {op_type}. Must be one of {VALID_OP_TYPES}")
 
     op_id = str(uuid.uuid4())
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
 
     with GRAPH_WRITE_LOCK:
         conn = get_db()
@@ -72,7 +76,7 @@ async def drain(limit: int = 50) -> list[dict]:
         ).fetchall()
         conn.close()
 
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
 
     for row in rows:
         op_id, op_type, payload_json = row
@@ -125,8 +129,8 @@ async def _apply_op(op_type: str, payload: dict):
 
 async def _apply_archive(payload: dict):
     """Set archived=true on all Qdrant points for each memory."""
-    from archivist.lifecycle.memory_lifecycle import archive_memory_complete
     from archivist.lifecycle.cascade import PartialDeletionError
+    from archivist.lifecycle.memory_lifecycle import archive_memory_complete
 
     memory_ids = payload.get("memory_ids", [])
     namespace = payload.get("namespace", "")
@@ -144,7 +148,7 @@ async def _apply_archive(payload: dict):
 
 def _apply_merge(payload: dict):
     """Merge memory content — delegates to the existing merge module."""
-    pass  # placeholder: full merge logic lives in merge.py
+    # placeholder: full merge logic lives in merge.py
 
 
 _last_pre_prune_snapshot: float = 0.0
@@ -166,6 +170,7 @@ def _maybe_pre_prune_snapshot() -> None:
     _last_pre_prune_snapshot = now
     try:
         from archivist.storage.backup_manager import create_snapshot, prune_snapshots
+
         create_snapshot(label="pre-prune")
         prune_snapshots()
         logger.info("Pre-prune backup snapshot created")
@@ -175,8 +180,8 @@ def _maybe_pre_prune_snapshot() -> None:
 
 async def _apply_delete(payload: dict):
     """Delete memories and ALL derived artifacts via the lifecycle module."""
-    from archivist.lifecycle.memory_lifecycle import delete_memory_complete
     from archivist.lifecycle.cascade import PartialDeletionError
+    from archivist.lifecycle.memory_lifecycle import delete_memory_complete
 
     memory_ids = payload.get("memory_ids", [])
     namespace = payload.get("namespace", "")
@@ -204,7 +209,7 @@ def _apply_consolidate_tips(payload: dict):
         try:
             if consolidated:
                 tip_id = str(uuid.uuid4())
-                now = datetime.now(timezone.utc).isoformat()
+                now = datetime.now(UTC).isoformat()
                 conn.execute(
                     "INSERT INTO tips (id, trajectory_id, agent_id, category, tip_text, context, negative_example, created_at) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -234,7 +239,7 @@ def _apply_consolidate_tips(payload: dict):
 def _apply_hotness(payload: dict):
     """Update hotness scores in the memory_hotness table."""
     scores = payload.get("scores", {})
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
 
     with GRAPH_WRITE_LOCK:
         conn = get_db()
@@ -243,8 +248,13 @@ def _apply_hotness(payload: dict):
                 conn.execute(
                     "INSERT OR REPLACE INTO memory_hotness (memory_id, score, retrieval_count, last_accessed, updated_at) "
                     "VALUES (?, ?, ?, ?, ?)",
-                    (memory_id, score, payload.get("counts", {}).get(memory_id, 0),
-                     payload.get("last_access", {}).get(memory_id, now), now),
+                    (
+                        memory_id,
+                        score,
+                        payload.get("counts", {}).get(memory_id, 0),
+                        payload.get("last_access", {}).get(memory_id, now),
+                        now,
+                    ),
                 )
             conn.commit()
         finally:
@@ -255,9 +265,7 @@ def stats() -> dict:
     """Return queue statistics."""
     _ensure_schema()
     conn = get_db()
-    rows = conn.execute(
-        "SELECT status, COUNT(*) FROM curator_queue GROUP BY status"
-    ).fetchall()
+    rows = conn.execute("SELECT status, COUNT(*) FROM curator_queue GROUP BY status").fetchall()
     conn.close()
 
     counts = {row[0]: row[1] for row in rows}

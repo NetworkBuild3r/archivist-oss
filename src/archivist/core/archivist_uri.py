@@ -17,7 +17,7 @@ Examples:
 
 import re
 from dataclasses import dataclass
-from urllib.parse import quote, unquote, urlencode, parse_qs
+from urllib.parse import parse_qs, quote, unquote, urlencode
 
 
 @dataclass
@@ -72,16 +72,32 @@ def parse_uri(uri: str) -> ArchivistURI | None:
 
 
 def memory_uri(namespace: str, point_id: str, **params) -> str:
-    return str(ArchivistURI(namespace=namespace, resource_type="memory", resource_id=point_id, params=params))
+    return str(
+        ArchivistURI(
+            namespace=namespace, resource_type="memory", resource_id=point_id, params=params
+        )
+    )
 
 
 def entity_uri(namespace: str, entity_id: str | int, **params) -> str:
-    return str(ArchivistURI(namespace=namespace, resource_type="entity", resource_id=str(entity_id), params=params))
+    return str(
+        ArchivistURI(
+            namespace=namespace, resource_type="entity", resource_id=str(entity_id), params=params
+        )
+    )
 
 
 def namespace_uri(namespace: str, **params) -> str:
-    return str(ArchivistURI(namespace=namespace, resource_type="namespace", resource_id=namespace, params=params))
+    return str(
+        ArchivistURI(
+            namespace=namespace, resource_type="namespace", resource_id=namespace, params=params
+        )
+    )
 
 
 def skill_uri(namespace: str, skill_id: str, **params) -> str:
-    return str(ArchivistURI(namespace=namespace, resource_type="skill", resource_id=skill_id, params=params))
+    return str(
+        ArchivistURI(
+            namespace=namespace, resource_type="skill", resource_id=skill_id, params=params
+        )
+    )

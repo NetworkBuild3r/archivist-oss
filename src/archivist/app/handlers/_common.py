@@ -47,7 +47,12 @@ def require_caller(caller: str) -> list[TextContent] | None:
     active (so callers can do ``if err := require_caller(caller): return err``).
     """
     if not is_permissive_mode() and not caller:
-        return error_response({"error": "caller_required", "reason": "caller_agent_id is required in strict RBAC mode"})
+        return error_response(
+            {
+                "error": "caller_required",
+                "reason": "caller_agent_id is required in strict RBAC mode",
+            }
+        )
     return None
 
 

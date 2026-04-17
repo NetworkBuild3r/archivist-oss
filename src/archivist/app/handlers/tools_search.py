@@ -1,18 +1,32 @@
 """MCP tool handlers — core search and retrieval."""
 
-from mcp.types import Tool, TextContent
+from datetime import UTC
 
-from archivist.retrieval.rlm_retriever import recursive_retrieve, search_vectors
-from archivist.storage.graph import search_entities, get_entity_facts, get_entity_relationships, add_entity_alias
-from archivist.storage.compressed_index import build_namespace_index, get_cached_wake_up, cache_wake_up, format_wake_up_text
-from archivist.storage.graph_retrieval import detect_contradictions, get_entity_brief
-from archivist.core.rbac import (
-    get_namespace_for_agent, filter_agents_for_read,
-    can_read_agent_memory, is_permissive_mode,
-)
+from mcp.types import TextContent, Tool
+
 from archivist.core.archivist_uri import memory_uri
+from archivist.core.rbac import (
+    can_read_agent_memory,
+    filter_agents_for_read,
+    get_namespace_for_agent,
+    is_permissive_mode,
+)
+from archivist.retrieval.rlm_retriever import recursive_retrieve, search_vectors
+from archivist.storage.compressed_index import (
+    build_namespace_index,
+    cache_wake_up,
+    format_wake_up_text,
+    get_cached_wake_up,
+)
+from archivist.storage.graph import (
+    add_entity_alias,
+    get_entity_facts,
+    get_entity_relationships,
+    search_entities,
+)
+from archivist.storage.graph_retrieval import detect_contradictions, get_entity_brief
 
-from ._common import _rbac_gate, error_response, success_response, resolve_caller, require_caller
+from ._common import _rbac_gate, error_response, require_caller, resolve_caller, success_response
 
 # ---------------------------------------------------------------------------
 # Tool definitions
@@ -31,7 +45,11 @@ TOOLS: list[Tool] = [
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "The search query"},
-                "agent_id": {"type": "string", "description": "Filter to one agent's memories (optional)", "default": ""},
+                "agent_id": {
+                    "type": "string",
+                    "description": "Filter to one agent's memories (optional)",
+                    "default": "",
+                },
                 "agent_ids": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -41,10 +59,26 @@ TOOLS: list[Tool] = [
                     "type": "string",
                     "description": "Identity of the invoking agent — used for RBAC when reading others' namespaces. Defaults to agent_id if set.",
                 },
-                "namespace": {"type": "string", "description": "Memory namespace to search (optional, auto-detect from agent_id)", "default": ""},
-                "team": {"type": "string", "description": "Filter by team (optional)", "default": ""},
-                "refine": {"type": "boolean", "description": "Use LLM refinement for higher quality (slower). Default false.", "default": False},
-                "limit": {"type": "integer", "description": "Max chunks to refine/synthesize after retrieval", "default": 20},
+                "namespace": {
+                    "type": "string",
+                    "description": "Memory namespace to search (optional, auto-detect from agent_id)",
+                    "default": "",
+                },
+                "team": {
+                    "type": "string",
+                    "description": "Filter by team (optional)",
+                    "default": "",
+                },
+                "refine": {
+                    "type": "boolean",
+                    "description": "Use LLM refinement for higher quality (slower). Default false.",
+                    "default": False,
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max chunks to refine/synthesize after retrieval",
+                    "default": 20,
+                },
                 "min_score": {
                     "type": "number",
                     "description": "Minimum vector similarity (0–1). Overrides RETRIEVAL_THRESHOLD for this call; omit to use env default. Use 0 to disable filtering.",
@@ -55,8 +89,16 @@ TOOLS: list[Tool] = [
                     "description": "Context tier: l0 (abstract ~100 tokens), l1 (overview ~500 tokens), l2 (full detail). Default l2.",
                     "default": "l2",
                 },
-                "date_from": {"type": "string", "description": "ISO date lower bound (inclusive), e.g. 2026-01-01", "default": ""},
-                "date_to": {"type": "string", "description": "ISO date upper bound (inclusive)", "default": ""},
+                "date_from": {
+                    "type": "string",
+                    "description": "ISO date lower bound (inclusive), e.g. 2026-01-01",
+                    "default": "",
+                },
+                "date_to": {
+                    "type": "string",
+                    "description": "ISO date upper bound (inclusive)",
+                    "default": "",
+                },
                 "max_tokens": {
                     "type": "integer",
                     "description": "Approximate token budget for context returned (caps chunk count). Omit for unlimited.",
@@ -88,18 +130,30 @@ TOOLS: list[Tool] = [
             "type": "object",
             "properties": {
                 "entity": {"type": "string", "description": "Entity name to look up"},
-                "related_to": {"type": "string", "description": "Optional second entity to find connections", "default": ""},
+                "related_to": {
+                    "type": "string",
+                    "description": "Optional second entity to find connections",
+                    "default": "",
+                },
                 "as_of": {
                     "type": "string",
                     "description": "ISO date (YYYY-MM-DD) — only return facts valid at this date. Omit for current facts.",
                     "default": "",
                 },
-                "agent_id": {"type": "string", "description": "Calling agent for RBAC (optional)", "default": ""},
+                "agent_id": {
+                    "type": "string",
+                    "description": "Calling agent for RBAC (optional)",
+                    "default": "",
+                },
                 "caller_agent_id": {
                     "type": "string",
                     "description": "Identity for read access checks (defaults to agent_id). Required when RBAC namespaces are configured.",
                 },
-                "namespace": {"type": "string", "description": "Memory namespace scope (optional)", "default": ""},
+                "namespace": {
+                    "type": "string",
+                    "description": "Memory namespace scope (optional)",
+                    "default": "",
+                },
             },
             "required": ["entity"],
         },
@@ -115,13 +169,25 @@ TOOLS: list[Tool] = [
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "Topic to build timeline for"},
-                "agent_id": {"type": "string", "description": "Filter to specific agent (optional)", "default": ""},
+                "agent_id": {
+                    "type": "string",
+                    "description": "Filter to specific agent (optional)",
+                    "default": "",
+                },
                 "caller_agent_id": {
                     "type": "string",
                     "description": "Invoker identity for RBAC (defaults to agent_id when set).",
                 },
-                "namespace": {"type": "string", "description": "Memory namespace to search (optional)", "default": ""},
-                "days": {"type": "integer", "description": "How many days back to search", "default": 14},
+                "namespace": {
+                    "type": "string",
+                    "description": "Memory namespace to search (optional)",
+                    "default": "",
+                },
+                "days": {
+                    "type": "integer",
+                    "description": "How many days back to search",
+                    "default": 14,
+                },
                 "as_of": {
                     "type": "string",
                     "description": "ISO date (YYYY-MM-DD) — anchor the timeline to this date for entity facts. Omit for current.",
@@ -141,13 +207,25 @@ TOOLS: list[Tool] = [
             "type": "object",
             "properties": {
                 "topic": {"type": "string", "description": "Topic to get insights on"},
-                "agent_id": {"type": "string", "description": "Calling agent for RBAC (optional)", "default": ""},
+                "agent_id": {
+                    "type": "string",
+                    "description": "Calling agent for RBAC (optional)",
+                    "default": "",
+                },
                 "caller_agent_id": {
                     "type": "string",
                     "description": "Invoker identity for RBAC when reading cross-agent insights (defaults to agent_id).",
                 },
-                "namespace": {"type": "string", "description": "Namespace scope (optional)", "default": ""},
-                "limit": {"type": "integer", "description": "Max insights to return", "default": 10},
+                "namespace": {
+                    "type": "string",
+                    "description": "Namespace scope (optional)",
+                    "default": "",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max insights to return",
+                    "default": 10,
+                },
             },
             "required": ["topic"],
         },
@@ -162,7 +240,11 @@ TOOLS: list[Tool] = [
             "type": "object",
             "properties": {
                 "memory_id": {"type": "string", "description": "Qdrant point ID to retrieve"},
-                "agent_id": {"type": "string", "description": "Calling agent for RBAC", "default": ""},
+                "agent_id": {
+                    "type": "string",
+                    "description": "Calling agent for RBAC",
+                    "default": "",
+                },
             },
             "required": ["memory_id"],
         },
@@ -177,8 +259,15 @@ TOOLS: list[Tool] = [
         inputSchema={
             "type": "object",
             "properties": {
-                "agent_id": {"type": "string", "description": "Calling agent for RBAC and default namespace resolution"},
-                "namespace": {"type": "string", "description": "Namespace to index (default: auto-detect)", "default": ""},
+                "agent_id": {
+                    "type": "string",
+                    "description": "Calling agent for RBAC and default namespace resolution",
+                },
+                "namespace": {
+                    "type": "string",
+                    "description": "Namespace to index (default: auto-detect)",
+                    "default": "",
+                },
             },
             "required": ["agent_id"],
         },
@@ -192,8 +281,15 @@ TOOLS: list[Tool] = [
         inputSchema={
             "type": "object",
             "properties": {
-                "entity": {"type": "string", "description": "Entity name to check for contradictions"},
-                "agent_id": {"type": "string", "description": "Calling agent for RBAC", "default": ""},
+                "entity": {
+                    "type": "string",
+                    "description": "Entity name to check for contradictions",
+                },
+                "agent_id": {
+                    "type": "string",
+                    "description": "Calling agent for RBAC",
+                    "default": "",
+                },
             },
             "required": ["entity"],
         },
@@ -221,7 +317,11 @@ TOOLS: list[Tool] = [
                     "description": "ISO date (YYYY-MM-DD) — only return facts valid at this date. Omit for current facts.",
                     "default": "",
                 },
-                "agent_id": {"type": "string", "description": "Calling agent for RBAC", "default": ""},
+                "agent_id": {
+                    "type": "string",
+                    "description": "Calling agent for RBAC",
+                    "default": "",
+                },
                 "caller_agent_id": {
                     "type": "string",
                     "description": "Invoker identity for RBAC (defaults to agent_id).",
@@ -240,8 +340,15 @@ TOOLS: list[Tool] = [
         inputSchema={
             "type": "object",
             "properties": {
-                "agent_id": {"type": "string", "description": "Agent identity for namespace resolution and fact scoping"},
-                "namespace": {"type": "string", "description": "Namespace to load (default: auto-detect from agent_id)", "default": ""},
+                "agent_id": {
+                    "type": "string",
+                    "description": "Agent identity for namespace resolution and fact scoping",
+                },
+                "namespace": {
+                    "type": "string",
+                    "description": "Namespace to load (default: auto-detect from agent_id)",
+                    "default": "",
+                },
             },
             "required": ["agent_id"],
         },
@@ -287,22 +394,26 @@ async def _handle_search(arguments: dict) -> list[TextContent]:
     if agent_ids:
         allowed, denied_list = filter_agents_for_read(caller, agent_ids)
         if not allowed:
-            return error_response({
-                "error": "access_denied",
-                "reason": "Caller cannot read any of the requested agents' namespaces",
-                "denied_agents": denied_list,
-                "caller_agent_id": caller,
-            })
+            return error_response(
+                {
+                    "error": "access_denied",
+                    "reason": "Caller cannot read any of the requested agents' namespaces",
+                    "denied_agents": denied_list,
+                    "caller_agent_id": caller,
+                }
+            )
         agent_ids = allowed
     elif agent_id:
         allowed, denied_list = filter_agents_for_read(caller, [agent_id])
         if not allowed:
-            return error_response({
-                "error": "access_denied",
-                "reason": f"Cannot read memories for agent '{agent_id}'",
-                "denied_agents": denied_list,
-                "caller_agent_id": caller,
-            })
+            return error_response(
+                {
+                    "error": "access_denied",
+                    "reason": f"Cannot read memories for agent '{agent_id}'",
+                    "denied_agents": denied_list,
+                    "caller_agent_id": caller,
+                }
+            )
 
     min_score = arguments.get("min_score")
     threshold = float(min_score) if min_score is not None else None
@@ -366,7 +477,8 @@ async def _handle_recall(arguments: dict) -> list[TextContent]:
             result["related_entity"] = rel_entities[0]
             result["related_facts"] = rel_facts[:10]
             shared = [
-                r for r in rels
+                r
+                for r in rels
                 if r["target_entity_id"] == rel_eid or r["source_entity_id"] == rel_eid
             ]
             result["shared_relationships"] = shared
@@ -375,7 +487,7 @@ async def _handle_recall(arguments: dict) -> list[TextContent]:
 
 
 async def _handle_timeline(arguments: dict) -> list[TextContent]:
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
     query = arguments["query"]
     agent_id = arguments.get("agent_id", "")
@@ -394,24 +506,30 @@ async def _handle_timeline(arguments: dict) -> list[TextContent]:
     if agent_id:
         allowed, denied_list = filter_agents_for_read(caller, [agent_id])
         if not allowed:
-            return error_response({
-                "error": "access_denied",
-                "reason": "Caller cannot read this agent's memories",
-                "denied_agents": denied_list,
-            })
+            return error_response(
+                {
+                    "error": "access_denied",
+                    "reason": "Caller cannot read this agent's memories",
+                    "denied_agents": denied_list,
+                }
+            )
 
     if as_of:
-        anchor = datetime.strptime(as_of, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        anchor = datetime.strptime(as_of, "%Y-%m-%d").replace(tzinfo=UTC)
         date_to = as_of
         date_from = (anchor - timedelta(days=days)).strftime("%Y-%m-%d") if days > 0 else ""
     else:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         date_to = ""
         date_from = (now - timedelta(days=days)).strftime("%Y-%m-%d") if days > 0 else ""
 
     results = await search_vectors(
-        query, agent_id=agent_id, namespace=namespace,
-        date_from=date_from, date_to=date_to, limit=50,
+        query,
+        agent_id=agent_id,
+        namespace=namespace,
+        date_from=date_from,
+        date_to=date_to,
+        limit=50,
     )
     results = [r for r in results if can_read_agent_memory(caller, r.get("agent_id", ""))]
     results.sort(key=lambda x: x.get("date", ""))
@@ -455,23 +573,27 @@ async def _handle_insights(arguments: dict) -> list[TextContent]:
         if key not in agents_seen:
             agents_seen.add(key)
             teams_seen.add(r["team"])
-            insights.append({
-                "agent": r["agent_id"],
-                "team": r["team"],
-                "date": r["date"],
-                "namespace": r.get("namespace", ""),
-                "text": r["text"][:500],
-                "source": r["file_path"],
-                "score": r["score"],
-            })
+            insights.append(
+                {
+                    "agent": r["agent_id"],
+                    "team": r["team"],
+                    "date": r["date"],
+                    "namespace": r.get("namespace", ""),
+                    "text": r["text"][:500],
+                    "source": r["file_path"],
+                    "score": r["score"],
+                }
+            )
         if len(insights) >= limit:
             break
 
-    return success_response({
-        "topic": topic,
-        "teams_represented": list(teams_seen),
-        "insights": insights,
-    })
+    return success_response(
+        {
+            "topic": topic,
+            "teams_represented": list(teams_seen),
+            "insights": insights,
+        }
+    )
 
 
 async def _handle_deref(arguments: dict) -> list[TextContent]:
@@ -505,23 +627,25 @@ async def _handle_deref(arguments: dict) -> list[TextContent]:
             if denied:
                 return [TextContent(type="text", text=denied)]
 
-    return success_response({
-        "memory_id": str(p.id),
-        "uri": memory_uri(payload.get("namespace", ""), str(p.id)),
-        "text": payload.get("text", ""),
-        "l0": payload.get("l0", ""),
-        "l1": payload.get("l1", ""),
-        "agent_id": payload.get("agent_id", ""),
-        "namespace": payload.get("namespace", ""),
-        "file_path": payload.get("file_path", ""),
-        "file_type": payload.get("file_type", ""),
-        "date": payload.get("date", ""),
-        "parent_id": payload.get("parent_id"),
-        "is_parent": payload.get("is_parent", False),
-        "importance_score": payload.get("importance_score", 0.5),
-        "retention_class": payload.get("retention_class", "standard"),
-        "version": payload.get("version", 1),
-    })
+    return success_response(
+        {
+            "memory_id": str(p.id),
+            "uri": memory_uri(payload.get("namespace", ""), str(p.id)),
+            "text": payload.get("text", ""),
+            "l0": payload.get("l0", ""),
+            "l1": payload.get("l1", ""),
+            "agent_id": payload.get("agent_id", ""),
+            "namespace": payload.get("namespace", ""),
+            "file_path": payload.get("file_path", ""),
+            "file_type": payload.get("file_type", ""),
+            "date": payload.get("date", ""),
+            "parent_id": payload.get("parent_id"),
+            "is_parent": payload.get("is_parent", False),
+            "importance_score": payload.get("importance_score", 0.5),
+            "retention_class": payload.get("retention_class", "standard"),
+            "version": payload.get("version", 1),
+        }
+    )
 
 
 async def _handle_index(arguments: dict) -> list[TextContent]:
@@ -548,21 +672,25 @@ async def _handle_contradictions(arguments: dict) -> list[TextContent]:
 
     entities = search_entities(entity_name, limit=1, namespace=namespace)
     if not entities:
-        return success_response({
-            "entity": entity_name,
-            "contradictions": [],
-            "note": "Entity not found in knowledge graph",
-        })
+        return success_response(
+            {
+                "entity": entity_name,
+                "contradictions": [],
+                "note": "Entity not found in knowledge graph",
+            }
+        )
 
     eid = entities[0]["id"]
     contradictions = detect_contradictions(eid)
 
-    return success_response({
-        "entity": entity_name,
-        "entity_id": eid,
-        "contradictions": contradictions,
-        "count": len(contradictions),
-    })
+    return success_response(
+        {
+            "entity": entity_name,
+            "entity_id": eid,
+            "contradictions": contradictions,
+            "count": len(contradictions),
+        }
+    )
 
 
 async def _handle_entity_brief(arguments: dict) -> list[TextContent]:
@@ -576,10 +704,12 @@ async def _handle_entity_brief(arguments: dict) -> list[TextContent]:
 
     entities = search_entities(entity_name, limit=1, namespace=namespace)
     if not entities:
-        return error_response({
-            "error": f"Entity '{entity_name}' not found in knowledge graph",
-            "hint": "Use archivist_recall or archivist_search first to discover entities.",
-        })
+        return error_response(
+            {
+                "error": f"Entity '{entity_name}' not found in knowledge graph",
+                "hint": "Use archivist_recall or archivist_search first to discover entities.",
+            }
+        )
 
     eid = entities[0]["id"]
 
@@ -592,8 +722,7 @@ async def _handle_entity_brief(arguments: dict) -> list[TextContent]:
 
     if caller and not is_permissive_mode():
         brief["facts"] = [
-            f for f in brief["facts"]
-            if can_read_agent_memory(caller, f.get("agent_id", ""))
+            f for f in brief["facts"] if can_read_agent_memory(caller, f.get("agent_id", ""))
         ]
         brief["fact_count"] = len(brief["facts"])
 

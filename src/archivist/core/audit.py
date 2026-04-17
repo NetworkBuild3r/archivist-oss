@@ -1,12 +1,11 @@
 """Immutable audit logging for all memory operations."""
 
-import hashlib
-import logging
 import json
+import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-from archivist.storage.graph import get_db, GRAPH_WRITE_LOCK, schema_guard
+from archivist.storage.graph import GRAPH_WRITE_LOCK, get_db, schema_guard
 
 logger = logging.getLogger("archivist.audit")
 
@@ -41,7 +40,7 @@ async def log_memory_event(
     """Append an immutable entry to the audit log."""
     _ensure_audit_schema()
     entry_id = str(uuid.uuid4())
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     meta_json = json.dumps(metadata or {})
 
     with GRAPH_WRITE_LOCK:
@@ -50,7 +49,17 @@ async def log_memory_event(
             conn.execute(
                 """INSERT INTO audit_log (id, timestamp, agent_id, action, memory_id, namespace, text_hash, version, metadata)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (entry_id, now, agent_id, action, memory_id, namespace, text_hash, version, meta_json),
+                (
+                    entry_id,
+                    now,
+                    agent_id,
+                    action,
+                    memory_id,
+                    namespace,
+                    text_hash,
+                    version,
+                    meta_json,
+                ),
             )
             conn.commit()
         except Exception as e:

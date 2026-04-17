@@ -74,4 +74,4 @@ def strip_augmentation_header(text: str) -> str:
     idx = text.find(sep)
     if idx == -1:
         return text
-    return text[idx + len(sep):]
+    return text[idx + len(sep) :]

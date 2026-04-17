@@ -10,18 +10,14 @@ Also covers the auth middleware OpenClaw placeholder acceptance.
 from contextlib import asynccontextmanager
 
 import pytest
-from starlette.routing import Route, Mount
+from starlette.routing import Mount, Route
 
 
 def test_app_registers_streamable_http_route():
     import main
 
     route = next(
-        (
-            route
-            for route in main.app.routes
-            if isinstance(route, Route) and route.path == "/mcp"
-        ),
+        (route for route in main.app.routes if isinstance(route, Route) and route.path == "/mcp"),
         None,
     )
 
@@ -164,8 +160,8 @@ def test_sse_transport_is_not_none_when_enabled():
 @pytest.mark.asyncio
 async def test_auth_middleware_accepts_actual_key(monkeypatch):
     """Standard Bearer token with the actual key must be accepted."""
+
     import main
-    from starlette.testclient import TestClient
 
     monkeypatch.setattr(main, "ARCHIVIST_API_KEY", "correct-key", raising=False)
     monkeypatch.setattr("main.ARCHIVIST_API_KEY", "correct-key", raising=False)
@@ -177,10 +173,9 @@ async def test_auth_middleware_accepts_actual_key(monkeypatch):
     async def call_next(req):
         accepted["called"] = True
         from starlette.responses import JSONResponse
+
         return JSONResponse({"ok": True})
 
-    from starlette.testclient import TestClient
-    from starlette.datastructures import Headers
     from starlette.requests import Request
 
     scope = {
@@ -202,8 +197,8 @@ async def test_auth_middleware_accepts_actual_key(monkeypatch):
 @pytest.mark.asyncio
 async def test_auth_middleware_accepts_openclaw_placeholder(monkeypatch):
     """OpenClaw compatibility: literal 'Bearer ${ARCHIVIST_API_KEY}' must be accepted with a warning."""
+
     import main
-    import logging
 
     monkeypatch.setattr(main, "ARCHIVIST_API_KEY", "some-secret-key", raising=False)
 
@@ -213,6 +208,7 @@ async def test_auth_middleware_accepts_openclaw_placeholder(monkeypatch):
     async def call_next(req):
         accepted["called"] = True
         from starlette.responses import JSONResponse
+
         return JSONResponse({"ok": True})
 
     from starlette.requests import Request
@@ -250,6 +246,7 @@ async def test_auth_middleware_rejects_unknown_token(monkeypatch):
     async def call_next(req):
         rejected["called"] = True
         from starlette.responses import JSONResponse
+
         return JSONResponse({"ok": True})
 
     from starlette.requests import Request

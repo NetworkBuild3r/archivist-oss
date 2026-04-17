@@ -1,7 +1,5 @@
 """Tests for RBAC — check_access, namespace resolution, filtering."""
 
-import pytest
-
 
 class TestCheckAccess:
     def test_read_own_namespace(self, rbac_config):
@@ -108,6 +106,7 @@ class TestPermissiveMode:
 
     def test_permissive_when_config_missing(self, tmp_path, monkeypatch):
         import rbac
+
         rbac._config = None
         rbac._permissive_fallback = False
         rbac.load_config(str(tmp_path / "missing.yaml"))

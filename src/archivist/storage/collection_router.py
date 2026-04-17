@@ -20,12 +20,12 @@ import logging
 import threading
 
 from archivist.core.config import (
-    QDRANT_COLLECTION,
-    VECTOR_DIM,
     NAMESPACE_SHARDING_ENABLED,
-    SINGLE_COLLECTION_MODE,
-    QDRANT_HNSW_M,
+    QDRANT_COLLECTION,
     QDRANT_HNSW_EF_CONSTRUCT,
+    QDRANT_HNSW_M,
+    SINGLE_COLLECTION_MODE,
+    VECTOR_DIM,
 )
 from archivist.storage.qdrant import qdrant_client
 
@@ -83,7 +83,7 @@ def ensure_collection(namespace: str) -> str:
         return QDRANT_COLLECTION
 
     if name not in existing:
-        from qdrant_client.models import VectorParams, Distance, HnswConfigDiff, PayloadSchemaType
+        from qdrant_client.models import Distance, HnswConfigDiff, PayloadSchemaType, VectorParams
 
         try:
             client.create_collection(
@@ -115,7 +115,9 @@ def ensure_collection(namespace: str) -> str:
                 ("actor_type", PayloadSchemaType.KEYWORD),
             ]:
                 client.create_payload_index(
-                    collection_name=name, field_name=field, field_schema=schema,
+                    collection_name=name,
+                    field_name=field,
+                    field_schema=schema,
                 )
             logger.info("Created shard collection '%s' for namespace '%s'", name, namespace)
         except Exception as e:
@@ -124,7 +126,9 @@ def ensure_collection(namespace: str) -> str:
 
     with _known_lock:
         if len(_known_collections) >= _MAX_KNOWN_COLLECTIONS:
-            logger.warning("Known collections set at cap (%d) — not adding '%s'", _MAX_KNOWN_COLLECTIONS, name)
+            logger.warning(
+                "Known collections set at cap (%d) — not adding '%s'", _MAX_KNOWN_COLLECTIONS, name
+            )
         else:
             _known_collections.add(name)
             _known_collections.add(QDRANT_COLLECTION)

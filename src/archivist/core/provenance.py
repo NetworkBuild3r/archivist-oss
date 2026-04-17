@@ -76,5 +76,6 @@ def default_confidence(actor_type: str, confidence_map: dict[str, float] | None 
     """
     if confidence_map is None:
         from archivist.core.config import DEFAULT_CONFIDENCE_BY_ACTOR_TYPE
+
         confidence_map = DEFAULT_CONFIDENCE_BY_ACTOR_TYPE
     return confidence_map.get(actor_type, confidence_map.get("agent", 0.8))

@@ -2,14 +2,14 @@
 
 import logging
 
-from mcp.types import Tool, TextContent
+from mcp.types import TextContent, Tool
 
+from archivist.app.dashboard import batch_heuristic, build_dashboard
 from archivist.core.rbac import get_namespace_for_agent, list_accessible_namespaces
-from archivist.features.skills import find_skill, get_skill_health, get_lessons
+from archivist.features.skills import find_skill, get_lessons, get_skill_health
 from archivist.retrieval.retrieval_log import get_retrieval_logs, get_retrieval_stats
-from archivist.app.dashboard import build_dashboard, batch_heuristic
 
-from ._common import _rbac_gate, error_response, success_response
+from ._common import error_response, success_response
 
 logger = logging.getLogger("archivist.mcp")
 
@@ -81,8 +81,16 @@ TOOLS: list[Tool] = [
             "type": "object",
             "properties": {
                 "agent_id": {"type": "string", "description": "Calling agent"},
-                "memory_id": {"type": "string", "description": "Specific memory ID to audit (optional)", "default": ""},
-                "target_agent": {"type": "string", "description": "Agent whose activity to view (optional)", "default": ""},
+                "memory_id": {
+                    "type": "string",
+                    "description": "Specific memory ID to audit (optional)",
+                    "default": "",
+                },
+                "target_agent": {
+                    "type": "string",
+                    "description": "Agent whose activity to view (optional)",
+                    "default": "",
+                },
                 "limit": {"type": "integer", "description": "Max entries to return", "default": 50},
             },
             "required": ["agent_id"],
@@ -107,8 +115,16 @@ TOOLS: list[Tool] = [
                         "archivist://shared/entity/42, archivist://agents-nova/skill/web_search"
                     ),
                 },
-                "agent_id": {"type": "string", "description": "Calling agent for RBAC", "default": ""},
-                "caller_agent_id": {"type": "string", "description": "Original caller agent (overrides agent_id for RBAC)", "default": ""},
+                "agent_id": {
+                    "type": "string",
+                    "description": "Calling agent for RBAC",
+                    "default": "",
+                },
+                "caller_agent_id": {
+                    "type": "string",
+                    "description": "Original caller agent (overrides agent_id for RBAC)",
+                    "default": "",
+                },
             },
             "required": ["uri"],
         },
@@ -122,15 +138,27 @@ TOOLS: list[Tool] = [
         inputSchema={
             "type": "object",
             "properties": {
-                "agent_id": {"type": "string", "description": "Filter by agent (optional)", "default": ""},
+                "agent_id": {
+                    "type": "string",
+                    "description": "Filter by agent (optional)",
+                    "default": "",
+                },
                 "limit": {"type": "integer", "description": "Max entries", "default": 20},
-                "since": {"type": "string", "description": "ISO datetime lower bound (optional)", "default": ""},
+                "since": {
+                    "type": "string",
+                    "description": "ISO datetime lower bound (optional)",
+                    "default": "",
+                },
                 "stats_only": {
                     "type": "boolean",
                     "description": "Return aggregate stats instead of individual logs",
                     "default": False,
                 },
-                "window_days": {"type": "integer", "description": "Stats aggregation window (days)", "default": 7},
+                "window_days": {
+                    "type": "integer",
+                    "description": "Stats aggregation window (days)",
+                    "default": 7,
+                },
             },
             "required": [],
         },
@@ -144,7 +172,11 @@ TOOLS: list[Tool] = [
         inputSchema={
             "type": "object",
             "properties": {
-                "window_days": {"type": "integer", "description": "Analysis window in days", "default": 7},
+                "window_days": {
+                    "type": "integer",
+                    "description": "Analysis window in days",
+                    "default": 7,
+                },
             },
             "required": [],
         },
@@ -159,7 +191,11 @@ TOOLS: list[Tool] = [
         inputSchema={
             "type": "object",
             "properties": {
-                "window_days": {"type": "integer", "description": "Analysis window in days", "default": 7},
+                "window_days": {
+                    "type": "integer",
+                    "description": "Analysis window in days",
+                    "default": 7,
+                },
             },
             "required": [],
         },
@@ -226,8 +262,7 @@ async def _handle_context_check(arguments: dict) -> list[TextContent]:
 
     if messages:
         messages = [
-            m if isinstance(m, dict) else {"role": "user", "content": str(m)}
-            for m in messages
+            m if isinstance(m, dict) else {"role": "user", "content": str(m)} for m in messages
         ]
         reserve = arguments.get("reserve_from_tail", 2000)
         result = check_context(messages, budget, reserve_from_tail=reserve)
@@ -249,15 +284,17 @@ async def _handle_context_check(arguments: dict) -> list[TextContent]:
 async def _handle_namespaces(arguments: dict) -> list[TextContent]:
     agent_id = arguments["agent_id"]
     namespaces = list_accessible_namespaces(agent_id)
-    return success_response({
-        "agent_id": agent_id,
-        "default_namespace": get_namespace_for_agent(agent_id),
-        "accessible_namespaces": namespaces,
-    })
+    return success_response(
+        {
+            "agent_id": agent_id,
+            "default_namespace": get_namespace_for_agent(agent_id),
+            "accessible_namespaces": namespaces,
+        }
+    )
 
 
 async def _handle_audit_trail(arguments: dict) -> list[TextContent]:
-    from archivist.core.audit import get_audit_trail, get_agent_activity
+    from archivist.core.audit import get_agent_activity, get_audit_trail
 
     memory_id = arguments.get("memory_id", "")
     target_agent = arguments.get("target_agent", "")
@@ -281,36 +318,56 @@ async def _handle_resolve_uri(arguments: dict) -> list[TextContent]:
     uri = parse_uri(raw_uri)
     if not uri:
         parts = raw_uri.split("/")
-        diag = "URI must start with 'archivist://'" if not raw_uri.startswith("archivist://") else (
-            f"Could not parse resource_type from URI (got {len(parts)} segments, expected at least 5)"
+        diag = (
+            "URI must start with 'archivist://'"
+            if not raw_uri.startswith("archivist://")
+            else (
+                f"Could not parse resource_type from URI (got {len(parts)} segments, expected at least 5)"
+            )
         )
-        return error_response({
-            "error": "invalid_uri",
-            "uri": raw_uri,
-            "diagnostic": diag,
-            "expected_format": "archivist://{namespace}/{resource_type}/{resource_id}",
-            "valid_resource_types": ["memory", "entity", "namespace", "skill"],
-            "examples": [
-                "archivist://agents-nova/memory/abc123-def456",
-                "archivist://shared/entity/42",
-                "archivist://agents-nova/skill/web_search",
-            ],
-        })
+        return error_response(
+            {
+                "error": "invalid_uri",
+                "uri": raw_uri,
+                "diagnostic": diag,
+                "expected_format": "archivist://{namespace}/{resource_type}/{resource_id}",
+                "valid_resource_types": ["memory", "entity", "namespace", "skill"],
+                "examples": [
+                    "archivist://agents-nova/memory/abc123-def456",
+                    "archivist://shared/entity/42",
+                    "archivist://agents-nova/skill/web_search",
+                ],
+            }
+        )
 
     agent_id = arguments.get("agent_id", "")
     caller_agent_id = arguments.get("caller_agent_id", "")
 
     if uri.is_memory:
         from .tools_search import _handle_deref
-        return await _handle_deref({"memory_id": uri.resource_id, "agent_id": agent_id, "caller_agent_id": caller_agent_id})
+
+        return await _handle_deref(
+            {"memory_id": uri.resource_id, "agent_id": agent_id, "caller_agent_id": caller_agent_id}
+        )
 
     if uri.is_entity:
         from .tools_search import _handle_recall
-        return await _handle_recall({"entity": uri.resource_id, "agent_id": agent_id, "caller_agent_id": caller_agent_id, "namespace": uri.namespace})
+
+        return await _handle_recall(
+            {
+                "entity": uri.resource_id,
+                "agent_id": agent_id,
+                "caller_agent_id": caller_agent_id,
+                "namespace": uri.namespace,
+            }
+        )
 
     if uri.is_namespace:
         from .tools_search import _handle_index
-        return await _handle_index({"agent_id": agent_id, "caller_agent_id": caller_agent_id, "namespace": uri.namespace})
+
+        return await _handle_index(
+            {"agent_id": agent_id, "caller_agent_id": caller_agent_id, "namespace": uri.namespace}
+        )
 
     if uri.is_skill:
         skill = find_skill(uri.resource_id)
@@ -355,8 +412,13 @@ async def _handle_batch_heuristic(arguments: dict) -> list[TextContent]:
 async def _handle_backup(arguments: dict) -> list[TextContent]:
     """Create, list, restore, or delete memory snapshots."""
     from archivist.storage.backup_manager import (
-        create_snapshot, list_snapshots, restore_snapshot,
-        delete_snapshot, prune_snapshots, export_agent, import_agent,
+        create_snapshot,
+        delete_snapshot,
+        export_agent,
+        import_agent,
+        list_snapshots,
+        prune_snapshots,
+        restore_snapshot,
     )
 
     action = arguments.get("action", "")

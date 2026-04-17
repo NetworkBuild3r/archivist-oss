@@ -86,7 +86,11 @@ def _load_training_data(db_path: str) -> tuple[list[list[float]], list[float], l
 
         for row in rows:
             try:
-                trace = json.loads(row["retrieval_trace"]) if isinstance(row["retrieval_trace"], str) else row["retrieval_trace"]
+                trace = (
+                    json.loads(row["retrieval_trace"])
+                    if isinstance(row["retrieval_trace"], str)
+                    else row["retrieval_trace"]
+                )
             except (json.JSONDecodeError, TypeError):
                 continue
 
@@ -132,8 +136,8 @@ def train(db_path: str, output_path: str, min_samples: int = 50) -> bool:
     Returns True if training succeeded, False otherwise.
     """
     try:
-        import xgboost as xgb
         import numpy as np
+        import xgboost as xgb
     except ImportError:
         logger.error("xgboost and numpy are required for training: pip install xgboost numpy")
         return False
@@ -143,7 +147,8 @@ def train(db_path: str, output_path: str, min_samples: int = 50) -> bool:
     if len(features) < min_samples:
         logger.info(
             "Not enough training data (%d samples, need %d) — skipping training",
-            len(features), min_samples,
+            len(features),
+            min_samples,
         )
         return False
 
@@ -178,12 +183,15 @@ def train(db_path: str, output_path: str, min_samples: int = 50) -> bool:
 
 def main():
     parser = argparse.ArgumentParser(description="Train Archivist LTR ranking model")
-    parser.add_argument("--db", default=os.getenv("SQLITE_PATH", "/data/archivist/graph.db"),
-                        help="Path to SQLite database")
-    parser.add_argument("--output", default="models/ranker.xgb",
-                        help="Output model path")
-    parser.add_argument("--min-samples", type=int, default=50,
-                        help="Minimum training samples required")
+    parser.add_argument(
+        "--db",
+        default=os.getenv("SQLITE_PATH", "/data/archivist/graph.db"),
+        help="Path to SQLite database",
+    )
+    parser.add_argument("--output", default="models/ranker.xgb", help="Output model path")
+    parser.add_argument(
+        "--min-samples", type=int, default=50, help="Minimum training samples required"
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")

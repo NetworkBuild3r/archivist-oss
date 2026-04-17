@@ -209,9 +209,8 @@ def collect_storage_gauges_tick() -> None:
     # Qdrant: points_count per collection; availability from health.register("qdrant") if present,
     # else infer 1 after a successful list collections (startup may not have registered yet).
     try:
-        from archivist.storage.qdrant import qdrant_client
-
         import archivist.core.health as health
+        from archivist.storage.qdrant import qdrant_client
 
         st = health.all_status()
         q_entry = st.get("qdrant")

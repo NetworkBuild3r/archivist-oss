@@ -2,5 +2,7 @@
 # sys.modules aliasing ensures mock.patch('rbac.foo') patches
 # archivist.core.rbac.foo (same module object).
 import sys
+
 import archivist.core.rbac as _real
+
 sys.modules[__name__] = _real

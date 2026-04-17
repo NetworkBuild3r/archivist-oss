@@ -15,11 +15,13 @@ import logging
 import os
 import threading
 import time
-import httpx
 from collections import OrderedDict
-from archivist.core.config import EMBED_URL, EMBED_API_KEY, EMBED_MODEL
+
+import httpx
+
 import archivist.core.health as health
 import archivist.core.metrics as m
+from archivist.core.config import EMBED_API_KEY, EMBED_MODEL, EMBED_URL
 from archivist.core.observability import slow_embed_check
 
 logger = logging.getLogger("archivist.embeddings")
@@ -43,6 +45,7 @@ EMBED_CACHE_MISSES = m.EMBED_CACHE_MISS
 
 def _cache_key(text: str, model: str) -> str:
     import hashlib
+
     return hashlib.sha256(f"{model}:{text}".encode()).hexdigest()[:24]
 
 
@@ -126,7 +129,9 @@ async def embed_text(text: str, model: str = EMBED_MODEL) -> list[float]:
         except Exception as e:
             if attempt < _MAX_RETRIES - 1:
                 delay = _RETRY_DELAYS[attempt]
-                logger.warning("Embed attempt %d failed: %s — retrying in %ds", attempt + 1, e, delay)
+                logger.warning(
+                    "Embed attempt %d failed: %s — retrying in %ds", attempt + 1, e, delay
+                )
                 await asyncio.sleep(delay)
             else:
                 health.register("embeddings", healthy=False, detail=str(e))
@@ -200,7 +205,5 @@ async def embed_batch(texts: list[str], model: str = EMBED_MODEL) -> list[list[f
 
     except Exception as e:
         logger.warning("Batch embed failed (%s), falling back to individual calls", e)
-        individual = list(await asyncio.gather(
-            *(embed_text(t, model) for t in texts)
-        ))
+        individual = list(await asyncio.gather(*(embed_text(t, model) for t in texts)))
         return individual

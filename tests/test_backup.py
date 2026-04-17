@@ -8,7 +8,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -41,6 +41,7 @@ class TestManifest(unittest.TestCase):
         for p in self.patches:
             p.stop()
         import shutil
+
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     @patch("backup_manager.collections_for_query")
@@ -64,6 +65,7 @@ class TestManifest(unittest.TestCase):
         mock_http.side_effect = http_side_effect
 
         from backup_manager import create_snapshot
+
         result = create_snapshot(label="test-backup")
 
         assert result["manifest_version"] == 1
@@ -81,7 +83,7 @@ class TestManifest(unittest.TestCase):
         with open(manifest_path) as f:
             on_disk = json.load(f)
         assert on_disk["snapshot_id"] == snap_id
-        assert on_disk["archivist_version"] == "1.10.0"
+        assert on_disk["archivist_version"] == "2.0.0"
 
     @patch("backup_manager.collections_for_query")
     @patch("backup_manager._qdrant_http")
@@ -147,6 +149,7 @@ class TestSQLiteBackup(unittest.TestCase):
             assert rows[1][1] == "test data"
         finally:
             import shutil
+
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
@@ -166,6 +169,7 @@ class TestSnapshotDeleteAndPrune(unittest.TestCase):
         for p in self.patches:
             p.stop()
         import shutil
+
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _make_fake_snapshot(self, snapshot_id: str, label: str = "") -> None:
@@ -187,6 +191,7 @@ class TestSnapshotDeleteAndPrune(unittest.TestCase):
 
     def test_delete_snapshot(self):
         from backup_manager import delete_snapshot
+
         self._make_fake_snapshot("snap_001")
         assert (Path(self.tmpdir) / "snap_001").is_dir()
         assert delete_snapshot("snap_001") is True
@@ -194,10 +199,12 @@ class TestSnapshotDeleteAndPrune(unittest.TestCase):
 
     def test_delete_nonexistent(self):
         from backup_manager import delete_snapshot
+
         assert delete_snapshot("nonexistent") is False
 
     def test_prune_keeps_n_most_recent(self):
-        from backup_manager import prune_snapshots, list_snapshots
+        from backup_manager import list_snapshots, prune_snapshots
+
         self._make_fake_snapshot("20250101T000000Z_a", "a")
         self._make_fake_snapshot("20250102T000000Z_b", "b")
         self._make_fake_snapshot("20250103T000000Z_c", "c")
@@ -228,15 +235,18 @@ class TestRestoreValidation(unittest.TestCase):
         for p in self.patches:
             p.stop()
         import shutil
+
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_restore_missing_snapshot(self):
         from backup_manager import restore_snapshot
+
         with self.assertRaises(FileNotFoundError):
             restore_snapshot("nonexistent_snapshot")
 
     def test_restore_dimension_mismatch(self):
         from backup_manager import restore_snapshot
+
         snap_dir = Path(self.tmpdir) / "dim_mismatch"
         snap_dir.mkdir()
         manifest = {
@@ -286,13 +296,24 @@ class TestNDJSONExportImport(unittest.TestCase):
 
     def tearDown(self):
         import shutil
+
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_ndjson_format(self):
         ndjson_path = os.path.join(self.tmpdir, "test.ndjson")
         records = [
-            {"id": "p1", "collection": "test_coll", "vector": [0.1, 0.2, 0.3], "payload": {"agent_id": "nova", "text": "hello"}},
-            {"id": "p2", "collection": "test_coll", "vector": [0.4, 0.5, 0.6], "payload": {"agent_id": "nova", "text": "world"}},
+            {
+                "id": "p1",
+                "collection": "test_coll",
+                "vector": [0.1, 0.2, 0.3],
+                "payload": {"agent_id": "nova", "text": "hello"},
+            },
+            {
+                "id": "p2",
+                "collection": "test_coll",
+                "vector": [0.4, 0.5, 0.6],
+                "payload": {"agent_id": "nova", "text": "world"},
+            },
         ]
         with open(ndjson_path, "w") as f:
             for r in records:
@@ -318,10 +339,13 @@ class TestNDJSONExportImport(unittest.TestCase):
         mock_client = MagicMock()
         mock_client.scroll.return_value = ([mock_point], None)
 
-        with patch("backup_manager.BACKUP_DIR", self.tmpdir), \
-             patch("backup_manager.SQLITE_PATH", self.db_path), \
-             patch("qdrant.qdrant_client", return_value=mock_client):
+        with (
+            patch("backup_manager.BACKUP_DIR", self.tmpdir),
+            patch("backup_manager.SQLITE_PATH", self.db_path),
+            patch("qdrant.qdrant_client", return_value=mock_client),
+        ):
             from backup_manager import export_agent
+
             result = export_agent("test-agent")
 
         assert result["agent_id"] == "test-agent"
@@ -346,6 +370,7 @@ class TestNDJSONExportImport(unittest.TestCase):
                 f.write(json.dumps(r) + "\n")
 
         from backup_manager import import_agent
+
         result = import_agent(ndjson_path, dry_run=True)
 
         assert result["imported"] == 2
@@ -354,6 +379,7 @@ class TestNDJSONExportImport(unittest.TestCase):
 
     def test_import_missing_file(self):
         from backup_manager import import_agent
+
         with self.assertRaises(FileNotFoundError):
             import_agent("/nonexistent/path.ndjson")
 
@@ -374,9 +400,12 @@ class TestPrePruneHook(unittest.TestCase):
             call_count += 1
             return {"snapshot_id": "test"}
 
-        with patch("curator_queue.BACKUP_PRE_PRUNE", True, create=True), \
-             patch.dict("sys.modules", {"backup_manager": MagicMock()}):
+        with (
+            patch("curator_queue.BACKUP_PRE_PRUNE", True, create=True),
+            patch.dict("sys.modules", {"backup_manager": MagicMock()}),
+        ):
             import importlib
+
             importlib.reload(cq)
 
             with patch("config.BACKUP_PRE_PRUNE", True):
@@ -412,18 +441,21 @@ class TestBackupMemoryFiles(unittest.TestCase):
 
             with patch("backup_manager.MEMORY_ROOT", mem_dir):
                 from backup_manager import _backup_memory_files
+
                 _backup_memory_files(snap_dir)
 
             tar_path = snap_dir / "memories.tar.gz"
             assert tar_path.is_file()
 
             import tarfile
+
             with tarfile.open(str(tar_path), "r:gz") as tar:
                 names = tar.getnames()
             assert any("note.md" in n for n in names)
             assert not any("skip.txt" in n for n in names)
         finally:
             import shutil
+
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 

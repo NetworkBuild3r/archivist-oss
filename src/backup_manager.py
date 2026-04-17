@@ -2,5 +2,7 @@
 # sys.modules aliasing ensures mock.patch('backup_manager.foo') patches
 # archivist.storage.backup_manager.foo (same module object).
 import sys
+
 import archivist.storage.backup_manager as _real
+
 sys.modules[__name__] = _real

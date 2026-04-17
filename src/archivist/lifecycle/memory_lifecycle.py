@@ -10,29 +10,29 @@ import logging
 import sqlite3
 from dataclasses import asdict, dataclass, field
 
-from qdrant_client.models import Filter, FieldCondition, MatchValue
+from qdrant_client.models import FieldCondition, Filter, MatchValue
 
-from archivist.storage.collection_router import collection_for
+import archivist.core.metrics as m
 import archivist.lifecycle.curator_queue as curator_queue
+from archivist.core.audit import log_memory_event
 from archivist.lifecycle.cascade import (
     PartialDeletionError,
     _qdrant_delete,
     _qdrant_set_payload,
     _scroll_all,
 )
+from archivist.storage.collection_router import collection_for
 from archivist.storage.graph import (
-    delete_fts_chunks_batch,
-    delete_needle_tokens_batch,
-    delete_hotness,
-    set_fts_excluded_batch,
-    lookup_memory_points,
-    delete_memory_points,
     GRAPH_WRITE_LOCK,
+    delete_fts_chunks_batch,
+    delete_hotness,
+    delete_memory_points,
+    delete_needle_tokens_batch,
     get_db,
+    lookup_memory_points,
+    set_fts_excluded_batch,
 )
 from archivist.storage.qdrant import qdrant_client
-from archivist.core.audit import log_memory_event
-import archivist.core.metrics as m
 
 logger = logging.getLogger("archivist.memory_lifecycle")
 
@@ -41,9 +41,11 @@ logger = logging.getLogger("archivist.memory_lifecycle")
 # Result types
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class DeleteResult:
     """Counts of artifacts removed per type."""
+
     memory_id: str = ""
     qdrant_primary: int = 0
     qdrant_reverse_hyde: int = 0
@@ -70,6 +72,7 @@ class DeleteResult:
 @dataclass
 class ArchiveResult:
     """Per-step success flags for archive operations."""
+
     memory_id: str = ""
     primary_archived: bool = False
     reverse_hyde_archived: bool = False
@@ -78,16 +81,19 @@ class ArchiveResult:
 
     @property
     def total(self) -> int:
-        return sum([
-            self.primary_archived,
-            self.reverse_hyde_archived,
-            self.micro_chunks_archived,
-        ])
+        return sum(
+            [
+                self.primary_archived,
+                self.reverse_hyde_archived,
+                self.micro_chunks_archived,
+            ]
+        )
 
 
 # ---------------------------------------------------------------------------
 # Delete helpers
 # ---------------------------------------------------------------------------
+
 
 async def _resolve_child_ids(
     memory_id: str,
@@ -107,22 +113,27 @@ async def _resolve_child_ids(
         hyde_ids = [r["qdrant_id"] for r in mp_rows if r["point_type"] == "reverse_hyde"]
         logger.debug(
             "delete.child_lookup from memory_points: micro=%d hyde=%d",
-            len(micro_ids), len(hyde_ids),
+            len(micro_ids),
+            len(hyde_ids),
         )
         return micro_ids, hyde_ids
 
     micro_ids = await asyncio.to_thread(
         _scroll_all,
-        client, col,
+        client,
+        col,
         Filter(must=[FieldCondition(key="parent_id", match=MatchValue(value=memory_id))]),
-        "scroll_micro_chunks", memory_id,
+        "scroll_micro_chunks",
+        memory_id,
         failed_steps,
     )
     hyde_ids = await asyncio.to_thread(
         _scroll_all,
-        client, col,
+        client,
+        col,
         Filter(must=[FieldCondition(key="source_memory_id", match=MatchValue(value=memory_id))]),
-        "scroll_reverse_hyde", memory_id,
+        "scroll_reverse_hyde",
+        memory_id,
         failed_steps,
     )
     return micro_ids, hyde_ids
@@ -143,16 +154,24 @@ async def _delete_qdrant_points(
     """
     primary_count = await asyncio.to_thread(
         _qdrant_delete,
-        client, col, [memory_id],
-        "qdrant_primary", memory_id, failed_steps,
+        client,
+        col,
+        [memory_id],
+        "qdrant_primary",
+        memory_id,
+        failed_steps,
     )
 
     all_child_ids = hyde_ids + micro_ids
     if all_child_ids:
         await asyncio.to_thread(
             _qdrant_delete,
-            client, col, all_child_ids,
-            "qdrant_children", memory_id, failed_steps,
+            client,
+            col,
+            all_child_ids,
+            "qdrant_children",
+            memory_id,
+            failed_steps,
         )
 
     return primary_count, len(hyde_ids), len(micro_ids)
@@ -258,13 +277,15 @@ async def _finalize_delete(
     if result.failed_steps:
         logger.warning(
             "delete_cascade partial failure for %s: %s",
-            result.memory_id, result.failed_steps,
+            result.memory_id,
+            result.failed_steps,
         )
 
 
 # ---------------------------------------------------------------------------
 # Archive helpers
 # ---------------------------------------------------------------------------
+
 
 async def _archive_qdrant_points(
     memory_id: str,
@@ -282,22 +303,35 @@ async def _archive_qdrant_points(
 
     result.primary_archived = await asyncio.to_thread(
         _qdrant_set_payload,
-        client, col, payload, [memory_id],
-        "archive_primary", memory_id, failed_steps,
+        client,
+        col,
+        payload,
+        [memory_id],
+        "archive_primary",
+        memory_id,
+        failed_steps,
     )
 
     result.reverse_hyde_archived = await asyncio.to_thread(
         _qdrant_set_payload,
-        client, col, payload,
+        client,
+        col,
+        payload,
         Filter(must=[FieldCondition(key="source_memory_id", match=MatchValue(value=memory_id))]),
-        "archive_reverse_hyde", memory_id, failed_steps,
+        "archive_reverse_hyde",
+        memory_id,
+        failed_steps,
     )
 
     result.micro_chunks_archived = await asyncio.to_thread(
         _qdrant_set_payload,
-        client, col, payload,
+        client,
+        col,
+        payload,
         Filter(must=[FieldCondition(key="parent_id", match=MatchValue(value=memory_id))]),
-        "archive_micro_chunks", memory_id, failed_steps,
+        "archive_micro_chunks",
+        memory_id,
+        failed_steps,
     )
 
     return result
@@ -353,6 +387,7 @@ async def _finalize_archive(
 # SQLite entity-facts helper (synchronous, called via asyncio.to_thread)
 # ---------------------------------------------------------------------------
 
+
 def _delete_entity_facts_for_memory(memory_id: str) -> int:
     """Soft-deactivate entity facts linked to *memory_id*.
 
@@ -367,8 +402,7 @@ def _delete_entity_facts_for_memory(memory_id: str) -> int:
         conn = get_db()
         try:
             cur = conn.execute(
-                "UPDATE facts SET is_active = 0 "
-                "WHERE memory_id = ? AND is_active = 1",
+                "UPDATE facts SET is_active = 0 WHERE memory_id = ? AND is_active = 1",
                 (memory_id,),
             )
             deactivated = cur.rowcount
@@ -384,7 +418,9 @@ def _delete_entity_facts_for_memory(memory_id: str) -> int:
             return deactivated
         except Exception as e:
             logger.warning(
-                "delete_entity_facts failed for memory %s: %s", memory_id, e,
+                "delete_entity_facts failed for memory %s: %s",
+                memory_id,
+                e,
             )
             return 0
         finally:
@@ -394,6 +430,7 @@ def _delete_entity_facts_for_memory(memory_id: str) -> int:
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 
 async def delete_memory_complete(
     memory_id: str,
@@ -424,14 +461,20 @@ async def delete_memory_complete(
 
     micro_ids, hyde_ids = await _resolve_child_ids(memory_id, client, col, result.failed_steps)
 
-    result.qdrant_primary, result.qdrant_reverse_hyde, result.qdrant_micro_chunks = (
-        await _delete_qdrant_points(memory_id, micro_ids, hyde_ids, client, col, result.failed_steps)
+    (
+        result.qdrant_primary,
+        result.qdrant_reverse_hyde,
+        result.qdrant_micro_chunks,
+    ) = await _delete_qdrant_points(
+        memory_id, micro_ids, hyde_ids, client, col, result.failed_steps
     )
 
     all_ids = [memory_id] + hyde_ids + micro_ids
-    result.fts_entries, result.registry_tokens, result.entity_facts = (
-        await _delete_sqlite_artifacts(memory_id, all_ids, result.failed_steps)
-    )
+    (
+        result.fts_entries,
+        result.registry_tokens,
+        result.entity_facts,
+    ) = await _delete_sqlite_artifacts(memory_id, all_ids, result.failed_steps)
 
     result.memory_hotness = await _delete_best_effort_rows(memory_id)
 
@@ -491,26 +534,37 @@ async def soft_delete_memory(memory_id: str, namespace: str) -> dict:
     # 1a. Mark primary point as deleted in Qdrant.
     await asyncio.to_thread(
         _qdrant_set_payload,
-        client, col, deleted_payload, [memory_id],
-        "soft_delete_primary", memory_id, failed_steps,
+        client,
+        col,
+        deleted_payload,
+        [memory_id],
+        "soft_delete_primary",
+        memory_id,
+        failed_steps,
     )
     if "soft_delete_primary" in failed_steps:
-        raise RuntimeError(
-            f"soft_delete_memory: primary Qdrant set_payload failed for {memory_id}"
-        )
+        raise RuntimeError(f"soft_delete_memory: primary Qdrant set_payload failed for {memory_id}")
 
     # 1b. Mark child points (micro-chunks + reverse HyDE) as deleted.
     await asyncio.to_thread(
         _qdrant_set_payload,
-        client, col, deleted_payload,
+        client,
+        col,
+        deleted_payload,
         Filter(must=[FieldCondition(key="parent_id", match=MatchValue(value=memory_id))]),
-        "soft_delete_micro_chunks", memory_id, failed_steps,
+        "soft_delete_micro_chunks",
+        memory_id,
+        failed_steps,
     )
     await asyncio.to_thread(
         _qdrant_set_payload,
-        client, col, deleted_payload,
+        client,
+        col,
+        deleted_payload,
         Filter(must=[FieldCondition(key="source_memory_id", match=MatchValue(value=memory_id))]),
-        "soft_delete_reverse_hyde", memory_id, failed_steps,
+        "soft_delete_reverse_hyde",
+        memory_id,
+        failed_steps,
     )
 
     # 2. Exclude the primary FTS entry; children cleaned by the hard-cascade.

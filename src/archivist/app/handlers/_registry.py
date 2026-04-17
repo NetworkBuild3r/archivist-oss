@@ -2,21 +2,28 @@
 
 import logging
 import time
-from typing import Callable, Awaitable
+from collections.abc import Awaitable, Callable
 
-from mcp.types import Tool, TextContent
+from mcp.types import TextContent, Tool
 
 import archivist.core.metrics as m
 from archivist.core.observability import get_request_id, tool_span
 
-from .tools_search import TOOLS as SEARCH_TOOLS, HANDLERS as SEARCH_HANDLERS
-from .tools_storage import TOOLS as STORAGE_TOOLS, HANDLERS as STORAGE_HANDLERS
-from .tools_trajectory import TOOLS as TRAJECTORY_TOOLS, HANDLERS as TRAJECTORY_HANDLERS
-from .tools_skills import TOOLS as SKILL_TOOLS, HANDLERS as SKILL_HANDLERS
-from .tools_admin import TOOLS as ADMIN_TOOLS, HANDLERS as ADMIN_HANDLERS
-from .tools_cache import TOOLS as CACHE_TOOLS, HANDLERS as CACHE_HANDLERS
-from .tools_docs import TOOLS as DOCS_TOOLS, HANDLERS as DOCS_HANDLERS
 from ._common import error_response
+from .tools_admin import HANDLERS as ADMIN_HANDLERS
+from .tools_admin import TOOLS as ADMIN_TOOLS
+from .tools_cache import HANDLERS as CACHE_HANDLERS
+from .tools_cache import TOOLS as CACHE_TOOLS
+from .tools_docs import HANDLERS as DOCS_HANDLERS
+from .tools_docs import TOOLS as DOCS_TOOLS
+from .tools_search import HANDLERS as SEARCH_HANDLERS
+from .tools_search import TOOLS as SEARCH_TOOLS
+from .tools_skills import HANDLERS as SKILL_HANDLERS
+from .tools_skills import TOOLS as SKILL_TOOLS
+from .tools_storage import HANDLERS as STORAGE_HANDLERS
+from .tools_storage import TOOLS as STORAGE_TOOLS
+from .tools_trajectory import HANDLERS as TRAJECTORY_HANDLERS
+from .tools_trajectory import TOOLS as TRAJECTORY_TOOLS
 
 logger = logging.getLogger("archivist.mcp")
 
@@ -66,7 +73,10 @@ async def dispatch_tool(name: str, arguments: dict) -> list[TextContent]:
         dur = round((time.monotonic() - t0) * 1000, 1)
         logger.info(
             "tool.finished tool=%s caller=%s duration_ms=%.1f request_id=%s",
-            name, caller, dur, rid,
+            name,
+            caller,
+            dur,
+            rid,
         )
         m.observe(m.TOOL_DURATION, dur, {"tool": name})
         return result
@@ -74,7 +84,11 @@ async def dispatch_tool(name: str, arguments: dict) -> list[TextContent]:
         dur = round((time.monotonic() - t0) * 1000, 1)
         logger.error(
             "tool.failed tool=%s caller=%s duration_ms=%.1f error=%s request_id=%s",
-            name, caller, dur, e, rid,
+            name,
+            caller,
+            dur,
+            e,
+            rid,
             exc_info=True,
         )
         m.inc(m.TOOL_ERRORS, {"tool": name})

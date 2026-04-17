@@ -3,11 +3,17 @@
 import json
 import logging
 
-from mcp.types import Tool, TextContent
+from mcp.types import TextContent, Tool
 
 from archivist.core.trajectory import (
-    log_trajectory, attribute_decisions, extract_tips, search_tips,
-    add_annotation, get_annotations, add_rating, get_rating_summary,
+    add_annotation,
+    add_rating,
+    attribute_decisions,
+    extract_tips,
+    get_annotations,
+    get_rating_summary,
+    log_trajectory,
+    search_tips,
     session_end_summary,
 )
 
@@ -32,24 +38,34 @@ TOOLS: list[Tool] = [
             "type": "object",
             "properties": {
                 "agent_id": {"type": "string", "description": "Agent that executed the trajectory"},
-                "task_description": {"type": "string", "description": "What the agent was trying to accomplish"},
+                "task_description": {
+                    "type": "string",
+                    "description": "What the agent was trying to accomplish",
+                },
                 "actions": {
                     "type": "array",
                     "items": {"oneOf": [{"type": "object"}, {"type": "string"}]},
-                    "description": "Ordered list of actions taken. Each item can be a string or an object, e.g. [\"searched for X\"] or [{\"action\": \"search\", \"result\": \"found X\"}]",
+                    "description": 'Ordered list of actions taken. Each item can be a string or an object, e.g. ["searched for X"] or [{"action": "search", "result": "found X"}]',
                 },
                 "outcome": {
                     "type": "string",
                     "enum": ["success", "partial", "failure", "unknown"],
                     "description": "Overall outcome of the task",
                 },
-                "outcome_score": {"type": "number", "description": "Optional 0.0-1.0 quality score"},
+                "outcome_score": {
+                    "type": "number",
+                    "description": "Optional 0.0-1.0 quality score",
+                },
                 "memory_ids_used": {
                     "type": "array",
                     "items": {"type": "string"},
                     "description": "Memory point IDs that informed decisions during this trajectory",
                 },
-                "session_id": {"type": "string", "description": "Session grouping key (optional)", "default": ""},
+                "session_id": {
+                    "type": "string",
+                    "description": "Session grouping key (optional)",
+                    "default": "",
+                },
             },
             "required": ["agent_id", "task_description", "actions", "outcome"],
         },
@@ -72,7 +88,10 @@ TOOLS: list[Tool] = [
                     "description": "Type of annotation",
                     "default": "note",
                 },
-                "quality_score": {"type": "number", "description": "Optional 0.0-1.0 quality assessment"},
+                "quality_score": {
+                    "type": "number",
+                    "description": "Optional 0.0-1.0 quality assessment",
+                },
             },
             "required": ["memory_id", "agent_id", "content"],
         },
@@ -88,8 +107,16 @@ TOOLS: list[Tool] = [
             "properties": {
                 "memory_id": {"type": "string", "description": "Qdrant point ID to rate"},
                 "agent_id": {"type": "string", "description": "Rating agent"},
-                "rating": {"type": "integer", "enum": [-1, 1], "description": "+1 (helpful) or -1 (unhelpful)"},
-                "context": {"type": "string", "description": "Optional context for the rating", "default": ""},
+                "rating": {
+                    "type": "integer",
+                    "enum": [-1, 1],
+                    "description": "+1 (helpful) or -1 (unhelpful)",
+                },
+                "context": {
+                    "type": "string",
+                    "description": "Optional context for the rating",
+                    "default": "",
+                },
             },
             "required": ["memory_id", "agent_id", "rating"],
         },
@@ -176,6 +203,7 @@ async def _handle_log_trajectory(arguments: dict) -> list[TextContent]:
         logger.warning("Tip extraction failed for trajectory %s: %s", traj_id, e)
 
     from archivist.core.audit import log_memory_event
+
     await log_memory_event(
         agent_id=arguments["agent_id"],
         action="log_trajectory",
@@ -199,6 +227,7 @@ async def _handle_annotate(arguments: dict) -> list[TextContent]:
     )
 
     from archivist.core.audit import log_memory_event
+
     await log_memory_event(
         agent_id=arguments["agent_id"],
         action="annotate",
@@ -208,11 +237,14 @@ async def _handle_annotate(arguments: dict) -> list[TextContent]:
         metadata={"annotation_id": ann_id, "type": arguments.get("annotation_type", "note")},
     )
 
-    return success_response({
-        "annotation_id": ann_id,
-        "memory_id": arguments["memory_id"],
-        "annotations": get_annotations(arguments["memory_id"]),
-    }, default=str)
+    return success_response(
+        {
+            "annotation_id": ann_id,
+            "memory_id": arguments["memory_id"],
+            "annotations": get_annotations(arguments["memory_id"]),
+        },
+        default=str,
+    )
 
 
 async def _handle_rate(arguments: dict) -> list[TextContent]:
@@ -225,6 +257,7 @@ async def _handle_rate(arguments: dict) -> list[TextContent]:
     )
 
     from archivist.core.audit import log_memory_event
+
     await log_memory_event(
         agent_id=arguments["agent_id"],
         action="rate",
@@ -245,11 +278,14 @@ async def _handle_tips(arguments: dict) -> list[TextContent]:
         category=arguments.get("category", ""),
         limit=arguments.get("limit", 10),
     )
-    return success_response({
-        "agent_id": arguments["agent_id"],
-        "tips": tips,
-        "count": len(tips),
-    }, default=str)
+    return success_response(
+        {
+            "agent_id": arguments["agent_id"],
+            "tips": tips,
+            "count": len(tips),
+        },
+        default=str,
+    )
 
 
 async def _handle_session_end(arguments: dict) -> list[TextContent]:
@@ -265,11 +301,13 @@ async def _handle_session_end(arguments: dict) -> list[TextContent]:
     store = arguments.get("store_as_memory", True)
     stored_id = None
     if store and result.get("summary"):
-        store_result = await _handle_store({
-            "text": f"[Session summary — {arguments['session_id']}]\n{result['summary']}",
-            "agent_id": arguments["agent_id"],
-            "importance_score": 0.8,
-        })
+        store_result = await _handle_store(
+            {
+                "text": f"[Session summary — {arguments['session_id']}]\n{result['summary']}",
+                "agent_id": arguments["agent_id"],
+                "importance_score": 0.8,
+            }
+        )
         try:
             stored_data = json.loads(store_result[0].text)
             stored_id = stored_data.get("memory_id")

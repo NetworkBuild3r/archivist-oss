@@ -12,7 +12,7 @@ import json
 import logging
 from collections import defaultdict
 
-from archivist.storage.graph import get_db, get_curator_state, set_curator_state
+from archivist.storage.graph import get_curator_state, get_db, set_curator_state
 
 logger = logging.getLogger("archivist.compressed_index")
 
@@ -104,7 +104,9 @@ def build_namespace_index(namespace: str, agent_ids: list[str] | None = None) ->
         lines.append(f"- **{label}**: {', '.join(names[:15])}")
 
     if pinned:
-        lines.append(f"\n**Pinned/Durable** ({len(pinned)}): {', '.join(e['name'] for e in pinned[:10])}")
+        lines.append(
+            f"\n**Pinned/Durable** ({len(pinned)}): {', '.join(e['name'] for e in pinned[:10])}"
+        )
 
     if key_facts:
         lines.append("\n**Key Facts:**")
@@ -221,7 +223,7 @@ def build_wake_up_context(namespace: str, agent_id: str = "") -> dict:
             if line not in pinned_facts:
                 recent_facts.append(line)
 
-        l1_lines = pinned_facts + recent_facts[:max(0, 5 - len(pinned_facts))]
+        l1_lines = pinned_facts + recent_facts[: max(0, 5 - len(pinned_facts))]
         l1_critical = "\n".join(l1_lines) if l1_lines else "No facts recorded yet."
 
         # Counts
@@ -299,7 +301,7 @@ def cache_wake_up(namespace: str, agent_id: str = "") -> dict:
 def format_wake_up_text(ctx: dict) -> str:
     """Render a wake-up context dict as a compact text block for agent consumption."""
     parts = [
-        f"## Wake-Up Context",
+        "## Wake-Up Context",
         f"**Identity:** {ctx.get('l0_identity', 'unknown')}",
         f"**Memories:** {ctx.get('total_memories', 0)} | **Last active:** {ctx.get('last_activity', 'n/a')}",
     ]

@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
-from typing import Any, Iterator
+from typing import Any
 
 from archivist.core.config import SLOW_EMBED_MS, SLOW_LLM_MS, SLOW_QDRANT_MS
 

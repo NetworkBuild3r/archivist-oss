@@ -12,13 +12,18 @@ Only activated for queries that look like factoid/needle requests
 import hashlib
 import logging
 import re
-import time
 import threading
+import time
 from collections import OrderedDict
 
-from archivist.core.config import LLM_REFINE_MODEL, LLM_MODEL, REVERSE_HYDE_ENABLED, REVERSE_HYDE_QUESTIONS_PER_CHUNK
-from archivist.features.llm import llm_query
 import archivist.core.metrics as m
+from archivist.core.config import (
+    LLM_MODEL,
+    LLM_REFINE_MODEL,
+    REVERSE_HYDE_ENABLED,
+    REVERSE_HYDE_QUESTIONS_PER_CHUNK,
+)
+from archivist.features.llm import llm_query
 
 logger = logging.getLogger("archivist.hyde")
 

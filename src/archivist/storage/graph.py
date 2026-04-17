@@ -1,12 +1,12 @@
 """SQLite-backed temporal knowledge graph for entity/relationship tracking."""
 
 import logging
+import os
 import re
 import sqlite3
-import os
 import threading
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from archivist.core.config import SQLITE_PATH
 from archivist.utils.chunking import NEEDLE_PATTERNS
@@ -321,16 +321,21 @@ def _migrate_entity_unique_constraint():
             """)
             conn.execute("DROP TABLE entities")
             conn.execute("ALTER TABLE entities_new RENAME TO entities")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(name COLLATE NOCASE)")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(name COLLATE NOCASE)"
+            )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(entity_type)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_entities_namespace ON entities(namespace)")
             conn.commit()
             _logger.info("Migrated entities: rebuilt UNIQUE constraint to include namespace")
         except Exception as e:
-            _logger.warning("Entity UNIQUE constraint migration failed (may already be done): %s", e)
+            _logger.warning(
+                "Entity UNIQUE constraint migration failed (may already be done): %s", e
+            )
             conn.rollback()
         finally:
             conn.close()
+
 
 def _init_fts5():
     """Create the FTS5 virtual tables if they don't already exist.
@@ -407,9 +412,22 @@ def upsert_fts_chunk(
             conn.execute(
                 "INSERT INTO memory_chunks (qdrant_id, text, file_path, chunk_index, agent_id, namespace, date, memory_type, actor_id, actor_type) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (qdrant_id, text, file_path, chunk_index, agent_id, namespace, date, memory_type, actor_id, actor_type),
+                (
+                    qdrant_id,
+                    text,
+                    file_path,
+                    chunk_index,
+                    agent_id,
+                    namespace,
+                    date,
+                    memory_type,
+                    actor_id,
+                    actor_type,
+                ),
             )
-            rowid = conn.execute("SELECT rowid FROM memory_chunks WHERE qdrant_id = ?", (qdrant_id,)).fetchone()["rowid"]
+            rowid = conn.execute(
+                "SELECT rowid FROM memory_chunks WHERE qdrant_id = ?", (qdrant_id,)
+            ).fetchone()["rowid"]
             conn.execute(
                 "INSERT INTO memory_fts (rowid, text) VALUES (?, ?)",
                 (rowid, text),
@@ -423,7 +441,9 @@ def upsert_fts_chunk(
                 pass
             conn.commit()
         except Exception as e:
-            logging.getLogger("archivist.graph").warning("FTS upsert failed for %s: %s", qdrant_id, e)
+            logging.getLogger("archivist.graph").warning(
+                "FTS upsert failed for %s: %s", qdrant_id, e
+            )
             conn.rollback()
         finally:
             conn.close()
@@ -469,7 +489,9 @@ def delete_fts_chunks_by_file(file_path: str):
             conn.execute("DELETE FROM memory_chunks WHERE file_path = ?", (file_path,))
             conn.commit()
         except Exception as e:
-            logging.getLogger("archivist.graph").warning("FTS delete failed for %s: %s", file_path, e)
+            logging.getLogger("archivist.graph").warning(
+                "FTS delete failed for %s: %s", file_path, e
+            )
             conn.rollback()
         finally:
             conn.close()
@@ -483,8 +505,14 @@ def delete_fts_chunks_by_qdrant_id(qdrant_id: str) -> int:
     return delete_fts_chunks_batch([qdrant_id])
 
 
-def search_fts(query: str, namespace: str = "", agent_id: str = "",
-               memory_type: str = "", limit: int = 30, actor_type: str = "") -> list[dict]:
+def search_fts(
+    query: str,
+    namespace: str = "",
+    agent_id: str = "",
+    memory_type: str = "",
+    limit: int = 30,
+    actor_type: str = "",
+) -> list[dict]:
     """BM25 keyword search via FTS5. Returns ranked results with qdrant_id and score."""
     conn = get_db()
     try:
@@ -533,8 +561,14 @@ def search_fts(query: str, namespace: str = "", agent_id: str = "",
         conn.close()
 
 
-def search_fts_exact(query: str, namespace: str = "", agent_id: str = "",
-                     memory_type: str = "", limit: int = 30, actor_type: str = "") -> list[dict]:
+def search_fts_exact(
+    query: str,
+    namespace: str = "",
+    agent_id: str = "",
+    memory_type: str = "",
+    limit: int = 30,
+    actor_type: str = "",
+) -> list[dict]:
     """Non-stemmed BM25 search via memory_fts_exact for exact token matching."""
     conn = get_db()
     try:
@@ -586,10 +620,16 @@ def search_fts_exact(query: str, namespace: str = "", agent_id: str = "",
 _RETENTION_RANK = {"ephemeral": 0, "standard": 1, "durable": 2, "permanent": 3}
 
 
-def upsert_entity(name: str, entity_type: str = "unknown", agent_id: str = "",
-                  retention_class: str = "standard", namespace: str = "global",
-                  actor_id: str = "", actor_type: str = "") -> int:
-    now = datetime.now(timezone.utc).isoformat()
+def upsert_entity(
+    name: str,
+    entity_type: str = "unknown",
+    agent_id: str = "",
+    retention_class: str = "standard",
+    namespace: str = "global",
+    actor_id: str = "",
+    actor_type: str = "",
+) -> int:
+    now = datetime.now(UTC).isoformat()
     with GRAPH_WRITE_LOCK:
         conn = get_db()
         try:
@@ -599,8 +639,14 @@ def upsert_entity(name: str, entity_type: str = "unknown", agent_id: str = "",
             )
             row = cur.fetchone()
             if row:
-                existing_rc = row["retention_class"] if "retention_class" in row.keys() else "standard"
-                new_rc = retention_class if _RETENTION_RANK.get(retention_class, 1) > _RETENTION_RANK.get(existing_rc, 1) else existing_rc
+                existing_rc = (
+                    row["retention_class"] if "retention_class" in row.keys() else "standard"
+                )
+                new_rc = (
+                    retention_class
+                    if _RETENTION_RANK.get(retention_class, 1) > _RETENTION_RANK.get(existing_rc, 1)
+                    else existing_rc
+                )
                 conn.execute(
                     "UPDATE entities SET last_seen=?, mention_count=mention_count+1, retention_class=? WHERE id=?",
                     (now, new_rc, row["id"]),
@@ -618,9 +664,16 @@ def upsert_entity(name: str, entity_type: str = "unknown", agent_id: str = "",
             conn.close()
 
 
-def add_relationship(source_id: int, target_id: int, rel_type: str, evidence: str,
-                     agent_id: str = "", provenance: str = "unknown", namespace: str = "global"):
-    now = datetime.now(timezone.utc).isoformat()
+def add_relationship(
+    source_id: int,
+    target_id: int,
+    rel_type: str,
+    evidence: str,
+    agent_id: str = "",
+    provenance: str = "unknown",
+    namespace: str = "global",
+):
+    now = datetime.now(UTC).isoformat()
     with GRAPH_WRITE_LOCK:
         conn = get_db()
         try:
@@ -631,7 +684,17 @@ def add_relationship(source_id: int, target_id: int, rel_type: str, evidence: st
                    ON CONFLICT(source_entity_id, target_entity_id, relation_type)
                    DO UPDATE SET evidence=excluded.evidence, updated_at=excluded.updated_at,
                    confidence=min(confidence+0.1, 1.0), provenance=excluded.provenance""",
-                (source_id, target_id, rel_type, evidence, agent_id, now, now, provenance, namespace),
+                (
+                    source_id,
+                    target_id,
+                    rel_type,
+                    evidence,
+                    agent_id,
+                    now,
+                    now,
+                    provenance,
+                    namespace,
+                ),
             )
             conn.commit()
         finally:
@@ -646,12 +709,21 @@ def _word_set(text: str) -> set[str]:
 _DATE_IN_PATH_RE = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
 
 
-def add_fact(entity_id: int, fact_text: str, source_file: str = "",
-             agent_id: str = "", retention_class: str = "standard",
-             valid_from: str = "", valid_until: str = "", namespace: str = "global",
-             memory_id: str = "", confidence: float = 1.0,
-             provenance: str = "unknown", actor_id: str = "") -> int:
-    now = datetime.now(timezone.utc).isoformat()
+def add_fact(
+    entity_id: int,
+    fact_text: str,
+    source_file: str = "",
+    agent_id: str = "",
+    retention_class: str = "standard",
+    valid_from: str = "",
+    valid_until: str = "",
+    namespace: str = "global",
+    memory_id: str = "",
+    confidence: float = 1.0,
+    provenance: str = "unknown",
+    actor_id: str = "",
+) -> int:
+    now = datetime.now(UTC).isoformat()
     new_words = _word_set(fact_text)
 
     if not valid_from and source_file:
@@ -666,8 +738,21 @@ def add_fact(entity_id: int, fact_text: str, source_file: str = "",
                 "INSERT INTO facts (entity_id, fact_text, source_file, agent_id, created_at, "
                 "retention_class, valid_from, valid_until, namespace, memory_id, confidence, provenance, actor_id) "
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (entity_id, fact_text, source_file, agent_id, now, retention_class,
-                 valid_from, valid_until, namespace, memory_id, confidence, provenance, actor_id),
+                (
+                    entity_id,
+                    fact_text,
+                    source_file,
+                    agent_id,
+                    now,
+                    retention_class,
+                    valid_from,
+                    valid_until,
+                    namespace,
+                    memory_id,
+                    confidence,
+                    provenance,
+                    actor_id,
+                ),
             )
             conn.commit()
             fid = cur.lastrowid
@@ -707,7 +792,7 @@ def invalidate_fact(fact_id: int, ended: str = ""):
     If *ended* is empty the current UTC date is used.
     """
     if not ended:
-        ended = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        ended = datetime.now(UTC).strftime("%Y-%m-%d")
     with GRAPH_WRITE_LOCK:
         conn = get_db()
         conn.execute(
@@ -763,6 +848,7 @@ def search_entities(query: str, limit: int = 10, namespace: str = "") -> list[di
 def add_entity_alias(entity_id: int, alias: str):
     """Add an alias to an entity (idempotent)."""
     import json as _json
+
     norm = _normalize(alias)
     if not norm:
         return
@@ -795,8 +881,9 @@ def get_entity_by_id(entity_id: int) -> dict | None:
         conn.close()
 
 
-def get_entity_facts(entity_id: int, include_superseded: bool = False,
-                     as_of: str = "") -> list[dict]:
+def get_entity_facts(
+    entity_id: int, include_superseded: bool = False, as_of: str = ""
+) -> list[dict]:
     """Get active facts for an entity.
 
     Non-superseded facts come first. Superseded facts are included only when
@@ -952,8 +1039,14 @@ _ensure_needle_registry = schema_guard("""
 """)
 
 
-def register_needle_tokens(memory_id: str, text: str, namespace: str = "", agent_id: str = "",
-                           actor_id: str = "", actor_type: str = ""):
+def register_needle_tokens(
+    memory_id: str,
+    text: str,
+    namespace: str = "",
+    agent_id: str = "",
+    actor_id: str = "",
+    actor_type: str = "",
+):
     """Extract and register high-specificity tokens from text for O(1) lookup."""
     _ensure_needle_registry()
     tokens: set[str] = set()
@@ -964,7 +1057,7 @@ def register_needle_tokens(memory_id: str, text: str, namespace: str = "", agent
                 tokens.add(tok)
     if not tokens:
         return
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     snippet = text[:500]
     with GRAPH_WRITE_LOCK:
         conn = get_db()
@@ -1090,15 +1183,15 @@ def set_fts_excluded_batch(qdrant_ids: list[str], excluded: int = 1) -> int:
                 chunk = qdrant_ids[i : i + _BATCH_CHUNK]
                 placeholders = ",".join("?" * len(chunk))
                 cur = conn.execute(
-                    f"UPDATE memory_chunks SET is_excluded = ? "
-                    f"WHERE qdrant_id IN ({placeholders})",
+                    f"UPDATE memory_chunks SET is_excluded = ? WHERE qdrant_id IN ({placeholders})",
                     [excluded] + chunk,
                 )
                 total += cur.rowcount
             conn.commit()
         except Exception as e:
             logging.getLogger("archivist.graph").warning(
-                "set_fts_excluded_batch failed: %s", e,
+                "set_fts_excluded_batch failed: %s",
+                e,
             )
             conn.rollback()
         finally:
@@ -1150,7 +1243,8 @@ def delete_hotness(memory_id: str) -> int:
         conn = get_db()
         try:
             cur = conn.execute(
-                "DELETE FROM memory_hotness WHERE memory_id = ?", (memory_id,),
+                "DELETE FROM memory_hotness WHERE memory_id = ?",
+                (memory_id,),
             )
             conn.commit()
             return cur.rowcount
@@ -1163,6 +1257,7 @@ def delete_hotness(memory_id: str) -> int:
 # ---------------------------------------------------------------------------
 # memory_points tracking (Phase 2)
 # ---------------------------------------------------------------------------
+
 
 def register_memory_points_batch(
     points: list[dict],
@@ -1185,7 +1280,7 @@ def register_memory_points_batch(
     if not points:
         return 0
 
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     total = 0
     with GRAPH_WRITE_LOCK:
         conn = get_db()
@@ -1196,14 +1291,17 @@ def register_memory_points_batch(
                     "INSERT OR IGNORE INTO memory_points "
                     "(memory_id, qdrant_id, point_type, created_at) "
                     "VALUES (?, ?, ?, ?)",
-                    [(p["memory_id"], p["qdrant_id"], p.get("point_type", "primary"), now)
-                     for p in chunk],
+                    [
+                        (p["memory_id"], p["qdrant_id"], p.get("point_type", "primary"), now)
+                        for p in chunk
+                    ],
                 )
                 total += sum(1 for p in chunk)
             conn.commit()
         except Exception as e:
             logging.getLogger("archivist.graph").warning(
-                "register_memory_points_batch failed: %s", e,
+                "register_memory_points_batch failed: %s",
+                e,
             )
             conn.rollback()
         finally:
@@ -1228,7 +1326,9 @@ def lookup_memory_points(memory_id: str) -> list[dict]:
         return [dict(r) for r in rows]
     except Exception as e:
         logging.getLogger("archivist.graph").warning(
-            "lookup_memory_points failed for %s: %s", memory_id, e,
+            "lookup_memory_points failed for %s: %s",
+            memory_id,
+            e,
         )
         return []
     finally:
@@ -1245,13 +1345,16 @@ def delete_memory_points(memory_id: str) -> int:
         conn = get_db()
         try:
             cur = conn.execute(
-                "DELETE FROM memory_points WHERE memory_id = ?", (memory_id,),
+                "DELETE FROM memory_points WHERE memory_id = ?",
+                (memory_id,),
             )
             conn.commit()
             return cur.rowcount
         except Exception as e:
             logging.getLogger("archivist.graph").warning(
-                "delete_memory_points failed for %s: %s", memory_id, e,
+                "delete_memory_points failed for %s: %s",
+                memory_id,
+                e,
             )
             return 0
         finally:
@@ -1266,7 +1369,8 @@ def log_delete_failure(memory_id: str, qdrant_ids: list[str], error: str) -> Non
     """
     import json as _json
     import uuid as _uuid
-    now = datetime.now(timezone.utc).isoformat()
+
+    now = datetime.now(UTC).isoformat()
     with GRAPH_WRITE_LOCK:
         conn = get_db()
         try:
@@ -1278,7 +1382,9 @@ def log_delete_failure(memory_id: str, qdrant_ids: list[str], error: str) -> Non
             conn.commit()
         except Exception as e:
             logging.getLogger("archivist.graph").warning(
-                "log_delete_failure insert failed for %s: %s", memory_id, e,
+                "log_delete_failure insert failed for %s: %s",
+                memory_id,
+                e,
             )
         finally:
             conn.close()

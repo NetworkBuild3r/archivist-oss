@@ -6,13 +6,11 @@ single-user / development deployments).
 """
 
 import logging
-import os
 from dataclasses import dataclass, field
-from typing import Optional
 
 import yaml
 
-from archivist.core.config import TEAM_MAP, NAMESPACES_CONFIG_PATH
+from archivist.core.config import NAMESPACES_CONFIG_PATH, TEAM_MAP
 
 logger = logging.getLogger("archivist.rbac")
 
@@ -23,10 +21,10 @@ class NamespaceConfig:
     read: list[str]
     write: list[str]
     consistency: str = "eventual"
-    ttl_days: Optional[int] = None
+    ttl_days: int | None = None
     profile: str = "standard"
-    chunk_size: Optional[int] = None
-    latency_budget_ms: Optional[int] = None
+    chunk_size: int | None = None
+    latency_budget_ms: int | None = None
 
 
 @dataclass
@@ -41,7 +39,7 @@ class RBACConfig:
     agent_namespaces: dict[str, str] = field(default_factory=dict)
 
 
-_config: Optional[RBACConfig] = None
+_config: RBACConfig | None = None
 _permissive_fallback = False
 
 
@@ -58,7 +56,7 @@ def load_config(path: str = NAMESPACES_CONFIG_PATH) -> RBACConfig:
         return _config
 
     try:
-        with open(path, "r") as f:
+        with open(path) as f:
             raw = yaml.safe_load(f)
     except Exception as e:
         logger.warning(
@@ -89,7 +87,9 @@ def load_config(path: str = NAMESPACES_CONFIG_PATH) -> RBACConfig:
             ttl_days=ns_raw.get("ttl_days"),
             profile=profile,
             chunk_size=ns_raw.get("chunk_size", profile_defaults.get("chunk_size")),
-            latency_budget_ms=ns_raw.get("latency_budget_ms", profile_defaults.get("latency_budget_ms")),
+            latency_budget_ms=ns_raw.get(
+                "latency_budget_ms", profile_defaults.get("latency_budget_ms")
+            ),
         )
         ns_map[ns.id] = ns
 
@@ -123,7 +123,7 @@ def get_namespace_for_agent(agent_id: str) -> str:
     return team
 
 
-def get_namespace_config(namespace: str) -> Optional[NamespaceConfig]:
+def get_namespace_config(namespace: str) -> NamespaceConfig | None:
     cfg = get_config()
     return cfg.namespaces.get(namespace)
 
@@ -158,7 +158,9 @@ def check_access(agent_id: str, action: str, namespace: str) -> AccessPolicy:
     )
 
 
-def filter_agents_for_read(caller_agent_id: str, target_agent_ids: list[str]) -> tuple[list[str], list[str]]:
+def filter_agents_for_read(
+    caller_agent_id: str, target_agent_ids: list[str]
+) -> tuple[list[str], list[str]]:
     """Return (allowed, denied) target agent IDs for memory read.
 
     Caller must have read access to each target agent's default namespace.
@@ -200,11 +202,13 @@ def list_accessible_namespaces(agent_id: str) -> list[dict]:
         can_read = "all" in ns.read or agent_id in ns.read
         can_write = "all" in ns.write or agent_id in ns.write
         if can_read or can_write:
-            result.append({
-                "namespace": ns_id,
-                "can_read": can_read,
-                "can_write": can_write,
-                "consistency": ns.consistency,
-                "ttl_days": ns.ttl_days,
-            })
+            result.append(
+                {
+                    "namespace": ns_id,
+                    "can_read": can_read,
+                    "can_write": can_write,
+                    "consistency": ns.consistency,
+                    "ttl_days": ns.ttl_days,
+                }
+            )
     return result

@@ -11,7 +11,7 @@ is available.
 import logging
 import os
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 logger = logging.getLogger("archivist.ranker")
 
@@ -29,6 +29,7 @@ def _load_model():
         return
     try:
         import xgboost as xgb
+
         _model = xgb.Booster()
         _model.load_model(_MODEL_PATH)
         logger.info("Loaded LTR model from %s", _MODEL_PATH)
@@ -74,7 +75,7 @@ def extract_features(result: dict, query_meta: dict | None = None) -> list[float
     if date_str:
         try:
             dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
-            recency_days = max(0.0, (datetime.now(timezone.utc) - dt).total_seconds() / 86400)
+            recency_days = max(0.0, (datetime.now(UTC) - dt).total_seconds() / 86400)
         except (ValueError, TypeError):
             pass
 
@@ -86,7 +87,14 @@ def extract_features(result: dict, query_meta: dict | None = None) -> list[float
         float(result.get("bm25_score", 0)),
         float(result.get("rrf_score", 0)),
         float(result.get("hotness", 0)),
-        float(result.get("importance_score", result.get("payload", {}).get("importance_score", 0.5) if isinstance(result.get("payload"), dict) else 0.5)),
+        float(
+            result.get(
+                "importance_score",
+                result.get("payload", {}).get("importance_score", 0.5)
+                if isinstance(result.get("payload"), dict)
+                else 0.5,
+            )
+        ),
         float(result.get("temporal_decay", 1.0)),
         float(result.get("outcome_adjustment", 0)),
         float(result.get("graph_hop", 0)),
@@ -108,8 +116,8 @@ def rank_results(results: list[dict], query_meta: dict | None = None) -> list[di
     if not ltr_available() or not results:
         return results
 
-    import xgboost as xgb
     import numpy as np
+    import xgboost as xgb
 
     features = [extract_features(r, query_meta) for r in results]
     dmatrix = xgb.DMatrix(np.array(features, dtype=np.float32), feature_names=FEATURE_NAMES)

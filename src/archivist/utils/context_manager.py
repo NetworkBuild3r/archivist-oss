@@ -4,7 +4,8 @@ Provides the logic behind the archivist_context_check MCP tool.
 """
 
 import logging
-from archivist.utils.tokenizer import count_tokens, count_message_tokens
+
+from archivist.utils.tokenizer import count_message_tokens, count_tokens
 
 logger = logging.getLogger("archivist.context")
 

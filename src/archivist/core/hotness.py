@@ -9,10 +9,10 @@ RLM pipeline blends hotness into scores after temporal decay.
 
 import logging
 import math
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-from archivist.storage.graph import get_db, GRAPH_WRITE_LOCK, schema_guard
-from archivist.core.config import HOTNESS_WEIGHT, HOTNESS_HALFLIFE_DAYS
+from archivist.core.config import HOTNESS_HALFLIFE_DAYS, HOTNESS_WEIGHT
+from archivist.storage.graph import GRAPH_WRITE_LOCK, get_db, schema_guard
 
 logger = logging.getLogger("archivist.hotness")
 
@@ -31,8 +31,9 @@ def _sigmoid(x: float) -> float:
     return 1.0 / (1.0 + math.exp(-x))
 
 
-def compute_hotness(retrieval_count: int, days_since_last_access: float,
-                    halflife: float | None = None) -> float:
+def compute_hotness(
+    retrieval_count: int, days_since_last_access: float, halflife: float | None = None
+) -> float:
     """Compute hotness for a single memory."""
     hl = halflife or HOTNESS_HALFLIFE_DAYS
     frequency = _sigmoid(math.log1p(retrieval_count))
@@ -89,16 +90,17 @@ def batch_update_hotness() -> int:
     feedback with cold-start guardrails (grace period, floor, relative frequency).
     """
     _ensure_schema()
-    from archivist.core.config import IMPORTANCE_FLOOR, IMPORTANCE_GRACE_DAYS
 
     conn = get_db()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     now_iso = now.isoformat()
 
     memory_counts: dict[str, int] = {}
     memory_last_access: dict[str, str] = {}
 
-    hotness_rows = conn.execute("SELECT memory_id, retrieval_count, last_accessed FROM memory_hotness").fetchall()
+    hotness_rows = conn.execute(
+        "SELECT memory_id, retrieval_count, last_accessed FROM memory_hotness"
+    ).fetchall()
     for r in hotness_rows:
         memory_counts[r["memory_id"]] = r["retrieval_count"]
         memory_last_access[r["memory_id"]] = r["last_accessed"] or now_iso
@@ -117,6 +119,7 @@ def batch_update_hotness() -> int:
         log_rows = []
 
     import json as _json
+
     for row in log_rows:
         try:
             ids = _json.loads(row["result_ids"] or "[]")

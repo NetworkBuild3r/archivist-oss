@@ -30,8 +30,9 @@ _MAX_AGENT_IDS = 256
 _last_agent_prune = 0.0
 
 
-def _cache_key(query: str, namespace: str = "", tier: str = "l2",
-               memory_type: str = "", extra: str = "") -> str:
+def _cache_key(
+    query: str, namespace: str = "", tier: str = "l2", memory_type: str = "", extra: str = ""
+) -> str:
     raw = f"{query}|{namespace}|{tier}|{memory_type}|{extra}"
     return hashlib.sha256(raw.encode()).hexdigest()[:24]
 
@@ -47,8 +48,14 @@ def _remove_from_ns_index(agent_id: str, key: str, value: dict) -> None:
                 del _ns_index[ns]
 
 
-def get(agent_id: str, query: str, namespace: str = "", tier: str = "l2",
-        memory_type: str = "", extra: str = "") -> dict | None:
+def get(
+    agent_id: str,
+    query: str,
+    namespace: str = "",
+    tier: str = "l2",
+    memory_type: str = "",
+    extra: str = "",
+) -> dict | None:
     """Return cached result or None on miss. Moves hit to front (LRU)."""
     if not HOT_CACHE_ENABLED:
         return None
@@ -76,8 +83,11 @@ def _prune_stale_agents_locked(now: float) -> None:
     if now - _last_agent_prune < 60:
         return
     _last_agent_prune = now
-    empty = [aid for aid, cache in _agent_caches.items()
-             if not cache or all(now - ts > HOT_CACHE_TTL_SECONDS for ts, _ in cache.values())]
+    empty = [
+        aid
+        for aid, cache in _agent_caches.items()
+        if not cache or all(now - ts > HOT_CACHE_TTL_SECONDS for ts, _ in cache.values())
+    ]
     for aid in empty:
         cache = _agent_caches.pop(aid, None)
         if cache:
@@ -85,8 +95,15 @@ def _prune_stale_agents_locked(now: float) -> None:
                 _remove_from_ns_index(aid, key, value)
 
 
-def put(agent_id: str, query: str, result: dict, namespace: str = "",
-        tier: str = "l2", memory_type: str = "", extra: str = "") -> None:
+def put(
+    agent_id: str,
+    query: str,
+    result: dict,
+    namespace: str = "",
+    tier: str = "l2",
+    memory_type: str = "",
+    extra: str = "",
+) -> None:
     """Store a result in the hot cache, evicting LRU entries if needed."""
     if not HOT_CACHE_ENABLED:
         return

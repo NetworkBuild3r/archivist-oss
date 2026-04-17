@@ -9,7 +9,7 @@ import json
 import logging
 from pathlib import Path
 
-from mcp.types import Tool, TextContent
+from mcp.types import TextContent, Tool
 
 logger = logging.getLogger("archivist.mcp")
 
@@ -89,18 +89,22 @@ async def _handle_get_reference_docs(arguments: dict) -> list[TextContent]:
     """Return the agent skill reference, optionally filtered to one section."""
     doc = _doc_path()
     if not doc.exists():
-        return [TextContent(
-            type="text",
-            text=json.dumps({"error": "reference_docs_not_found", "path": str(doc)}),
-        )]
+        return [
+            TextContent(
+                type="text",
+                text=json.dumps({"error": "reference_docs_not_found", "path": str(doc)}),
+            )
+        ]
 
     try:
         text = doc.read_text(encoding="utf-8")
     except OSError as exc:
-        return [TextContent(
-            type="text",
-            text=json.dumps({"error": "read_failed", "detail": str(exc)}),
-        )]
+        return [
+            TextContent(
+                type="text",
+                text=json.dumps({"error": "read_failed", "detail": str(exc)}),
+            )
+        ]
 
     section_filter = (arguments.get("section") or "").strip().lower()
     if not section_filter:
@@ -112,14 +116,18 @@ async def _handle_get_reference_docs(arguments: dict) -> list[TextContent]:
             return [TextContent(type="text", text=block)]
 
     available = [h for h, _ in sections if h]
-    return [TextContent(
-        type="text",
-        text=json.dumps({
-            "error": "section_not_found",
-            "section": section_filter,
-            "available_sections": available,
-        }),
-    )]
+    return [
+        TextContent(
+            type="text",
+            text=json.dumps(
+                {
+                    "error": "section_not_found",
+                    "section": section_filter,
+                    "available_sections": available,
+                }
+            ),
+        )
+    ]
 
 
 HANDLERS: dict[str, object] = {

@@ -8,7 +8,7 @@ full snapshot for the health dashboard.
 
 import logging
 import threading
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 logger = logging.getLogger("archivist.health")
 
@@ -22,12 +22,14 @@ def register(name: str, healthy: bool = True, detail: str = ""):
         _status[name] = {
             "healthy": healthy,
             "detail": detail,
-            "since": datetime.now(timezone.utc).isoformat(),
+            "since": datetime.now(UTC).isoformat(),
         }
     level = logging.INFO if healthy else logging.ERROR
     logger.log(
-        level, "Subsystem %s: %s%s",
-        name, "UP" if healthy else "DOWN",
+        level,
+        "Subsystem %s: %s%s",
+        name,
+        "UP" if healthy else "DOWN",
         f" ({detail})" if detail else "",
     )
 

@@ -16,23 +16,23 @@ import shutil
 import sqlite3
 import tarfile
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
 
 from archivist.core.config import (
     BACKUP_DIR,
-    BACKUP_RETENTION_COUNT,
     BACKUP_INCLUDE_FILES,
-    QDRANT_URL,
-    QDRANT_COLLECTION,
-    SQLITE_PATH,
+    BACKUP_RETENTION_COUNT,
     MEMORY_ROOT,
+    QDRANT_COLLECTION,
+    QDRANT_URL,
+    SQLITE_PATH,
     VECTOR_DIM,
 )
 from archivist.storage.collection_router import collections_for_query
-from archivist.storage.graph import get_db, GRAPH_WRITE_LOCK
+from archivist.storage.graph import GRAPH_WRITE_LOCK
 
 logger = logging.getLogger("archivist.backup")
 
@@ -67,10 +67,11 @@ def _collection_point_count(collection_name: str) -> int:
 
 # ── Snapshot creation ────────────────────────────────────────────────────────
 
+
 def create_snapshot(label: str = "") -> dict:
     """Create a full backup snapshot. Returns summary dict with snapshot_id and paths."""
     _ensure_backup_dir()
-    ts = datetime.now(timezone.utc)
+    ts = datetime.now(UTC)
     snapshot_id = ts.strftime("%Y%m%dT%H%M%SZ")
     if label:
         safe_label = "".join(c if c.isalnum() or c in "-_" else "_" for c in label)
@@ -128,7 +129,10 @@ def create_snapshot(label: str = "") -> dict:
 
     logger.info(
         "Snapshot created: %s (%d collections, %.1fms, %d errors)",
-        snapshot_id, len(collection_info), elapsed_ms, len(errors),
+        snapshot_id,
+        len(collection_info),
+        elapsed_ms,
+        len(errors),
     )
     return manifest
 
@@ -159,7 +163,9 @@ def _backup_qdrant_collection(collection_name: str, snap_dir: Path) -> dict:
     size_bytes = out_path.stat().st_size
     logger.info(
         "Qdrant snapshot: %s — %d points, %.1f MB",
-        collection_name, point_count, size_bytes / (1024 * 1024),
+        collection_name,
+        point_count,
+        size_bytes / (1024 * 1024),
     )
     return {
         "points": point_count,
@@ -203,6 +209,7 @@ def _backup_memory_files(snap_dir: Path) -> None:
 
 # ── Snapshot listing ─────────────────────────────────────────────────────────
 
+
 def list_snapshots() -> list[dict]:
     """List all available snapshots sorted newest-first."""
     _ensure_backup_dir()
@@ -229,28 +236,33 @@ def list_snapshots() -> list[dict]:
                     db_path = entry / "graph.db"
                     if db_path.is_file():
                         total_size += db_path.stat().st_size
-                snapshots.append({
-                    "snapshot_id": manifest.get("snapshot_id", entry.name),
-                    "label": manifest.get("label", ""),
-                    "created_at": manifest.get("created_at", ""),
-                    "collections": len(manifest.get("collections", {})),
-                    "total_points": total_points,
-                    "total_size_mb": round(total_size / (1024 * 1024), 2),
-                    "sqlite": manifest.get("sqlite_backed_up", False),
-                    "files": manifest.get("files_backed_up", False),
-                    "errors": len(manifest.get("errors", [])),
-                })
+                snapshots.append(
+                    {
+                        "snapshot_id": manifest.get("snapshot_id", entry.name),
+                        "label": manifest.get("label", ""),
+                        "created_at": manifest.get("created_at", ""),
+                        "collections": len(manifest.get("collections", {})),
+                        "total_points": total_points,
+                        "total_size_mb": round(total_size / (1024 * 1024), 2),
+                        "sqlite": manifest.get("sqlite_backed_up", False),
+                        "files": manifest.get("files_backed_up", False),
+                        "errors": len(manifest.get("errors", [])),
+                    }
+                )
             except (json.JSONDecodeError, OSError):
-                snapshots.append({
-                    "snapshot_id": entry.name,
-                    "label": "",
-                    "created_at": "",
-                    "error": "corrupt manifest",
-                })
+                snapshots.append(
+                    {
+                        "snapshot_id": entry.name,
+                        "label": "",
+                        "created_at": "",
+                        "error": "corrupt manifest",
+                    }
+                )
     return snapshots
 
 
 # ── Snapshot restore ─────────────────────────────────────────────────────────
+
 
 def restore_snapshot(snapshot_id: str, target: str = "all") -> dict:
     """Restore from a snapshot directory.
@@ -340,6 +352,7 @@ def _restore_sqlite(backup_path: Path) -> None:
 
 # ── Snapshot deletion / pruning ──────────────────────────────────────────────
 
+
 def delete_snapshot(snapshot_id: str) -> bool:
     """Delete a snapshot directory. Returns True if deleted."""
     snap_dir = _snapshot_dir(snapshot_id)
@@ -374,6 +387,7 @@ def prune_snapshots(keep: int = 0) -> list[str]:
 
 # ── Per-agent export / import (NDJSON) ───────────────────────────────────────
 
+
 def export_agent(agent_id: str, output_dir: str = "") -> dict:
     """Export all memories for a single agent to NDJSON.
 
@@ -382,22 +396,21 @@ def export_agent(agent_id: str, output_dir: str = "") -> dict:
 
     Returns summary with path and counts.
     """
-    from qdrant_client.models import Filter, FieldCondition, MatchValue
+    from qdrant_client.models import FieldCondition, Filter, MatchValue
 
     out_dir = Path(output_dir) if output_dir else Path(BACKUP_DIR) / "exports"
     os.makedirs(out_dir, exist_ok=True)
 
-    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     safe_agent = "".join(c if c.isalnum() or c in "-_" else "_" for c in agent_id)
     filename = f"agent_{safe_agent}_{ts}.ndjson"
     out_path = out_dir / filename
 
     from archivist.storage.qdrant import qdrant_client as get_client
+
     client = get_client()
 
-    agent_filter = Filter(
-        must=[FieldCondition(key="agent_id", match=MatchValue(value=agent_id))]
-    )
+    agent_filter = Filter(must=[FieldCondition(key="agent_id", match=MatchValue(value=agent_id))])
 
     total_points = 0
     colls = collections_for_query("")
@@ -423,7 +436,9 @@ def export_agent(agent_id: str, output_dir: str = "") -> dict:
                     record = {
                         "id": str(point.id),
                         "collection": coll,
-                        "vector": point.vector if isinstance(point.vector, list) else list(point.vector),
+                        "vector": point.vector
+                        if isinstance(point.vector, list)
+                        else list(point.vector),
                         "payload": dict(point.payload) if point.payload else {},
                     }
                     f.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -481,22 +496,24 @@ def import_agent(ndjson_path: str, dry_run: bool = False) -> dict:
     Upserts points back into Qdrant and rebuilds FTS entries.
     """
     from qdrant_client.models import PointStruct
+
+    from archivist.core.config import BM25_ENABLED
     from archivist.storage.collection_router import ensure_collection
     from archivist.storage.graph import upsert_fts_chunk
-    from archivist.core.config import BM25_ENABLED
 
     path = Path(ndjson_path)
     if not path.is_file():
         raise FileNotFoundError(f"Import file not found: {ndjson_path}")
 
     from archivist.storage.qdrant import qdrant_client as get_client
+
     client = get_client()
 
     imported = 0
     skipped = 0
     fts_rebuilt = 0
 
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         batch: list[tuple[str, PointStruct]] = []
 
         for line_num, line in enumerate(f, 1):
@@ -559,7 +576,12 @@ def import_agent(ndjson_path: str, dry_run: bool = False) -> dict:
         "fts_rebuilt": fts_rebuilt,
         "dry_run": dry_run,
     }
-    logger.info("Agent import: %d points imported, %d skipped, %d FTS rebuilt", imported, skipped, fts_rebuilt)
+    logger.info(
+        "Agent import: %d points imported, %d skipped, %d FTS rebuilt",
+        imported,
+        skipped,
+        fts_rebuilt,
+    )
     return summary
 
 

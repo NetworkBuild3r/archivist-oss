@@ -20,17 +20,16 @@ from collections import OrderedDict
 from qdrant_client.models import PointStruct
 
 from archivist.core.config import (
-    SYNTHETIC_QUESTIONS_ENABLED,
-    SYNTHETIC_QUESTIONS_COUNT,
-    LLM_REFINE_MODEL,
-    LLM_MODEL,
-    CURATOR_LLM_URL,
-    CURATOR_LLM_MODEL,
     CURATOR_LLM_API_KEY,
+    CURATOR_LLM_MODEL,
+    CURATOR_LLM_URL,
+    LLM_MODEL,
+    LLM_REFINE_MODEL,
+    SYNTHETIC_QUESTIONS_COUNT,
+    SYNTHETIC_QUESTIONS_ENABLED,
 )
-from archivist.features.llm import llm_query
 from archivist.features.embeddings import embed_batch
-import archivist.core.metrics as m
+from archivist.features.llm import llm_query
 
 logger = logging.getLogger("archivist.synthetic_questions")
 
@@ -81,6 +80,7 @@ async def generate_synthetic_questions(
     """Generate synthetic questions for a chunk. Returns [] if disabled or on failure."""
     if not SYNTHETIC_QUESTIONS_ENABLED:
         import archivist.core.config as _cfg
+
         if not _cfg.SYNTHETIC_QUESTIONS_ENABLED:
             return []
     if not count:
@@ -132,7 +132,11 @@ def _parse_questions(raw: str, count: int) -> list[str]:
         except json.JSONDecodeError:
             pass
     # Fallback: one question per line
-    lines = [q.strip().lstrip("0123456789.-) ") for q in raw.splitlines() if q.strip() and len(q.strip()) > 5]
+    lines = [
+        q.strip().lstrip("0123456789.-) ")
+        for q in raw.splitlines()
+        if q.strip() and len(q.strip()) > 5
+    ]
     return lines[:count]
 
 
@@ -170,6 +174,7 @@ async def generate_and_embed_synthetic_points(
 
     logger.debug(
         "synthetic_questions.generated point=%s count=%d",
-        chunk_point_id, len(points),
+        chunk_point_id,
+        len(points),
     )
     return points

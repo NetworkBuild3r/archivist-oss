@@ -2,15 +2,22 @@
 
 import logging
 
-from mcp.types import Tool, TextContent
+from mcp.types import TextContent, Tool
 
-from archivist.features.skills import (
-    register_skill, record_version, add_lesson, get_lessons,
-    log_skill_event, get_skill_health, find_skill,
-    add_skill_relation, get_skill_relations, get_skill_substitutes,
-)
 import archivist.core.metrics as m
 import archivist.features.webhooks as webhooks
+from archivist.features.skills import (
+    add_lesson,
+    add_skill_relation,
+    find_skill,
+    get_lessons,
+    get_skill_health,
+    get_skill_relations,
+    get_skill_substitutes,
+    log_skill_event,
+    record_version,
+    register_skill,
+)
 
 from ._common import error_response, success_response
 
@@ -31,13 +38,37 @@ TOOLS: list[Tool] = [
             "type": "object",
             "properties": {
                 "name": {"type": "string", "description": "Skill/tool name"},
-                "provider": {"type": "string", "description": "Provider or manufacturer (e.g. 'openai', 'internal')", "default": ""},
-                "mcp_endpoint": {"type": "string", "description": "MCP server endpoint URL (optional)", "default": ""},
-                "version": {"type": "string", "description": "Current version string", "default": "0.0.0"},
-                "description": {"type": "string", "description": "What this skill does", "default": ""},
+                "provider": {
+                    "type": "string",
+                    "description": "Provider or manufacturer (e.g. 'openai', 'internal')",
+                    "default": "",
+                },
+                "mcp_endpoint": {
+                    "type": "string",
+                    "description": "MCP server endpoint URL (optional)",
+                    "default": "",
+                },
+                "version": {
+                    "type": "string",
+                    "description": "Current version string",
+                    "default": "0.0.0",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "What this skill does",
+                    "default": "",
+                },
                 "agent_id": {"type": "string", "description": "Agent registering this skill"},
-                "changelog": {"type": "string", "description": "What changed in this version (optional)", "default": ""},
-                "breaking_changes": {"type": "string", "description": "Known breaking changes (optional)", "default": ""},
+                "changelog": {
+                    "type": "string",
+                    "description": "What changed in this version (optional)",
+                    "default": "",
+                },
+                "breaking_changes": {
+                    "type": "string",
+                    "description": "Known breaking changes (optional)",
+                    "default": "",
+                },
             },
             "required": ["name", "agent_id"],
         },
@@ -51,18 +82,40 @@ TOOLS: list[Tool] = [
         inputSchema={
             "type": "object",
             "properties": {
-                "skill_name": {"type": "string", "description": "Skill name (looked up in registry)"},
-                "provider": {"type": "string", "description": "Provider to disambiguate (optional)", "default": ""},
+                "skill_name": {
+                    "type": "string",
+                    "description": "Skill name (looked up in registry)",
+                },
+                "provider": {
+                    "type": "string",
+                    "description": "Provider to disambiguate (optional)",
+                    "default": "",
+                },
                 "agent_id": {"type": "string", "description": "Agent that used the skill"},
                 "outcome": {
                     "type": "string",
                     "enum": ["success", "partial", "failure"],
                     "description": "Outcome of the invocation",
                 },
-                "skill_version": {"type": "string", "description": "Version used (optional, defaults to current)", "default": ""},
-                "duration_ms": {"type": "integer", "description": "Execution time in milliseconds (optional)"},
-                "error_message": {"type": "string", "description": "Error details if failed", "default": ""},
-                "trajectory_id": {"type": "string", "description": "Link to a trajectory (optional)", "default": ""},
+                "skill_version": {
+                    "type": "string",
+                    "description": "Version used (optional, defaults to current)",
+                    "default": "",
+                },
+                "duration_ms": {
+                    "type": "integer",
+                    "description": "Execution time in milliseconds (optional)",
+                },
+                "error_message": {
+                    "type": "string",
+                    "description": "Error details if failed",
+                    "default": "",
+                },
+                "trajectory_id": {
+                    "type": "string",
+                    "description": "Link to a trajectory (optional)",
+                    "default": "",
+                },
             },
             "required": ["skill_name", "agent_id", "outcome"],
         },
@@ -77,16 +130,33 @@ TOOLS: list[Tool] = [
             "type": "object",
             "properties": {
                 "skill_name": {"type": "string", "description": "Skill name"},
-                "provider": {"type": "string", "description": "Provider to disambiguate (optional)", "default": ""},
+                "provider": {
+                    "type": "string",
+                    "description": "Provider to disambiguate (optional)",
+                    "default": "",
+                },
                 "title": {"type": "string", "description": "Short title for the lesson"},
-                "content": {"type": "string", "description": "Full lesson content — failure mode, workaround, or usage tip"},
+                "content": {
+                    "type": "string",
+                    "description": "Full lesson content — failure mode, workaround, or usage tip",
+                },
                 "lesson_type": {
                     "type": "string",
-                    "enum": ["failure_mode", "workaround", "best_practice", "breaking_change", "general"],
+                    "enum": [
+                        "failure_mode",
+                        "workaround",
+                        "best_practice",
+                        "breaking_change",
+                        "general",
+                    ],
                     "description": "Category of lesson",
                     "default": "general",
                 },
-                "skill_version": {"type": "string", "description": "Version this lesson applies to (optional)", "default": ""},
+                "skill_version": {
+                    "type": "string",
+                    "description": "Version this lesson applies to (optional)",
+                    "default": "",
+                },
                 "agent_id": {"type": "string", "description": "Agent contributing this lesson"},
             },
             "required": ["skill_name", "title", "content", "agent_id"],
@@ -102,9 +172,21 @@ TOOLS: list[Tool] = [
             "type": "object",
             "properties": {
                 "skill_name": {"type": "string", "description": "Skill name to check"},
-                "provider": {"type": "string", "description": "Provider to disambiguate (optional)", "default": ""},
-                "window_days": {"type": "integer", "description": "How many days of history to analyze", "default": 30},
-                "include_lessons": {"type": "boolean", "description": "Include recent lessons in response", "default": True},
+                "provider": {
+                    "type": "string",
+                    "description": "Provider to disambiguate (optional)",
+                    "default": "",
+                },
+                "window_days": {
+                    "type": "integer",
+                    "description": "How many days of history to analyze",
+                    "default": 30,
+                },
+                "include_lessons": {
+                    "type": "boolean",
+                    "description": "Include recent lessons in response",
+                    "default": True,
+                },
             },
             "required": ["skill_name"],
         },
@@ -126,10 +208,22 @@ TOOLS: list[Tool] = [
                     "description": "Type of relationship",
                 },
                 "confidence": {"type": "number", "description": "Confidence 0-1", "default": 1.0},
-                "evidence": {"type": "string", "description": "Why this relation exists", "default": ""},
+                "evidence": {
+                    "type": "string",
+                    "description": "Why this relation exists",
+                    "default": "",
+                },
                 "agent_id": {"type": "string", "description": "Agent creating this relation"},
-                "provider_a": {"type": "string", "description": "Provider for skill_a (optional)", "default": ""},
-                "provider_b": {"type": "string", "description": "Provider for skill_b (optional)", "default": ""},
+                "provider_a": {
+                    "type": "string",
+                    "description": "Provider for skill_a (optional)",
+                    "default": "",
+                },
+                "provider_b": {
+                    "type": "string",
+                    "description": "Provider for skill_b (optional)",
+                    "default": "",
+                },
             },
             "required": ["skill_a", "skill_b", "relation_type", "agent_id"],
         },
@@ -144,8 +238,16 @@ TOOLS: list[Tool] = [
             "type": "object",
             "properties": {
                 "skill_name": {"type": "string", "description": "Skill to get relations for"},
-                "provider": {"type": "string", "description": "Provider to disambiguate (optional)", "default": ""},
-                "depth": {"type": "integer", "description": "Graph traversal depth (1=direct)", "default": 1},
+                "provider": {
+                    "type": "string",
+                    "description": "Provider to disambiguate (optional)",
+                    "default": "",
+                },
+                "depth": {
+                    "type": "integer",
+                    "description": "Graph traversal depth (1=direct)",
+                    "default": 1,
+                },
             },
             "required": ["skill_name"],
         },
@@ -197,11 +299,13 @@ async def _handle_register_skill(arguments: dict) -> list[TextContent]:
 async def _handle_skill_event(arguments: dict) -> list[TextContent]:
     skill = _resolve_skill(arguments["skill_name"], arguments.get("provider", ""))
     if not skill:
-        return error_response({
-            "error": "skill_not_found",
-            "skill_name": arguments["skill_name"],
-            "hint": "Register the skill first with archivist_register_skill",
-        })
+        return error_response(
+            {
+                "error": "skill_not_found",
+                "skill_name": arguments["skill_name"],
+                "hint": "Register the skill first with archivist_register_skill",
+            }
+        )
 
     event_id = log_skill_event(
         skill_id=skill["id"],
@@ -214,27 +318,35 @@ async def _handle_skill_event(arguments: dict) -> list[TextContent]:
     )
 
     m.inc(m.SKILL_EVENT, {"outcome": arguments["outcome"]})
-    webhooks.fire_background("skill_event", {
-        "skill_name": skill["name"], "outcome": arguments["outcome"],
-        "agent_id": arguments["agent_id"],
-    })
+    webhooks.fire_background(
+        "skill_event",
+        {
+            "skill_name": skill["name"],
+            "outcome": arguments["outcome"],
+            "agent_id": arguments["agent_id"],
+        },
+    )
 
-    return success_response({
-        "event_id": event_id,
-        "skill_id": skill["id"],
-        "skill_name": skill["name"],
-        "outcome": arguments["outcome"],
-    })
+    return success_response(
+        {
+            "event_id": event_id,
+            "skill_id": skill["id"],
+            "skill_name": skill["name"],
+            "outcome": arguments["outcome"],
+        }
+    )
 
 
 async def _handle_skill_lesson(arguments: dict) -> list[TextContent]:
     skill = _resolve_skill(arguments["skill_name"], arguments.get("provider", ""))
     if not skill:
-        return error_response({
-            "error": "skill_not_found",
-            "skill_name": arguments["skill_name"],
-            "hint": "Register the skill first with archivist_register_skill",
-        })
+        return error_response(
+            {
+                "error": "skill_not_found",
+                "skill_name": arguments["skill_name"],
+                "hint": "Register the skill first with archivist_register_skill",
+            }
+        )
 
     lesson_id = add_lesson(
         skill_id=skill["id"],
@@ -245,21 +357,25 @@ async def _handle_skill_lesson(arguments: dict) -> list[TextContent]:
         agent_id=arguments["agent_id"],
     )
 
-    return success_response({
-        "lesson_id": lesson_id,
-        "skill_id": skill["id"],
-        "skill_name": skill["name"],
-        "title": arguments["title"],
-    })
+    return success_response(
+        {
+            "lesson_id": lesson_id,
+            "skill_id": skill["id"],
+            "skill_name": skill["name"],
+            "title": arguments["title"],
+        }
+    )
 
 
 async def _handle_skill_health(arguments: dict) -> list[TextContent]:
     skill = _resolve_skill(arguments["skill_name"], arguments.get("provider", ""))
     if not skill:
-        return error_response({
-            "error": "skill_not_found",
-            "skill_name": arguments["skill_name"],
-        })
+        return error_response(
+            {
+                "error": "skill_not_found",
+                "skill_name": arguments["skill_name"],
+            }
+        )
 
     health = get_skill_health(
         skill_id=skill["id"],
@@ -283,17 +399,21 @@ async def _handle_skill_relate(arguments: dict) -> list[TextContent]:
     skill_b = _resolve_skill(arguments["skill_b"], arguments.get("provider_b", ""))
 
     if not skill_a:
-        return error_response({
-            "error": "skill_not_found",
-            "skill_name": arguments["skill_a"],
-            "hint": f"Skill '{arguments['skill_a']}' is not registered. Use archivist_register_skill to create it first.",
-        })
+        return error_response(
+            {
+                "error": "skill_not_found",
+                "skill_name": arguments["skill_a"],
+                "hint": f"Skill '{arguments['skill_a']}' is not registered. Use archivist_register_skill to create it first.",
+            }
+        )
     if not skill_b:
-        return error_response({
-            "error": "skill_not_found",
-            "skill_name": arguments["skill_b"],
-            "hint": f"Skill '{arguments['skill_b']}' is not registered. Use archivist_register_skill to create it first.",
-        })
+        return error_response(
+            {
+                "error": "skill_not_found",
+                "skill_name": arguments["skill_b"],
+                "hint": f"Skill '{arguments['skill_b']}' is not registered. Use archivist_register_skill to create it first.",
+            }
+        )
 
     rel_id = add_skill_relation(
         skill_a_id=skill_a["id"],
@@ -304,35 +424,45 @@ async def _handle_skill_relate(arguments: dict) -> list[TextContent]:
         created_by=arguments["agent_id"],
     )
 
-    return success_response({
-        "relation_id": rel_id,
-        "skill_a": skill_a["name"],
-        "skill_b": skill_b["name"],
-        "relation_type": arguments["relation_type"],
-    })
+    return success_response(
+        {
+            "relation_id": rel_id,
+            "skill_a": skill_a["name"],
+            "skill_b": skill_b["name"],
+            "relation_type": arguments["relation_type"],
+        }
+    )
 
 
 async def _handle_skill_dependencies(arguments: dict) -> list[TextContent]:
     """Return the dependency/relation graph for a skill."""
     skill = _resolve_skill(arguments["skill_name"], arguments.get("provider", ""))
     if not skill:
-        return error_response({
-            "error": "skill_not_found",
-            "skill_name": arguments["skill_name"],
-            "hint": f"Skill '{arguments['skill_name']}' is not registered. Use archivist_register_skill to create it first.",
-        })
+        return error_response(
+            {
+                "error": "skill_not_found",
+                "skill_name": arguments["skill_name"],
+                "hint": f"Skill '{arguments['skill_name']}' is not registered. Use archivist_register_skill to create it first.",
+            }
+        )
 
     depth = arguments.get("depth", 1)
     relations = get_skill_relations(skill["id"], depth=depth)
     substitutes = get_skill_substitutes(skill["id"])
 
-    return success_response({
-        "skill": skill["name"],
-        "skill_id": skill["id"],
-        "relations": relations,
-        "substitutes": [{"name": s["name"], "relation": s["relation_type"], "confidence": s["confidence"]} for s in substitutes],
-        "depth": depth,
-    }, default=str)
+    return success_response(
+        {
+            "skill": skill["name"],
+            "skill_id": skill["id"],
+            "relations": relations,
+            "substitutes": [
+                {"name": s["name"], "relation": s["relation_type"], "confidence": s["confidence"]}
+                for s in substitutes
+            ],
+            "depth": depth,
+        },
+        default=str,
+    )
 
 
 # ---------------------------------------------------------------------------

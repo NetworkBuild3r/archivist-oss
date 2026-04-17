@@ -8,13 +8,12 @@ with per-event routing). Fires asynchronously — never blocks the caller.
 """
 
 import asyncio
-import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import httpx
 
-from archivist.core.config import WEBHOOK_URL, WEBHOOK_TIMEOUT, WEBHOOK_EVENTS
+from archivist.core.config import WEBHOOK_EVENTS, WEBHOOK_TIMEOUT, WEBHOOK_URL
 
 logger = logging.getLogger("archivist.webhooks")
 
@@ -28,11 +27,12 @@ async def fire(event: str, payload: dict) -> bool:
 
     body = {
         "event": event,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "data": payload,
     }
 
-    from archivist.core.metrics import inc, WEBHOOK_FIRE, WEBHOOK_FAIL
+    from archivist.core.metrics import WEBHOOK_FAIL, WEBHOOK_FIRE, inc
+
     inc(WEBHOOK_FIRE, {"event": event})
 
     try:

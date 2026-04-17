@@ -1,39 +1,47 @@
 """Archivist main entrypoint — starts MCP server, file watcher, curator loop, and initial index."""
 
 import asyncio
-from contextlib import asynccontextmanager
 import json
 import logging
 import os
 import sys
 import time
-from datetime import datetime, timezone
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 
-from watchfiles import awatch, Change
-
-from archivist.core.config import (
-    MEMORY_ROOT, MCP_PORT, QDRANT_URL, QDRANT_COLLECTION, VECTOR_DIM, ARCHIVIST_API_KEY,
-    CURATOR_QUEUE_DRAIN_INTERVAL, ARCHIVIST_INVALIDATION_EXPORT_PATH,
-    QDRANT_HNSW_M, QDRANT_HNSW_EF_CONSTRUCT,
-    METRICS_ENABLED, METRICS_AUTH_EXEMPT, METRICS_COLLECT_INTERVAL_SECONDS,
-    MCP_SSE_ENABLED,
-)
-from archivist.storage.qdrant import qdrant_client
-import archivist.core.health as health
-from archivist.storage.graph import init_schema
-from archivist.write.indexer import full_index, index_file, delete_file_points
-from archivist.lifecycle.curator import curator_loop
-from archivist.lifecycle.curator_queue import drain as drain_curator_queue
-from mcp_server import server
-from archivist.core.rbac import load_config as load_rbac_config
-
+from mcp.server.sse import SseServerTransport
+from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.routing import Mount, Route
 from starlette.responses import JSONResponse, PlainTextResponse, Response
-from mcp.server.sse import SseServerTransport
-from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+from starlette.routing import Mount, Route
+from watchfiles import Change, awatch
+
+import archivist.core.health as health
+from archivist.core.config import (
+    ARCHIVIST_API_KEY,
+    ARCHIVIST_INVALIDATION_EXPORT_PATH,
+    CURATOR_QUEUE_DRAIN_INTERVAL,
+    MCP_PORT,
+    MCP_SSE_ENABLED,
+    MEMORY_ROOT,
+    METRICS_AUTH_EXEMPT,
+    METRICS_COLLECT_INTERVAL_SECONDS,
+    METRICS_ENABLED,
+    QDRANT_COLLECTION,
+    QDRANT_HNSW_EF_CONSTRUCT,
+    QDRANT_HNSW_M,
+    QDRANT_URL,
+    VECTOR_DIM,
+)
+from archivist.core.rbac import load_config as load_rbac_config
+from archivist.lifecycle.curator import curator_loop
+from archivist.lifecycle.curator_queue import drain as drain_curator_queue
+from archivist.storage.graph import init_schema
+from archivist.storage.qdrant import qdrant_client
+from archivist.write.indexer import delete_file_points, full_index, index_file
+from mcp_server import server
 
 logging.basicConfig(
     level=logging.INFO,
@@ -50,7 +58,7 @@ def ensure_qdrant_collection():
     before qdrant is listening; avoids brittle image-specific healthchecks).
     """
     from qdrant_client import QdrantClient
-    from qdrant_client.models import VectorParams, Distance, PayloadSchemaType, HnswConfigDiff
+    from qdrant_client.models import Distance, HnswConfigDiff, PayloadSchemaType, VectorParams
 
     deadline = time.monotonic() + 120
     last_err: Exception | None = None
@@ -66,7 +74,9 @@ def ensure_qdrant_collection():
             logger.warning("Waiting for Qdrant at %s: %s — retrying in 2s", QDRANT_URL, e)
             time.sleep(2)
     else:
-        health.register("qdrant", healthy=False, detail=f"Qdrant not reachable after 120s: {last_err}")
+        health.register(
+            "qdrant", healthy=False, detail=f"Qdrant not reachable after 120s: {last_err}"
+        )
         raise RuntimeError(f"Qdrant not reachable at {QDRANT_URL} after 120s") from last_err
 
     assert client is not None
@@ -79,14 +89,18 @@ def ensure_qdrant_collection():
         if current_dim != VECTOR_DIM:
             logger.warning(
                 "Collection '%s' has %d-dim vectors but target is %d-dim — recreating",
-                QDRANT_COLLECTION, current_dim, VECTOR_DIM,
+                QDRANT_COLLECTION,
+                current_dim,
+                VECTOR_DIM,
             )
             client.delete_collection(QDRANT_COLLECTION)
             needs_create = True
         else:
             logger.info(
                 "Qdrant collection '%s' exists: %d points (%d-dim)",
-                QDRANT_COLLECTION, info.points_count, current_dim,
+                QDRANT_COLLECTION,
+                info.points_count,
+                current_dim,
             )
 
     if needs_create:
@@ -100,7 +114,10 @@ def ensure_qdrant_collection():
         )
         logger.info(
             "Created Qdrant collection '%s' (%d-dim, HNSW m=%d ef_construct=%d)",
-            QDRANT_COLLECTION, VECTOR_DIM, QDRANT_HNSW_M, QDRANT_HNSW_EF_CONSTRUCT,
+            QDRANT_COLLECTION,
+            VECTOR_DIM,
+            QDRANT_HNSW_M,
+            QDRANT_HNSW_EF_CONSTRUCT,
         )
 
         for field, schema in [
@@ -167,9 +184,9 @@ async def handle_health(_request):
 
 async def handle_invalidate(_request):
     """Endpoint to delete expired memories (TTL-based)."""
-    import archivist.core.metrics as met
+    from qdrant_client.models import FieldCondition, Filter, Range
 
-    from qdrant_client.models import Filter, FieldCondition, Range
+    import archivist.core.metrics as met
 
     t0 = time.monotonic()
     now_ts = int(time.time())
@@ -195,6 +212,7 @@ async def handle_invalidate(_request):
 
         if point_ids:
             from archivist.lifecycle.memory_lifecycle import delete_memory_complete
+
             for pid in points:
                 pl = getattr(pid, "payload", None) or {}
                 ns = str(pl.get("namespace", "") or "")
@@ -215,7 +233,7 @@ async def handle_invalidate(_request):
         if ARCHIVIST_INVALIDATION_EXPORT_PATH:
             try:
                 line = {
-                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "ts": datetime.now(UTC).isoformat(),
                     "count": n,
                     "duration_ms": dur_ms,
                     "sample_ids": sample,
@@ -251,8 +269,9 @@ async def _startup():
     logger.info("Archivist v2.0.0 starting up...")
     logger.info(
         "MCP transport: streamable_http (POST /mcp)%s",
-        " + legacy SSE (/mcp/sse, /mcp/messages/)" if MCP_SSE_ENABLED else
-        " [SSE disabled — set MCP_SSE_ENABLED=true to enable legacy SSE]",
+        " + legacy SSE (/mcp/sse, /mcp/messages/)"
+        if MCP_SSE_ENABLED
+        else " [SSE disabled — set MCP_SSE_ENABLED=true to enable legacy SSE]",
     )
 
     init_schema()
@@ -346,9 +365,7 @@ class SseASGIApp:
             if sse_transport is None:
                 raise RuntimeError("SSE transport is disabled (MCP_SSE_ENABLED=false)")
             async with sse_transport.connect_sse(scope, receive, send) as streams:
-                await server.run(
-                    streams[0], streams[1], server.create_initialization_options()
-                )
+                await server.run(streams[0], streams[1], server.create_initialization_options())
         finally:
             reset_request_id(token)
 
@@ -415,6 +432,7 @@ class ArchivistAuthMiddleware(BaseHTTPMiddleware):
 async def handle_retrieval_export(request):
     """REST endpoint for retrieval log export (dashboard/debugging)."""
     from archivist.retrieval.retrieval_log import get_retrieval_logs, get_retrieval_stats
+
     params = request.query_params
     if params.get("stats") == "true":
         stats = get_retrieval_stats(
@@ -441,7 +459,8 @@ async def handle_metrics(_request):
 
 async def handle_dashboard(request):
     """Health dashboard JSON."""
-    from archivist.app.dashboard import build_dashboard, batch_heuristic
+    from archivist.app.dashboard import batch_heuristic, build_dashboard
+
     params = request.query_params
     window = int(params.get("window_days", "7"))
     if params.get("batch") == "true":
@@ -458,8 +477,8 @@ async def handle_namespace_index(request):
     agent_id = request.query_params.get("agent_id", "").strip()
     if not agent_id:
         return PlainTextResponse("missing agent_id query parameter", status_code=400)
-    from archivist.storage.compressed_index import build_namespace_index
     from archivist.core.rbac import get_namespace_for_agent
+    from archivist.storage.compressed_index import build_namespace_index
 
     namespace = get_namespace_for_agent(agent_id)
     text = build_namespace_index(namespace, agent_ids=[agent_id])
@@ -467,6 +486,7 @@ async def handle_namespace_index(request):
 
 
 # ── Backup / restore admin endpoints ─────────────────────────────────────────
+
 
 async def handle_backup_create(request):
     """POST /admin/backup — create a memory snapshot."""
@@ -485,6 +505,7 @@ async def handle_backup_create(request):
 async def handle_backup_list(_request):
     """GET /admin/backups — list available snapshots."""
     from archivist.storage.backup_manager import list_snapshots
+
     snapshots = list_snapshots()
     return JSONResponse({"snapshots": snapshots, "count": len(snapshots)})
 
@@ -502,9 +523,12 @@ async def handle_backup_restore(request):
 
     target = body.get("target", "all")
     if target not in ("all", "qdrant", "sqlite"):
-        return JSONResponse({"error": "target must be 'all', 'qdrant', or 'sqlite'"}, status_code=400)
+        return JSONResponse(
+            {"error": "target must be 'all', 'qdrant', or 'sqlite'"}, status_code=400
+        )
 
     from archivist.storage.backup_manager import restore_snapshot
+
     try:
         result = restore_snapshot(snapshot_id, target=target)
         return JSONResponse(result)
@@ -524,6 +548,7 @@ async def handle_backup_delete(request):
         return JSONResponse({"error": "snapshot_id required"}, status_code=400)
 
     from archivist.storage.backup_manager import delete_snapshot
+
     if delete_snapshot(snapshot_id):
         return JSONResponse({"deleted": snapshot_id})
     return JSONResponse({"error": "snapshot not found"}, status_code=404)
@@ -536,6 +561,7 @@ async def handle_agent_export(request):
         return JSONResponse({"error": "agent_id query parameter required"}, status_code=400)
 
     from archivist.storage.backup_manager import export_agent
+
     try:
         result = export_agent(agent_id)
         return JSONResponse(result)
@@ -558,6 +584,7 @@ async def handle_agent_import(request):
     dry_run = body.get("dry_run", False)
 
     from archivist.storage.backup_manager import import_agent
+
     try:
         result = import_agent(ndjson_path, dry_run=dry_run)
         return JSONResponse(result)
@@ -601,4 +628,5 @@ app = Starlette(
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=MCP_PORT)

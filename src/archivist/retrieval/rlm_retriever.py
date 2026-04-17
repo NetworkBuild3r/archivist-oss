@@ -10,68 +10,88 @@ Phase 5 (v0.8): hot cache, retrieval trajectory logging.
 import asyncio
 import logging
 import time
-from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchAny, MatchText, SearchParams
 
-from archivist.core.config import (
-    QDRANT_COLLECTION,
-    LLM_MODEL,
-    LLM_REFINE_MODEL,
-    LLM_SYNTH_MODEL,
-    LLM_REFINE_CONCURRENCY,
-    REFINE_SKIP_THRESHOLD,
-    RETRIEVAL_THRESHOLD, RERANK_ENABLED, RERANK_MODEL, RERANK_TOP_K,
-    VECTOR_SEARCH_LIMIT,
-    GRAPH_RETRIEVAL_ENABLED, MULTI_HOP_DEPTH, TEMPORAL_DECAY_HALFLIFE_DAYS,
-    HOT_CACHE_ENABLED,
-    BM25_ENABLED,
-    QUERY_CLASSIFICATION_ENABLED,
-    IMPORTANCE_WEIGHT,
-    TEMPORAL_INTENT_ENABLED,
-    BM25_RESCUE_ENABLED, BM25_RESCUE_MIN_SCORE_RATIO, BM25_RESCUE_MAX_SLOTS,
-    ADAPTIVE_VECTOR_LIMIT_ENABLED, ADAPTIVE_VECTOR_MIN_RESULTS, ADAPTIVE_VECTOR_LIMIT_MULTIPLIER,
-    CROSS_AGENT_MAX_SHARE,
-    TOPIC_ROUTING_ENABLED,
-    QUERY_EXPANSION_ENABLED, QUERY_EXPANSION_COUNT, QUERY_EXPANSION_MODEL,
-    DYNAMIC_THRESHOLD_ENABLED,
-    QDRANT_SEARCH_EF, LATENCY_BUDGET_MS,
-    RERANKER_ENABLED, RERANKER_MODEL, RERANKER_TOP_K,
-    SYNTHETIC_QUESTIONS_ENABLED,
+from qdrant_client.models import (
+    FieldCondition,
+    Filter,
+    MatchAny,
+    MatchText,
+    MatchValue,
+    SearchParams,
 )
-from archivist.features.embeddings import embed_text, embed_batch
-from archivist.features.llm import llm_query
-from archivist.retrieval.memory_fusion import dedupe_vector_hits
-from archivist.retrieval.retrieval_filters import apply_retrieval_threshold, apply_dynamic_threshold
-from archivist.retrieval.rank_fusion import rrf_merge
-from archivist.storage.graph_retrieval import (
-    extract_entity_mentions,
-    graph_context_for_entities,
-    apply_temporal_decay,
-    merge_graph_context_into_results,
-    build_entity_fact_results,
-)
-from archivist.storage.fts_search import search_bm25, merge_vector_and_bm25
+
 import archivist.core.health as health
 import archivist.core.metrics as m
-from archivist.core.observability import slow_qdrant_check
-from archivist.storage.qdrant import qdrant_client
-from archivist.write.tiering import select_tier
-from archivist.utils.tokenizer import count_tokens
-from archivist.core.trajectory import get_outcome_adjustments
-from archivist.core.hotness import apply_hotness_to_results
-from archivist.retrieval.query_intent import classify_temporal_intent
-from archivist.retrieval.topic_detector import detect_query_topic
-from archivist.retrieval.ranker import ltr_available, rank_results as ltr_rank_results
-from archivist.storage.collection_router import collection_for
-from archivist.core.latency_budget import LatencyBudget, budget_for_query_type
-from archivist.retrieval.query_expansion import expand_query
-from archivist.write.hyde import is_needle_query, generate_hypothetical_document
-from archivist.core.result_types import ResultCandidate, RetrievalSource
-from archivist.storage.graph import lookup_needle_tokens
-from archivist.utils.chunking import NEEDLE_PATTERNS as LITERAL_NEEDLE_PATTERNS
 import archivist.retrieval.hot_cache as hot_cache
 import archivist.retrieval.retrieval_log as retrieval_log
+from archivist.core.config import (
+    ADAPTIVE_VECTOR_LIMIT_ENABLED,
+    ADAPTIVE_VECTOR_LIMIT_MULTIPLIER,
+    ADAPTIVE_VECTOR_MIN_RESULTS,
+    BM25_ENABLED,
+    BM25_RESCUE_ENABLED,
+    BM25_RESCUE_MAX_SLOTS,
+    BM25_RESCUE_MIN_SCORE_RATIO,
+    CROSS_AGENT_MAX_SHARE,
+    DYNAMIC_THRESHOLD_ENABLED,
+    GRAPH_RETRIEVAL_ENABLED,
+    IMPORTANCE_WEIGHT,
+    LLM_MODEL,
+    LLM_REFINE_CONCURRENCY,
+    LLM_REFINE_MODEL,
+    LLM_SYNTH_MODEL,
+    MULTI_HOP_DEPTH,
+    QDRANT_SEARCH_EF,
+    QUERY_CLASSIFICATION_ENABLED,
+    QUERY_EXPANSION_COUNT,
+    QUERY_EXPANSION_ENABLED,
+    QUERY_EXPANSION_MODEL,
+    REFINE_SKIP_THRESHOLD,
+    RERANK_ENABLED,
+    RERANK_MODEL,
+    RERANK_TOP_K,
+    RERANKER_ENABLED,
+    RERANKER_MODEL,
+    RERANKER_TOP_K,
+    RETRIEVAL_THRESHOLD,
+    SYNTHETIC_QUESTIONS_ENABLED,
+    TEMPORAL_DECAY_HALFLIFE_DAYS,
+    TEMPORAL_INTENT_ENABLED,
+    TOPIC_ROUTING_ENABLED,
+    VECTOR_SEARCH_LIMIT,
+)
+from archivist.core.hotness import apply_hotness_to_results
+from archivist.core.latency_budget import LatencyBudget, budget_for_query_type
+from archivist.core.observability import slow_qdrant_check
+from archivist.core.result_types import ResultCandidate
+from archivist.core.trajectory import get_outcome_adjustments
+from archivist.features.embeddings import embed_batch, embed_text
+from archivist.features.llm import llm_query
+from archivist.retrieval.memory_fusion import dedupe_vector_hits
+from archivist.retrieval.query_classifier import SUBCATEGORY_TO_TOPIC, classify_query_full
+from archivist.retrieval.query_expansion import expand_query
+from archivist.retrieval.query_intent import classify_temporal_intent
+from archivist.retrieval.rank_fusion import rrf_merge
+from archivist.retrieval.ranker import ltr_available
+from archivist.retrieval.ranker import rank_results as ltr_rank_results
+from archivist.retrieval.retrieval_filters import apply_dynamic_threshold, apply_retrieval_threshold
+from archivist.retrieval.topic_detector import detect_query_topic
+from archivist.storage.collection_router import collection_for
+from archivist.storage.fts_search import merge_vector_and_bm25, search_bm25
+from archivist.storage.graph import lookup_needle_tokens
+from archivist.storage.graph_retrieval import (
+    apply_temporal_decay,
+    build_entity_fact_results,
+    extract_entity_mentions,
+    graph_context_for_entities,
+    merge_graph_context_into_results,
+)
 from archivist.storage.namespace_inventory import NamespaceInventory, get_inventory
-from archivist.retrieval.query_classifier import classify_query_full, SUBCATEGORY_TO_TOPIC
+from archivist.storage.qdrant import qdrant_client
+from archivist.utils.chunking import NEEDLE_PATTERNS as LITERAL_NEEDLE_PATTERNS
+from archivist.utils.tokenizer import count_tokens
+from archivist.write.hyde import generate_hypothetical_document, is_needle_query
+from archivist.write.tiering import select_tier
 
 logger = logging.getLogger("archivist.rlm")
 
@@ -119,7 +139,9 @@ def _literal_search_sync(
         if namespace:
             must_filters.append(FieldCondition(key="namespace", match=MatchValue(value=namespace)))
         if memory_type:
-            must_filters.append(FieldCondition(key="memory_type", match=MatchValue(value=memory_type)))
+            must_filters.append(
+                FieldCondition(key="memory_type", match=MatchValue(value=memory_type))
+            )
 
         literal_must_not = [
             FieldCondition(key="archived", match=MatchValue(value=True)),
@@ -141,30 +163,32 @@ def _literal_search_sync(
                 continue
             seen_ids.add(hid)
             p = hit.payload or {}
-            all_hits.append({
-                "id": hid,
-                "score": 0.0,
-                "text": p.get("text", ""),
-                "l0": p.get("l0", ""),
-                "l1": p.get("l1", ""),
-                "agent_id": p.get("agent_id", ""),
-                "file_path": p.get("file_path", ""),
-                "file_type": p.get("file_type", ""),
-                "date": p.get("date", ""),
-                "content_date": p.get("content_date", ""),
-                "indexed_at": p.get("indexed_at", ""),
-                "team": p.get("team", ""),
-                "namespace": p.get("namespace", ""),
-                "chunk_index": p.get("chunk_index", 0),
-                "parent_id": p.get("parent_id"),
-                "is_parent": p.get("is_parent", False),
-                "parent_text": p.get("parent_text", ""),
-                "importance_score": p.get("importance_score", 0.5),
-                "retention_class": p.get("retention_class", "standard"),
-                "topic": p.get("topic", ""),
-                "thought_type": p.get("thought_type", ""),
-                "literal_match": True,
-            })
+            all_hits.append(
+                {
+                    "id": hid,
+                    "score": 0.0,
+                    "text": p.get("text", ""),
+                    "l0": p.get("l0", ""),
+                    "l1": p.get("l1", ""),
+                    "agent_id": p.get("agent_id", ""),
+                    "file_path": p.get("file_path", ""),
+                    "file_type": p.get("file_type", ""),
+                    "date": p.get("date", ""),
+                    "content_date": p.get("content_date", ""),
+                    "indexed_at": p.get("indexed_at", ""),
+                    "team": p.get("team", ""),
+                    "namespace": p.get("namespace", ""),
+                    "chunk_index": p.get("chunk_index", 0),
+                    "parent_id": p.get("parent_id"),
+                    "is_parent": p.get("is_parent", False),
+                    "parent_text": p.get("parent_text", ""),
+                    "importance_score": p.get("importance_score", 0.5),
+                    "retention_class": p.get("retention_class", "standard"),
+                    "topic": p.get("topic", ""),
+                    "thought_type": p.get("thought_type", ""),
+                    "literal_match": True,
+                }
+            )
     return all_hits[:limit]
 
 
@@ -256,9 +280,7 @@ def _memory_awareness_payload(
             "try memory_type=experience for 'what happened' queries."
         )
     elif searched_as == "experience" and by.get("skill", 0) > 0:
-        hint = (
-            f"Also {by['skill']} skill memories — try memory_type=skill for how-to questions."
-        )
+        hint = f"Also {by['skill']} skill memories — try memory_type=skill for how-to questions."
     elif searched_as in ("skill", "experience") and by.get("general", 0) > 0:
         hint = f"Also {by['general']} general memories available."
     out = {
@@ -281,9 +303,7 @@ def _attach_stage0(
 ) -> None:
     if inventory is None:
         return
-    result["memory_awareness"] = _memory_awareness_payload(
-        inventory, auto_type, user_memory_type
-    )
+    result["memory_awareness"] = _memory_awareness_payload(inventory, auto_type, user_memory_type)
     rt = result.get("retrieval_trace")
     if isinstance(rt, dict):
         if auto_type:
@@ -333,12 +353,14 @@ async def _refine_one_chunk(
             graph_extra = "\n[Graph context] " + " | ".join(hit["graph_context"][:3])
 
         who = hit.get("agent_id") or "unknown"
-        prompt = (
-            f"Query: {query}\n\nMemory chunk (agent={who}, file={hit['file_path']}, date={hit['date']}):\n{context}{graph_extra}"
-        )
+        prompt = f"Query: {query}\n\nMemory chunk (agent={who}, file={hit['file_path']}, date={hit['date']}):\n{context}{graph_extra}"
         try:
             extraction = await llm_query(
-                prompt, system=REFINE_SYSTEM, max_tokens=512, model=refine_model, stage="refine",
+                prompt,
+                system=REFINE_SYSTEM,
+                max_tokens=512,
+                model=refine_model,
+                stage="refine",
             )
             if extraction.strip().upper() != "IRRELEVANT":
                 return {
@@ -472,7 +494,9 @@ async def search_vectors(
     if topic:
         must_filters.append(FieldCondition(key="topic", match=MatchValue(value=topic)))
     if thought_type:
-        must_filters.append(FieldCondition(key="thought_type", match=MatchValue(value=thought_type)))
+        must_filters.append(
+            FieldCondition(key="thought_type", match=MatchValue(value=thought_type))
+        )
     if actor_type:
         must_filters.append(FieldCondition(key="actor_type", match=MatchValue(value=actor_type)))
 
@@ -584,6 +608,7 @@ async def _apply_rerank(query: str, results: list[dict]) -> list[dict]:
         return results
     try:
         from archivist.retrieval.reranker import rerank_results
+
         return await rerank_results(query, results, model_name=RERANK_MODEL, limit=RERANK_TOP_K)
     except Exception as e:
         logger.warning("Reranking failed, using original order: %s", e)
@@ -630,7 +655,8 @@ async def recursive_retrieve(
         if namespace:
             stage0_inventory = get_inventory(namespace)
         auto_type, auto_subcategory = await classify_query_full(
-            query, inventory=stage0_inventory,
+            query,
+            inventory=stage0_inventory,
         )
         _classified_budget_type = auto_type if auto_type else _initial_budget_type
         _new_budget_ms = budget_for_query_type(_classified_budget_type)
@@ -682,9 +708,17 @@ async def recursive_retrieve(
             "latency_budget_ms": _budget.remaining_ms(),
         }
 
-    cache_extra = f"{agent_id}|{','.join(agent_ids or [])}|{team}|{date_from}|{date_to}|{limit}|{refine}"
-    cached = hot_cache.get(agent_id or "fleet", query, namespace=namespace,
-                           tier=tier, memory_type=effective_memory_type, extra=cache_extra)
+    cache_extra = (
+        f"{agent_id}|{','.join(agent_ids or [])}|{team}|{date_from}|{date_to}|{limit}|{refine}"
+    )
+    cached = hot_cache.get(
+        agent_id or "fleet",
+        query,
+        namespace=namespace,
+        tier=tier,
+        memory_type=effective_memory_type,
+        extra=cache_extra,
+    )
     if cached is not None:
         elapsed = int((time.monotonic() - t0) * 1000)
         out = dict(cached)
@@ -696,11 +730,15 @@ async def recursive_retrieve(
             user_memory_type,
         )
         retrieval_log.log_retrieval(
-            agent_id=agent_id or "fleet", query=query, namespace=namespace,
-            tier=tier, memory_type=effective_memory_type,
+            agent_id=agent_id or "fleet",
+            query=query,
+            namespace=namespace,
+            tier=tier,
+            memory_type=effective_memory_type,
             retrieval_trace=out.get("retrieval_trace", {}),
             result_count=len(out.get("sources", [])),
-            cache_hit=True, duration_ms=elapsed,
+            cache_hit=True,
+            duration_ms=elapsed,
         )
         out["cache_hit"] = True
         m.inc(m.CACHE_HIT)
@@ -814,9 +852,14 @@ async def recursive_retrieve(
     # Stage 1: Parallel retrieval — vector + BM25 run concurrently (v1.10 12c)
     _t_vec = time.monotonic()
     _vec_common = dict(
-        agent_id=agent_id, agent_ids=agent_ids, team=team,
-        namespace=namespace, date_from=date_from, date_to=date_to,
-        memory_type=effective_memory_type, limit=vector_limit,
+        agent_id=agent_id,
+        agent_ids=agent_ids,
+        team=team,
+        namespace=namespace,
+        date_from=date_from,
+        date_to=date_to,
+        memory_type=effective_memory_type,
+        limit=vector_limit,
         actor_type=actor_type,
     )
 
@@ -830,7 +873,8 @@ async def recursive_retrieve(
         if not BM25_ENABLED:
             return []
         return await asyncio.to_thread(
-            search_bm25, query,
+            search_bm25,
+            query,
             namespace=namespace,
             agent_id=agent_id if not agent_ids else "",
             memory_type=effective_memory_type,
@@ -846,7 +890,8 @@ async def recursive_retrieve(
         if not literal_tokens:
             return []
         return await asyncio.to_thread(
-            _literal_search_sync, literal_tokens,
+            _literal_search_sync,
+            literal_tokens,
             namespace=namespace,
             agent_id=agent_id if not agent_ids else "",
             agent_ids=agent_ids,
@@ -857,7 +902,7 @@ async def recursive_retrieve(
     all_tasks = vec_tasks + [_bm25_async(), _literal_async()]
     all_results = await asyncio.gather(*all_tasks)
 
-    vec_results = list(all_results[:len(vec_tasks)])
+    vec_results = list(all_results[: len(vec_tasks)])
     bm25_hits = all_results[len(vec_tasks)]
     literal_hits = all_results[len(vec_tasks) + 1]
 
@@ -865,7 +910,10 @@ async def recursive_retrieve(
     if detected_topic and len(vec_results[0]) < ADAPTIVE_VECTOR_MIN_RESULTS and _cached_query_vec:
         topic_fallback_used = True
         vec_results[0] = await search_vectors(
-            query, **_vec_common, topic="", _query_vec=_cached_query_vec,
+            query,
+            **_vec_common,
+            topic="",
+            _query_vec=_cached_query_vec,
         )
 
     # Merge all vector variant results + literal + registry via RRF
@@ -899,7 +947,8 @@ async def recursive_retrieve(
 
     logger.debug(
         "POST-FUSION coarse=%d bm25=%d top5_scores=%s top3_paths=%s",
-        len(coarse), n_bm25,
+        len(coarse),
+        n_bm25,
         [round(r.get("score", 0), 4) for r in coarse[:5]],
         [r.get("file_path", "?") for r in coarse[:3]],
     )
@@ -922,16 +971,22 @@ async def recursive_retrieve(
     _stage_timings["graph_ms"] = round((time.monotonic() - _t_graph) * 1000, 1)
 
     # Late HyDE pass — legacy path only; v2 path relies on the nomination pool
-    if (not RERANKER_ENABLED
-            and not _is_retry and not _hyde_used
-            and is_needle_query(query, entity_count=n_graph_entities)
-            and _budget.can_afford(150) and _cached_query_vec is not None):
+    if (
+        not RERANKER_ENABLED
+        and not _is_retry
+        and not _hyde_used
+        and is_needle_query(query, entity_count=n_graph_entities)
+        and _budget.can_afford(150)
+        and _cached_query_vec is not None
+    ):
         try:
             late_hyde_doc = await generate_hypothetical_document(query)
             if late_hyde_doc:
                 late_vec = (await embed_batch([late_hyde_doc]))[0]
                 if late_vec:
-                    late_hits = await search_vectors(query, **_vec_common, topic="", _query_vec=late_vec)
+                    late_hits = await search_vectors(
+                        query, **_vec_common, topic="", _query_vec=late_vec
+                    )
                     if late_hits:
                         coarse, _ = _merge_into_results(coarse, late_hits)
                     _hyde_used = True
@@ -997,9 +1052,7 @@ async def recursive_retrieve(
                 ci = r.get("chunk_index", 0)
                 rid = f"{fp}:{ci}"
             existing = candidate_pool.get(rid)
-            if existing is None:
-                candidate_pool[rid] = dict(r)
-            elif r.get("score", 0) > existing.get("score", 0):
+            if existing is None or r.get("score", 0) > existing.get("score", 0):
                 candidate_pool[rid] = dict(r)
             if r.get("representation_type") == "synthetic_question":
                 candidate_pool[rid]["synthetic_match"] = True
@@ -1027,12 +1080,21 @@ async def recursive_retrieve(
                 "chunks_searched": n_coarse,
                 "agents_scoped": agent_ids or ([agent_id] if agent_id else []),
                 "retrieval_trace": _retrieval_trace(
-                    vector_limit=vector_limit, coarse_count=n_coarse,
-                    deduped_count=0, threshold=0.0, after_threshold_count=0,
-                    after_rerank_count=0, parent_enriched=False, refinement_chunks=0,
-                    graph_entities_found=n_graph_entities, graph_context_items=n_graph_items,
-                    tier=tier, bm25_hits=n_bm25, stage_timings=_stage_timings,
-                    reranker_enabled=True, reranker_model=RERANKER_MODEL,
+                    vector_limit=vector_limit,
+                    coarse_count=n_coarse,
+                    deduped_count=0,
+                    threshold=0.0,
+                    after_threshold_count=0,
+                    after_rerank_count=0,
+                    parent_enriched=False,
+                    refinement_chunks=0,
+                    graph_entities_found=n_graph_entities,
+                    graph_context_items=n_graph_items,
+                    tier=tier,
+                    bm25_hits=n_bm25,
+                    stage_timings=_stage_timings,
+                    reranker_enabled=True,
+                    reranker_model=RERANKER_MODEL,
                     **_trace_kw(),
                 ),
             }
@@ -1043,8 +1105,10 @@ async def recursive_retrieve(
         # Cross-encoder rerank: the sole ranking authority
         # Parent text is already stored in the payload at index time — no runtime fetch needed
         from archivist.retrieval.reranker import rerank_candidates
+
         reranked = await rerank_candidates(
-            query, pool,
+            query,
+            pool,
             model_name=RERANKER_MODEL,
             top_k=RERANKER_TOP_K,
         )
@@ -1090,7 +1154,9 @@ async def recursive_retrieve(
         temporal_applied = False
         if TEMPORAL_DECAY_HALFLIFE_DAYS > 0:
             coarse = apply_temporal_decay(
-                coarse, TEMPORAL_DECAY_HALFLIFE_DAYS, temporal_intent=temporal_intent,
+                coarse,
+                TEMPORAL_DECAY_HALFLIFE_DAYS,
+                temporal_intent=temporal_intent,
             )
             temporal_applied = True
 
@@ -1110,14 +1176,22 @@ async def recursive_retrieve(
             filtered = apply_retrieval_threshold(coarse, effective_threshold)
 
         # Stage 2-rescue: Adaptive vector limit (v1.9)
-        if (ADAPTIVE_VECTOR_LIMIT_ENABLED
-                and len(filtered) < ADAPTIVE_VECTOR_MIN_RESULTS
-                and n_coarse >= vector_limit):
+        if (
+            ADAPTIVE_VECTOR_LIMIT_ENABLED
+            and len(filtered) < ADAPTIVE_VECTOR_MIN_RESULTS
+            and n_coarse >= vector_limit
+        ):
             wider_limit = int(vector_limit * ADAPTIVE_VECTOR_LIMIT_MULTIPLIER)
             wider_coarse = await search_vectors(
-                query, agent_id=agent_id, agent_ids=agent_ids, team=team,
-                namespace=namespace, date_from=date_from, date_to=date_to,
-                memory_type=effective_memory_type, limit=wider_limit,
+                query,
+                agent_id=agent_id,
+                agent_ids=agent_ids,
+                team=team,
+                namespace=namespace,
+                date_from=date_from,
+                date_to=date_to,
+                memory_type=effective_memory_type,
+                limit=wider_limit,
                 _query_vec=_cached_query_vec,
             )
             if len(wider_coarse) > n_coarse:
@@ -1125,7 +1199,8 @@ async def recursive_retrieve(
                 wider_coarse = dedupe_vector_hits(wider_coarse)
                 if TEMPORAL_DECAY_HALFLIFE_DAYS > 0:
                     wider_coarse = apply_temporal_decay(
-                        wider_coarse, TEMPORAL_DECAY_HALFLIFE_DAYS,
+                        wider_coarse,
+                        TEMPORAL_DECAY_HALFLIFE_DAYS,
                         temporal_intent=temporal_intent,
                     )
                 wider_coarse = apply_hotness_to_results(wider_coarse)
@@ -1135,17 +1210,20 @@ async def recursive_retrieve(
 
         # Stage 2-bm25-rescue: BM25 rescue slots (v1.9, needle-boosted v1.11)
         if BM25_RESCUE_ENABLED and BM25_ENABLED and n_bm25 > 0:
-            bm25_max = max((r.get("bm25_score", 0) for r in coarse if r.get("bm25_score")), default=0)
+            bm25_max = max(
+                (r.get("bm25_score", 0) for r in coarse if r.get("bm25_score")), default=0
+            )
             if bm25_max > 0:
                 rescue_threshold = bm25_max * BM25_RESCUE_MIN_SCORE_RATIO
                 rescue_slots = 7 if _needle_query_detected else BM25_RESCUE_MAX_SLOTS
                 rescue_candidates = [
-                    r for r in coarse
-                    if r.get("bm25_score", 0) >= rescue_threshold
+                    r for r in coarse if r.get("bm25_score", 0) >= rescue_threshold
                 ][:rescue_slots]
                 filtered, n_bm25_rescue = _merge_into_results(
-                    filtered, rescue_candidates,
-                    min_score=effective_threshold, tag="bm25_rescue",
+                    filtered,
+                    rescue_candidates,
+                    min_score=effective_threshold,
+                    tag="bm25_rescue",
                 )
 
         # Stage 2-xagent: Cross-agent rank guards (v1.9)
@@ -1170,12 +1248,14 @@ async def recursive_retrieve(
         n_entity_facts_injected = 0
         if GRAPH_RETRIEVAL_ENABLED and detected_entities:
             entity_facts = build_entity_fact_results(
-                detected_entities, min_score=effective_threshold + 0.05,
+                detected_entities,
+                min_score=effective_threshold + 0.05,
                 as_of=date_from,
             )
             if entity_facts:
                 filtered, n_entity_facts_injected = _merge_into_results(
-                    filtered, entity_facts,
+                    filtered,
+                    entity_facts,
                     preserve_top_n=min(5, max(limit // 2, 1)),
                 )
 
@@ -1234,14 +1314,14 @@ async def recursive_retrieve(
 
         # Stage 3a: Iterative retrieval — auto-reformulate on low-confidence (v1.10)
         _ITERATIVE_THRESHOLD = 0.45
-        if (not _is_retry
-                and reranked
-                and max(r.get("score", 0) for r in reranked) < _ITERATIVE_THRESHOLD
-                and _budget.can_afford(200)):
+        if (
+            not _is_retry
+            and reranked
+            and max(r.get("score", 0) for r in reranked) < _ITERATIVE_THRESHOLD
+            and _budget.can_afford(200)
+        ):
             try:
-                snippets = " | ".join(
-                    (r.get("text", "") or "")[:80] for r in reranked[:3]
-                )
+                snippets = " | ".join((r.get("text", "") or "")[:80] for r in reranked[:3])
                 reformulated = await llm_query(
                     f"The search query '{query}' returned low-relevance results: [{snippets}]. "
                     "Suggest a single, better search query to find the answer. Return ONLY the query.",
@@ -1256,11 +1336,18 @@ async def recursive_retrieve(
                     _stage_timings["postprocess_ms"] = round((time.monotonic() - _t_post) * 1000, 1)
                     return await recursive_retrieve(
                         reformulated,
-                        agent_id=agent_id, agent_ids=agent_ids, team=team,
-                        namespace=namespace, limit=limit, refine=refine,
-                        threshold=threshold, tier=tier,
-                        date_from=date_from, date_to=date_to,
-                        max_tokens=max_tokens, memory_type=memory_type,
+                        agent_id=agent_id,
+                        agent_ids=agent_ids,
+                        team=team,
+                        namespace=namespace,
+                        limit=limit,
+                        refine=refine,
+                        threshold=threshold,
+                        tier=tier,
+                        date_from=date_from,
+                        date_to=date_to,
+                        max_tokens=max_tokens,
+                        memory_type=memory_type,
                         _is_retry=True,
                     )
             except Exception as e:
@@ -1416,14 +1503,20 @@ async def recursive_retrieve(
     t_synth0 = time.monotonic()
     try:
         answer = await llm_query(
-            synth_prompt, system=synth_system, max_tokens=1024, model=synth_model, stage="synth",
+            synth_prompt,
+            system=synth_system,
+            max_tokens=1024,
+            model=synth_model,
+            stage="synth",
         )
         if answer is None:
             answer = ""
         else:
             answer = str(answer)
         if not answer.strip():
-            logger.warning("Synthesis returned empty text; falling back to raw extractions (truncated)")
+            logger.warning(
+                "Synthesis returned empty text; falling back to raw extractions (truncated)"
+            )
             answer = extractions_text[:24000]
             _common_trace["synthesis_degraded"] = True
     except Exception as e:
@@ -1438,8 +1531,13 @@ async def recursive_retrieve(
     final_result = {
         "answer": answer,
         "sources": [
-            {"file": r["source"], "date": r["date"], "agent": r["agent_id"],
-             "score": r["score"], "rerank_score": r.get("rerank_score")}
+            {
+                "file": r["source"],
+                "date": r["date"],
+                "agent": r["agent_id"],
+                "score": r["score"],
+                "rerank_score": r.get("rerank_score"),
+            }
             for r in refined
         ],
         "chunks_searched": n_coarse,
@@ -1454,14 +1552,25 @@ async def recursive_retrieve(
 
     elapsed = int((time.monotonic() - t0) * 1000)
     final_result["_cache_namespace"] = namespace
-    hot_cache.put(agent_id or "fleet", query, final_result, namespace=namespace,
-                  tier=tier, memory_type=effective_memory_type, extra=cache_extra)
+    hot_cache.put(
+        agent_id or "fleet",
+        query,
+        final_result,
+        namespace=namespace,
+        tier=tier,
+        memory_type=effective_memory_type,
+        extra=cache_extra,
+    )
     retrieval_log.log_retrieval(
-        agent_id=agent_id or "fleet", query=query, namespace=namespace,
-        tier=tier, memory_type=effective_memory_type,
+        agent_id=agent_id or "fleet",
+        query=query,
+        namespace=namespace,
+        tier=tier,
+        memory_type=effective_memory_type,
         retrieval_trace=final_result.get("retrieval_trace", {}),
         result_count=len(refined),
-        cache_hit=False, duration_ms=elapsed,
+        cache_hit=False,
+        duration_ms=elapsed,
     )
     m.inc(m.SEARCH_TOTAL)
     m.inc(m.CACHE_MISS)

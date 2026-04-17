@@ -68,7 +68,10 @@ _THOUGHT_BODY_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\b(?:must not|cannot|blocked by|constraint|limitation)\b", re.I), "constraint"),
     (re.compile(r"\b(?:discovered|realized|noticed|found that|turns out)\b", re.I), "insight"),
     (re.compile(r"\b(?:prefer|always use|never use|default to)\b", re.I), "preference"),
-    (re.compile(r"\b(?:completed|shipped|deployed|launched|released|milestone)\b", re.I), "milestone"),
+    (
+        re.compile(r"\b(?:completed|shipped|deployed|launched|released|milestone)\b", re.I),
+        "milestone",
+    ),
     (re.compile(r"\b(?:fixed|corrected|was wrong|actually|correction)\b", re.I), "correction"),
 ]
 
@@ -90,16 +93,34 @@ _ENTITY_TYPE_HINTS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"(?:k8s|kube|cluster|node|pod)", re.I), "kubernetes"),
 ]
 
-_STOP_ENTITIES = frozenset({
-    "the", "this", "that", "true", "false", "none", "null", "todo",
-    "note", "example", "yes", "no", "ok", "done", "wip",
-})
+_STOP_ENTITIES = frozenset(
+    {
+        "the",
+        "this",
+        "that",
+        "true",
+        "false",
+        "none",
+        "null",
+        "todo",
+        "note",
+        "example",
+        "yes",
+        "no",
+        "ok",
+        "done",
+        "wip",
+    }
+)
 
 _NEEDLE_ENTITY_PATTERNS: list[tuple[re.Pattern, str]] = [
-    (_CHUNKING_NEEDLE_PATTERNS[0], "ip_address"),      # IP / CIDR
-    (_CHUNKING_NEEDLE_PATTERNS[5], "uuid"),             # UUID
-    (_CHUNKING_NEEDLE_PATTERNS[3], "ticket_id"),        # employee / ticket IDs
-    (re.compile(r"\b[a-z][a-z0-9]*(?:-[a-z0-9]+){2,}\b"), "hostname"),  # filtered in extract_needle_entities
+    (_CHUNKING_NEEDLE_PATTERNS[0], "ip_address"),  # IP / CIDR
+    (_CHUNKING_NEEDLE_PATTERNS[5], "uuid"),  # UUID
+    (_CHUNKING_NEEDLE_PATTERNS[3], "ticket_id"),  # employee / ticket IDs
+    (
+        re.compile(r"\b[a-z][a-z0-9]*(?:-[a-z0-9]+){2,}\b"),
+        "hostname",
+    ),  # filtered in extract_needle_entities
 ]
 
 
@@ -151,24 +172,30 @@ def pre_extract(text: str, source_file: str = "") -> dict:
         lower = name.lower()
         if lower not in _STOP_ENTITIES and lower not in seen_names:
             seen_names.add(lower)
-            entities.append({
-                "name": name,
-                "type": _classify_entity(name),
-                "confidence": "extracted",
-            })
+            entities.append(
+                {
+                    "name": name,
+                    "type": _classify_entity(name),
+                    "confidence": "extracted",
+                }
+            )
 
     for m in _BACKTICK_ENTITY_RE.finditer(text):
         name = m.group(1).strip()
         lower = name.lower()
-        if (lower not in _STOP_ENTITIES
-                and lower not in seen_names
-                and not name.startswith(("--", "//", "#"))):
+        if (
+            lower not in _STOP_ENTITIES
+            and lower not in seen_names
+            and not name.startswith(("--", "//", "#"))
+        ):
             seen_names.add(lower)
-            entities.append({
-                "name": name,
-                "type": _classify_entity(name),
-                "confidence": "extracted",
-            })
+            entities.append(
+                {
+                    "name": name,
+                    "type": _classify_entity(name),
+                    "confidence": "extracted",
+                }
+            )
 
     dates = _DATE_RE.findall(text)
     if source_file:

@@ -10,12 +10,12 @@ import hashlib
 import json
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-from archivist.storage.graph import get_db, GRAPH_WRITE_LOCK, upsert_entity, add_fact, schema_guard
 from archivist.core.config import OUTCOME_RETRIEVAL_BOOST, OUTCOME_RETRIEVAL_PENALTY
-from archivist.utils.text_utils import strip_fences
 from archivist.features.llm import llm_query
+from archivist.storage.graph import GRAPH_WRITE_LOCK, add_fact, get_db, schema_guard, upsert_entity
+from archivist.utils.text_utils import strip_fences
 
 
 def compute_task_fingerprint(task_description: str) -> str:
@@ -27,6 +27,7 @@ def compute_task_fingerprint(task_description: str) -> str:
     """
     normalized = " ".join(task_description.lower().split())
     return hashlib.sha256(normalized.encode()).hexdigest()[:16]
+
 
 logger = logging.getLogger("archivist.trajectory")
 
@@ -142,7 +143,7 @@ async def log_trajectory(
     _ensure_trajectory_schema()
 
     traj_id = str(uuid.uuid4())
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     fp = task_fingerprint or compute_task_fingerprint(task_description)
 
     with GRAPH_WRITE_LOCK:
@@ -154,19 +155,35 @@ async def log_trajectory(
                     actions, outcome, outcome_score,
                     memory_ids_used, created_at, metadata)
                    VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-                (traj_id, agent_id, session_id, task_description, fp,
-                 json.dumps(actions), outcome, outcome_score,
-                 json.dumps(memory_ids_used or []), now,
-                 json.dumps(metadata or {})),
+                (
+                    traj_id,
+                    agent_id,
+                    session_id,
+                    task_description,
+                    fp,
+                    json.dumps(actions),
+                    outcome,
+                    outcome_score,
+                    json.dumps(memory_ids_used or []),
+                    now,
+                    json.dumps(metadata or {}),
+                ),
             )
             conn.commit()
         finally:
             conn.close()
 
     from archivist.core.rbac import get_namespace_for_agent
+
     _ns = get_namespace_for_agent(agent_id) if agent_id else "global"
     eid = upsert_entity(agent_id, "agent", namespace=_ns)
-    add_fact(eid, f"Trajectory [{outcome}]: {task_description[:200]}", f"trajectory/{traj_id}", agent_id, namespace=_ns)
+    add_fact(
+        eid,
+        f"Trajectory [{outcome}]: {task_description[:200]}",
+        f"trajectory/{traj_id}",
+        agent_id,
+        namespace=_ns,
+    )
 
     return {"trajectory_id": traj_id, "agent_id": agent_id, "outcome": outcome}
 
@@ -201,9 +218,12 @@ async def attribute_decisions(trajectory_id: str) -> list[dict]:
         attributions = json.loads(raw.strip())
     except Exception as e:
         logger.warning("Decision attribution LLM failed: %s", e)
-        attributions = [{"memory_id": mid, "influence": "unknown", "reasoning": "LLM unavailable"} for mid in mem_ids]
+        attributions = [
+            {"memory_id": mid, "influence": "unknown", "reasoning": "LLM unavailable"}
+            for mid in mem_ids
+        ]
 
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     with GRAPH_WRITE_LOCK:
         conn = get_db()
         try:
@@ -211,8 +231,14 @@ async def attribute_decisions(trajectory_id: str) -> list[dict]:
                 conn.execute(
                     """INSERT INTO memory_outcomes (memory_id, trajectory_id, influence, outcome, outcome_score, created_at)
                        VALUES (?,?,?,?,?,?)""",
-                    (a.get("memory_id", ""), trajectory_id, a.get("influence", "medium"),
-                     traj["outcome"], traj.get("outcome_score"), now),
+                    (
+                        a.get("memory_id", ""),
+                        trajectory_id,
+                        a.get("influence", "medium"),
+                        traj["outcome"],
+                        traj.get("outcome_score"),
+                        now,
+                    ),
                 )
             conn.commit()
         finally:
@@ -247,7 +273,7 @@ async def extract_tips(trajectory_id: str) -> list[dict]:
         logger.warning("Tip extraction LLM failed: %s", e)
         return []
 
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     stored_tips = []
     with GRAPH_WRITE_LOCK:
         conn = get_db()
@@ -257,9 +283,15 @@ async def extract_tips(trajectory_id: str) -> list[dict]:
                 conn.execute(
                     """INSERT INTO tips (id, trajectory_id, agent_id, category, tip_text, context, created_at)
                        VALUES (?,?,?,?,?,?,?)""",
-                    (tip_id, trajectory_id, traj["agent_id"],
-                     t.get("category", "strategy"), t.get("tip", ""),
-                     t.get("context", ""), now),
+                    (
+                        tip_id,
+                        trajectory_id,
+                        traj["agent_id"],
+                        t.get("category", "strategy"),
+                        t.get("tip", ""),
+                        t.get("context", ""),
+                        now,
+                    ),
                 )
                 stored_tips.append({"tip_id": tip_id, **t})
             conn.commit()
@@ -323,12 +355,17 @@ def search_tips(agent_id: str, category: str = "", limit: int = 10) -> list[dict
     return rows
 
 
-def add_annotation(memory_id: str, agent_id: str, content: str,
-                   annotation_type: str = "note", quality_score: float | None = None) -> str:
+def add_annotation(
+    memory_id: str,
+    agent_id: str,
+    content: str,
+    annotation_type: str = "note",
+    quality_score: float | None = None,
+) -> str:
     """Add an annotation to a memory point."""
     _ensure_trajectory_schema()
     ann_id = str(uuid.uuid4())
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     with GRAPH_WRITE_LOCK:
         conn = get_db()
         try:
@@ -360,7 +397,7 @@ def add_rating(memory_id: str, agent_id: str, rating: int, context: str = "") ->
     """Rate a memory (positive = +1, negative = -1)."""
     _ensure_trajectory_schema()
     rating_id = str(uuid.uuid4())
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     with GRAPH_WRITE_LOCK:
         conn = get_db()
         try:
@@ -385,7 +422,12 @@ def get_rating_summary(memory_id: str) -> dict:
     )
     row = dict(cur.fetchone())
     conn.close()
-    return {"memory_id": memory_id, "total": row["total"] or 0, "up": row["up"] or 0, "down": row["down"] or 0}
+    return {
+        "memory_id": memory_id,
+        "total": row["total"] or 0,
+        "up": row["up"] or 0,
+        "down": row["down"] or 0,
+    }
 
 
 async def session_end_summary(agent_id: str, session_id: str) -> dict:
@@ -403,10 +445,7 @@ async def session_end_summary(agent_id: str, session_id: str) -> dict:
     if not rows:
         return {"error": "no_trajectories", "session_id": session_id}
 
-    actions_text = "\n".join(
-        f"- [{t['outcome']}] {t['task_description'][:200]}"
-        for t in rows
-    )
+    actions_text = "\n".join(f"- [{t['outcome']}] {t['task_description'][:200]}" for t in rows)
 
     prompt = f"Agent: {agent_id}\nSession: {session_id}\n\nActivities:\n{actions_text}"
 
@@ -461,10 +500,10 @@ async def consolidate_tips(budget: int = 20) -> dict:
 
     Returns summary of consolidation: clusters found, merged, budget used.
     """
-    from archivist.core.config import CURATOR_TIP_BUDGET
-    from archivist.features.embeddings import embed_text
     import archivist.core.metrics as m
     import archivist.lifecycle.curator_queue as curator_queue
+    from archivist.core.config import CURATOR_TIP_BUDGET
+    from archivist.features.embeddings import embed_text
 
     _ensure_trajectory_schema()
     budget = budget or CURATOR_TIP_BUDGET
@@ -515,16 +554,19 @@ async def consolidate_tips(budget: int = 20) -> dict:
 
         original_ids = [t["id"] for t in cluster]
         fleet_agent = "fleet" if contrastive else cluster[0].get("agent_id", "curator")
-        curator_queue.enqueue("consolidate_tips", {
-            "consolidated_tip": {
-                "agent_id": fleet_agent,
-                "category": merged.get("category", "strategy"),
-                "tip": merged.get("tip", ""),
-                "context": merged.get("context", ""),
-                "negative_example": merged.get("negative_example", ""),
+        curator_queue.enqueue(
+            "consolidate_tips",
+            {
+                "consolidated_tip": {
+                    "agent_id": fleet_agent,
+                    "category": merged.get("category", "strategy"),
+                    "tip": merged.get("tip", ""),
+                    "context": merged.get("context", ""),
+                    "negative_example": merged.get("negative_example", ""),
+                },
+                "original_tip_ids": original_ids,
             },
-            "original_tip_ids": original_ids,
-        })
+        )
         m.inc(m.CURATOR_TIP_CONSOLIDATIONS)
         consolidated_count += 1
 
@@ -537,7 +579,9 @@ async def consolidate_tips(budget: int = 20) -> dict:
     }
 
 
-def _cluster_tips(tips: list[dict], embeddings: list[list[float]], threshold: float = 0.85) -> list[list[dict]]:
+def _cluster_tips(
+    tips: list[dict], embeddings: list[list[float]], threshold: float = 0.85
+) -> list[list[dict]]:
     """Simple greedy clustering by cosine similarity."""
     import math
 
@@ -571,6 +615,7 @@ def _cluster_tips(tips: list[dict], embeddings: list[list[float]], threshold: fl
 
 
 # ── Contrastive consolidation eligibility (v1.9) ─────────────────────────────
+
 
 def contrastive_consolidation_candidates(min_agents: int = 2, limit: int = 20) -> list[dict]:
     """Find task fingerprints worked on by multiple agents — eligible for

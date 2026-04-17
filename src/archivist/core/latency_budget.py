@@ -17,8 +17,8 @@ queries get a fast path and multi-hop gets generous allocation.
 """
 
 import time
-from archivist.core.config import LATENCY_BUDGET_MS
 
+from archivist.core.config import LATENCY_BUDGET_MS
 
 BUDGET_PROFILES: dict[str, int] = {
     "needle": 200,

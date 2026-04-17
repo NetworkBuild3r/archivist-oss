@@ -37,6 +37,7 @@ permissions:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 # ─── Validate tag matches package version ────────────────────────────────────
 jobs:

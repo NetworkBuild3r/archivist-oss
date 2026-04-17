@@ -5,10 +5,10 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from provenance import SourceTrace, ActorType, default_confidence
-
+from provenance import ActorType, SourceTrace, default_confidence
 
 # ── SourceTrace dataclass ─────────────────────────────────────────────────────
+
 
 def test_source_trace_round_trip():
     st = SourceTrace(
@@ -56,6 +56,7 @@ def test_source_trace_with_parent():
 
 # ── ActorType enum ────────────────────────────────────────────────────────────
 
+
 def test_actor_type_values():
     assert ActorType.AGENT.value == "agent"
     assert ActorType.HUMAN.value == "human"
@@ -69,6 +70,7 @@ def test_actor_type_string_comparison():
 
 
 # ── default_confidence ────────────────────────────────────────────────────────
+
 
 def test_default_confidence_by_actor_type():
     cmap = {"human": 1.0, "agent": 0.8, "system": 0.7, "tool": 0.7, "extracted": 0.5}
@@ -84,6 +86,7 @@ def test_default_confidence_unknown_falls_back_to_agent():
 
 
 # ── ResultCandidate provenance fields ─────────────────────────────────────────
+
 
 def test_result_candidate_from_qdrant_payload_provenance():
     from result_types import ResultCandidate, RetrievalSource
@@ -142,8 +145,12 @@ def test_result_candidate_to_dict_includes_provenance():
     from result_types import ResultCandidate
 
     rc = ResultCandidate(
-        id="p1", text="test", actor_id="bob", actor_type="human",
-        confidence=0.9, source_trace={"tool": "test"},
+        id="p1",
+        text="test",
+        actor_id="bob",
+        actor_type="human",
+        confidence=0.9,
+        source_trace={"tool": "test"},
     )
     d = rc.to_dict()
     assert d["actor_id"] == "bob"
@@ -156,13 +163,15 @@ def test_result_candidate_update_from_payload_provenance():
     from result_types import ResultCandidate
 
     rc = ResultCandidate(id="p1", text="old")
-    rc.update_from_payload({
-        "text": "new",
-        "actor_id": "carol",
-        "actor_type": "tool",
-        "confidence": 0.6,
-        "source_trace": {"tool": "file_indexer"},
-    })
+    rc.update_from_payload(
+        {
+            "text": "new",
+            "actor_id": "carol",
+            "actor_type": "tool",
+            "confidence": 0.6,
+            "source_trace": {"tool": "file_indexer"},
+        }
+    )
     assert rc.actor_id == "carol"
     assert rc.actor_type == "tool"
     assert rc.confidence == 0.6
@@ -170,6 +179,7 @@ def test_result_candidate_update_from_payload_provenance():
 
 
 # ── resolve_actor ─────────────────────────────────────────────────────────────
+
 
 def test_resolve_actor_defaults_to_agent_id():
     from handlers._common import resolve_actor
@@ -182,14 +192,19 @@ def test_resolve_actor_defaults_to_agent_id():
 def test_resolve_actor_explicit():
     from handlers._common import resolve_actor
 
-    actor_id, actor_type = resolve_actor({
-        "agent_id": "alice", "actor_id": "bob", "actor_type": "human",
-    })
+    actor_id, actor_type = resolve_actor(
+        {
+            "agent_id": "alice",
+            "actor_id": "bob",
+            "actor_type": "human",
+        }
+    )
     assert actor_id == "bob"
     assert actor_type == "human"
 
 
 # ── Reranker _build_pair provenance context ───────────────────────────────────
+
 
 def test_reranker_build_pair_includes_provenance():
     from reranker import _build_pair
@@ -215,6 +230,7 @@ def test_reranker_build_pair_no_provenance():
 
 # ── Augment header ────────────────────────────────────────────────────────────
 
+
 def test_augment_chunk_uses_actor_over_agent():
     from contextual_augment import augment_chunk
 
@@ -232,6 +248,7 @@ def test_augment_chunk_falls_back_to_agent():
 
 # ── Derived artifact provenance inheritance (synthetic questions) ─────────────
 
+
 def test_source_trace_with_parent_for_synthetic_questions():
     """Synthetic question points inherit provenance with parent_memory_id set."""
     parent_trace = SourceTrace(tool="archivist_store", session_id="s1", upstream_source="slack")
@@ -245,6 +262,7 @@ def test_source_trace_with_parent_for_synthetic_questions():
 
 # ── Derived artifact provenance inheritance (reverse HyDE) ────────────────────
 
+
 def test_source_trace_with_parent_for_reverse_hyde():
     """Reverse HyDE points inherit provenance with parent_memory_id set."""
     parent_trace = SourceTrace(tool="archivist_store", upstream_source="jira")
@@ -256,6 +274,7 @@ def test_source_trace_with_parent_for_reverse_hyde():
 
 
 # ── Graph retrieval confidence filtering ──────────────────────────────────────
+
 
 def test_build_entity_fact_results_filters_low_confidence(monkeypatch):
     """Facts below MIN_FACT_CONFIDENCE should be excluded from results."""
@@ -287,7 +306,8 @@ def test_build_entity_fact_results_filters_low_confidence(monkeypatch):
     }
 
     monkeypatch.setattr(
-        gr, "get_entity_facts_bulk",
+        gr,
+        "get_entity_facts_bulk",
         lambda eids, as_of="": {1: [high_conf_fact, low_conf_fact]},
     )
 

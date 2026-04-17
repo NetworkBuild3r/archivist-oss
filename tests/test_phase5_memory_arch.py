@@ -1,17 +1,16 @@
 """Phase 5 tests — hot cache, archivist:// URIs, retrieval log, consistency."""
 
-import sys
 import os
-import sqlite3
-import time
+import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 
 # ── URI parsing ──────────────────────────────────────────────────────────────
 
+
 def test_uri_roundtrip():
-    from archivist_uri import memory_uri, entity_uri, namespace_uri, skill_uri, parse_uri
+    from archivist_uri import entity_uri, memory_uri, namespace_uri, parse_uri, skill_uri
 
     m = memory_uri("agents-nova", "abc-123")
     assert m == "archivist://agents-nova/memory/abc-123"
@@ -40,6 +39,7 @@ def test_uri_roundtrip():
 
 def test_uri_parse_invalid():
     from archivist_uri import parse_uri
+
     assert parse_uri("http://not-archivist/foo") is None
     assert parse_uri("archivist://ns/bad_type/123") is None
     assert parse_uri("") is None
@@ -47,8 +47,10 @@ def test_uri_parse_invalid():
 
 # ── Hot cache ────────────────────────────────────────────────────────────────
 
+
 def test_cache_put_get():
     import hot_cache
+
     hot_cache.invalidate_all()
 
     result = {"answer": "test", "sources": [], "_cache_namespace": "ns1"}
@@ -69,15 +71,22 @@ def test_cache_put_get():
 
 def test_cache_lru_eviction():
     import hot_cache
+
     hot_cache.invalidate_all()
 
     original_max = hot_cache.HOT_CACHE_MAX_PER_AGENT
     import config
+
     old_val = config.HOT_CACHE_MAX_PER_AGENT
     try:
         hot_cache.HOT_CACHE_MAX_PER_AGENT = 3
         for i in range(5):
-            hot_cache.put("agent-lru", f"query-{i}", {"answer": f"r{i}", "_cache_namespace": "ns"}, namespace="ns")
+            hot_cache.put(
+                "agent-lru",
+                f"query-{i}",
+                {"answer": f"r{i}", "_cache_namespace": "ns"},
+                namespace="ns",
+            )
 
         assert hot_cache.get("agent-lru", "query-0", namespace="ns") is None
         assert hot_cache.get("agent-lru", "query-1", namespace="ns") is None
@@ -90,6 +99,7 @@ def test_cache_lru_eviction():
 
 def test_cache_namespace_invalidation():
     import hot_cache
+
     hot_cache.invalidate_all()
 
     hot_cache.put("a1", "q1", {"answer": "x", "_cache_namespace": "ns-alpha"}, namespace="ns-alpha")
@@ -105,6 +115,7 @@ def test_cache_namespace_invalidation():
 
 def test_cache_stats():
     import hot_cache
+
     hot_cache.invalidate_all()
 
     hot_cache.put("s1", "q1", {"answer": "ok", "_cache_namespace": "ns"}, namespace="ns")
@@ -120,7 +131,7 @@ def test_cache_stats():
 
 
 def test_retrieval_log_roundtrip():
-    from retrieval_log import log_retrieval, get_retrieval_logs
+    from retrieval_log import get_retrieval_logs, log_retrieval
 
     lid = log_retrieval(
         agent_id="agent-x",
@@ -144,10 +155,20 @@ def test_retrieval_log_roundtrip():
 
 
 def test_retrieval_stats():
-    from retrieval_log import log_retrieval, get_retrieval_stats
+    from retrieval_log import get_retrieval_stats, log_retrieval
 
     for i in range(5):
-        log_retrieval("a1", f"q{i}", "ns", "l2", "", {"hits": i}, i, cache_hit=(i % 2 == 0), duration_ms=100 + i * 10)
+        log_retrieval(
+            "a1",
+            f"q{i}",
+            "ns",
+            "l2",
+            "",
+            {"hits": i},
+            i,
+            cache_hit=(i % 2 == 0),
+            duration_ms=100 + i * 10,
+        )
 
     stats = get_retrieval_stats("a1")
     assert stats["total"] == 5
@@ -159,6 +180,8 @@ def test_retrieval_stats():
 
 # ── Consistency semantics ────────────────────────────────────────────────────
 
+
 def test_default_consistency_config():
     from config import DEFAULT_CONSISTENCY
+
     assert DEFAULT_CONSISTENCY in ("eventual", "session", "strong")

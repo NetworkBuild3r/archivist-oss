@@ -42,14 +42,15 @@ _classifier_cache: dict[tuple[str, str], tuple[float, str, str]] = {}
 
 def _sweep_expired_locked(now: float) -> None:
     """Remove expired entries under the lock. Called when the cache is too large."""
-    expired = [k for k, (ts, _, _) in _classifier_cache.items()
-               if now - ts > CLASSIFIER_CACHE_TTL_SECONDS]
+    expired = [
+        k for k, (ts, _, _) in _classifier_cache.items() if now - ts > CLASSIFIER_CACHE_TTL_SECONDS
+    ]
     for k in expired:
         del _classifier_cache[k]
     if len(_classifier_cache) > _CLASSIFIER_CACHE_MAX_ENTRIES:
         # Still too large after sweeping expired: drop oldest half
         by_age = sorted(_classifier_cache.items(), key=lambda kv: kv[1][0])
-        for k, _ in by_age[:len(by_age) // 2]:
+        for k, _ in by_age[: len(by_age) // 2]:
             del _classifier_cache[k]
 
 
@@ -91,12 +92,28 @@ _CLASSIFY_SYSTEM_V2 = (
 # ---------------------------------------------------------------------------
 
 _SUBCATEGORY_PATTERNS: list[tuple[re.Pattern, str, str]] = [
-    (re.compile(r"\b(?:incident|outage|downtime|postmortem|on-call)\b", re.I), "experience", "incident"),
-    (re.compile(r"\b(?:deploy|deployment|release|rollout|shipped)\b", re.I), "experience", "deployment"),
+    (
+        re.compile(r"\b(?:incident|outage|downtime|postmortem|on-call)\b", re.I),
+        "experience",
+        "incident",
+    ),
+    (
+        re.compile(r"\b(?:deploy|deployment|release|rollout|shipped)\b", re.I),
+        "experience",
+        "deployment",
+    ),
     (re.compile(r"\b(?:session|meeting|standup|retro)\b", re.I), "experience", "session"),
-    (re.compile(r"\b(?:timeline|chronolog|history|what happened)\b", re.I), "experience", "timeline"),
+    (
+        re.compile(r"\b(?:timeline|chronolog|history|what happened)\b", re.I),
+        "experience",
+        "timeline",
+    ),
     (re.compile(r"\b(?:changed|migration|upgrade|switch)\b", re.I), "experience", "change"),
-    (re.compile(r"\b(?:how to|how do|procedure|steps to|guide|tutorial)\b", re.I), "skill", "procedure"),
+    (
+        re.compile(r"\b(?:how to|how do|procedure|steps to|guide|tutorial)\b", re.I),
+        "skill",
+        "procedure",
+    ),
     (re.compile(r"\b(?:command|cli|kubectl|docker|run)\b", re.I), "skill", "command"),
     (re.compile(r"\b(?:playbook|runbook|checklist)\b", re.I), "skill", "playbook"),
     (re.compile(r"\b(?:architecture|design|pattern|diagram)\b", re.I), "skill", "architecture"),
@@ -109,6 +126,7 @@ _SUBCATEGORY_PATTERNS: list[tuple[re.Pattern, str, str]] = [
 def classify_query_heuristic(query: str) -> tuple[str, str]:
     """Fast regex-based classification without LLM. Returns (type, subcategory)."""
     from collections import Counter
+
     type_votes: Counter = Counter()
     sub_votes: Counter = Counter()
 

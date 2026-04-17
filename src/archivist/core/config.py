@@ -6,6 +6,7 @@ Override via .env or environment variables in production.
 
 import logging
 import os
+
 import yaml
 
 logger = logging.getLogger("archivist.config")
@@ -14,6 +15,7 @@ logger = logging.getLogger("archivist.config")
 def _env_bool(key: str, default: str = "true") -> bool:
     """Parse a boolean environment variable (true/1/yes → True)."""
     return os.getenv(key, default).lower() in ("true", "1", "yes")
+
 
 # ── Vector store ──────────────────────────────────────────────────────────────
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
@@ -120,7 +122,9 @@ ARCHIVIST_INVALIDATION_EXPORT_PATH = os.getenv("ARCHIVIST_INVALIDATION_EXPORT_PA
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").strip()
 WEBHOOK_TIMEOUT = float(os.getenv("WEBHOOK_TIMEOUT", "5"))
 _raw_events = os.getenv("WEBHOOK_EVENTS", "").strip()
-WEBHOOK_EVENTS: set[str] = set(e.strip() for e in _raw_events.split(",") if e.strip()) if _raw_events else set()
+WEBHOOK_EVENTS: set[str] = (
+    set(e.strip() for e in _raw_events.split(",") if e.strip()) if _raw_events else set()
+)
 
 # ── Curator intelligence (v1.0) ─────────────────────────────────────────────
 DEDUP_LLM_ENABLED = _env_bool("DEDUP_LLM_ENABLED")
@@ -140,7 +144,9 @@ ENTITY_SPECIFICITY_MAX_MENTIONS = int(os.getenv("ENTITY_SPECIFICITY_MAX_MENTIONS
 
 # ── Temporal intent & adaptive retrieval (v1.9 — recall improvements) ────────
 TEMPORAL_INTENT_ENABLED = _env_bool("TEMPORAL_INTENT_ENABLED")
-TEMPORAL_HISTORICAL_HALFLIFE_MULTIPLIER = float(os.getenv("TEMPORAL_HISTORICAL_HALFLIFE_MULTIPLIER", "10"))
+TEMPORAL_HISTORICAL_HALFLIFE_MULTIPLIER = float(
+    os.getenv("TEMPORAL_HISTORICAL_HALFLIFE_MULTIPLIER", "10")
+)
 BM25_RESCUE_ENABLED = _env_bool("BM25_RESCUE_ENABLED")
 BM25_RESCUE_MIN_SCORE_RATIO = float(os.getenv("BM25_RESCUE_MIN_SCORE_RATIO", "0.6"))
 BM25_RESCUE_MAX_SLOTS = int(os.getenv("BM25_RESCUE_MAX_SLOTS", "3"))
@@ -155,10 +161,20 @@ TOPIC_MAP_PATH = os.getenv("TOPIC_MAP_PATH", "")
 
 # ── Retention classes (v1.7 — "never forget" pinning) ────────────────────────
 VALID_RETENTION_CLASSES = ("ephemeral", "standard", "durable", "permanent")
-DURABLE_ENTITY_TYPES = frozenset({
-    "person", "host", "server", "service", "credential",
-    "organization", "cluster", "database", "network", "user",
-})
+DURABLE_ENTITY_TYPES = frozenset(
+    {
+        "person",
+        "host",
+        "server",
+        "service",
+        "credential",
+        "organization",
+        "cluster",
+        "database",
+        "network",
+        "user",
+    }
+)
 
 # ── Curator ───────────────────────────────────────────────────────────────────
 CURATOR_INTERVAL_MINUTES = int(os.getenv("CURATOR_INTERVAL_MINUTES", "30"))
@@ -166,13 +182,13 @@ ORPHAN_SWEEP_ENABLED = _env_bool("ORPHAN_SWEEP_ENABLED", "true")
 ORPHAN_SWEEP_EVERY_N_CYCLES = int(os.getenv("ORPHAN_SWEEP_EVERY_N_CYCLES", "12"))
 
 CURATOR_EXTRACT_PREFIXES: list[str] = [
-    p.strip() for p in
-    os.getenv("CURATOR_EXTRACT_PREFIXES", "agents/,memories/").split(",")
+    p.strip()
+    for p in os.getenv("CURATOR_EXTRACT_PREFIXES", "agents/,memories/").split(",")
     if p.strip()
 ]
 CURATOR_EXTRACT_SKIP_SEGMENTS: list[str] = [
-    p.strip() for p in
-    os.getenv("CURATOR_EXTRACT_SKIP_SEGMENTS", "skills,.cursor,.git").split(",")
+    p.strip()
+    for p in os.getenv("CURATOR_EXTRACT_SKIP_SEGMENTS", "skills,.cursor,.git").split(",")
     if p.strip()
 ]
 
@@ -293,6 +309,7 @@ def _load_team_map() -> dict[str, str]:
     raw = os.getenv("TEAM_MAP_JSON", "")
     if raw:
         import json
+
         try:
             return json.loads(raw)
         except Exception:

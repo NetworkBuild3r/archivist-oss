@@ -8,10 +8,9 @@ organizational boundaries via MCP connections.
 import json
 import logging
 import uuid
-from datetime import datetime, timezone
-from collections import defaultdict
+from datetime import UTC, datetime
 
-from archivist.storage.graph import get_db, GRAPH_WRITE_LOCK, schema_guard
+from archivist.storage.graph import GRAPH_WRITE_LOCK, get_db, schema_guard
 
 logger = logging.getLogger("archivist.skills")
 
@@ -105,7 +104,7 @@ def register_skill(
 ) -> dict:
     """Register a new skill or update an existing one."""
     _ensure_skill_schema()
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
 
     with GRAPH_WRITE_LOCK:
         conn = get_db()
@@ -122,8 +121,7 @@ def register_skill(
                 conn.execute(
                     """UPDATE skills SET current_version=?, mcp_endpoint=?, description=?,
                        status='active', updated_at=?, metadata=? WHERE id=?""",
-                    (version, mcp_endpoint, description, now,
-                     json.dumps(metadata or {}), skill_id),
+                    (version, mcp_endpoint, description, now, json.dumps(metadata or {}), skill_id),
                 )
                 if version != old_version:
                     conn.execute(
@@ -141,8 +139,18 @@ def register_skill(
                        (id, name, provider, mcp_endpoint, current_version, description,
                         registered_by, registered_at, updated_at, metadata)
                        VALUES (?,?,?,?,?,?,?,?,?,?)""",
-                    (skill_id, name, provider, mcp_endpoint, version, description,
-                     registered_by, now, now, json.dumps(metadata or {})),
+                    (
+                        skill_id,
+                        name,
+                        provider,
+                        mcp_endpoint,
+                        version,
+                        description,
+                        registered_by,
+                        now,
+                        now,
+                        json.dumps(metadata or {}),
+                    ),
                 )
                 conn.execute(
                     """INSERT INTO skill_versions
@@ -165,7 +173,7 @@ def record_version(
 ) -> dict:
     """Record a new version observation for a skill."""
     _ensure_skill_schema()
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
 
     with GRAPH_WRITE_LOCK:
         conn = get_db()
@@ -199,7 +207,7 @@ def add_lesson(
     """Add a lesson learned to a skill."""
     _ensure_skill_schema()
     lesson_id = str(uuid.uuid4())
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
 
     with GRAPH_WRITE_LOCK:
         conn = get_db()
@@ -208,8 +216,7 @@ def add_lesson(
                 """INSERT INTO skill_lessons
                    (id, skill_id, lesson_type, title, content, skill_version, agent_id, created_at)
                    VALUES (?,?,?,?,?,?,?,?)""",
-                (lesson_id, skill_id, lesson_type, title, content,
-                 skill_version, agent_id, now),
+                (lesson_id, skill_id, lesson_type, title, content, skill_version, agent_id, now),
             )
             conn.commit()
         finally:
@@ -251,7 +258,7 @@ def log_skill_event(
     """Log a skill usage event (invocation, failure, etc.)."""
     _ensure_skill_schema()
     event_id = str(uuid.uuid4())
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
 
     if outcome == "failure" and not skill_version:
         conn = get_db()
@@ -269,9 +276,19 @@ def log_skill_event(
                    (id, skill_id, agent_id, event_type, outcome, skill_version,
                     duration_ms, error_message, trajectory_id, created_at, metadata)
                    VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-                (event_id, skill_id, agent_id, event_type, outcome, skill_version,
-                 duration_ms, error_message, trajectory_id, now,
-                 json.dumps(metadata or {})),
+                (
+                    event_id,
+                    skill_id,
+                    agent_id,
+                    event_type,
+                    outcome,
+                    skill_version,
+                    duration_ms,
+                    error_message,
+                    trajectory_id,
+                    now,
+                    json.dumps(metadata or {}),
+                ),
             )
             conn.commit()
         finally:
@@ -408,7 +425,7 @@ def list_skills(status: str = "", limit: int = 100) -> list[dict]:
 def update_skill_status(skill_id: str, status: str) -> None:
     """Update a skill's status (active, deprecated, disabled)."""
     _ensure_skill_schema()
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     with GRAPH_WRITE_LOCK:
         conn = get_db()
         try:
@@ -437,9 +454,11 @@ def add_skill_relation(
     """Create or update a relation between two skills."""
     _ensure_skill_schema()
     if relation_type not in VALID_RELATION_TYPES:
-        raise ValueError(f"Invalid relation_type: {relation_type}. Must be one of {VALID_RELATION_TYPES}")
+        raise ValueError(
+            f"Invalid relation_type: {relation_type}. Must be one of {VALID_RELATION_TYPES}"
+        )
 
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
 
     with GRAPH_WRITE_LOCK:
         conn = get_db()

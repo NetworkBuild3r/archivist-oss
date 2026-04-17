@@ -135,11 +135,13 @@ def retry(
         def _fetch():
             return requests.get(url)
     """
+
     def decorator(fn: Callable) -> Callable:
         @functools.wraps(fn)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
             return retry_call(
-                fn, *args,
+                fn,
+                *args,
                 max_attempts=max_attempts,
                 delay=delay,
                 backoff=backoff,
@@ -148,5 +150,7 @@ def retry(
                 reraise=reraise,
                 **kwargs,
             )
+
         return wrapper
+
     return decorator

@@ -1,24 +1,30 @@
 """Autonomous curator — consolidates daily notes, extracts entities, detects contradictions."""
 
+import asyncio
 import hashlib
-import os
-import re
 import json
 import logging
-import asyncio
+import os
+import re
 import time
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 
 import archivist.core.metrics as m
-
 from archivist.core.config import (
-    MEMORY_ROOT, CURATOR_INTERVAL_MINUTES,
-    CURATOR_EXTRACT_PREFIXES, CURATOR_EXTRACT_SKIP_SEGMENTS,
-    CURATOR_TIP_BUDGET, CURATOR_MAX_PARALLEL,
+    CURATOR_EXTRACT_PREFIXES,
+    CURATOR_EXTRACT_SKIP_SEGMENTS,
+    CURATOR_INTERVAL_MINUTES,
+    CURATOR_LLM_API_KEY,
+    CURATOR_LLM_MODEL,
+    CURATOR_LLM_URL,
+    CURATOR_MAX_PARALLEL,
+    CURATOR_TIP_BUDGET,
     DURABLE_ENTITY_TYPES,
-    ORPHAN_SWEEP_ENABLED, ORPHAN_SWEEP_EVERY_N_CYCLES,
-    LLM_MODEL, LLM_URL,
-    CURATOR_LLM_MODEL, CURATOR_LLM_URL, CURATOR_LLM_API_KEY,
+    LLM_MODEL,
+    LLM_URL,
+    MEMORY_ROOT,
+    ORPHAN_SWEEP_ENABLED,
+    ORPHAN_SWEEP_EVERY_N_CYCLES,
 )
 from archivist.features.llm import llm_query
 
@@ -26,15 +32,20 @@ from archivist.features.llm import llm_query
 _CURATOR_MODEL = CURATOR_LLM_MODEL or LLM_MODEL
 _CURATOR_URL = CURATOR_LLM_URL or LLM_URL
 _CURATOR_KEY = CURATOR_LLM_API_KEY
-from archivist.storage.graph import (
-    upsert_entity, add_fact, add_relationship,
-    get_curator_state, set_curator_state, get_db, GRAPH_WRITE_LOCK,
-)
-from archivist.write.indexer import index_file
 from archivist.core.hotness import batch_update_hotness
-from archivist.utils.text_utils import strip_fences, extract_agent_id_from_path
 from archivist.core.trajectory import consolidate_tips
 from archivist.storage.compressed_index import cache_wake_up
+from archivist.storage.graph import (
+    GRAPH_WRITE_LOCK,
+    add_fact,
+    add_relationship,
+    get_curator_state,
+    get_db,
+    set_curator_state,
+    upsert_entity,
+)
+from archivist.utils.text_utils import extract_agent_id_from_path, strip_fences
+from archivist.write.indexer import index_file
 from archivist.write.pre_extractor import pre_extract
 
 logger = logging.getLogger("archivist.curator")
@@ -100,8 +111,13 @@ async def extract_knowledge(text: str, agent_id: str, source_file: str) -> dict 
     )
     try:
         raw = await llm_query(
-            prompt, system=EXTRACT_SYSTEM, max_tokens=1024, json_mode=True,
-            model=_CURATOR_MODEL, url=_CURATOR_URL, api_key=_CURATOR_KEY,
+            prompt,
+            system=EXTRACT_SYSTEM,
+            max_tokens=1024,
+            json_mode=True,
+            model=_CURATOR_MODEL,
+            url=_CURATOR_URL,
+            api_key=_CURATOR_KEY,
             stage="curator_extract",
         )
         return json.loads(strip_fences(raw))
@@ -109,8 +125,13 @@ async def extract_knowledge(text: str, agent_id: str, source_file: str) -> dict 
         try:
             repair_prompt = f"Fix this invalid JSON:\n{raw[:2000]}"
             fixed = await llm_query(
-                repair_prompt, system=_JSON_REPAIR_SYSTEM, max_tokens=1024, json_mode=True,
-                model=_CURATOR_MODEL, url=_CURATOR_URL, api_key=_CURATOR_KEY,
+                repair_prompt,
+                system=_JSON_REPAIR_SYSTEM,
+                max_tokens=1024,
+                json_mode=True,
+                model=_CURATOR_MODEL,
+                url=_CURATOR_URL,
+                api_key=_CURATOR_KEY,
                 stage="curator_json_repair",
             )
             return json.loads(strip_fences(fixed))
@@ -132,6 +153,7 @@ def _retention_for_entity_type(entity_type: str) -> str:
 async def process_extraction(data: dict, agent_id: str, source_file: str):
     """Store extracted knowledge in the graph."""
     from archivist.core.rbac import get_namespace_for_agent
+
     _ns = get_namespace_for_agent(agent_id) if agent_id else "global"
 
     entity_retention: dict[str, str] = {}
@@ -158,8 +180,16 @@ async def process_extraction(data: dict, agent_id: str, source_file: str):
             vu = (fact.get("valid_until") or "").strip()
             if not vf and file_date:
                 vf = file_date
-            add_fact(eid, ftext, source_file, agent_id, retention_class=rc,
-                     valid_from=vf, valid_until=vu, namespace=_ns)
+            add_fact(
+                eid,
+                ftext,
+                source_file,
+                agent_id,
+                retention_class=rc,
+                valid_from=vf,
+                valid_until=vu,
+                namespace=_ns,
+            )
 
     for rel in data.get("relationships", []):
         src = rel.get("source", "").strip()
@@ -170,7 +200,9 @@ async def process_extraction(data: dict, agent_id: str, source_file: str):
         if src and tgt:
             sid = upsert_entity(src, namespace=_ns)
             tid = upsert_entity(tgt, namespace=_ns)
-            add_relationship(sid, tid, rtype, evidence, agent_id, provenance=provenance, namespace=_ns)
+            add_relationship(
+                sid, tid, rtype, evidence, agent_id, provenance=provenance, namespace=_ns
+            )
 
 
 def _file_checksum(text: str) -> str:
@@ -191,9 +223,9 @@ async def curate_cycle():
     if last_run:
         cutoff = datetime.fromisoformat(last_run)
     else:
-        cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+        cutoff = datetime.now(UTC) - timedelta(days=7)
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     processed = 0
     skipped_unchanged = 0
 
@@ -204,11 +236,11 @@ async def curate_cycle():
                 continue
             filepath = os.path.join(root, fname)
             try:
-                mtime = datetime.fromtimestamp(os.path.getmtime(filepath), tz=timezone.utc)
+                mtime = datetime.fromtimestamp(os.path.getmtime(filepath), tz=UTC)
                 if mtime <= cutoff:
                     continue
 
-                with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+                with open(filepath, encoding="utf-8", errors="replace") as f:
                     text = f.read()
 
                 if len(text.strip()) < 50:
@@ -232,7 +264,11 @@ async def curate_cycle():
         async with sem:
             try:
                 agent_id = extract_agent_id_from_path(rel)
-                data = await extract_knowledge(text, agent_id, rel) if should_extract_knowledge(rel) else None
+                data = (
+                    await extract_knowledge(text, agent_id, rel)
+                    if should_extract_knowledge(rel)
+                    else None
+                )
                 if data:
                     await process_extraction(data, agent_id, rel)
                 await index_file(filepath)
@@ -267,7 +303,7 @@ async def extract_all_agent_memories() -> int:
                 continue
             filepath = os.path.join(root, fname)
             try:
-                with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+                with open(filepath, encoding="utf-8", errors="replace") as f:
                     text = f.read()
                 if len(text.strip()) < 50:
                     continue
@@ -307,12 +343,11 @@ async def reinforce_durable_entities():
     Also boosts confidence on relationships involving these entities.
     This runs every curator cycle and is cheap (pure SQL, no LLM).
     """
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     with GRAPH_WRITE_LOCK:
         conn = get_db()
         cur = conn.execute(
-            "UPDATE entities SET last_seen=? "
-            "WHERE retention_class IN ('durable', 'permanent')",
+            "UPDATE entities SET last_seen=? WHERE retention_class IN ('durable', 'permanent')",
             (now,),
         )
         reinforced = cur.rowcount
@@ -328,7 +363,9 @@ async def reinforce_durable_entities():
         conn.close()
 
     if reinforced:
-        logger.info("Reinforced %d durable/permanent entities, %d relationships", reinforced, rels_boosted)
+        logger.info(
+            "Reinforced %d durable/permanent entities, %d relationships", reinforced, rels_boosted
+        )
 
 
 async def decay_old_entries() -> dict[str, int]:
@@ -344,7 +381,7 @@ async def decay_old_entries() -> dict[str, int]:
     """
     with GRAPH_WRITE_LOCK:
         conn = get_db()
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         cutoff_90 = (now - timedelta(days=90)).isoformat()
         cur1 = conn.execute(
@@ -372,7 +409,9 @@ async def decay_old_entries() -> dict[str, int]:
     if total:
         logger.info(
             "Decayed %d facts (%d aged 90d, %d superseded/ephemeral 30d; durable/permanent preserved)",
-            total, aged_out, superseded_out,
+            total,
+            aged_out,
+            superseded_out,
         )
     return {"aged_out": aged_out, "superseded_out": superseded_out, "total": total}
 
@@ -388,8 +427,7 @@ def _refresh_wake_up_caches() -> int:
     conn = get_db()
     try:
         rows = conn.execute(
-            "SELECT DISTINCT namespace, agent_id FROM memory_chunks "
-            "WHERE namespace != '' LIMIT 500"
+            "SELECT DISTINCT namespace, agent_id FROM memory_chunks WHERE namespace != '' LIMIT 500"
         ).fetchall()
     finally:
         conn.close()
@@ -460,6 +498,7 @@ async def curator_loop():
                 _sweep_counter = 0
                 try:
                     from archivist.lifecycle.cascade import sweep_orphans
+
                     sr = await asyncio.to_thread(sweep_orphans)
                     orphans_cleaned = sr.get("fts_cleaned", 0) + sr.get("needle_cleaned", 0)
                     if orphans_cleaned:

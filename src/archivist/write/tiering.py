@@ -6,7 +6,8 @@ saving tokens when full detail is unnecessary.
 """
 
 import logging
-from archivist.core.config import TIERED_CONTEXT_ENABLED, L0_MAX_TOKENS, L1_MAX_TOKENS
+
+from archivist.core.config import L0_MAX_TOKENS, L1_MAX_TOKENS, TIERED_CONTEXT_ENABLED
 from archivist.features.llm import llm_query
 
 logger = logging.getLogger("archivist.tiering")
@@ -32,8 +33,8 @@ async def generate_tiers(text: str) -> dict:
 
     if not TIERED_CONTEXT_ENABLED or len(text.strip()) < 80:
         return {
-            "l0": text[:L0_MAX_TOKENS * 4].strip(),
-            "l1": text[:L1_MAX_TOKENS * 4].strip(),
+            "l0": text[: L0_MAX_TOKENS * 4].strip(),
+            "l1": text[: L1_MAX_TOKENS * 4].strip(),
             "l2": l2,
         }
 
@@ -42,14 +43,14 @@ async def generate_tiers(text: str) -> dict:
         l0 = l0.strip()
     except Exception as e:
         logger.warning("L0 generation failed, falling back to truncation: %s", e)
-        l0 = text[:L0_MAX_TOKENS * 4].strip()
+        l0 = text[: L0_MAX_TOKENS * 4].strip()
 
     try:
         l1 = await llm_query(text[:4000], system=_L1_SYSTEM, max_tokens=200)
         l1 = l1.strip()
     except Exception as e:
         logger.warning("L1 generation failed, falling back to truncation: %s", e)
-        l1 = text[:L1_MAX_TOKENS * 4].strip()
+        l1 = text[: L1_MAX_TOKENS * 4].strip()
 
     return {"l0": l0, "l1": l1, "l2": l2}
 

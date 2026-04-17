@@ -9,9 +9,9 @@ the journal directory has no effect on retrieval.
 import logging
 import os
 import threading
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-from archivist.core.config import JOURNAL_ENABLED, JOURNAL_DIR
+from archivist.core.config import JOURNAL_DIR, JOURNAL_ENABLED
 
 logger = logging.getLogger("archivist.journal")
 
@@ -46,7 +46,7 @@ def append_entry(
 
     _ensure_dir()
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     date_str = now.strftime("%Y-%m-%d")
     time_str = now.strftime("%H:%M:%S UTC")
     path = os.path.join(JOURNAL_DIR, f"{date_str}.md")
@@ -59,11 +59,10 @@ def append_entry(
     is_new = not os.path.exists(path)
 
     try:
-        with _write_lock:
-            with open(path, "a", encoding="utf-8") as f:
-                if is_new:
-                    f.write(f"# Archivist Journal — {date_str}\n\n---\n")
-                f.write(entry)
+        with _write_lock, open(path, "a", encoding="utf-8") as f:
+            if is_new:
+                f.write(f"# Archivist Journal — {date_str}\n\n---\n")
+            f.write(entry)
         return True
     except OSError as e:
         logger.warning("Journal write failed (%s): %s", path, e)

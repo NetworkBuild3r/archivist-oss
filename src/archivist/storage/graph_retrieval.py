@@ -3,19 +3,26 @@
 Called from rlm_retriever when GRAPH_RETRIEVAL_ENABLED is set.
 """
 
-import math
 import logging
-from datetime import datetime, timezone
+import math
+from datetime import UTC, datetime
 
-from archivist.storage.graph import (
-    search_entities, get_entity_facts, get_entity_relationships,
-    get_entity_facts_bulk, get_entity_relationships_bulk,
-    get_entity_by_id, _normalize,
-)
 from archivist.core.config import (
-    GRAPH_RETRIEVAL_WEIGHT, TEMPORAL_DECAY_HALFLIFE_DAYS,
-    MAX_ENTITY_FACT_INJECTIONS, ENTITY_SPECIFICITY_MAX_MENTIONS,
-    CROSS_AGENT_MAX_SHARE, MIN_FACT_CONFIDENCE,
+    CROSS_AGENT_MAX_SHARE,
+    ENTITY_SPECIFICITY_MAX_MENTIONS,
+    GRAPH_RETRIEVAL_WEIGHT,
+    MAX_ENTITY_FACT_INJECTIONS,
+    MIN_FACT_CONFIDENCE,
+    TEMPORAL_DECAY_HALFLIFE_DAYS,
+)
+from archivist.storage.graph import (
+    _normalize,
+    get_entity_by_id,
+    get_entity_facts,
+    get_entity_facts_bulk,
+    get_entity_relationships,
+    get_entity_relationships_bulk,
+    search_entities,
 )
 
 logger = logging.getLogger("archivist.graph_retrieval")
@@ -51,22 +58,128 @@ def _apply_cross_agent_cap(items: list[dict], agent_id_key: str = "agent_id") ->
     return kept
 
 
-_STOPWORDS = frozenset({
-    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
-    "have", "has", "had", "do", "does", "did", "will", "would", "shall",
-    "should", "may", "might", "must", "can", "could", "not", "no", "nor",
-    "and", "but", "or", "if", "then", "else", "when", "where", "why",
-    "how", "what", "which", "who", "whom", "this", "that", "these",
-    "those", "it", "its", "my", "your", "our", "their", "he", "she",
-    "we", "they", "me", "him", "her", "us", "them", "i", "you",
-    "of", "in", "to", "for", "with", "on", "at", "from", "by", "as",
-    "into", "about", "between", "through", "during", "before", "after",
-    "above", "below", "up", "down", "out", "off", "over", "under",
-    "find", "get", "tell", "show", "give", "know", "use", "used",
-    "exact", "all", "any", "each", "every", "both", "few", "more",
-    "most", "other", "some", "such", "only", "own", "same", "so",
-    "than", "too", "very", "just", "also", "now",
-})
+_STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "the",
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "being",
+        "have",
+        "has",
+        "had",
+        "do",
+        "does",
+        "did",
+        "will",
+        "would",
+        "shall",
+        "should",
+        "may",
+        "might",
+        "must",
+        "can",
+        "could",
+        "not",
+        "no",
+        "nor",
+        "and",
+        "but",
+        "or",
+        "if",
+        "then",
+        "else",
+        "when",
+        "where",
+        "why",
+        "how",
+        "what",
+        "which",
+        "who",
+        "whom",
+        "this",
+        "that",
+        "these",
+        "those",
+        "it",
+        "its",
+        "my",
+        "your",
+        "our",
+        "their",
+        "he",
+        "she",
+        "we",
+        "they",
+        "me",
+        "him",
+        "her",
+        "us",
+        "them",
+        "i",
+        "you",
+        "of",
+        "in",
+        "to",
+        "for",
+        "with",
+        "on",
+        "at",
+        "from",
+        "by",
+        "as",
+        "into",
+        "about",
+        "between",
+        "through",
+        "during",
+        "before",
+        "after",
+        "above",
+        "below",
+        "up",
+        "down",
+        "out",
+        "off",
+        "over",
+        "under",
+        "find",
+        "get",
+        "tell",
+        "show",
+        "give",
+        "know",
+        "use",
+        "used",
+        "exact",
+        "all",
+        "any",
+        "each",
+        "every",
+        "both",
+        "few",
+        "more",
+        "most",
+        "other",
+        "some",
+        "such",
+        "only",
+        "own",
+        "same",
+        "so",
+        "than",
+        "too",
+        "very",
+        "just",
+        "also",
+        "now",
+    }
+)
 
 
 def extract_entity_mentions(query: str, namespace: str = "") -> list[dict]:
@@ -85,7 +198,7 @@ def extract_entity_mentions(query: str, namespace: str = "") -> list[dict]:
 
     for n in (3, 2, 1):
         for i in range(len(tokens) - n + 1):
-            phrase = " ".join(tokens[i:i + n])
+            phrase = " ".join(tokens[i : i + n])
             if len(phrase) < 2:
                 continue
             # Skip single stopwords — they match too many entities
@@ -133,31 +246,37 @@ def graph_context_for_entities(entity_ids: list[int], depth: int = 1) -> list[di
         next_frontier: list[int] = []
         for eid in unvisited:
             for f in all_facts.get(eid, []):
-                context_items.append({
-                    "type": "fact",
-                    "entity_id": eid,
-                    "text": f["fact_text"],
-                    "agent_id": f.get("agent_id", ""),
-                    "created_at": f.get("created_at", ""),
-                    "source_file": f.get("source_file", ""),
-                    "hop": hop,
-                })
+                context_items.append(
+                    {
+                        "type": "fact",
+                        "entity_id": eid,
+                        "text": f["fact_text"],
+                        "agent_id": f.get("agent_id", ""),
+                        "created_at": f.get("created_at", ""),
+                        "source_file": f.get("source_file", ""),
+                        "hop": hop,
+                    }
+                )
                 if len(context_items) >= _MAX_GRAPH_CONTEXT_ITEMS:
                     return context_items
 
             for r in all_rels.get(eid, []):
-                context_items.append({
-                    "type": "relationship",
-                    "source": r.get("source_name", ""),
-                    "target": r.get("target_name", ""),
-                    "relation": r["relation_type"],
-                    "evidence": r.get("evidence", ""),
-                    "agent_id": r.get("agent_id", ""),
-                    "hop": hop,
-                })
+                context_items.append(
+                    {
+                        "type": "relationship",
+                        "source": r.get("source_name", ""),
+                        "target": r.get("target_name", ""),
+                        "relation": r["relation_type"],
+                        "evidence": r.get("evidence", ""),
+                        "agent_id": r.get("agent_id", ""),
+                        "hop": hop,
+                    }
+                )
                 if len(context_items) >= _MAX_GRAPH_CONTEXT_ITEMS:
                     return context_items
-                other = r["target_entity_id"] if r["source_entity_id"] == eid else r["source_entity_id"]
+                other = (
+                    r["target_entity_id"] if r["source_entity_id"] == eid else r["source_entity_id"]
+                )
                 if other not in visited:
                     next_frontier.append(other)
 
@@ -182,7 +301,10 @@ def apply_temporal_decay(
     date was inferred from indexing time, not from the filename) are never
     decayed — they represent reference material with unknown event date.
     """
-    from archivist.core.config import TEMPORAL_INTENT_ENABLED, TEMPORAL_HISTORICAL_HALFLIFE_MULTIPLIER
+    from archivist.core.config import (
+        TEMPORAL_HISTORICAL_HALFLIFE_MULTIPLIER,
+        TEMPORAL_INTENT_ENABLED,
+    )
 
     hl = halflife_days or TEMPORAL_DECAY_HALFLIFE_DAYS
     if hl <= 0:
@@ -191,7 +313,7 @@ def apply_temporal_decay(
     if TEMPORAL_INTENT_ENABLED and temporal_intent == "historical":
         hl = int(hl * TEMPORAL_HISTORICAL_HALFLIFE_MULTIPLIER)
 
-    now = datetime.now(timezone.utc).date()
+    now = datetime.now(UTC).date()
     ln2 = math.log(2)
 
     for r in results:
@@ -262,21 +384,23 @@ def merge_graph_context_into_results(
                 continue
             added.add(dedup_key)
             n_synthetic += 1
-            vector_results.append({
-                "id": "",
-                "score": w,
-                "text": text[:500],
-                "agent_id": gi.get("agent_id", ""),
-                "file_path": src,
-                "file_type": "graph",
-                "date": gi.get("created_at", "")[:10] if gi.get("created_at") else "",
-                "team": "",
-                "namespace": "",
-                "chunk_index": 0,
-                "parent_id": None,
-                "is_parent": False,
-                "graph_hop": gi.get("hop", 0),
-            })
+            vector_results.append(
+                {
+                    "id": "",
+                    "score": w,
+                    "text": text[:500],
+                    "agent_id": gi.get("agent_id", ""),
+                    "file_path": src,
+                    "file_type": "graph",
+                    "date": gi.get("created_at", "")[:10] if gi.get("created_at") else "",
+                    "team": "",
+                    "namespace": "",
+                    "chunk_index": 0,
+                    "parent_id": None,
+                    "is_parent": False,
+                    "graph_hop": gi.get("hop", 0),
+                }
+            )
 
     vector_results.sort(key=lambda x: x.get("score", 0), reverse=True)
     return vector_results
@@ -377,30 +501,32 @@ def build_entity_fact_results(
                 continue
             seen_texts.add(text_key)
 
-            results.append({
-                "id": "",
-                "score": min_score + score_boost,
-                "text": f"[{entity['name']}] {f['fact_text']}",
-                "l0": "",
-                "l1": "",
-                "agent_id": f.get("agent_id", ""),
-                "file_path": f.get("source_file", ""),
-                "file_type": "entity_fact",
-                "date": (f.get("created_at", "") or "")[:10],
-                "team": "",
-                "namespace": "",
-                "chunk_index": 0,
-                "parent_id": None,
-                "is_parent": False,
-                "importance_score": 1.0 if retention == "permanent" else 0.7,
-                "retention_class": f.get("retention_class", retention),
-                "entity_name": entity["name"],
-                "entity_id": eid,
-                "valid_from": f.get("valid_from", ""),
-                "valid_until": f.get("valid_until", ""),
-                "confidence": fact_confidence,
-                "actor_id": f.get("actor_id", ""),
-            })
+            results.append(
+                {
+                    "id": "",
+                    "score": min_score + score_boost,
+                    "text": f"[{entity['name']}] {f['fact_text']}",
+                    "l0": "",
+                    "l1": "",
+                    "agent_id": f.get("agent_id", ""),
+                    "file_path": f.get("source_file", ""),
+                    "file_type": "entity_fact",
+                    "date": (f.get("created_at", "") or "")[:10],
+                    "team": "",
+                    "namespace": "",
+                    "chunk_index": 0,
+                    "parent_id": None,
+                    "is_parent": False,
+                    "importance_score": 1.0 if retention == "permanent" else 0.7,
+                    "retention_class": f.get("retention_class", retention),
+                    "entity_name": entity["name"],
+                    "entity_id": eid,
+                    "valid_from": f.get("valid_from", ""),
+                    "valid_until": f.get("valid_until", ""),
+                    "confidence": fact_confidence,
+                    "actor_id": f.get("actor_id", ""),
+                }
+            )
 
     results = _apply_cross_agent_cap(results)
     if cap > 0 and len(results) > cap:
@@ -421,29 +547,37 @@ def detect_contradictions(entity_id: int) -> list[dict]:
         return []
 
     _OPPOSING = [
-        ("enabled", "disabled"), ("active", "inactive"), ("yes", "no"),
-        ("true", "false"), ("success", "failure"), ("up", "down"),
-        ("running", "stopped"), ("allow", "deny"), ("open", "closed"),
+        ("enabled", "disabled"),
+        ("active", "inactive"),
+        ("yes", "no"),
+        ("true", "false"),
+        ("success", "failure"),
+        ("up", "down"),
+        ("running", "stopped"),
+        ("allow", "deny"),
+        ("open", "closed"),
     ]
 
     contradictions: list[dict] = []
     for i, a in enumerate(facts):
-        for b in facts[i + 1:]:
+        for b in facts[i + 1 :]:
             if a.get("agent_id") == b.get("agent_id"):
                 continue
             a_lower = a["fact_text"].lower()
             b_lower = b["fact_text"].lower()
             for pos, neg in _OPPOSING:
                 if (pos in a_lower and neg in b_lower) or (neg in a_lower and pos in b_lower):
-                    contradictions.append({
-                        "fact_a": a["fact_text"],
-                        "fact_a_agent": a.get("agent_id", ""),
-                        "fact_a_date": a.get("created_at", ""),
-                        "fact_b": b["fact_text"],
-                        "fact_b_agent": b.get("agent_id", ""),
-                        "fact_b_date": b.get("created_at", ""),
-                        "trigger": f"{pos}/{neg}",
-                    })
+                    contradictions.append(
+                        {
+                            "fact_a": a["fact_text"],
+                            "fact_a_agent": a.get("agent_id", ""),
+                            "fact_a_date": a.get("created_at", ""),
+                            "fact_b": b["fact_text"],
+                            "fact_b_agent": b.get("agent_id", ""),
+                            "fact_b_date": b.get("created_at", ""),
+                            "trigger": f"{pos}/{neg}",
+                        }
+                    )
                     break
 
     return contradictions

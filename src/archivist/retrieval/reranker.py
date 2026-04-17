@@ -22,13 +22,10 @@ relevance without a separate parent-enrichment stage.
 import asyncio
 import logging
 import time
-from typing import Optional
-
-import archivist.core.metrics as m
 
 logger = logging.getLogger("archivist.reranker")
 
-_model: Optional[object] = None
+_model: object | None = None
 _model_name: str = ""
 _load_failed = False
 
@@ -42,6 +39,7 @@ def _get_model(model_name: str):
         return _model
     try:
         from sentence_transformers import CrossEncoder
+
         t0 = time.monotonic()
         _model = CrossEncoder(model_name)
         _model_name = model_name
@@ -51,7 +49,8 @@ def _get_model(model_name: str):
     except Exception as e:
         logger.warning(
             "Failed to load reranker model '%s': %s — reranking disabled",
-            model_name, e,
+            model_name,
+            e,
         )
         _load_failed = True
         return None

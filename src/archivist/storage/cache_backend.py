@@ -16,7 +16,7 @@ import time
 from collections import OrderedDict
 from typing import Any
 
-from archivist.core.config import CACHE_BACKEND, REDIS_URL, REDIS_KEY_PREFIX
+from archivist.core.config import CACHE_BACKEND, REDIS_KEY_PREFIX, REDIS_URL
 
 logger = logging.getLogger("archivist.cache_backend")
 
@@ -109,6 +109,7 @@ class RedisBackend(CacheBackend):
                 return self._client
             try:
                 import redis
+
                 client = redis.Redis.from_url(
                     REDIS_URL,
                     decode_responses=True,
@@ -143,7 +144,9 @@ class RedisBackend(CacheBackend):
     def put(self, key: str, value: Any, ttl_seconds: int = 600) -> None:
         try:
             self._get_client().setex(
-                self._key(key), ttl_seconds, json.dumps(value),
+                self._key(key),
+                ttl_seconds,
+                json.dumps(value),
             )
         except Exception as e:
             logger.debug("Redis SET failed: %s", e)

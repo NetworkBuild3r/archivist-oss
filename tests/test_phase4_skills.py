@@ -2,7 +2,7 @@
 
 
 def test_register_and_find_skill():
-    from skills import register_skill, find_skill, list_skills
+    from skills import find_skill, list_skills, register_skill
 
     result = register_skill(
         name="web_search",
@@ -34,7 +34,7 @@ def test_register_and_find_skill():
 
 
 def test_lessons_crud():
-    from skills import register_skill, add_lesson, get_lessons
+    from skills import add_lesson, get_lessons, register_skill
 
     reg = register_skill(name="code_exec", provider="internal", registered_by="a1")
     sid = reg["skill_id"]
@@ -54,13 +54,15 @@ def test_lessons_crud():
     assert lessons[0]["title"] == "Timeout on large inputs"
     assert lessons[0]["lesson_type"] == "failure_mode"
 
-    add_lesson(sid, "Use JSON input", "Always pass JSON, not raw text.", "best_practice", agent_id="a2")
+    add_lesson(
+        sid, "Use JSON input", "Always pass JSON, not raw text.", "best_practice", agent_id="a2"
+    )
     lessons2 = get_lessons(sid, lesson_type="failure_mode")
     assert len(lessons2) == 1
 
 
 def test_skill_events_and_health():
-    from skills import register_skill, log_skill_event, get_skill_health
+    from skills import get_skill_health, log_skill_event, register_skill
 
     reg = register_skill(name="calculator", provider="builtin", registered_by="a1")
     sid = reg["skill_id"]
@@ -80,7 +82,7 @@ def test_skill_events_and_health():
 
 
 def test_health_grades():
-    from skills import register_skill, log_skill_event, get_skill_health, update_skill_status
+    from skills import get_skill_health, log_skill_event, register_skill, update_skill_status
 
     reg = register_skill(name="good_tool", provider="x", registered_by="a1")
     for _ in range(10):
@@ -102,13 +104,15 @@ def test_health_grades():
 
 
 def test_version_tracking():
-    from skills import register_skill, record_version, get_skill_health
+    from skills import get_skill_health, record_version, register_skill
 
     reg = register_skill(name="api_tool", provider="acme", version="1.0.0", registered_by="a1")
     sid = reg["skill_id"]
 
     record_version(sid, "1.1.0", changelog="Added caching", reported_by="a1")
-    record_version(sid, "2.0.0", changelog="New API", breaking_changes="Removed v1 endpoints", reported_by="a1")
+    record_version(
+        sid, "2.0.0", changelog="New API", breaking_changes="Removed v1 endpoints", reported_by="a1"
+    )
 
     health = get_skill_health(sid)
     assert health["current_version"] == "2.0.0"

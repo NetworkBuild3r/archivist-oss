@@ -19,6 +19,7 @@ def _load_encoder():
     _encoder_loaded = True
     try:
         import tiktoken
+
         _encoder = tiktoken.get_encoding("cl100k_base")
         logger.info("Tokenizer: using tiktoken cl100k_base")
     except Exception:

@@ -13,18 +13,44 @@ import re
 
 _YEAR_RE = re.compile(r"\b(20\d{2})\b")
 _ISO_DATE_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
-_MONTH_YEAR_RE = re.compile(r"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\s+20\d{2}\b", re.IGNORECASE)
+_MONTH_YEAR_RE = re.compile(
+    r"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\s+20\d{2}\b", re.IGNORECASE
+)
 
-_RECENCY_WORDS = frozenset({
-    "recent", "recently", "latest", "newest", "current", "today",
-    "this week", "this month", "right now", "just now", "last hour",
-})
+_RECENCY_WORDS = frozenset(
+    {
+        "recent",
+        "recently",
+        "latest",
+        "newest",
+        "current",
+        "today",
+        "this week",
+        "this month",
+        "right now",
+        "just now",
+        "last hour",
+    }
+)
 
-_HISTORICAL_WORDS = frozenset({
-    "when did", "when was", "what happened", "history", "historical",
-    "previously", "past", "back then", "timeline", "chronolog",
-    "incident on", "outage on", "event on", "on the date",
-})
+_HISTORICAL_WORDS = frozenset(
+    {
+        "when did",
+        "when was",
+        "what happened",
+        "history",
+        "historical",
+        "previously",
+        "past",
+        "back then",
+        "timeline",
+        "chronolog",
+        "incident on",
+        "outage on",
+        "event on",
+        "on the date",
+    }
+)
 
 _RECENCY_PATTERNS = [
     re.compile(r"\b(?:latest|newest|most recent|current|up.to.date)\b", re.IGNORECASE),

@@ -8,19 +8,26 @@ import json
 import logging
 from dataclasses import dataclass
 
-from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchExcept
+from qdrant_client.models import FieldCondition, Filter, MatchValue
 
-from archivist.core.config import DEDUP_LLM_ENABLED, DEDUP_LLM_THRESHOLD
-from archivist.core.config import LLM_MODEL, LLM_URL, CURATOR_LLM_MODEL, CURATOR_LLM_URL, CURATOR_LLM_API_KEY
-from archivist.storage.collection_router import collection_for
+from archivist.core.config import (
+    CURATOR_LLM_API_KEY,
+    CURATOR_LLM_MODEL,
+    CURATOR_LLM_URL,
+    DEDUP_LLM_ENABLED,
+    DEDUP_LLM_THRESHOLD,
+    LLM_MODEL,
+    LLM_URL,
+)
 from archivist.features.embeddings import embed_text
+from archivist.storage.collection_router import collection_for
 
 _CURATOR_MODEL = CURATOR_LLM_MODEL or LLM_MODEL
 _CURATOR_URL = CURATOR_LLM_URL or LLM_URL
 _CURATOR_KEY = CURATOR_LLM_API_KEY
+import archivist.core.metrics as m
 from archivist.features.llm import llm_query
 from archivist.storage.qdrant import qdrant_client
-import archivist.core.metrics as m
 
 logger = logging.getLogger("archivist.conflict")
 
@@ -159,26 +166,30 @@ async def llm_adjudicated_dedup(
     existing_texts = []
     for r in top_matches:
         payload = r.payload or {}
-        existing_texts.append({
-            "id": str(r.id),
-            "text": (payload.get("text") or "")[:500],
-            "agent_id": payload.get("agent_id", ""),
-            "date": payload.get("date", ""),
-            "score": r.score,
-        })
+        existing_texts.append(
+            {
+                "id": str(r.id),
+                "text": (payload.get("text") or "")[:500],
+                "agent_id": payload.get("agent_id", ""),
+                "date": payload.get("date", ""),
+                "score": r.score,
+            }
+        )
 
-    prompt = (
-        f"NEW MEMORY (from agent '{agent_id}'):\n{text[:500]}\n\n"
-        f"EXISTING MEMORIES:\n"
-    )
+    prompt = f"NEW MEMORY (from agent '{agent_id}'):\n{text[:500]}\n\nEXISTING MEMORIES:\n"
     for i, ex in enumerate(existing_texts, 1):
         prompt += f"\n{i}. [ID: {ex['id']}, agent: {ex['agent_id']}, similarity: {ex['score']:.3f}]\n{ex['text']}\n"
 
     try:
         m.inc(m.CURATOR_LLM_CALLS)
         raw = await llm_query(
-            prompt, system=_DEDUP_SYSTEM, max_tokens=512, json_mode=True,
-            model=_CURATOR_MODEL, url=_CURATOR_URL, api_key=_CURATOR_KEY,
+            prompt,
+            system=_DEDUP_SYSTEM,
+            max_tokens=512,
+            json_mode=True,
+            model=_CURATOR_MODEL,
+            url=_CURATOR_URL,
+            api_key=_CURATOR_KEY,
             stage="curator_dedup",
         )
         decisions = json.loads(raw.strip().strip("`").strip())

@@ -1,21 +1,20 @@
 """CRDT-style merge strategies for conflicting memories."""
 
-import logging
-import json
 import hashlib
+import logging
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from qdrant_client.models import PointStruct
 
-from archivist.core.config import QDRANT_COLLECTION, MEMORY_ROOT
-from archivist.storage.collection_router import collection_for
+from archivist.core.audit import log_memory_event
+from archivist.core.config import MEMORY_ROOT, QDRANT_COLLECTION
 from archivist.features.embeddings import embed_text
 from archivist.features.llm import llm_query
+from archivist.storage.collection_router import collection_for
 from archivist.storage.qdrant import qdrant_client
-from archivist.utils.text_utils import compute_memory_checksum
 from archivist.storage.versioning import record_version
-from archivist.core.audit import log_memory_event
+from archivist.utils.text_utils import compute_memory_checksum
 
 logger = logging.getLogger("archivist.merge")
 
@@ -71,7 +70,7 @@ async def merge_memories(
         "text": merged_text,
         "file_path": f"merge/{agent_id}",
         "file_type": "merged",
-        "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "date": datetime.now(UTC).strftime("%Y-%m-%d"),
         "team": payloads[0][1].get("team", "unknown"),
         "namespace": ns,
         "version": result["version"],
@@ -88,11 +87,15 @@ async def merge_memories(
     )
 
     from archivist.lifecycle.memory_lifecycle import delete_memory_complete
+
     for mid in memory_ids:
         await delete_memory_complete(mid, ns, collection=collection_for(ns))
 
     version = record_version(
-        merged_id, agent_id, checksum, "merge",
+        merged_id,
+        agent_id,
+        checksum,
+        "merge",
         parent_versions=[],
     )
 
@@ -140,7 +143,7 @@ def _merge_concat(payloads: list[tuple[str, dict]]) -> dict:
 
 async def _merge_semantic(payloads: list[tuple[str, dict]]) -> dict:
     versions_text = "\n\n".join(
-        f"Version (date={p.get('date','?')}, agent={p.get('agent_id','?')}):\n{p['text']}"
+        f"Version (date={p.get('date', '?')}, agent={p.get('agent_id', '?')}):\n{p['text']}"
         for _, p in payloads
     )
     prompt = f"Merge the following memory versions into a single coherent fact:\n\n{versions_text}\n\nMerged version:"
@@ -162,12 +165,10 @@ async def _merge_manual(payloads: list[tuple[str, dict]], namespace: str) -> dic
     conflict_dir = os.path.join(MEMORY_ROOT, "memory-conflicts")
     os.makedirs(conflict_dir, exist_ok=True)
 
-    conflict_id = hashlib.md5(
-        ":".join(str(pid) for pid, _ in payloads).encode()
-    ).hexdigest()[:12]
+    conflict_id = hashlib.md5(":".join(str(pid) for pid, _ in payloads).encode()).hexdigest()[:12]
     filepath = os.path.join(conflict_dir, f"conflict-{conflict_id}.md")
 
-    lines = [f"# Memory Conflict — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}", ""]
+    lines = [f"# Memory Conflict — {datetime.now(UTC).strftime('%Y-%m-%d %H:%M')}", ""]
     lines.append(f"**Namespace:** {namespace}")
     lines.append(f"**Memory IDs:** {', '.join(str(pid) for pid, _ in payloads)}")
     lines.append("")

@@ -26,18 +26,20 @@ through a cascade will leave partial state.  The contract:
 
 import logging
 
-from qdrant_client.http.exceptions import UnexpectedResponse, ResponseHandlingException
-from qdrant_client.models import Filter, FieldCondition, MatchValue
+from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
+from qdrant_client.models import Filter
 
+import archivist.core.metrics as m
 from archivist.storage.collection_router import collections_for_query
 from archivist.storage.graph import (
-    get_db, GRAPH_WRITE_LOCK, _delete_fts_rows,
-    delete_fts_chunks_batch, delete_needle_tokens_batch,
-    _ensure_needle_registry, log_delete_failure,
+    _ensure_needle_registry,
+    delete_fts_chunks_batch,
+    delete_needle_tokens_batch,
+    get_db,
+    log_delete_failure,
 )
 from archivist.storage.qdrant import qdrant_client
 from archivist.utils.retry import retry_call
-import archivist.core.metrics as m
 
 logger = logging.getLogger("archivist.cascade")
 
@@ -59,14 +61,14 @@ class PartialDeletionError(Exception):
     def __init__(self, result):
         self.result = result
         super().__init__(
-            f"Partial deletion for {result.memory_id}: "
-            f"failed_steps={result.failed_steps}"
+            f"Partial deletion for {result.memory_id}: failed_steps={result.failed_steps}"
         )
 
 
 # ---------------------------------------------------------------------------
 # Qdrant helpers
 # ---------------------------------------------------------------------------
+
 
 def _qdrant_delete(
     client,
@@ -116,12 +118,16 @@ def _qdrant_delete(
     if step_name in failed_steps:
         logger.error(
             "cascade.%s failed for %s after %d attempt(s)",
-            step_name, memory_id, 1 + retries,
+            step_name,
+            memory_id,
+            1 + retries,
         )
         # Record the failed IDs in the dead-letter table for later inspection/replay.
         if isinstance(selector, list) and selector:
             try:
-                log_delete_failure(memory_id, selector, f"retry exhausted after {1 + retries} attempt(s)")
+                log_delete_failure(
+                    memory_id, selector, f"retry exhausted after {1 + retries} attempt(s)"
+                )
             except Exception as _dlq_err:
                 logger.debug("cascade.log_delete_failure failed: %s", _dlq_err)
 
@@ -144,6 +150,7 @@ def _qdrant_set_payload(
     Returns ``True`` on success.  On failure the *step_name* is appended to
     *failed_steps* and ``False`` is returned.
     """
+
     def _do_set():
         client.set_payload(collection_name=col, payload=payload, points=selector)
         return True
@@ -161,7 +168,9 @@ def _qdrant_set_payload(
     if step_name in failed_steps:
         logger.error(
             "cascade.%s failed for %s after %d attempt(s)",
-            step_name, memory_id, 1 + retries,
+            step_name,
+            memory_id,
+            1 + retries,
         )
         return False
 
@@ -171,6 +180,7 @@ def _qdrant_set_payload(
 # ---------------------------------------------------------------------------
 # Paginated scroll
 # ---------------------------------------------------------------------------
+
 
 def _scroll_all(
     client,
@@ -209,14 +219,19 @@ def _scroll_all(
             if pages >= max_pages:
                 logger.warning(
                     "cascade.%s hit max_pages=%d for %s — result is incomplete",
-                    step_name, max_pages, memory_id,
+                    step_name,
+                    max_pages,
+                    memory_id,
                 )
                 failed_steps.append(step_name)
                 break
             offset = next_offset
     except Exception as e:
         logger.error(
-            "cascade.%s failed for %s: %s", step_name, memory_id, e,
+            "cascade.%s failed for %s: %s",
+            step_name,
+            memory_id,
+            e,
         )
         failed_steps.append(step_name)
     return ids
@@ -278,7 +293,9 @@ def sweep_orphans() -> dict[str, int | str]:
             for coll in collections:
                 try:
                     points = client.retrieve(
-                        collection_name=coll, ids=sub, with_payload=False,
+                        collection_name=coll,
+                        ids=sub,
+                        with_payload=False,
                     )
                     found_ids.update(str(p.id) for p in points)
                 except Exception:
@@ -328,7 +345,9 @@ def sweep_orphans() -> dict[str, int | str]:
             for coll in collections:
                 try:
                     points = client.retrieve(
-                        collection_name=coll, ids=sub, with_payload=False,
+                        collection_name=coll,
+                        ids=sub,
+                        with_payload=False,
                     )
                     found.update(str(p.id) for p in points)
                 except Exception:
@@ -350,7 +369,8 @@ def sweep_orphans() -> dict[str, int | str]:
     if total:
         logger.info(
             "sweep_orphans cleaned %d FTS + %d needle orphans",
-            fts_cleaned, needle_cleaned,
+            fts_cleaned,
+            needle_cleaned,
         )
     m.inc(m.ORPHAN_SWEEP, value=total)
 

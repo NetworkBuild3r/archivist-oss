@@ -8,14 +8,11 @@ plus timing and the final retrieval_trace dict.
 
 import json
 import logging
-import threading
-import time
 import uuid
-from collections import deque
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-from archivist.storage.graph import get_db, GRAPH_WRITE_LOCK, schema_guard
-from archivist.core.config import TRAJECTORY_EXPORT_ENABLED, TRAJECTORY_EXPORT_MAX
+from archivist.core.config import TRAJECTORY_EXPORT_ENABLED
+from archivist.storage.graph import GRAPH_WRITE_LOCK, get_db, schema_guard
 
 logger = logging.getLogger("archivist.retrieval_log")
 
@@ -55,7 +52,7 @@ def log_retrieval(
 
     _ensure_schema()
     log_id = str(uuid.uuid4())
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
 
     with GRAPH_WRITE_LOCK:
         conn = get_db()
@@ -65,9 +62,19 @@ def log_retrieval(
                    (id, agent_id, query, namespace, tier, memory_type,
                     retrieval_trace, result_count, cache_hit, duration_ms, created_at)
                    VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-                (log_id, agent_id, query, namespace, tier, memory_type,
-                 json.dumps(retrieval_trace), result_count,
-                 1 if cache_hit else 0, duration_ms, now),
+                (
+                    log_id,
+                    agent_id,
+                    query,
+                    namespace,
+                    tier,
+                    memory_type,
+                    json.dumps(retrieval_trace),
+                    result_count,
+                    1 if cache_hit else 0,
+                    duration_ms,
+                    now,
+                ),
             )
             conn.commit()
         finally:
@@ -157,7 +164,6 @@ def get_retrieval_stats(agent_id: str = "", window_days: int = 7) -> dict:
 
     result["window_days"] = window_days
     result["cache_hit_rate"] = (
-        round(result.get("cache_hits", 0) / result["total"], 3)
-        if result.get("total") else None
+        round(result.get("cache_hits", 0) / result["total"], 3) if result.get("total") else None
     )
     return result

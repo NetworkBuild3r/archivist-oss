@@ -2,5 +2,7 @@
 # sys.modules aliasing ensures mock.patch('chunking.foo') patches
 # archivist.utils.chunking.foo (same module object).
 import sys
+
 import archivist.utils.chunking as _real
+
 sys.modules[__name__] = _real

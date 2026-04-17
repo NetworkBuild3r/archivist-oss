@@ -11,6 +11,7 @@ from enum import Enum
 
 class RetrievalSource(str, Enum):
     """Where a result originated — used for tracing, not scoring."""
+
     VECTOR = "vector"
     BM25 = "bm25"
     LITERAL = "literal"
@@ -26,6 +27,7 @@ class ResultCandidate:
     Factory methods normalize source-specific fields to sensible defaults
     so downstream stages (RRF, reranker, synthesis) never hit missing keys.
     """
+
     id: str = ""
     score: float = 0.0
     text: str = ""
