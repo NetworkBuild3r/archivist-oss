@@ -9,11 +9,8 @@ Covers:
 
 import ast
 import inspect
-import time
-from unittest.mock import MagicMock, patch
 
 import pytest
-
 
 # ── strip_augmentation_header ────────────────────────────────────────────────
 
@@ -105,10 +102,10 @@ class TestIndexerFtsRawText:
 
         source = inspect.getsource(indexer)
         # Should NOT prefer text_augmented for FTS
-        assert 'get("text_augmented"' not in source or \
-               'text=p.payload.get("text_augmented"' not in source, (
-            "indexer still uses text_augmented for FTS5 insertion"
-        )
+        assert (
+            'get("text_augmented"' not in source
+            or 'text=p.payload.get("text_augmented"' not in source
+        ), "indexer still uses text_augmented for FTS5 insertion"
 
 
 # ── Embedding cache immutability ─────────────────────────────────────────────
@@ -127,7 +124,7 @@ class TestEmbeddingCacheImmutability:
                 break
 
     def test_cache_get_returns_tuple(self):
-        from embeddings import _cache_put, _cache_get
+        from embeddings import _cache_get, _cache_put
 
         _cache_put("world", "model-b", [4.0, 5.0, 6.0])
         result = _cache_get("world", "model-b")
@@ -137,7 +134,7 @@ class TestEmbeddingCacheImmutability:
 
     def test_cache_get_no_copy(self):
         """Returned value should be the exact same object, not a copy."""
-        from embeddings import _cache_put, _cache_get, _embed_cache, _embed_cache_lock
+        from embeddings import _cache_get, _cache_put
 
         _cache_put("identity", "model-c", [7.0, 8.0])
         result1 = _cache_get("identity", "model-c")

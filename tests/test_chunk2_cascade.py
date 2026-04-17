@@ -13,10 +13,9 @@ Covers:
 - Orphan sweeper reconciles SQLite vs Qdrant
 """
 
-import asyncio
 import sqlite3
-from dataclasses import asdict
-from unittest.mock import AsyncMock, MagicMock, patch, call
+from datetime import UTC
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -80,10 +79,12 @@ def _make_mock_client(scroll_side_effect=None, children=None):
     if scroll_side_effect:
         client.scroll.side_effect = scroll_side_effect
     elif children:
+
         def _scroll(**kwargs):
             filt = kwargs.get("scroll_filter")
             key = filt.must[0].key if filt and filt.must else None
             return (children.get(key, []), None)
+
         client.scroll.side_effect = _scroll
     else:
         client.scroll.return_value = ([], None)
@@ -148,17 +149,23 @@ class TestDeleteMemoryComplete:
         self, mock_fts, mock_needle, mock_entity_facts, mock_audit
     ):
         """Micro-chunk and reverse HyDE FTS/needle rows are cleaned up."""
-        mc1 = MagicMock(); mc1.id = "micro-1"
-        mc2 = MagicMock(); mc2.id = "micro-2"
-        rh1 = MagicMock(); rh1.id = "rhyde-1"
+        mc1 = MagicMock()
+        mc1.id = "micro-1"
+        mc2 = MagicMock()
+        mc2.id = "micro-2"
+        rh1 = MagicMock()
+        rh1.id = "rhyde-1"
 
-        client = _make_mock_client(children={
-            "parent_id": [mc1, mc2],
-            "source_memory_id": [rh1],
-        })
+        client = _make_mock_client(
+            children={
+                "parent_id": [mc1, mc2],
+                "source_memory_id": [rh1],
+            }
+        )
 
         with patch("memory_lifecycle.qdrant_client", return_value=client):
             from memory_lifecycle import delete_memory_complete
+
             result = await delete_memory_complete("mem-parent", "ns")
 
         fts_ids = mock_fts.call_args[0][0]
@@ -206,10 +213,15 @@ class TestDeleteMemoryComplete:
         client.scroll.side_effect = Exception("down")
         client.count.return_value = MagicMock(count=0)
 
-        with patch("memory_lifecycle.qdrant_client", return_value=client), \
-             patch("memory_lifecycle.delete_fts_chunks_batch", side_effect=sqlite3.OperationalError("db locked")), \
-             patch("memory_lifecycle.delete_needle_tokens_batch", return_value=0), \
-             patch("memory_lifecycle._delete_entity_facts_for_memory", return_value=0):
+        with (
+            patch("memory_lifecycle.qdrant_client", return_value=client),
+            patch(
+                "memory_lifecycle.delete_fts_chunks_batch",
+                side_effect=sqlite3.OperationalError("db locked"),
+            ),
+            patch("memory_lifecycle.delete_needle_tokens_batch", return_value=0),
+            patch("memory_lifecycle._delete_entity_facts_for_memory", return_value=0),
+        ):
             from memory_lifecycle import delete_memory_complete
 
             with pytest.raises(PartialDeletionError) as exc_info:
@@ -218,11 +230,15 @@ class TestDeleteMemoryComplete:
             assert "qdrant_primary" in exc_info.value.result.failed_steps
 
     @pytest.mark.asyncio
-    async def test_uses_collection_router(self, mock_fts, mock_needle, mock_entity_facts, mock_audit):
+    async def test_uses_collection_router(
+        self, mock_fts, mock_needle, mock_entity_facts, mock_audit
+    ):
         """Respects namespace-to-collection routing."""
         client = _make_mock_client()
-        with patch("memory_lifecycle.qdrant_client", return_value=client), \
-             patch("memory_lifecycle.collection_for", return_value="archivist_custom") as cf:
+        with (
+            patch("memory_lifecycle.qdrant_client", return_value=client),
+            patch("memory_lifecycle.collection_for", return_value="archivist_custom") as cf,
+        ):
             from memory_lifecycle import delete_memory_complete
 
             await delete_memory_complete("m1", "custom-ns")
@@ -264,14 +280,19 @@ class TestPaginatedScroll:
     @pytest.mark.asyncio
     async def test_discovers_all_children_across_pages(self):
         """Scroll with two pages discovers all children."""
-        from cascade import _scroll_all
-        from qdrant_client.models import Filter, FieldCondition, MatchValue
+        from qdrant_client.models import FieldCondition, Filter, MatchValue
 
-        p1 = MagicMock(); p1.id = "child-1"
-        p2 = MagicMock(); p2.id = "child-2"
-        p3 = MagicMock(); p3.id = "child-3"
+        from cascade import _scroll_all
+
+        p1 = MagicMock()
+        p1.id = "child-1"
+        p2 = MagicMock()
+        p2.id = "child-2"
+        p3 = MagicMock()
+        p3.id = "child-3"
 
         call_count = 0
+
         def scroll_effect(**kwargs):
             nonlocal call_count
             call_count += 1
@@ -294,8 +315,9 @@ class TestPaginatedScroll:
     @pytest.mark.asyncio
     async def test_records_failure_in_failed_steps(self):
         """Scroll failure is tracked in failed_steps."""
+        from qdrant_client.models import FieldCondition, Filter, MatchValue
+
         from cascade import _scroll_all
-        from qdrant_client.models import Filter, FieldCondition, MatchValue
 
         client = MagicMock()
         client.scroll.side_effect = Exception("timeout")
@@ -315,9 +337,11 @@ class TestArchiveMemoryComplete:
     async def test_archives_primary_and_children(self):
         client = MagicMock()
         client.scroll.return_value = ([], None)  # no child points to enumerate
-        with patch("memory_lifecycle.qdrant_client", return_value=client), \
-             patch("memory_lifecycle.collection_for", return_value="test_col"), \
-             patch("memory_lifecycle.log_memory_event", new_callable=AsyncMock):
+        with (
+            patch("memory_lifecycle.qdrant_client", return_value=client),
+            patch("memory_lifecycle.collection_for", return_value="test_col"),
+            patch("memory_lifecycle.log_memory_event", new_callable=AsyncMock),
+        ):
             from memory_lifecycle import archive_memory_complete
 
             result = await archive_memory_complete("m1", "ns")
@@ -338,9 +362,11 @@ class TestArchiveMemoryComplete:
         client = MagicMock()
         client.scroll.return_value = ([], None)
         client.set_payload.side_effect = [None, Exception("nope"), None]
-        with patch("memory_lifecycle.qdrant_client", return_value=client), \
-             patch("memory_lifecycle.collection_for", return_value="test_col"), \
-             patch("memory_lifecycle.log_memory_event", new_callable=AsyncMock):
+        with (
+            patch("memory_lifecycle.qdrant_client", return_value=client),
+            patch("memory_lifecycle.collection_for", return_value="test_col"),
+            patch("memory_lifecycle.log_memory_event", new_callable=AsyncMock),
+        ):
             from memory_lifecycle import archive_memory_complete
 
             result = await archive_memory_complete("m2", "ns")
@@ -355,9 +381,11 @@ class TestArchiveMemoryComplete:
         client = MagicMock()
         client.scroll.return_value = ([], None)
         mock_audit = AsyncMock()
-        with patch("memory_lifecycle.qdrant_client", return_value=client), \
-             patch("memory_lifecycle.collection_for", return_value="test_col"), \
-             patch("memory_lifecycle.log_memory_event", mock_audit):
+        with (
+            patch("memory_lifecycle.qdrant_client", return_value=client),
+            patch("memory_lifecycle.collection_for", return_value="test_col"),
+            patch("memory_lifecycle.log_memory_event", mock_audit),
+        ):
             from memory_lifecycle import archive_memory_complete
 
             await archive_memory_complete("m-audit", "ns")
@@ -371,7 +399,7 @@ class TestDeleteFtsChunksByQdrantId:
     """graph.delete_fts_chunks_by_qdrant_id works correctly."""
 
     def test_deletes_matching_rows(self):
-        from graph import get_db, init_schema, upsert_fts_chunk, delete_fts_chunks_by_qdrant_id
+        from graph import delete_fts_chunks_by_qdrant_id, get_db, upsert_fts_chunk
 
         upsert_fts_chunk("qid-1", "some text", "test.md", 0, "agent", "ns")
         upsert_fts_chunk("qid-2", "other text", "test.md", 1, "agent", "ns")
@@ -388,10 +416,11 @@ class TestDeleteFtsChunksByQdrantId:
 
     def test_returns_zero_for_missing_id(self):
         from graph import delete_fts_chunks_by_qdrant_id
+
         assert delete_fts_chunks_by_qdrant_id("nonexistent") == 0
 
     def test_leaves_other_rows_intact(self):
-        from graph import get_db, upsert_fts_chunk, delete_fts_chunks_by_qdrant_id
+        from graph import delete_fts_chunks_by_qdrant_id, get_db, upsert_fts_chunk
 
         upsert_fts_chunk("keep-me", "important text", "f.md", 0, "a", "ns")
         upsert_fts_chunk("delete-me", "trash text", "f.md", 1, "a", "ns")
@@ -410,7 +439,7 @@ class TestBatchFtsDelete:
     """delete_fts_chunks_batch handles chunking correctly."""
 
     def test_batch_deletes_multiple_ids(self):
-        from graph import upsert_fts_chunk, delete_fts_chunks_batch, get_db
+        from graph import delete_fts_chunks_batch, get_db, upsert_fts_chunk
 
         for i in range(5):
             upsert_fts_chunk(f"batch-{i}", f"text {i}", "f.md", i, "a", "ns")
@@ -427,6 +456,7 @@ class TestBatchFtsDelete:
 
     def test_batch_empty_list(self):
         from graph import delete_fts_chunks_batch
+
         assert delete_fts_chunks_batch([]) == 0
 
     def test_batch_chunking_under_parameter_limit(self):
@@ -446,6 +476,7 @@ class TestBatchNeedleDelete:
 
     def test_batch_empty_list(self):
         from graph import delete_needle_tokens_batch
+
         assert delete_needle_tokens_batch([]) == 0
 
 
@@ -453,7 +484,7 @@ class TestDeleteEntityFactsForMemory:
     """_delete_entity_facts_for_memory soft-deactivates linked facts."""
 
     def test_deactivates_matching_facts(self):
-        from graph import get_db, upsert_entity, add_fact
+        from graph import add_fact, get_db, upsert_entity
         from memory_lifecycle import _delete_entity_facts_for_memory
 
         eid = upsert_entity("test-entity")
@@ -472,7 +503,7 @@ class TestDeleteEntityFactsForMemory:
         assert active == 0
 
     def test_does_not_affect_unrelated_facts(self):
-        from graph import get_db, upsert_entity, add_fact
+        from graph import add_fact, get_db, upsert_entity
         from memory_lifecycle import _delete_entity_facts_for_memory
 
         eid = upsert_entity("test-entity-2")
@@ -493,19 +524,23 @@ class TestOrphanSweeper:
 
     def test_cleans_orphaned_fts_rows(self):
         """FTS rows with no corresponding Qdrant point are cleaned."""
-        from graph import upsert_fts_chunk, get_db
+        from graph import get_db, upsert_fts_chunk
 
         upsert_fts_chunk("exists-in-qdrant", "text", "f.md", 0, "a", "ns")
         upsert_fts_chunk("orphaned-id", "text2", "f.md", 1, "a", "ns")
 
         mock_client = MagicMock()
-        p1 = MagicMock(); p1.id = "exists-in-qdrant"
+        p1 = MagicMock()
+        p1.id = "exists-in-qdrant"
         mock_client.retrieve.return_value = [p1]
         mock_client.get_collections.return_value = MagicMock()
 
-        with patch("cascade.qdrant_client", return_value=mock_client), \
-             patch("cascade.collections_for_query", return_value=["test_col"]):
+        with (
+            patch("cascade.qdrant_client", return_value=mock_client),
+            patch("cascade.collections_for_query", return_value=["test_col"]),
+        ):
             from cascade import sweep_orphans
+
             result = sweep_orphans()
 
         assert result["fts_cleaned"] >= 1
@@ -519,18 +554,22 @@ class TestOrphanSweeper:
 
     def test_does_not_clean_existing_points(self):
         """FTS rows with matching Qdrant points are kept."""
-        from graph import upsert_fts_chunk, get_db
+        from graph import get_db, upsert_fts_chunk
 
         upsert_fts_chunk("keep-this", "text", "f.md", 0, "a", "ns")
 
         mock_client = MagicMock()
-        p1 = MagicMock(); p1.id = "keep-this"
+        p1 = MagicMock()
+        p1.id = "keep-this"
         mock_client.retrieve.return_value = [p1]
         mock_client.get_collections.return_value = MagicMock()
 
-        with patch("cascade.qdrant_client", return_value=mock_client), \
-             patch("cascade.collections_for_query", return_value=["test_col"]):
+        with (
+            patch("cascade.qdrant_client", return_value=mock_client),
+            patch("cascade.collections_for_query", return_value=["test_col"]),
+        ):
             from cascade import sweep_orphans
+
             result = sweep_orphans()
 
         conn = get_db()
@@ -546,13 +585,15 @@ class TestCuratorQueueDrainAsync:
 
     @pytest.mark.asyncio
     async def test_drain_is_async_coroutine(self):
-        from curator_queue import drain
         import inspect
+
+        from curator_queue import drain
+
         assert inspect.iscoroutinefunction(drain)
 
     @pytest.mark.asyncio
     async def test_delete_op_calls_lifecycle(self):
-        from curator_queue import enqueue, drain
+        from curator_queue import drain, enqueue
 
         with patch("curator_queue._apply_delete", new_callable=AsyncMock) as mock_del:
             enqueue("delete_memory", {"memory_ids": ["m1"], "namespace": "ns"})
@@ -564,7 +605,7 @@ class TestCuratorQueueDrainAsync:
 
     @pytest.mark.asyncio
     async def test_archive_op_calls_lifecycle(self):
-        from curator_queue import enqueue, drain
+        from curator_queue import drain, enqueue
 
         with patch("curator_queue._apply_archive", new_callable=AsyncMock) as mock_arc:
             enqueue("archive_memory", {"memory_ids": ["m1"], "namespace": "ns"})
@@ -576,9 +617,11 @@ class TestCuratorQueueDrainAsync:
 
     @pytest.mark.asyncio
     async def test_failed_op_marked_failed(self):
-        from curator_queue import enqueue, drain
+        from curator_queue import drain, enqueue
 
-        with patch("curator_queue._apply_delete", new_callable=AsyncMock, side_effect=Exception("boom")):
+        with patch(
+            "curator_queue._apply_delete", new_callable=AsyncMock, side_effect=Exception("boom")
+        ):
             enqueue("delete_memory", {"memory_ids": ["m1"]})
             result = await drain(limit=10)
 
@@ -609,12 +652,14 @@ class TestMergeUsesLifecycle:
 
         mock_del = AsyncMock()
 
-        with patch("merge.qdrant_client", return_value=mock_client), \
-             patch("merge.embed_text", new_callable=AsyncMock, return_value=[0.1] * 1024), \
-             patch("merge.llm_query", new_callable=AsyncMock, return_value="merged text"), \
-             patch("merge.record_version", return_value=2), \
-             patch("merge.log_memory_event", new_callable=AsyncMock), \
-             patch("memory_lifecycle.delete_memory_complete", mock_del):
+        with (
+            patch("merge.qdrant_client", return_value=mock_client),
+            patch("merge.embed_text", new_callable=AsyncMock, return_value=[0.1] * 1024),
+            patch("merge.llm_query", new_callable=AsyncMock, return_value="merged text"),
+            patch("merge.record_version", return_value=2),
+            patch("merge.log_memory_event", new_callable=AsyncMock),
+            patch("memory_lifecycle.delete_memory_complete", mock_del),
+        ):
             from merge import merge_memories
 
             result = await merge_memories(["id1", "id2"], "semantic", "agent", "ns")
@@ -627,14 +672,16 @@ class TestQdrantRetry:
 
     def test_transient_retry_succeeds_on_second_attempt(self):
         """First delete raises a transient error, second attempt succeeds."""
-        from cascade import _qdrant_delete
         from qdrant_client.http.exceptions import ResponseHandlingException
+
+        from cascade import _qdrant_delete
 
         client = MagicMock()
         client.count.return_value = MagicMock(count=5)
         client.delete.side_effect = [ResponseHandlingException("timeout"), None]
 
-        from qdrant_client.models import Filter, FieldCondition, MatchValue
+        from qdrant_client.models import FieldCondition, Filter, MatchValue
+
         filt = Filter(must=[FieldCondition(key="parent_id", match=MatchValue(value="mem-1"))])
         failed = []
 
@@ -646,8 +693,9 @@ class TestQdrantRetry:
 
     def test_permanent_error_does_not_retry(self):
         """A non-transient error (e.g. 404) fails immediately without retry."""
-        from cascade import _qdrant_delete
         from qdrant_client.http.exceptions import UnexpectedResponse
+
+        from cascade import _qdrant_delete
 
         client = MagicMock()
         err = UnexpectedResponse.__new__(UnexpectedResponse)
@@ -665,8 +713,9 @@ class TestQdrantRetry:
 
     def test_precount_returned_on_final_failure(self):
         """Both attempts fail with transient errors; pre-count is still returned."""
-        from cascade import _qdrant_delete
         from qdrant_client.http.exceptions import ResponseHandlingException
+
+        from cascade import _qdrant_delete
 
         client = MagicMock()
         client.delete.side_effect = ResponseHandlingException("network")
@@ -680,16 +729,22 @@ class TestQdrantRetry:
 
     def test_set_payload_transient_retry(self):
         """_qdrant_set_payload retries on transient error and succeeds."""
-        from cascade import _qdrant_set_payload
         from qdrant_client.http.exceptions import ResponseHandlingException
+
+        from cascade import _qdrant_set_payload
 
         client = MagicMock()
         client.set_payload.side_effect = [ResponseHandlingException("timeout"), None]
 
         failed = []
         ok = _qdrant_set_payload(
-            client, "col", {"archived": True}, ["p1"],
-            "archive_step", "mem-1", failed,
+            client,
+            "col",
+            {"archived": True},
+            ["p1"],
+            "archive_step",
+            "mem-1",
+            failed,
         )
 
         assert ok is True
@@ -698,8 +753,9 @@ class TestQdrantRetry:
 
     def test_set_payload_permanent_error_no_retry(self):
         """_qdrant_set_payload does not retry permanent errors."""
-        from cascade import _qdrant_set_payload
         from qdrant_client.http.exceptions import UnexpectedResponse
+
+        from cascade import _qdrant_set_payload
 
         client = MagicMock()
         err = UnexpectedResponse.__new__(UnexpectedResponse)
@@ -710,8 +766,13 @@ class TestQdrantRetry:
 
         failed = []
         ok = _qdrant_set_payload(
-            client, "col", {"archived": True}, ["p1"],
-            "bad_step", "mem-1", failed,
+            client,
+            "col",
+            {"archived": True},
+            ["p1"],
+            "bad_step",
+            "mem-1",
+            failed,
         )
 
         assert ok is False
@@ -729,6 +790,7 @@ class TestOrphanSweeperAdvanced:
 
         with patch("cascade.qdrant_client", return_value=mock_client):
             from cascade import sweep_orphans
+
             result = sweep_orphans()
 
         assert result.get("skipped") == "qdrant_unavailable"
@@ -737,7 +799,7 @@ class TestOrphanSweeperAdvanced:
 
     def test_needle_orphan_cleanup_primary(self):
         """Needle rows keyed on a primary memory_id with no Qdrant point are cleaned."""
-        from graph import get_db, GRAPH_WRITE_LOCK, _ensure_needle_registry
+        from graph import _ensure_needle_registry, get_db
 
         _ensure_needle_registry()
         conn = get_db()
@@ -753,9 +815,12 @@ class TestOrphanSweeperAdvanced:
         mock_client.get_collections.return_value = MagicMock()
         mock_client.retrieve.return_value = []
 
-        with patch("cascade.qdrant_client", return_value=mock_client), \
-             patch("cascade.collections_for_query", return_value=["test_col"]):
+        with (
+            patch("cascade.qdrant_client", return_value=mock_client),
+            patch("cascade.collections_for_query", return_value=["test_col"]),
+        ):
             from cascade import sweep_orphans
+
             result = sweep_orphans()
 
         assert result["needle_cleaned"] >= 1
@@ -769,7 +834,7 @@ class TestOrphanSweeperAdvanced:
 
     def test_needle_orphan_cleanup_child(self):
         """Needle rows where memory_id is a micro-chunk Qdrant ID are cleaned when orphaned."""
-        from graph import get_db, GRAPH_WRITE_LOCK, _ensure_needle_registry
+        from graph import _ensure_needle_registry, get_db
 
         _ensure_needle_registry()
         conn = get_db()
@@ -785,9 +850,12 @@ class TestOrphanSweeperAdvanced:
         mock_client.get_collections.return_value = MagicMock()
         mock_client.retrieve.return_value = []
 
-        with patch("cascade.qdrant_client", return_value=mock_client), \
-             patch("cascade.collections_for_query", return_value=["test_col"]):
+        with (
+            patch("cascade.qdrant_client", return_value=mock_client),
+            patch("cascade.collections_for_query", return_value=["test_col"]),
+        ):
             from cascade import sweep_orphans
+
             result = sweep_orphans()
 
         assert result["needle_cleaned"] >= 1
@@ -801,7 +869,7 @@ class TestOrphanSweeperAdvanced:
 
     def test_retrieve_failure_skips_subbatch(self):
         """If client.retrieve fails for one collection, sub-batch is conservatively kept."""
-        from graph import upsert_fts_chunk, get_db
+        from graph import get_db, upsert_fts_chunk
 
         upsert_fts_chunk("maybe-orphan", "text", "f.md", 0, "a", "ns")
 
@@ -809,9 +877,12 @@ class TestOrphanSweeperAdvanced:
         mock_client.get_collections.return_value = MagicMock()
         mock_client.retrieve.side_effect = Exception("retrieve error")
 
-        with patch("cascade.qdrant_client", return_value=mock_client), \
-             patch("cascade.collections_for_query", return_value=["col_a", "col_b"]):
+        with (
+            patch("cascade.qdrant_client", return_value=mock_client),
+            patch("cascade.collections_for_query", return_value=["col_a", "col_b"]),
+        ):
             from cascade import sweep_orphans
+
             result = sweep_orphans()
 
         assert result["fts_cleaned"] == 0
@@ -825,8 +896,7 @@ class TestOrphanSweeperAdvanced:
 
     def test_keyset_pagination_processes_all_pages(self):
         """Sweeper uses keyset pagination (WHERE id > ?) to process multiple pages."""
-        from graph import upsert_fts_chunk, get_db
-        from cascade import _SWEEP_PAGE_SIZE
+        from graph import get_db, upsert_fts_chunk
 
         ids_to_insert = [f"ks-{i:04d}" for i in range(3)]
         for qid in ids_to_insert:
@@ -836,10 +906,13 @@ class TestOrphanSweeperAdvanced:
         mock_client.get_collections.return_value = MagicMock()
         mock_client.retrieve.return_value = []
 
-        with patch("cascade.qdrant_client", return_value=mock_client), \
-             patch("cascade.collections_for_query", return_value=["test_col"]), \
-             patch("cascade._SWEEP_PAGE_SIZE", 2):
+        with (
+            patch("cascade.qdrant_client", return_value=mock_client),
+            patch("cascade.collections_for_query", return_value=["test_col"]),
+            patch("cascade._SWEEP_PAGE_SIZE", 2),
+        ):
             from cascade import sweep_orphans
+
             result = sweep_orphans()
 
         assert result["fts_cleaned"] == 3
@@ -856,7 +929,7 @@ class TestDeleteHotness:
     """graph.delete_hotness removes memory_hotness rows."""
 
     def test_deletes_existing_row(self):
-        from graph import get_db, delete_hotness
+        from graph import delete_hotness, get_db
 
         conn = get_db()
         conn.execute(
@@ -884,7 +957,7 @@ class TestDeleteHotness:
         assert remaining == 0
 
     def test_returns_zero_for_missing_id(self):
-        from graph import get_db, delete_hotness
+        from graph import delete_hotness, get_db
 
         conn = get_db()
         conn.execute(
@@ -900,7 +973,7 @@ class TestDeleteHotness:
 
     def test_returns_zero_when_table_missing(self):
         """Silently returns 0 if memory_hotness table doesn't exist yet."""
-        from graph import get_db, delete_hotness
+        from graph import delete_hotness, get_db
 
         conn = get_db()
         conn.execute("DROP TABLE IF EXISTS memory_hotness")
@@ -916,7 +989,8 @@ class TestBatchSqliteRetry:
     def test_fts_retry_on_operational_error(self):
         """delete_fts_chunks_batch retries once on sqlite3.OperationalError."""
         import sqlite3 as _sqlite3
-        from graph import delete_fts_chunks_batch, GRAPH_WRITE_LOCK
+
+        from graph import delete_fts_chunks_batch
 
         call_count = 0
         _orig_get_db = None
@@ -929,9 +1003,11 @@ class TestBatchSqliteRetry:
             return _orig_get_db()
 
         from graph import get_db as orig_get_db
+
         _orig_get_db = orig_get_db
 
         from graph import upsert_fts_chunk
+
         upsert_fts_chunk("retry-id", "text", "f.md", 0, "a", "ns")
 
         with patch("graph.get_db", side_effect=_flaky_get_db):
@@ -943,7 +1019,8 @@ class TestBatchSqliteRetry:
     def test_needle_retry_on_operational_error(self):
         """delete_needle_tokens_batch retries once on sqlite3.OperationalError."""
         import sqlite3 as _sqlite3
-        from graph import delete_needle_tokens_batch, _ensure_needle_registry, get_db
+
+        from graph import _ensure_needle_registry, delete_needle_tokens_batch, get_db
 
         _ensure_needle_registry()
         conn = get_db()
@@ -977,16 +1054,19 @@ class TestMetricsExist:
 
     def test_delete_complete_metric(self):
         import metrics as m
+
         assert hasattr(m, "DELETE_COMPLETE")
         assert "delete" in m.DELETE_COMPLETE.lower()
 
     def test_archive_complete_metric(self):
         import metrics as m
+
         assert hasattr(m, "ARCHIVE_COMPLETE")
         assert "archive" in m.ARCHIVE_COMPLETE.lower()
 
     def test_orphan_sweep_metric(self):
         import metrics as m
+
         assert hasattr(m, "ORPHAN_SWEEP")
         assert "orphan" in m.ORPHAN_SWEEP.lower()
 
@@ -997,13 +1077,22 @@ class TestEntityFactsMemoryId:
     def _insert_fact(self, memory_id: str, source_file: str = "") -> int:
         """Insert a test fact row and return its id."""
         from graph import get_db, upsert_entity
+
         eid = upsert_entity("test-entity", "concept", namespace="global")
-        from datetime import datetime, timezone
+        from datetime import datetime
+
         conn = get_db()
         cur = conn.execute(
             "INSERT INTO facts (entity_id, fact_text, source_file, agent_id, created_at, "
             "memory_id) VALUES (?, ?, ?, ?, ?, ?)",
-            (eid, "some fact text", source_file, "agent", datetime.now(timezone.utc).isoformat(), memory_id),
+            (
+                eid,
+                "some fact text",
+                source_file,
+                "agent",
+                datetime.now(UTC).isoformat(),
+                memory_id,
+            ),
         )
         conn.commit()
         row_id = cur.lastrowid
@@ -1012,8 +1101,8 @@ class TestEntityFactsMemoryId:
 
     def test_exact_match_deactivates_by_memory_id(self):
         """Primary path: rows with matching memory_id are deactivated."""
-        from memory_lifecycle import _delete_entity_facts_for_memory
         from graph import get_db
+        from memory_lifecycle import _delete_entity_facts_for_memory
 
         mid = "mem-exact-test-001"
         self._insert_fact(mid, source_file="explicit/agent")
@@ -1022,17 +1111,15 @@ class TestEntityFactsMemoryId:
         assert count == 1
 
         conn = get_db()
-        active = conn.execute(
-            "SELECT is_active FROM facts WHERE memory_id = ?", (mid,)
-        ).fetchone()
+        active = conn.execute("SELECT is_active FROM facts WHERE memory_id = ?", (mid,)).fetchone()
         conn.close()
         assert active is not None
         assert active[0] == 0
 
     def test_like_fallback_for_pre_migration_rows(self):
         """Fallback: rows with memory_id='' but matching source_file are deactivated."""
-        from memory_lifecycle import _delete_entity_facts_for_memory
         from graph import get_db
+        from memory_lifecycle import _delete_entity_facts_for_memory
 
         mid = "mem-fallback-test-002"
         # Pre-migration row: memory_id is empty, but source_file contains the UUID
@@ -1043,8 +1130,7 @@ class TestEntityFactsMemoryId:
 
         conn = get_db()
         row = conn.execute(
-            "SELECT is_active FROM facts WHERE source_file = ?",
-            (f"explicit/{mid}",)
+            "SELECT is_active FROM facts WHERE source_file = ?", (f"explicit/{mid}",)
         ).fetchone()
         conn.close()
         assert row is not None
@@ -1053,7 +1139,6 @@ class TestEntityFactsMemoryId:
     def test_like_fallback_does_not_touch_rows_with_memory_id_set(self):
         """LIKE fallback is scoped to memory_id='' only — does not double-deactivate."""
         from memory_lifecycle import _delete_entity_facts_for_memory
-        from graph import get_db
 
         mid = "mem-scope-test-003"
         # Row already has memory_id set correctly
@@ -1065,8 +1150,8 @@ class TestEntityFactsMemoryId:
 
     def test_non_matching_rows_untouched(self):
         """Facts belonging to a different memory are not deactivated."""
-        from memory_lifecycle import _delete_entity_facts_for_memory
         from graph import get_db
+        from memory_lifecycle import _delete_entity_facts_for_memory
 
         mid_target = "mem-target-004"
         mid_other = "mem-other-004"
@@ -1086,6 +1171,7 @@ class TestEntityFactsMemoryId:
     def test_returns_zero_for_unknown_memory(self):
         """Returns 0 and does not crash for a memory_id with no matching facts."""
         from memory_lifecycle import _delete_entity_facts_for_memory
+
         assert _delete_entity_facts_for_memory("completely-unknown-id") == 0
 
 
@@ -1093,32 +1179,31 @@ class TestAddFactMemoryId:
     """add_fact stores memory_id and it can be queried."""
 
     def test_stores_memory_id(self):
-        from graph import add_fact, upsert_entity, get_db
+        from graph import add_fact, get_db, upsert_entity
 
         eid = upsert_entity("test-entity-af", "concept", namespace="global")
         mid = "mem-add-fact-test-001"
-        add_fact(eid, "test fact text", "explicit/agent", "agent",
-                 namespace="global", memory_id=mid)
+        add_fact(
+            eid, "test fact text", "explicit/agent", "agent", namespace="global", memory_id=mid
+        )
 
         conn = get_db()
-        row = conn.execute(
-            "SELECT memory_id FROM facts WHERE memory_id = ?", (mid,)
-        ).fetchone()
+        row = conn.execute("SELECT memory_id FROM facts WHERE memory_id = ?", (mid,)).fetchone()
         conn.close()
         assert row is not None
         assert row[0] == mid
 
     def test_default_memory_id_is_empty(self):
         """Existing call sites that don't pass memory_id get empty string."""
-        from graph import add_fact, upsert_entity, get_db
+        from graph import add_fact, get_db, upsert_entity
 
         eid = upsert_entity("entity-no-mid", "concept", namespace="global")
-        fact_id = add_fact(eid, "fact with no memory_id", "trajectory/abc", "agent", namespace="global")
+        fact_id = add_fact(
+            eid, "fact with no memory_id", "trajectory/abc", "agent", namespace="global"
+        )
 
         conn = get_db()
-        row = conn.execute(
-            "SELECT memory_id FROM facts WHERE id = ?", (fact_id,)
-        ).fetchone()
+        row = conn.execute("SELECT memory_id FROM facts WHERE id = ?", (fact_id,)).fetchone()
         conn.close()
         assert row is not None
         assert row[0] == ""
@@ -1129,8 +1214,9 @@ class TestScrollAllMaxPages:
 
     def test_max_pages_breaks_and_appends_failed_step(self):
         """When max_pages is hit, step_name is appended to failed_steps."""
-        from cascade import _scroll_all
         from qdrant_client.models import Filter
+
+        from cascade import _scroll_all
 
         call_count = 0
 
@@ -1148,8 +1234,14 @@ class TestScrollAllMaxPages:
         failed = []
         filt = Filter(must=[])
         ids = _scroll_all(
-            mock_client, "col", filt, "test_scroll", "mem-id", failed,
-            batch=1, max_pages=3,
+            mock_client,
+            "col",
+            filt,
+            "test_scroll",
+            "mem-id",
+            failed,
+            batch=1,
+            max_pages=3,
         )
 
         assert len(ids) == 3
@@ -1158,8 +1250,9 @@ class TestScrollAllMaxPages:
 
     def test_no_guard_triggered_on_normal_completion(self):
         """When pagination ends naturally, failed_steps is not appended."""
-        from cascade import _scroll_all
         from qdrant_client.models import Filter
+
+        from cascade import _scroll_all
 
         def fake_scroll(**kwargs):
             pt = MagicMock()
@@ -1172,8 +1265,14 @@ class TestScrollAllMaxPages:
         failed = []
         filt = Filter(must=[])
         ids = _scroll_all(
-            mock_client, "col", filt, "test_scroll", "mem-id", failed,
-            batch=500, max_pages=1000,
+            mock_client,
+            "col",
+            filt,
+            "test_scroll",
+            "mem-id",
+            failed,
+            batch=500,
+            max_pages=1000,
         )
 
         assert ids == ["only-pt"]
@@ -1184,7 +1283,7 @@ class TestPartialDeletionErrorThreshold:
     """PartialDeletionError is raised on qdrant_primary or qdrant_children failures."""
 
     def test_raises_on_qdrant_primary_failure(self):
-        from memory_lifecycle import PartialDeletionError, DeleteResult
+        from memory_lifecycle import DeleteResult
 
         result = DeleteResult(memory_id="mid", failed_steps=["qdrant_primary"])
         _critical = {"qdrant_primary", "qdrant_children"}

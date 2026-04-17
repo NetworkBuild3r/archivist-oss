@@ -1,50 +1,6 @@
-"""Shared helpers for MCP tool handlers."""
+# Compatibility shim — remove in Phase 5 after all imports are updated.
+import sys
 
-import json
-import logging
+import archivist.app.handlers._common as _real
 
-from mcp.types import TextContent
-
-from rbac import check_access, is_permissive_mode
-
-logger = logging.getLogger("archivist.mcp")
-
-
-def _rbac_gate(agent_id: str, action: str, namespace: str) -> str | None:
-    """Return error JSON string if access denied, None if allowed."""
-    policy = check_access(agent_id, action, namespace)
-    if not policy.allowed:
-        return json.dumps({"error": "access_denied", "reason": policy.reason})
-    return None
-
-
-def resolve_caller(arguments: dict) -> str:
-    """Return the effective caller agent_id from tool arguments.
-
-    Prefers ``caller_agent_id`` over ``agent_id`` so that a delegating agent
-    can supply the original caller identity explicitly.
-    """
-    agent_id = (arguments.get("agent_id") or "").strip()
-    return (arguments.get("caller_agent_id") or "").strip() or agent_id
-
-
-def require_caller(caller: str) -> list[TextContent] | None:
-    """Return an error response when caller is missing in strict RBAC mode.
-
-    Returns ``None`` when the caller is present or when permissive mode is
-    active (so callers can do ``if err := require_caller(caller): return err``).
-    """
-    if not is_permissive_mode() and not caller:
-        return error_response({"error": "caller_required", "reason": "caller_agent_id is required in strict RBAC mode"})
-    return None
-
-
-def error_response(data: dict, **json_kw) -> list[TextContent]:
-    """Return a single-element TextContent list with a JSON error payload."""
-    return [TextContent(type="text", text=json.dumps(data, **json_kw))]
-
-
-def success_response(data: dict, **json_kw) -> list[TextContent]:
-    """Return a single-element TextContent list with a JSON success payload."""
-    json_kw.setdefault("indent", 2)
-    return [TextContent(type="text", text=json.dumps(data, **json_kw))]
+sys.modules[__name__] = _real

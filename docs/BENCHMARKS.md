@@ -1,7 +1,48 @@
 # Archivist Benchmark Results
 
-> Generated: 2026-03-25  
-> Version: v1.5.0  
+> Latest pipeline snapshot: **v2.0.0** — 2026-04-17
+> Stack (pipeline run): Qdrant + embedding + LLM per your `.env` (see reproduction below)
+
+---
+
+## Archivist 2.0 — Pipeline evaluation (Phase 5, semantic chunking)
+
+**Run:** `scale=small`, **2 variants** (`clean_reranker`, `vector_plus_synth`), **108 queries** each.
+**Artifacts:** Full JSON is written locally to `.benchmarks/phase5_semantic_chunking.json` when you reproduce the run (directory is gitignored; summary tables below are canonical for the release).
+
+**Session log (excerpt):**
+
+```text
+vector_plus_synth: 100%|…| 108/108 [11:11<00:00,  6.22s/q, mrr=0.741, recall=0.578]
+R@1=0.3451  R@5=0.5778  R@10=0.6819  NDCG@5=0.7407  p50=7577ms  tok/q=1176  wall=671.8s
+Session complete: scale=small  2 variants  2212.9s total
+```
+
+### Overall by variant
+
+| Variant | R@1 | R@5 | R@10 | NDCG@5 | NDCG@10 | p50 (ms) | p95 (ms) | Tok/Q | Synth Hits | Pool | Wall (s) |
+|---------|-----|-----|------|--------|---------|----------|----------|-------|------------|------|----------|
+| clean_reranker | 0.4389 | 0.6208 | 0.7185 | 0.8580 | 0.8591 | 112 | 11091 | 1207 | 1689 (108q) | 80 | 190.9 |
+| vector_plus_synth | 0.3451 | 0.5778 | 0.6819 | 0.7407 | 0.7321 | 7577 | 11052 | 1176 | 3078 (108q) | 0 | 671.8 |
+
+### Per-query-type slices (memory / time / haystack)
+
+| Variant | temporal (R@5 / NDCG@5) | needle (R@5 / NDCG@5) | multi_hop (R@5 / NDCG@5) | single_hop (R@5 / NDCG@5) |
+|---------|-------------------------|----------------------|--------------------------|---------------------------|
+| small/clean_reranker | 0.6333 / 0.9342 (n=4) | — | 0.5273 / 0.8845 (n=11) | 0.6353 / 0.8346 (n=52) |
+| small/vector_plus_synth | 0.7333 / 0.8868 (n=4) | — | 0.4727 / 0.6653 (n=11) | 0.6096 / 0.7774 (n=52) |
+
+**Notes:**
+
+- **clean_reranker** — Cross-encoder reranking after coarse retrieval; strong NDCG and low p50 latency on this slice.
+- **vector_plus_synth** — Index-time synthetic question embeddings (`vector_plus_synth`); higher synthetic-hit counts and different latency profile (see p50). Compare variants using the same corpus and `questions.json` only.
+
+---
+
+## Historical snapshot (v1.5 era)
+
+> Generated: 2026-03-25
+> Version: v1.5.0
 > Stack: Qdrant + vLLM `BAAI/bge-base-en-v1.5` (768-dim) + xAI Grok (LLM)
 
 ## Overview

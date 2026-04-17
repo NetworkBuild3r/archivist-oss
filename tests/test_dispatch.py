@@ -1,7 +1,8 @@
 """Tests for MCP registry — tool listing and dispatch error handling."""
 
-import pytest
 import json
+
+import pytest
 
 pytestmark = pytest.mark.integration
 
@@ -18,7 +19,9 @@ class TestToolRegistry:
         from handlers._registry import ALL_TOOLS
 
         names = [t.name for t in ALL_TOOLS]
-        assert len(names) == len(set(names)), f"Duplicate tool names: {[n for n in names if names.count(n) > 1]}"
+        assert len(names) == len(set(names)), (
+            f"Duplicate tool names: {[n for n in names if names.count(n) > 1]}"
+        )
 
     def test_all_tools_have_input_schema(self):
         from handlers._registry import ALL_TOOLS
@@ -39,20 +42,36 @@ class TestToolRegistry:
 
         names = {t.name for t in ALL_TOOLS}
         expected = {
-            "archivist_search", "archivist_recall", "archivist_timeline",
-            "archivist_insights", "archivist_deref", "archivist_index",
+            "archivist_search",
+            "archivist_recall",
+            "archivist_timeline",
+            "archivist_insights",
+            "archivist_deref",
+            "archivist_index",
             "archivist_contradictions",
-            "archivist_store", "archivist_merge", "archivist_compress",
-            "archivist_log_trajectory", "archivist_annotate", "archivist_rate",
-            "archivist_tips", "archivist_session_end",
-            "archivist_register_skill", "archivist_skill_event",
-            "archivist_skill_lesson", "archivist_skill_health",
-            "archivist_skill_relate", "archivist_skill_dependencies",
-            "archivist_context_check", "archivist_namespaces",
-            "archivist_audit_trail", "archivist_resolve_uri",
-            "archivist_retrieval_logs", "archivist_health_dashboard",
+            "archivist_store",
+            "archivist_merge",
+            "archivist_compress",
+            "archivist_log_trajectory",
+            "archivist_annotate",
+            "archivist_rate",
+            "archivist_tips",
+            "archivist_session_end",
+            "archivist_register_skill",
+            "archivist_skill_event",
+            "archivist_skill_lesson",
+            "archivist_skill_health",
+            "archivist_skill_relate",
+            "archivist_skill_dependencies",
+            "archivist_context_check",
+            "archivist_namespaces",
+            "archivist_audit_trail",
+            "archivist_resolve_uri",
+            "archivist_retrieval_logs",
+            "archivist_health_dashboard",
             "archivist_batch_heuristic",
-            "archivist_cache_stats", "archivist_cache_invalidate",
+            "archivist_cache_stats",
+            "archivist_cache_invalidate",
         }
         missing = expected - names
         assert not missing, f"Missing expected tools: {missing}"
@@ -82,12 +101,15 @@ class TestDispatch:
     async def test_context_check_with_messages(self):
         from handlers._registry import dispatch_tool
 
-        result = await dispatch_tool("archivist_context_check", {
-            "messages": [
-                {"role": "user", "content": "Hello world, this is a test message."},
-            ],
-            "budget_tokens": 1000,
-        })
+        result = await dispatch_tool(
+            "archivist_context_check",
+            {
+                "messages": [
+                    {"role": "user", "content": "Hello world, this is a test message."},
+                ],
+                "budget_tokens": 1000,
+            },
+        )
         data = json.loads(result[0].text)
         assert data["total_tokens"] > 0
         assert data["hint"] == "ok"

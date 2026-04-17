@@ -37,14 +37,14 @@ Phase 2:
 
 import asyncio
 import sqlite3
-from unittest.mock import AsyncMock, MagicMock, patch, call
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _mock_point(pid: str):
     p = MagicMock()
@@ -65,12 +65,12 @@ def _make_qdrant_client(scroll_return=None):
 # Phase 1b — retrieval filter tests
 # ===========================================================================
 
+
 class TestSearchVectorsMustNotFilter:
     """search_vectors() includes must_not conditions for archived and deleted."""
 
     def test_must_not_always_set(self, monkeypatch):
         """Filter(must_not=...) is always constructed, not conditional."""
-        from qdrant_client.models import Filter, FieldCondition, MatchValue
         import rlm_retriever
 
         captured_filter = None
@@ -102,7 +102,6 @@ class TestSearchVectorsMustNotFilter:
 
     def test_must_not_values_are_true(self, monkeypatch):
         """The must_not conditions match value=True."""
-        from qdrant_client.models import MatchValue
         import rlm_retriever
 
         captured_filter = None
@@ -169,6 +168,7 @@ class TestNeedleRegistryArchivedFilter:
     def _is_stale(payload: dict) -> bool:
         """Mirror the exact predicate used in rlm_retriever's registry loop."""
         import rlm_retriever  # noqa: F401 – ensures module is importable
+
         # The condition lives at: if p.get("archived") or p.get("deleted"): continue
         # We expose it here so tests depend on the module existing and the semantic.
         return bool(payload.get("archived") or payload.get("deleted"))
@@ -194,8 +194,11 @@ class TestNeedleRegistryArchivedFilter:
     def test_stale_metric_incremented_for_archived(self, monkeypatch):
         """NEEDLE_REGISTRY_STALE is incremented when a stale payload is encountered."""
         import metrics as m
+
         counter: list[int] = [0]
-        monkeypatch.setattr(m, "inc", lambda name, labels=None: counter.__setitem__(0, counter[0] + 1))
+        monkeypatch.setattr(
+            m, "inc", lambda name, labels=None: counter.__setitem__(0, counter[0] + 1)
+        )
 
         payload = {"text": "some text", "archived": True}
         if self._is_stale(payload):
@@ -205,7 +208,6 @@ class TestNeedleRegistryArchivedFilter:
 
     def test_live_candidate_passes_through(self):
         """A live payload is added to results; a stale one is skipped."""
-        from rlm_retriever import ResultCandidate
 
         live_cand = MagicMock()
         live_cand.id = "live-id"
@@ -221,6 +223,7 @@ class TestNeedleRegistryArchivedFilter:
 
         kept = []
         import metrics as m
+
         for cand in [live_cand, stale_cand]:
             p = payloads.get(cand.id)
             if p and self._is_stale(p):
@@ -238,6 +241,7 @@ class TestNeedleRegistryArchivedFilter:
 # Needle-in-a-haystack — token registration & lookup
 # ===========================================================================
 
+
 class TestNeedleTokenRegistration:
     """register_needle_tokens extracts high-specificity tokens; lookup finds them.
 
@@ -249,19 +253,26 @@ class TestNeedleTokenRegistration:
 
     def test_ip_address_registered_and_found(self):
         import graph
-        graph.register_needle_tokens("mem-ip", "Gateway is at 192.168.10.1 for subnet", namespace="ns1")
+
+        graph.register_needle_tokens(
+            "mem-ip", "Gateway is at 192.168.10.1 for subnet", namespace="ns1"
+        )
         hits = graph.lookup_needle_tokens("what is 192.168.10.1?", namespace="ns1")
         ids = [h["memory_id"] for h in hits]
         assert "mem-ip" in ids
 
     def test_cidr_block_registered_and_found(self):
         import graph
-        graph.register_needle_tokens("mem-cidr", "VPC range is 10.0.0.0/16 for prod", namespace="ns1")
+
+        graph.register_needle_tokens(
+            "mem-cidr", "VPC range is 10.0.0.0/16 for prod", namespace="ns1"
+        )
         hits = graph.lookup_needle_tokens("what is the 10.0.0.0/16 range?", namespace="ns1")
         assert any(h["memory_id"] == "mem-cidr" for h in hits)
 
     def test_uuid_registered_and_found(self):
         import graph
+
         uid = "550e8400-e29b-41d4-a716-446655440000"
         graph.register_needle_tokens("mem-uuid", f"Service identifier: {uid}", namespace="ns1")
         hits = graph.lookup_needle_tokens(f"find {uid}", namespace="ns1")
@@ -269,32 +280,47 @@ class TestNeedleTokenRegistration:
 
     def test_cron_expression_registered_and_found(self):
         import graph
-        graph.register_needle_tokens("mem-cron", "Backup runs on schedule: 0 3 * * 0", namespace="ns1")
+
+        graph.register_needle_tokens(
+            "mem-cron", "Backup runs on schedule: 0 3 * * 0", namespace="ns1"
+        )
         hits = graph.lookup_needle_tokens("what is the cron 0 3 * * 0?", namespace="ns1")
         assert any(h["memory_id"] == "mem-cron" for h in hits)
 
     def test_key_value_registered_and_found(self):
         import graph
-        graph.register_needle_tokens("mem-kv", "Set ENV_TOKEN=abc123XYZ in the env", namespace="ns1")
+
+        graph.register_needle_tokens(
+            "mem-kv", "Set ENV_TOKEN=abc123XYZ in the env", namespace="ns1"
+        )
         # Query must not trail a punctuation char that would change the matched token
         hits = graph.lookup_needle_tokens("what is ENV_TOKEN=abc123XYZ value", namespace="ns1")
         assert any(h["memory_id"] == "mem-kv" for h in hits)
 
     def test_ticket_id_registered_and_found(self):
         import graph
-        graph.register_needle_tokens("mem-ticket", "Tracked in JIRA-10042 for the backend team", namespace="ns1")
+
+        graph.register_needle_tokens(
+            "mem-ticket", "Tracked in JIRA-10042 for the backend team", namespace="ns1"
+        )
         hits = graph.lookup_needle_tokens("details about JIRA-10042", namespace="ns1")
         assert any(h["memory_id"] == "mem-ticket" for h in hits)
 
     def test_datetime_stamp_registered_and_found(self):
         import graph
-        graph.register_needle_tokens("mem-dt", "Outage started 2024-03-15T02:47 and lasted 20 minutes", namespace="ns1")
+
+        graph.register_needle_tokens(
+            "mem-dt", "Outage started 2024-03-15T02:47 and lasted 20 minutes", namespace="ns1"
+        )
         hits = graph.lookup_needle_tokens("what happened at 2024-03-15T02:47?", namespace="ns1")
         assert any(h["memory_id"] == "mem-dt" for h in hits)
 
     def test_plain_prose_yields_no_tokens(self):
         import graph
-        graph.register_needle_tokens("mem-prose", "The architecture uses microservices and containers", namespace="ns1")
+
+        graph.register_needle_tokens(
+            "mem-prose", "The architecture uses microservices and containers", namespace="ns1"
+        )
         # Prose has no high-specificity tokens — lookup returns nothing for it
         hits = graph.lookup_needle_tokens("architecture microservices containers", namespace="ns1")
         assert hits == []
@@ -303,12 +329,14 @@ class TestNeedleTokenRegistration:
 
     def test_namespace_isolation_different_ns_returns_nothing(self):
         import graph
+
         graph.register_needle_tokens("mem-nsA", "internal addr 172.16.0.5", namespace="ns-A")
         hits = graph.lookup_needle_tokens("172.16.0.5", namespace="ns-B")
         assert hits == [], "Token registered in ns-A must not appear in ns-B lookup"
 
     def test_namespace_isolation_same_ns_returns_match(self):
         import graph
+
         graph.register_needle_tokens("mem-nsX", "service ip 172.16.1.1", namespace="ns-X")
         hits = graph.lookup_needle_tokens("172.16.1.1", namespace="ns-X")
         assert any(h["memory_id"] == "mem-nsX" for h in hits)
@@ -316,6 +344,7 @@ class TestNeedleTokenRegistration:
     def test_empty_namespace_query_skips_ns_filter(self):
         """Passing namespace='' returns matches regardless of stored namespace."""
         import graph
+
         graph.register_needle_tokens("mem-open", "address 10.1.2.3", namespace="some-ns")
         hits = graph.lookup_needle_tokens("10.1.2.3", namespace="")
         assert any(h["memory_id"] == "mem-open" for h in hits)
@@ -325,18 +354,21 @@ class TestNeedleTokenRegistration:
     def test_multi_token_memory_all_tokens_find_same_memory(self):
         """A memory containing IP + UUID + ticket — each token resolves to that memory."""
         import graph
+
         uid = "aaaabbbb-cccc-dddd-eeee-ffffffffffff"
         text = f"Host 10.20.30.40 with id {uid} tracked in ENG-9999"
         graph.register_needle_tokens("mem-multi", text, namespace="ns1")
 
         for query in ["10.20.30.40", uid, "ENG-9999"]:
             hits = graph.lookup_needle_tokens(query, namespace="ns1")
-            assert any(h["memory_id"] == "mem-multi" for h in hits), \
+            assert any(h["memory_id"] == "mem-multi" for h in hits), (
                 f"Token '{query}' should resolve to mem-multi"
+            )
 
     def test_multi_token_no_duplicates_per_lookup(self):
         """When a query matches multiple tokens in the same memory, it appears once."""
         import graph
+
         text = "Hosts: 10.0.0.1 and 10.0.0.2 in the same cluster"
         graph.register_needle_tokens("mem-dedup", text, namespace="ns1")
         # If both IPs appear in the query, the memory should still appear once
@@ -349,17 +381,20 @@ class TestNeedleTokenRegistration:
     def test_token_collision_both_memories_returned(self):
         """Two memories sharing the same IP are both returned for that IP query."""
         import graph
+
         graph.register_needle_tokens("mem-A", "Primary node at 192.0.2.1", namespace="ns1")
         graph.register_needle_tokens("mem-B", "Replica node at 192.0.2.1", namespace="ns1")
         hits = graph.lookup_needle_tokens("tell me about 192.0.2.1", namespace="ns1")
         ids = {h["memory_id"] for h in hits}
-        assert "mem-A" in ids and "mem-B" in ids, \
+        assert "mem-A" in ids and "mem-B" in ids, (
             "Both memories sharing the same token must appear in results"
+        )
 
 
 # ===========================================================================
 # Needle-in-a-haystack — FTS lifecycle (store → archive → exclusion)
 # ===========================================================================
+
 
 class TestNeedleHaystackIsolation:
     """Needle is findable among generic chunks, then disappears when archived.
@@ -378,9 +413,7 @@ class TestNeedleHaystackIsolation:
     _NEEDLE_FTS_WORD = "critprobemarker"
     # An IP carried by the needle — used only for registry-path tests
     _NEEDLE_IP = "10.33.44.55"
-    _NEEDLE_TEXT = (
-        f"Prod DB primary at {_NEEDLE_IP} token {_NEEDLE_FTS_WORD} must not change"
-    )
+    _NEEDLE_TEXT = f"Prod DB primary at {_NEEDLE_IP} token {_NEEDLE_FTS_WORD} must not change"
 
     # Haystack: 8 generic memories; each contains a single distinguishing word
     # so FTS single-term queries find exactly the intended chunk.
@@ -413,9 +446,14 @@ class TestNeedleHaystackIsolation:
         conn.commit()
 
         for row_id, text in conn.execute("SELECT rowid, text FROM memory_chunks").fetchall():
-            conn.execute("INSERT OR REPLACE INTO memory_fts(rowid, text) VALUES (?, ?)", (row_id, text))
+            conn.execute(
+                "INSERT OR REPLACE INTO memory_fts(rowid, text) VALUES (?, ?)", (row_id, text)
+            )
             try:
-                conn.execute("INSERT OR REPLACE INTO memory_fts_exact(rowid, text) VALUES (?, ?)", (row_id, text))
+                conn.execute(
+                    "INSERT OR REPLACE INTO memory_fts_exact(rowid, text) VALUES (?, ?)",
+                    (row_id, text),
+                )
             except Exception:
                 pass
         conn.commit()
@@ -427,6 +465,7 @@ class TestNeedleHaystackIsolation:
     def test_needle_found_in_fts_before_exclusion(self, graph_db):
         """Needle unique word appears in search_fts results before archive."""
         import graph
+
         conn = sqlite3.connect(graph_db)
         self._populate(conn, "ns-test")
         conn.close()
@@ -438,6 +477,7 @@ class TestNeedleHaystackIsolation:
     def test_needle_absent_from_fts_after_exclusion(self, graph_db):
         """After is_excluded=1, the needle word no longer appears in search_fts."""
         import graph
+
         conn = sqlite3.connect(graph_db)
         self._populate(conn, "ns-test")
         conn.close()
@@ -450,6 +490,7 @@ class TestNeedleHaystackIsolation:
     def test_needle_found_in_fts_exact_before_exclusion(self, graph_db):
         """Needle unique word appears in search_fts_exact results before archive."""
         import graph
+
         conn = sqlite3.connect(graph_db)
         self._populate(conn, "ns-test")
         conn.close()
@@ -461,6 +502,7 @@ class TestNeedleHaystackIsolation:
     def test_needle_absent_from_fts_exact_after_exclusion(self, graph_db):
         """After is_excluded=1, the needle word no longer appears in search_fts_exact."""
         import graph
+
         conn = sqlite3.connect(graph_db)
         self._populate(conn, "ns-test")
         conn.close()
@@ -475,6 +517,7 @@ class TestNeedleHaystackIsolation:
     def test_haystack_unaffected_by_needle_exclusion(self, graph_db):
         """Excluding the needle does not remove haystack chunks from FTS."""
         import graph
+
         conn = sqlite3.connect(graph_db)
         self._populate(conn, "ns-test")
         conn.close()
@@ -494,6 +537,7 @@ class TestNeedleHaystackIsolation:
     def test_only_needle_ns_excluded_not_sibling_ns(self, graph_db):
         """Excluding needle in ns-A does not touch chunks in ns-B."""
         import graph
+
         conn = sqlite3.connect(graph_db)
         # Populate needle in ns-A and a generic chunk in ns-B
         conn.execute(
@@ -504,7 +548,9 @@ class TestNeedleHaystackIsolation:
         )
         conn.commit()
         for row_id, text in conn.execute("SELECT rowid, text FROM memory_chunks").fetchall():
-            conn.execute("INSERT OR REPLACE INTO memory_fts(rowid, text) VALUES (?, ?)", (row_id, text))
+            conn.execute(
+                "INSERT OR REPLACE INTO memory_fts(rowid, text) VALUES (?, ?)", (row_id, text)
+            )
         conn.commit()
         conn.close()
 
@@ -525,20 +571,23 @@ class TestNeedleHaystackIsolation:
         registry payload filter (archived/deleted check) is the second gate.
         """
         import graph
+
         conn = sqlite3.connect(graph_db)
         self._populate(conn, "ns-test")
         conn.close()
 
         graph.set_fts_excluded_batch(["needle-id"], excluded=1)
         hits = graph.lookup_needle_tokens(self._NEEDLE_IP, namespace="ns-test")
-        assert any(h["memory_id"] == "needle-id" for h in hits), \
+        assert any(h["memory_id"] == "needle-id" for h in hits), (
             "Registry row must still exist after FTS exclusion (only cascade delete removes it)"
+        )
 
     def test_excluded_needle_payload_flag_stops_registry_hit(self, graph_db):
         """When the Qdrant payload for a registry hit carries deleted=True, the
         rlm_retriever filter predicate drops it even though the registry row exists.
         """
         import graph
+
         conn = sqlite3.connect(graph_db)
         self._populate(conn, "ns-test")
         conn.close()
@@ -549,11 +598,16 @@ class TestNeedleHaystackIsolation:
         assert hits, "Registry row must exist before payload filter"
 
         simulated_qdrant_payload = {"text": self._NEEDLE_TEXT, "deleted": True}
-        kept = [h for h in hits if not (
-            simulated_qdrant_payload.get("archived") or simulated_qdrant_payload.get("deleted")
-        )]
-        assert kept == [], \
+        kept = [
+            h
+            for h in hits
+            if not (
+                simulated_qdrant_payload.get("archived") or simulated_qdrant_payload.get("deleted")
+            )
+        ]
+        assert kept == [], (
             "Registry hit with deleted=True payload must be dropped before reaching the caller"
+        )
 
 
 class TestFTSExcludedFilter:
@@ -595,7 +649,9 @@ class TestFTSExcludedFilter:
         )
         for row_id, text in conn.execute("SELECT rowid, text FROM memory_chunks").fetchall():
             try:
-                conn.execute("INSERT INTO memory_fts_exact(rowid, text) VALUES (?, ?)", (row_id, text))
+                conn.execute(
+                    "INSERT INTO memory_fts_exact(rowid, text) VALUES (?, ?)", (row_id, text)
+                )
             except Exception:
                 pass
         conn.commit()
@@ -645,12 +701,15 @@ class TestSetFtsExcludedBatch:
         graph.set_fts_excluded_batch(["qid-r"], excluded=0)
 
         conn = sqlite3.connect(graph_db)
-        row = conn.execute("SELECT is_excluded FROM memory_chunks WHERE qdrant_id='qid-r'").fetchone()
+        row = conn.execute(
+            "SELECT is_excluded FROM memory_chunks WHERE qdrant_id='qid-r'"
+        ).fetchone()
         conn.close()
         assert row[0] == 0
 
     def test_empty_list_is_noop(self, graph_db):
         import graph
+
         count = graph.set_fts_excluded_batch([])
         assert count == 0
 
@@ -671,7 +730,9 @@ class TestSetFtsExcludedBatch:
         assert count == 600
 
         conn = sqlite3.connect(graph_db)
-        n_excluded = conn.execute("SELECT COUNT(*) FROM memory_chunks WHERE is_excluded=1").fetchone()[0]
+        n_excluded = conn.execute(
+            "SELECT COUNT(*) FROM memory_chunks WHERE is_excluded=1"
+        ).fetchone()[0]
         conn.close()
         assert n_excluded == 600
 
@@ -681,7 +742,6 @@ class TestArchiveMemoryCompleteFTSExclusion:
 
     async def test_archive_marks_fts_excluded(self, graph_db):
         from memory_lifecycle import archive_memory_complete
-        import graph
 
         memory_id = "mem-arch-1"
 
@@ -697,9 +757,11 @@ class TestArchiveMemoryCompleteFTSExclusion:
 
         mock_client = _make_qdrant_client(scroll_return=([], None))
 
-        with patch("memory_lifecycle.qdrant_client", return_value=mock_client), \
-             patch("memory_lifecycle.collection_for", return_value="test-coll"), \
-             patch("memory_lifecycle.log_memory_event", new_callable=AsyncMock):
+        with (
+            patch("memory_lifecycle.qdrant_client", return_value=mock_client),
+            patch("memory_lifecycle.collection_for", return_value="test-coll"),
+            patch("memory_lifecycle.log_memory_event", new_callable=AsyncMock),
+        ):
             await archive_memory_complete(memory_id, namespace="test-ns")
 
         conn = sqlite3.connect(graph_db)
@@ -715,6 +777,7 @@ class TestArchiveMemoryCompleteFTSExclusion:
 # Phase 1 — soft_delete_memory tests
 # ===========================================================================
 
+
 class TestSoftDeleteMemory:
     """soft_delete_memory() hot path behaves correctly."""
 
@@ -724,36 +787,41 @@ class TestSoftDeleteMemory:
 
         mock_client = _make_qdrant_client()
 
-        with patch("memory_lifecycle.qdrant_client", return_value=mock_client), \
-             patch("memory_lifecycle.collection_for", return_value="test-coll"), \
-             patch("memory_lifecycle.curator_queue") as mock_cq, \
-             patch("memory_lifecycle.log_memory_event", new_callable=AsyncMock), \
-             patch("memory_lifecycle.set_fts_excluded_batch"):
+        with (
+            patch("memory_lifecycle.qdrant_client", return_value=mock_client),
+            patch("memory_lifecycle.collection_for", return_value="test-coll"),
+            patch("memory_lifecycle.curator_queue") as mock_cq,
+            patch("memory_lifecycle.log_memory_event", new_callable=AsyncMock),
+            patch("memory_lifecycle.set_fts_excluded_batch"),
+        ):
             mock_cq.enqueue.return_value = "op-123"
             await soft_delete_memory("mem-1", "test-ns")
 
         # set_payload called with deleted=True for the primary ID
         calls = mock_client.set_payload.call_args_list
         primary_call = next(
-            (c for c in calls if c.kwargs.get("points") == ["mem-1"] or
-             (c.args and c.args[-1] == ["mem-1"])),
+            (
+                c
+                for c in calls
+                if c.kwargs.get("points") == ["mem-1"] or (c.args and c.args[-1] == ["mem-1"])
+            ),
             None,
         )
         assert any(
-            kw.get("payload", {}).get("deleted") is True
-            for c in calls
-            for kw in [c.kwargs]
+            kw.get("payload", {}).get("deleted") is True for c in calls for kw in [c.kwargs]
         ), "deleted=True must be set via set_payload"
 
     async def test_enqueues_delete_memory_job(self):
         """A delete_memory job is enqueued in curator_queue."""
         from memory_lifecycle import soft_delete_memory
 
-        with patch("memory_lifecycle.qdrant_client", return_value=_make_qdrant_client()), \
-             patch("memory_lifecycle.collection_for", return_value="test-coll"), \
-             patch("memory_lifecycle.curator_queue") as mock_cq, \
-             patch("memory_lifecycle.log_memory_event", new_callable=AsyncMock), \
-             patch("memory_lifecycle.set_fts_excluded_batch"):
+        with (
+            patch("memory_lifecycle.qdrant_client", return_value=_make_qdrant_client()),
+            patch("memory_lifecycle.collection_for", return_value="test-coll"),
+            patch("memory_lifecycle.curator_queue") as mock_cq,
+            patch("memory_lifecycle.log_memory_event", new_callable=AsyncMock),
+            patch("memory_lifecycle.set_fts_excluded_batch"),
+        ):
             mock_cq.enqueue.return_value = "op-456"
             result = await soft_delete_memory("mem-2", "test-ns")
 
@@ -773,11 +841,13 @@ class TestSoftDeleteMemory:
         async def _fake_log(**kwargs):
             log_calls.append(kwargs)
 
-        with patch("memory_lifecycle.qdrant_client", return_value=_make_qdrant_client()), \
-             patch("memory_lifecycle.collection_for", return_value="test-coll"), \
-             patch("memory_lifecycle.curator_queue") as mock_cq, \
-             patch("memory_lifecycle.log_memory_event", side_effect=_fake_log), \
-             patch("memory_lifecycle.set_fts_excluded_batch"):
+        with (
+            patch("memory_lifecycle.qdrant_client", return_value=_make_qdrant_client()),
+            patch("memory_lifecycle.collection_for", return_value="test-coll"),
+            patch("memory_lifecycle.curator_queue") as mock_cq,
+            patch("memory_lifecycle.log_memory_event", side_effect=_fake_log),
+            patch("memory_lifecycle.set_fts_excluded_batch"),
+        ):
             mock_cq.enqueue.return_value = "op-789"
             await soft_delete_memory("mem-3", "test-ns")
 
@@ -787,9 +857,9 @@ class TestSoftDeleteMemory:
 
     async def test_marks_fts_excluded(self, graph_db):
         """The primary memory_chunk row is marked is_excluded=1."""
-        from memory_lifecycle import soft_delete_memory
-        import graph
         import sqlite3
+
+        from memory_lifecycle import soft_delete_memory
 
         conn = sqlite3.connect(graph_db)
         conn.execute(
@@ -799,10 +869,12 @@ class TestSoftDeleteMemory:
         conn.commit()
         conn.close()
 
-        with patch("memory_lifecycle.qdrant_client", return_value=_make_qdrant_client()), \
-             patch("memory_lifecycle.collection_for", return_value="test-coll"), \
-             patch("memory_lifecycle.curator_queue") as mock_cq, \
-             patch("memory_lifecycle.log_memory_event", new_callable=AsyncMock):
+        with (
+            patch("memory_lifecycle.qdrant_client", return_value=_make_qdrant_client()),
+            patch("memory_lifecycle.collection_for", return_value="test-coll"),
+            patch("memory_lifecycle.curator_queue") as mock_cq,
+            patch("memory_lifecycle.log_memory_event", new_callable=AsyncMock),
+        ):
             mock_cq.enqueue.return_value = "op-0"
             await soft_delete_memory("mem-fts", "test-ns")
 
@@ -821,11 +893,13 @@ class TestSoftDeleteMemory:
         mock_client = _make_qdrant_client()
         mock_client.set_payload.side_effect = Exception("Qdrant down")
 
-        with patch("memory_lifecycle.qdrant_client", return_value=mock_client), \
-             patch("memory_lifecycle.collection_for", return_value="test-coll"), \
-             patch("memory_lifecycle.curator_queue") as mock_cq, \
-             patch("memory_lifecycle.log_memory_event", new_callable=AsyncMock), \
-             patch("memory_lifecycle.set_fts_excluded_batch"):
+        with (
+            patch("memory_lifecycle.qdrant_client", return_value=mock_client),
+            patch("memory_lifecycle.collection_for", return_value="test-coll"),
+            patch("memory_lifecycle.curator_queue") as mock_cq,
+            patch("memory_lifecycle.log_memory_event", new_callable=AsyncMock),
+            patch("memory_lifecycle.set_fts_excluded_batch"),
+        ):
             mock_cq.enqueue.return_value = "op-err"
             with pytest.raises((RuntimeError, Exception)):
                 await soft_delete_memory("mem-fail", "test-ns")
@@ -834,6 +908,7 @@ class TestSoftDeleteMemory:
 # ===========================================================================
 # Phase 2 — memory_points table tests
 # ===========================================================================
+
 
 class TestRegisterMemoryPointsBatch:
     """register_memory_points_batch inserts correct rows."""
@@ -873,6 +948,7 @@ class TestRegisterMemoryPointsBatch:
 
     def test_empty_list_noop(self, graph_db):
         import graph
+
         count = graph.register_memory_points_batch([])
         assert count == 0
 
@@ -893,10 +969,12 @@ class TestLookupMemoryPoints:
     def test_returns_rows_for_known_memory(self, graph_db):
         import graph
 
-        graph.register_memory_points_batch([
-            {"memory_id": "mem-A", "qdrant_id": "mem-A", "point_type": "primary"},
-            {"memory_id": "mem-A", "qdrant_id": "child-1", "point_type": "micro_chunk"},
-        ])
+        graph.register_memory_points_batch(
+            [
+                {"memory_id": "mem-A", "qdrant_id": "mem-A", "point_type": "primary"},
+                {"memory_id": "mem-A", "qdrant_id": "child-1", "point_type": "micro_chunk"},
+            ]
+        )
 
         rows = graph.lookup_memory_points("mem-A")
         assert len(rows) == 2
@@ -906,6 +984,7 @@ class TestLookupMemoryPoints:
 
     def test_returns_empty_for_unknown_memory(self, graph_db):
         import graph
+
         rows = graph.lookup_memory_points("nonexistent-id")
         assert rows == []
 
@@ -916,10 +995,12 @@ class TestDeleteMemoryPoints:
     def test_removes_all_rows(self, graph_db):
         import graph
 
-        graph.register_memory_points_batch([
-            {"memory_id": "dm-1", "qdrant_id": "dm-1", "point_type": "primary"},
-            {"memory_id": "dm-1", "qdrant_id": "dm-child", "point_type": "micro_chunk"},
-        ])
+        graph.register_memory_points_batch(
+            [
+                {"memory_id": "dm-1", "qdrant_id": "dm-1", "point_type": "primary"},
+                {"memory_id": "dm-1", "qdrant_id": "dm-child", "point_type": "micro_chunk"},
+            ]
+        )
         count = graph.delete_memory_points("dm-1")
         assert count == 2
 
@@ -928,6 +1009,7 @@ class TestDeleteMemoryPoints:
 
     def test_noop_for_unknown(self, graph_db):
         import graph
+
         count = graph.delete_memory_points("does-not-exist")
         assert count == 0
 
@@ -937,23 +1019,27 @@ class TestDeleteMemoryCompleteUsesMemoryPoints:
 
     async def test_uses_table_when_rows_present(self, graph_db):
         """No Qdrant scroll when memory_points has rows."""
-        from memory_lifecycle import delete_memory_complete
         import graph
+        from memory_lifecycle import delete_memory_complete
 
         memory_id = "mem-table-1"
         micro_id = "micro-table-1"
 
         # Pre-populate memory_points
-        graph.register_memory_points_batch([
-            {"memory_id": memory_id, "qdrant_id": memory_id, "point_type": "primary"},
-            {"memory_id": memory_id, "qdrant_id": micro_id, "point_type": "micro_chunk"},
-        ])
+        graph.register_memory_points_batch(
+            [
+                {"memory_id": memory_id, "qdrant_id": memory_id, "point_type": "primary"},
+                {"memory_id": memory_id, "qdrant_id": micro_id, "point_type": "micro_chunk"},
+            ]
+        )
 
         mock_client = _make_qdrant_client()
 
-        with patch("memory_lifecycle.qdrant_client", return_value=mock_client), \
-             patch("memory_lifecycle.collection_for", return_value="test-coll"), \
-             patch("memory_lifecycle.log_memory_event", new_callable=AsyncMock):
+        with (
+            patch("memory_lifecycle.qdrant_client", return_value=mock_client),
+            patch("memory_lifecycle.collection_for", return_value="test-coll"),
+            patch("memory_lifecycle.log_memory_event", new_callable=AsyncMock),
+        ):
             result = await delete_memory_complete(memory_id, "test-ns")
 
         # scroll should NOT have been called since we have memory_points rows
@@ -967,9 +1053,11 @@ class TestDeleteMemoryCompleteUsesMemoryPoints:
         memory_id = "mem-legacy-1"
         mock_client = _make_qdrant_client(scroll_return=([], None))
 
-        with patch("memory_lifecycle.qdrant_client", return_value=mock_client), \
-             patch("memory_lifecycle.collection_for", return_value="test-coll"), \
-             patch("memory_lifecycle.log_memory_event", new_callable=AsyncMock):
+        with (
+            patch("memory_lifecycle.qdrant_client", return_value=mock_client),
+            patch("memory_lifecycle.collection_for", return_value="test-coll"),
+            patch("memory_lifecycle.log_memory_event", new_callable=AsyncMock),
+        ):
             await delete_memory_complete(memory_id, "test-ns")
 
         # scroll IS called for fallback path (at least once for micro-chunks)
@@ -977,19 +1065,23 @@ class TestDeleteMemoryCompleteUsesMemoryPoints:
 
     async def test_cleans_up_memory_points_rows(self, graph_db):
         """delete_memory_complete removes the memory_points rows on success."""
-        from memory_lifecycle import delete_memory_complete
         import graph
+        from memory_lifecycle import delete_memory_complete
 
         memory_id = "mem-cleanup-1"
-        graph.register_memory_points_batch([
-            {"memory_id": memory_id, "qdrant_id": memory_id, "point_type": "primary"},
-        ])
+        graph.register_memory_points_batch(
+            [
+                {"memory_id": memory_id, "qdrant_id": memory_id, "point_type": "primary"},
+            ]
+        )
 
         mock_client = _make_qdrant_client()
 
-        with patch("memory_lifecycle.qdrant_client", return_value=mock_client), \
-             patch("memory_lifecycle.collection_for", return_value="test-coll"), \
-             patch("memory_lifecycle.log_memory_event", new_callable=AsyncMock):
+        with (
+            patch("memory_lifecycle.qdrant_client", return_value=mock_client),
+            patch("memory_lifecycle.collection_for", return_value="test-coll"),
+            patch("memory_lifecycle.log_memory_event", new_callable=AsyncMock),
+        ):
             await delete_memory_complete(memory_id, "test-ns")
 
         remaining = graph.lookup_memory_points(memory_id)
@@ -1000,8 +1092,9 @@ class TestLogDeleteFailure:
     """log_delete_failure writes to delete_failures table."""
 
     def test_writes_failure_record(self, graph_db):
-        import graph
         import json
+
+        import graph
 
         graph.log_delete_failure("mem-fail", ["qid-1", "qid-2"], "connection refused")
 
@@ -1022,24 +1115,24 @@ class TestDeadLetterOnCascadeFailure:
 
     async def test_delete_failure_logged_to_dead_letter(self, graph_db):
         """When Qdrant primary delete fails, delete_failures is written."""
-        from memory_lifecycle import delete_memory_complete
         from cascade import PartialDeletionError
-        import graph
+        from memory_lifecycle import delete_memory_complete
 
         memory_id = "mem-dlq-1"
         mock_client = _make_qdrant_client()
         mock_client.delete.side_effect = Exception("Qdrant unavailable")
 
-        with patch("memory_lifecycle.qdrant_client", return_value=mock_client), \
-             patch("memory_lifecycle.collection_for", return_value="test-coll"), \
-             patch("memory_lifecycle.log_memory_event", new_callable=AsyncMock):
+        with (
+            patch("memory_lifecycle.qdrant_client", return_value=mock_client),
+            patch("memory_lifecycle.collection_for", return_value="test-coll"),
+            patch("memory_lifecycle.log_memory_event", new_callable=AsyncMock),
+        ):
             with pytest.raises(PartialDeletionError):
                 await delete_memory_complete(memory_id, "test-ns")
 
         conn = sqlite3.connect(graph_db)
-        rows = conn.execute(
-            "SELECT memory_id FROM delete_failures"
-        ).fetchall()
+        rows = conn.execute("SELECT memory_id FROM delete_failures").fetchall()
         conn.close()
-        assert any(r[0] == memory_id for r in rows), \
+        assert any(r[0] == memory_id for r in rows), (
             "delete_failures should have a row for the failed memory_id"
+        )

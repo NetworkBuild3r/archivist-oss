@@ -39,23 +39,22 @@ import os
 import sqlite3
 import sys
 
-
 # ---------------------------------------------------------------------------
 # Schema definition
 # ---------------------------------------------------------------------------
 
 # Columns to add if missing. Matches _migrate_schema() in src/graph.py exactly.
 COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
-    ("facts",         "retention_class", "TEXT NOT NULL DEFAULT 'standard'"),
-    ("entities",      "retention_class", "TEXT NOT NULL DEFAULT 'standard'"),
-    ("entities",      "aliases",         "TEXT NOT NULL DEFAULT '[]'"),
-    ("facts",         "valid_from",      "TEXT NOT NULL DEFAULT ''"),
-    ("facts",         "valid_until",     "TEXT NOT NULL DEFAULT ''"),
-    ("relationships", "provenance",      "TEXT NOT NULL DEFAULT 'unknown'"),
-    ("entities",      "namespace",       "TEXT NOT NULL DEFAULT 'global'"),
-    ("facts",         "namespace",       "TEXT NOT NULL DEFAULT 'global'"),
-    ("relationships", "namespace",       "TEXT NOT NULL DEFAULT 'global'"),
-    ("facts",         "memory_id",       "TEXT NOT NULL DEFAULT ''"),
+    ("facts", "retention_class", "TEXT NOT NULL DEFAULT 'standard'"),
+    ("entities", "retention_class", "TEXT NOT NULL DEFAULT 'standard'"),
+    ("entities", "aliases", "TEXT NOT NULL DEFAULT '[]'"),
+    ("facts", "valid_from", "TEXT NOT NULL DEFAULT ''"),
+    ("facts", "valid_until", "TEXT NOT NULL DEFAULT ''"),
+    ("relationships", "provenance", "TEXT NOT NULL DEFAULT 'unknown'"),
+    ("entities", "namespace", "TEXT NOT NULL DEFAULT 'global'"),
+    ("facts", "namespace", "TEXT NOT NULL DEFAULT 'global'"),
+    ("relationships", "namespace", "TEXT NOT NULL DEFAULT 'global'"),
+    ("facts", "memory_id", "TEXT NOT NULL DEFAULT ''"),
 ]
 
 INDEX_MIGRATIONS: list[str] = [
@@ -90,6 +89,7 @@ _ENTITIES_NEW_DDL = """
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
 
@@ -100,9 +100,12 @@ def _needs_unique_constraint_rebuild(conn: sqlite3.Connection) -> bool:
         return False
 
     # Check inline constraint in CREATE TABLE sql
-    create_sql: str = conn.execute(
-        "SELECT sql FROM sqlite_master WHERE type='table' AND name='entities'"
-    ).fetchone()[0] or ""
+    create_sql: str = (
+        conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='entities'"
+        ).fetchone()[0]
+        or ""
+    )
     if "UNIQUE" in create_sql:
         after_unique = create_sql.split("UNIQUE", 1)[-1]
         if "namespace" in after_unique:
@@ -135,6 +138,7 @@ def _check_pending(conn: sqlite3.Connection) -> dict[str, list[str]]:
 # ---------------------------------------------------------------------------
 # Migration steps
 # ---------------------------------------------------------------------------
+
 
 def _apply_columns(conn: sqlite3.Connection, dry_run: bool) -> bool:
     print("\nStep 1: Column migrations")
@@ -200,7 +204,9 @@ def _apply_unique_constraint(conn: sqlite3.Connection, dry_run: bool) -> bool:
         """)
         conn.execute("DROP TABLE entities")
         conn.execute("ALTER TABLE entities_new RENAME TO entities")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(name COLLATE NOCASE)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(name COLLATE NOCASE)"
+        )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(entity_type)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_entities_namespace ON entities(namespace)")
         conn.commit()
@@ -215,6 +221,7 @@ def _apply_unique_constraint(conn: sqlite3.Connection, dry_run: bool) -> bool:
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+
 
 def resolve_db_path(cli_path: str | None) -> str:
     if cli_path:

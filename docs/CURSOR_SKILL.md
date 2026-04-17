@@ -2,14 +2,16 @@
 
 ## Overview
 
-Archivist exposes 30 memory tools via the Model Context Protocol (MCP) over Streamable HTTP (preferred) or legacy HTTP SSE. Any MCP-compatible client can connect and use these tools.
+Archivist exposes 31 memory tools via the Model Context Protocol (MCP) over Streamable HTTP (preferred) or legacy HTTP SSE. Any MCP-compatible client can connect and use these tools.
 
 ## Connection
 
 ```text
-Streamable HTTP endpoint: http://<host>:3100/mcp
-Legacy SSE endpoint: http://<host>:3100/mcp/sse
-Legacy SSE message endpoint: http://<host>:3100/mcp/messages/
+Streamable HTTP endpoint (default): http://<host>:3100/mcp
+
+Legacy SSE endpoints (opt-in, set MCP_SSE_ENABLED=true):
+  http://<host>:3100/mcp/sse
+  http://<host>:3100/mcp/messages/
 ```
 
 ---
@@ -400,6 +402,17 @@ Manually invalidate the hot cache.
 - `namespace` (string) -- Invalidate entries for this namespace
 - `agent_id` (string) -- Invalidate entries for this agent
 - `all` (boolean, default: false) -- Invalidate entire cache
+
+---
+
+## Reference Docs (1 tool)
+
+### archivist_get_reference_docs
+
+Return the full Archivist agent skill reference (this document) or a single named section.  Call this on first connection or whenever you are unsure how to use a tool.
+
+**Parameters:**
+- `section` (string, optional) -- Heading keyword to filter (e.g. `"search"`, `"storage"`, `"trajectory"`, `"skills"`, `"admin"`, `"tips"`). Omit to return the full reference.
 
 ---
 

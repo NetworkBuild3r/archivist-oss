@@ -7,12 +7,12 @@
 Vector search + knowledge graph + active curation — one MCP endpoint.</p>
 
 <p align="center">
-  <a href="#quick-start"><strong>Quick Start</strong></a> · <a href="#openclaw-and-agent-workspace-layout"><strong>OpenClaw Layout</strong></a> · <a href="#how-it-works"><strong>How It Works</strong></a> · <a href="#benchmarks"><strong>Benchmarks</strong></a> · <a href="#ship-it-locally-validated-performance"><strong>Ship It Locally</strong></a> · <a href="#mcp-tools-30"><strong>30 MCP Tools</strong></a> · <a href="#configuration-reference"><strong>Config</strong></a> · <a href="#architecture-deep-dive"><strong>Architecture</strong></a> · <a href="docs/ROADMAP.md"><strong>Roadmap</strong></a>
+  <a href="#quick-start"><strong>Quick Start</strong></a> · <a href="#openclaw-and-agent-workspace-layout"><strong>OpenClaw Layout</strong></a> · <a href="#how-it-works"><strong>How It Works</strong></a> · <a href="#benchmarks"><strong>Benchmarks</strong></a> · <a href="#ship-it-locally-validated-performance"><strong>Ship It Locally</strong></a> · <a href="#mcp-tools-31"><strong>31 MCP Tools</strong></a> · <a href="#configuration-reference"><strong>Config</strong></a> · <a href="#architecture-deep-dive"><strong>Architecture</strong></a> · <a href="docs/ROADMAP.md"><strong>Roadmap</strong></a>
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="License" />
-  <img src="https://img.shields.io/badge/version-v1.12.0-brightgreen" alt="Version" />
+  <img src="https://img.shields.io/badge/version-v2.0.0-brightgreen" alt="Version" />
   <img src="https://img.shields.io/badge/protocol-MCP-purple" alt="MCP" />
   <img src="https://img.shields.io/badge/models-any%20OpenAI--compatible-orange" alt="Models" />
 </p>
@@ -30,13 +30,23 @@ curl http://localhost:3100/health          # {"status":"ok"}
 
 Full Docker options (host vLLM, persistent volumes, overrides): [`docs/DOCKER.md`](docs/DOCKER.md).
 
+The default image installs **core** [`requirements.txt`](requirements.txt) only (no BEIR, no cross-encoder wheels). Optional Python extras are documented under [Development](#development).
+
 Point any MCP client at `http://localhost:3100/mcp` — done. Your agents now have long-term memory with search, RBAC, knowledge graphs, and active curation out of the box. Legacy SSE compatibility remains available at `http://localhost:3100/mcp/sse`.
 
 ---
 
+## What's New in v2.0
+
+**Archivist 2.0** — The codebase is now a first-class Python package under [`src/archivist/`](src/archivist/): `core`, `storage`, `lifecycle`, `retrieval`, `write`, `features`, `utils`, and `app`. Legacy `src/*.py` module names still work via compatibility shims. **Mypy** is configured for the new layout (`mypy_path` + `explicit_package_bases` in [`pyproject.toml`](pyproject.toml)).
+
+**Benchmarks** — Phase 5 pipeline evaluation (`clean_reranker` vs `vector_plus_synth`, small corpus, 108 queries per variant) is summarized in [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md). Formal release notes: [`docs/RELEASE_NOTES_v2.0.md`](docs/RELEASE_NOTES_v2.0.md).
+
 ## What's New in v1.12
 
 **Semantic chunking** — parent chunks can follow markdown structure (headings, code blocks, lists) via `CHUNKING_STRATEGY=semantic` (default), with `fixed` for the previous fixed-size parent split. Improves retrieval on long technical documents without changing the child chunking API.
+
+**Lean default Python install** — `sentence-transformers` (and its PyTorch stack) is **not** in the core [`requirements.txt`](requirements.txt). Add [`requirements-rerank.txt`](requirements-rerank.txt) when you enable the v2 cross-encoder reranker (`RERANKER_ENABLED=true`), and [`requirements-benchmark.txt`](requirements-benchmark.txt) only if you run BEIR thin or other academic harnesses. The shipped [`Dockerfile`](Dockerfile) stays small; [`Dockerfile.benchmark`](Dockerfile.benchmark) installs benchmark extras for reproduction runs.
 
 **Benchmark harness in-repo** — `benchmarks/pipeline/` and `benchmarks/fixtures/corpus_small/` (plus `questions.json`) are tracked so you can reproduce retrieval evaluations locally. Sample corpus text uses **synthetic** hostnames and paths only.
 
@@ -115,6 +125,8 @@ Each stage is observable via `retrieval_trace` in every response.
 ## Benchmarks
 
 Live run (2026-04-06) — **Qdrant** vector store, **`BAAI/bge-base-en-v1.5`** embeddings (local), **`qwen3.5-122b`** via an OpenAI-compatible API. Four corpus scales (56 → 1,523 files), 107–110 questions per scale covering 8 query types. Context stuffing uses real LLM calls. All Archivist runs use `--no-refine` (pure retrieval, no generative synthesis). Context budget: **32,768 tokens** (realistic agent window after system prompt, history, and tools).
+
+**Why BEIR scores are not our headline metric.** The optional **BEIR thin** path (`benchmarks/academic/beir_thin.py`, e.g. NFCorpus with a query cap) scores **classic ad-hoc retrieval**: one bi-encoder against a static corpus, with standard nDCG / MAP / recall. That is useful as a **cheap embedding and harness sanity check** and for comparing embedding models on the same slice. Archivist’s product surface is **agent memory**: hybrid vector + BM25 fusion, graph augmentation, namespaces, lifecycle, needles, and operational behavior under real workloads. None of that appears in a plain BEIR dense run, so a high or low BEIR row does **not** map 1:1 to “good or bad Archivist.” We still record thin BEIR numbers in [`docs/ROADMAP.md`](docs/ROADMAP.md) so defaults and regressions stay visible over time. For product-shaped signal, use the **in-repo pipeline** and **LongMemEval thin** paths described in [`benchmarks/README.md`](benchmarks/README.md).
 
 ### Ship it locally: validated performance
 
@@ -361,7 +373,7 @@ Raw MD trees **do not scale**: they blow the context window, repeat facts, and d
 
 ---
 
-## MCP Tools (30)
+## MCP Tools (31)
 
 ### Search & Retrieval (7)
 
@@ -719,12 +731,22 @@ Fork [NetworkBuild3r/archivist-oss](https://github.com/NetworkBuild3r/archivist-
 
 ## Development
 
+**Local install (matches CI):**
+
 ```bash
-pip install -r requirements.txt
+pip install -r requirements.txt -r requirements-test.txt
 python -m pytest tests/ -v
 ```
 
-**Pipeline benchmark (optional):** large corpora (`corpus_medium` through `corpus_stress`) are generated or downloaded locally and stay **gitignored**. The **small** fixture and `benchmarks/fixtures/questions.json` are in the repo; run `python -m benchmarks.pipeline.evaluate --help` after configuring `.env` (see [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md)).
+**Optional Python extras** — not part of the default [`Dockerfile`](Dockerfile); add them only when you need the feature:
+
+| File | Use when |
+|------|----------|
+| [`requirements-rerank.txt`](requirements-rerank.txt) | Cross-encoder reranking (`RERANKER_ENABLED=true`); pulls `sentence-transformers` / PyTorch |
+| [`requirements-benchmark.txt`](requirements-benchmark.txt) | BEIR thin and similar scripts; pulls `beir` and its dependencies |
+| [`requirements-test.txt`](requirements-test.txt) | Pytest + asyncio (included in the command above; [`.github/workflows/ci.yml`](.github/workflows/ci.yml) uses the same pair) |
+
+**Pipeline benchmark (optional):** large corpora (`corpus_medium` through `corpus_stress`) are generated or downloaded locally and stay **gitignored**. The **small** fixture and `benchmarks/fixtures/questions.json` are in the repo; run `python -m benchmarks.pipeline.evaluate --help` after configuring `.env` (see [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md)). For thin LongMemEval + BEIR from the shell script, see [`benchmarks/README.md`](benchmarks/README.md).
 
 Tests are organized by domain with markers:
 - **Unit tests** — Run by default, no external services needed
@@ -745,10 +767,11 @@ Archivist is integration and execution on top of public work from the agent-memo
 | Document | Covers |
 |----------|--------|
 | [`CHANGELOG.md`](CHANGELOG.md) | Version history, breaking changes, migration notes |
+| [`benchmarks/README.md`](benchmarks/README.md) | Thin LongMemEval + BEIR commands (reference benchmarks) |
 | [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) | Three-tier benchmark results, reproduction steps, competitive comparison |
 | [`docs/DOCKER.md`](docs/DOCKER.md) | Docker Compose stack, host vLLM + cloud LLM, volume overrides |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Module map, data flow diagrams, storage schema, per-version operational notes |
-| [`docs/CURSOR_SKILL.md`](docs/CURSOR_SKILL.md) | Full parameter schemas and examples for all 30 MCP tools |
+| [`docs/CURSOR_SKILL.md`](docs/CURSOR_SKILL.md) | Full parameter schemas and examples for all 31 MCP tools |
 | [`docs/REFERENCE.md`](docs/REFERENCE.md) | Condensed tool reference table |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | Phased roadmap and differentiation goals |
 | [`docs/INSPIRATION.md`](docs/INSPIRATION.md) | Credits, research lineage, ReMe comparison |

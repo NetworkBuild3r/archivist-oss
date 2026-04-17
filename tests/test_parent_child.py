@@ -71,7 +71,9 @@ def test_hierarchical_parent_ids():
     for child in result:
         if not child["is_parent"]:
             assert child["parent_id"] is not None, "Child must have a parent_id"
-            assert child["parent_id"] in parent_ids, f"Child parent_id '{child['parent_id']}' not in parent set"
+            assert child["parent_id"] in parent_ids, (
+                f"Child parent_id '{child['parent_id']}' not in parent set"
+            )
 
 
 def test_hierarchical_parent_has_no_parent():
@@ -111,6 +113,7 @@ def test_parent_ids_differ_by_filepath():
 
 
 # ── Semantic chunking tests ───────────────────────────────────────────────────
+
 
 def test_semantic_short_document_fast_path():
     """Documents shorter than size return a single chunk, unchanged."""
@@ -178,14 +181,12 @@ def test_semantic_heading_prepended_to_sub_chunks():
     if len(chunks) > 1:
         # All sub-chunks from the oversized section carry the heading
         for c in chunks:
-            assert "Big Section" in c, (
-                f"Sub-chunk missing heading context: {c[:80]!r}"
-            )
+            assert "Big Section" in c, f"Sub-chunk missing heading context: {c[:80]!r}"
 
 
 def test_semantic_no_headings_falls_back_to_paragraph_split():
     """Documents without markdown headings fall back to paragraph splitting."""
-    paragraphs = ["Paragraph number {}. ".format(i) * 10 for i in range(8)]
+    paragraphs = [f"Paragraph number {i}. " * 10 for i in range(8)]
     text = "\n\n".join(paragraphs)
     # With size=300 this should produce multiple chunks
     chunks = chunk_text_semantic(text, size=300)

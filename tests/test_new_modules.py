@@ -92,15 +92,18 @@ class TestCompaction:
     @pytest.mark.asyncio
     async def test_compact_structured(self, mock_llm):
         import json
+
         from compaction import compact_structured
 
-        mock_llm.return_value = json.dumps({
-            "goal": "Deploy app",
-            "progress": ["Step 1 done"],
-            "decisions": ["Use ArgoCD"],
-            "next_steps": ["Run tests"],
-            "critical_context": "Cluster is prod-us-east-1",
-        })
+        mock_llm.return_value = json.dumps(
+            {
+                "goal": "Deploy app",
+                "progress": ["Step 1 done"],
+                "decisions": ["Use ArgoCD"],
+                "next_steps": ["Run tests"],
+                "critical_context": "Cluster is prod-us-east-1",
+            }
+        )
         result = await compact_structured([("id1", "Memory about deployment")])
         assert isinstance(result, dict)
         assert "goal" in result
@@ -190,8 +193,9 @@ class TestFTSSearch:
         top_ids = {r["qdrant_id"] for r in result[:8]}
         # Top-8 vector hits must survive in the top results
         for i in range(8):
-            assert f"v{i}" in top_ids or f"v{i}" in {r.get("qdrant_id") for r in result}, \
+            assert f"v{i}" in top_ids or f"v{i}" in {r.get("qdrant_id") for r in result}, (
                 f"Vector hit v{i} was buried by BM25 noise"
+            )
 
     def test_merge_vector_score_field_preserved(self):
         from fts_search import merge_vector_and_bm25
@@ -204,8 +208,13 @@ class TestFTSSearch:
     def test_merge_output_capped_at_20(self):
         from fts_search import merge_vector_and_bm25
 
-        vec = [{"id": f"v{i}", "qdrant_id": f"v{i}", "score": 0.9 - i * 0.01, "text": f"t{i}"} for i in range(25)]
-        bm25 = [{"qdrant_id": f"b{i}", "bm25_score": 5.0 - i * 0.1, "text": f"t{i}"} for i in range(25)]
+        vec = [
+            {"id": f"v{i}", "qdrant_id": f"v{i}", "score": 0.9 - i * 0.01, "text": f"t{i}"}
+            for i in range(25)
+        ]
+        bm25 = [
+            {"qdrant_id": f"b{i}", "bm25_score": 5.0 - i * 0.1, "text": f"t{i}"} for i in range(25)
+        ]
         result = merge_vector_and_bm25(vec, bm25)
         assert len(result) <= 20
 
@@ -255,7 +264,8 @@ class TestReranker:
     def test_basic_scoring_adds_reranker_score(self):
         """rerank_candidates adds a reranker_score key to each candidate."""
         import asyncio
-        from unittest.mock import patch, MagicMock
+        from unittest.mock import MagicMock, patch
+
         from reranker import rerank_candidates
 
         candidates = [
@@ -288,7 +298,8 @@ class TestReranker:
     def test_sorting_by_reranker_score(self):
         """Candidates are sorted descending by reranker_score."""
         import asyncio
-        from unittest.mock import patch, MagicMock
+        from unittest.mock import MagicMock, patch
+
         from reranker import rerank_candidates
 
         candidates = [
@@ -310,6 +321,7 @@ class TestReranker:
     def test_empty_list_returns_empty(self):
         """rerank_candidates with empty list returns empty."""
         import asyncio
+
         from reranker import rerank_candidates
 
         result = asyncio.get_event_loop().run_until_complete(
@@ -322,11 +334,14 @@ class TestBenchmarkMetrics:
     """Tests for the evaluation metric functions in benchmarks/pipeline/evaluate.py."""
 
     def _import_metrics(self):
-        import sys, os
+        import os
+        import sys
+
         bench_dir = os.path.join(os.path.dirname(__file__), "..", "benchmarks", "pipeline")
         if bench_dir not in sys.path:
             sys.path.insert(0, bench_dir)
         from evaluate import _extract_source_text, _keyword_recall_at_k, _ndcg_at_k
+
         return _extract_source_text, _keyword_recall_at_k, _ndcg_at_k
 
     def test_extract_source_text_prefers_tier_text(self):
@@ -425,7 +440,9 @@ class TestBenchmarkMetrics:
         assert score == 0.0
 
     def test_filter_questions_for_scale(self):
-        import sys, os
+        import os
+        import sys
+
         bench_dir = os.path.join(os.path.dirname(__file__), "..", "benchmarks", "pipeline")
         if bench_dir not in sys.path:
             sys.path.insert(0, bench_dir)
@@ -448,7 +465,9 @@ class TestBenchmarkMetrics:
 
     def test_questions_json_has_scales(self):
         """Every question in the fixture file must have a 'scales' field."""
-        import json, os
+        import json
+        import os
+
         qpath = os.path.join(
             os.path.dirname(__file__), "..", "benchmarks", "fixtures", "questions.json"
         )
@@ -461,7 +480,9 @@ class TestBenchmarkMetrics:
 
     def test_questions_json_no_impossible_q61(self):
         """Q61 (2025 date on 2026 corpus) must not exist."""
-        import json, os
+        import json
+        import os
+
         qpath = os.path.join(
             os.path.dirname(__file__), "..", "benchmarks", "fixtures", "questions.json"
         )
@@ -474,7 +495,9 @@ class TestBenchmarkMetrics:
 
     def test_needle_questions_require_medium_plus(self):
         """Needle questions should be excluded from small corpus."""
-        import json, os
+        import json
+        import os
+
         qpath = os.path.join(
             os.path.dirname(__file__), "..", "benchmarks", "fixtures", "questions.json"
         )
@@ -483,6 +506,7 @@ class TestBenchmarkMetrics:
         with open(qpath) as f:
             questions = json.load(f)
         from evaluate import filter_questions_for_scale
+
         small_qs = filter_questions_for_scale(questions, "small")
         needle_in_small = [q for q in small_qs if q.get("query_type") == "needle"]
         assert len(needle_in_small) == 0, "Needle questions should be filtered out for small corpus"
@@ -492,16 +516,20 @@ class TestPhase1QueryExpansionKill:
     """Phase 1: verify query expansion is dead by default and variants are clean."""
 
     def _import_evaluate(self):
-        import sys, os
+        import os
+        import sys
+
         bench_dir = os.path.join(os.path.dirname(__file__), "..", "benchmarks", "pipeline")
         if bench_dir not in sys.path:
             sys.path.insert(0, bench_dir)
         import evaluate
+
         return evaluate
 
     def test_config_default_expansion_disabled(self):
         """QUERY_EXPANSION_ENABLED must default to False."""
         from config import QUERY_EXPANSION_ENABLED
+
         assert QUERY_EXPANSION_ENABLED is False, (
             "QUERY_EXPANSION_ENABLED must default to False — "
             "expansion adds ~6s latency for <1pp recall"
@@ -513,7 +541,7 @@ class TestPhase1QueryExpansionKill:
         for name, overrides in evaluate.VARIANTS.items():
             if name == "expansion_on":
                 assert overrides.get("QUERY_EXPANSION_ENABLED") == "true", (
-                    f"expansion_on should have expansion enabled"
+                    "expansion_on should have expansion enabled"
                 )
                 continue
             assert overrides.get("QUERY_EXPANSION_ENABLED") == "false", (
@@ -544,6 +572,7 @@ class TestPhase1QueryExpansionKill:
         """query_expansion must be in the module reload list."""
         evaluate = self._import_evaluate()
         import inspect
+
         source = inspect.getsource(evaluate._apply_variant)
         assert "query_expansion" in source, (
             "_apply_variant must reload query_expansion module on variant switch"
@@ -553,11 +582,19 @@ class TestPhase1QueryExpansionKill:
         """Sanity: we didn't accidentally lose variants during refactor."""
         evaluate = self._import_evaluate()
         expected_names = {
-            "vector_only", "vector_plus_synth", "vector_plus_synth_plus_reranker",
+            "vector_only",
+            "vector_plus_synth",
+            "vector_plus_synth_plus_reranker",
             "clean_reranker",
-            "expansion_off", "expansion_on",
-            "plus_bm25", "plus_graph", "plus_temporal", "plus_hotness", "plus_rerank",
-            "full_pipeline", "full_pipeline_rerank",
+            "expansion_off",
+            "expansion_on",
+            "plus_bm25",
+            "plus_graph",
+            "plus_temporal",
+            "plus_hotness",
+            "plus_rerank",
+            "full_pipeline",
+            "full_pipeline_rerank",
         }
         assert set(evaluate.VARIANTS.keys()) == expected_names
 
@@ -568,7 +605,9 @@ class TestPhase2SyntheticQuestionPipeline:
     def test_search_vectors_returns_representation_type(self):
         """search_vectors result rows must include representation_type."""
         import inspect
+
         from rlm_retriever import search_vectors
+
         source = inspect.getsource(search_vectors)
         assert "representation_type" in source, (
             "search_vectors must propagate representation_type from Qdrant payload"
@@ -583,7 +622,9 @@ class TestPhase2SyntheticQuestionPipeline:
     def test_search_vectors_filters_synthetic_when_disabled(self):
         """search_vectors must exclude synthetic_question points when the feature is off."""
         import inspect
+
         from rlm_retriever import search_vectors
+
         source = inspect.getsource(search_vectors)
         assert "SYNTHETIC_QUESTIONS_ENABLED" in source, (
             "search_vectors must check SYNTHETIC_QUESTIONS_ENABLED to filter synthetic points"
@@ -651,13 +692,19 @@ class TestPhase2SyntheticQuestionPipeline:
 
         hits = [
             {
-                "id": "c1", "file_path": "f1.md", "chunk_index": 0,
-                "text": "some text", "score": 0.8,
+                "id": "c1",
+                "file_path": "f1.md",
+                "chunk_index": 0,
+                "text": "some text",
+                "score": 0.8,
                 "representation_type": "chunk",
             },
             {
-                "id": "c2", "file_path": "f2.md", "chunk_index": 0,
-                "text": "other text", "score": 0.7,
+                "id": "c2",
+                "file_path": "f2.md",
+                "chunk_index": 0,
+                "text": "other text",
+                "score": 0.7,
                 "representation_type": "chunk",
             },
         ]
@@ -669,7 +716,9 @@ class TestPhase2SyntheticQuestionPipeline:
     def test_trace_includes_synthetic_hits_key(self):
         """_trace_kw must include synthetic_hits for benchmark observability."""
         import inspect
+
         from rlm_retriever import recursive_retrieve
+
         source = inspect.getsource(recursive_retrieve)
         assert "synthetic_hits" in source, (
             "recursive_retrieve must track n_synthetic_hits in the retrieval trace"
@@ -678,6 +727,7 @@ class TestPhase2SyntheticQuestionPipeline:
     def test_force_invalidate_all_clears_cache(self):
         """force_invalidate_all (alias for invalidate_all) must always clear entries."""
         import hot_cache
+
         old_enabled = hot_cache.HOT_CACHE_ENABLED
 
         try:
@@ -696,13 +746,16 @@ class TestPhase2SyntheticQuestionPipeline:
         """Synthetic question points must carry required fields for the search path."""
         import asyncio
         from unittest.mock import AsyncMock, patch
+
         import synthetic_questions
 
         mock_qs = '["How do backups work?", "When is the backup window?"]'
-        with patch.object(synthetic_questions, "SYNTHETIC_QUESTIONS_ENABLED", True), \
-             patch.object(synthetic_questions, "SYNTHETIC_QUESTIONS_COUNT", 2), \
-             patch("synthetic_questions.llm_query", new_callable=AsyncMock) as mock_llm, \
-             patch("synthetic_questions.embed_batch", new_callable=AsyncMock) as mock_embed:
+        with (
+            patch.object(synthetic_questions, "SYNTHETIC_QUESTIONS_ENABLED", True),
+            patch.object(synthetic_questions, "SYNTHETIC_QUESTIONS_COUNT", 2),
+            patch("synthetic_questions.llm_query", new_callable=AsyncMock) as mock_llm,
+            patch("synthetic_questions.embed_batch", new_callable=AsyncMock) as mock_embed,
+        ):
             mock_llm.return_value = mock_qs
             mock_embed.return_value = [[0.1] * 1024, [0.2] * 1024]
             synthetic_questions._cache.clear()
@@ -731,12 +784,16 @@ class TestPhase2SyntheticQuestionPipeline:
 
     def test_benchmark_summary_includes_synthetic_counts(self):
         """Benchmark summary dict must include total_synthetic_hits and queries_with_synthetic_hits."""
-        import sys, os
+        import os
+        import sys
+
         bench_dir = os.path.join(os.path.dirname(__file__), "..", "benchmarks", "pipeline")
         if bench_dir not in sys.path:
             sys.path.insert(0, bench_dir)
-        import evaluate
         import inspect
+
+        import evaluate
+
         source = inspect.getsource(evaluate.run_variant)
         assert "total_synthetic_hits" in source, (
             "run_variant summary must aggregate total_synthetic_hits"
@@ -752,7 +809,9 @@ class TestPhase3NominateThenRerank:
     def test_v2_path_bypasses_rrf_merge(self):
         """When RERANKER_ENABLED=True, the v2 branch must NOT use rrf_merge."""
         import inspect
+
         from rlm_retriever import recursive_retrieve
+
         source = inspect.getsource(recursive_retrieve)
         lines = source.split("\n")
         in_v2 = False
@@ -762,14 +821,14 @@ class TestPhase3NominateThenRerank:
             if in_v2 and "LEGACY PATH" in line:
                 break
             if in_v2:
-                assert "rrf_merge" not in line, (
-                    "rrf_merge must not appear in the v2 clean path"
-                )
+                assert "rrf_merge" not in line, "rrf_merge must not appear in the v2 clean path"
 
     def test_v2_path_bypasses_bm25_merge(self):
         """When RERANKER_ENABLED=True, merge_vector_and_bm25 must be skipped."""
         import inspect
+
         from rlm_retriever import recursive_retrieve
+
         source = inspect.getsource(recursive_retrieve)
         assert "not RERANKER_ENABLED" in source, (
             "merge_vector_and_bm25 must be gated behind 'not RERANKER_ENABLED'"
@@ -778,7 +837,9 @@ class TestPhase3NominateThenRerank:
     def test_v2_path_does_id_based_dedup(self):
         """The v2 path must build a candidate_pool keyed by ID, not use dedupe_vector_hits."""
         import inspect
+
         from rlm_retriever import recursive_retrieve
+
         source = inspect.getsource(recursive_retrieve)
         assert "candidate_pool" in source, (
             "v2 path must use candidate_pool dict for ID-based deduplication"
@@ -787,17 +848,19 @@ class TestPhase3NominateThenRerank:
     def test_v2_pool_collects_all_nomination_sources(self):
         """The nomination pool must include vec_results, bm25_hits, literal_hits, _registry_hits."""
         import inspect
+
         from rlm_retriever import recursive_retrieve
+
         source = inspect.getsource(recursive_retrieve)
         for source_name in ("vec_results", "bm25_hits", "literal_hits", "_registry_hits"):
-            assert source_name in source, (
-                f"Nomination pool must include {source_name}"
-            )
+            assert source_name in source, f"Nomination pool must include {source_name}"
 
     def test_v2_trace_includes_nomination_pool_size(self):
         """The v2 trace must record nomination_pool_size for observability."""
         import inspect
+
         from rlm_retriever import recursive_retrieve
+
         source = inspect.getsource(recursive_retrieve)
         assert "nomination_pool_size" in source, (
             "v2 path must include nomination_pool_size in _common_trace"
@@ -814,9 +877,7 @@ class TestPhase3NominateThenRerank:
         for r in test_items:
             rid = str(r.get("id", ""))
             existing = candidate_pool.get(rid)
-            if existing is None:
-                candidate_pool[rid] = dict(r)
-            elif r.get("score", 0) > existing.get("score", 0):
+            if existing is None or r.get("score", 0) > existing.get("score", 0):
                 candidate_pool[rid] = dict(r)
 
         assert len(candidate_pool) == 2
@@ -827,17 +888,25 @@ class TestPhase3NominateThenRerank:
         """Synthetic question hits must be tagged with synthetic_match=True in the pool."""
         candidate_pool: dict[str, dict] = {}
         test_items = [
-            {"id": "c1", "score": 0.8, "file_path": "a.md", "chunk_index": 0,
-             "representation_type": "chunk"},
-            {"id": "s1", "score": 0.85, "file_path": "a.md", "chunk_index": 0,
-             "representation_type": "synthetic_question"},
+            {
+                "id": "c1",
+                "score": 0.8,
+                "file_path": "a.md",
+                "chunk_index": 0,
+                "representation_type": "chunk",
+            },
+            {
+                "id": "s1",
+                "score": 0.85,
+                "file_path": "a.md",
+                "chunk_index": 0,
+                "representation_type": "synthetic_question",
+            },
         ]
         for r in test_items:
             rid = str(r.get("id", ""))
             existing = candidate_pool.get(rid)
-            if existing is None:
-                candidate_pool[rid] = dict(r)
-            elif r.get("score", 0) > existing.get("score", 0):
+            if existing is None or r.get("score", 0) > existing.get("score", 0):
                 candidate_pool[rid] = dict(r)
             if r.get("representation_type") == "synthetic_question":
                 candidate_pool[rid]["synthetic_match"] = True
@@ -849,17 +918,19 @@ class TestPhase3NominateThenRerank:
         """Needle registry hits must keep their needle_registry_hit flag through dedup."""
         candidate_pool: dict[str, dict] = {}
         test_items = [
-            {"id": "n1", "score": 1.0, "file_path": "needle.md",
-             "needle_registry_hit": True, "representation_type": "chunk"},
-            {"id": "n1", "score": 0.9, "file_path": "needle.md",
-             "representation_type": "chunk"},
+            {
+                "id": "n1",
+                "score": 1.0,
+                "file_path": "needle.md",
+                "needle_registry_hit": True,
+                "representation_type": "chunk",
+            },
+            {"id": "n1", "score": 0.9, "file_path": "needle.md", "representation_type": "chunk"},
         ]
         for r in test_items:
             rid = str(r.get("id", ""))
             existing = candidate_pool.get(rid)
-            if existing is None:
-                candidate_pool[rid] = dict(r)
-            elif r.get("score", 0) > existing.get("score", 0):
+            if existing is None or r.get("score", 0) > existing.get("score", 0):
                 candidate_pool[rid] = dict(r)
             if r.get("needle_registry_hit"):
                 candidate_pool[rid]["needle_registry_hit"] = True
@@ -869,12 +940,16 @@ class TestPhase3NominateThenRerank:
 
     def test_clean_reranker_variant_exists(self):
         """The clean_reranker benchmark variant must exist with correct flags."""
-        import sys, os
+        import os
+        import sys
+
         bench_dir = os.path.join(os.path.dirname(__file__), "..", "benchmarks", "pipeline")
         if bench_dir not in sys.path:
             sys.path.insert(0, bench_dir)
         import importlib
+
         import evaluate
+
         importlib.reload(evaluate)
         v = evaluate.VARIANTS["clean_reranker"]
         assert v["RERANKER_ENABLED"] == "true"
@@ -885,26 +960,32 @@ class TestPhase3NominateThenRerank:
 
     def test_clean_reranker_variant_no_legacy_scoring(self):
         """clean_reranker must disable all legacy scoring knobs."""
-        import sys, os
+        import os
+        import sys
+
         bench_dir = os.path.join(os.path.dirname(__file__), "..", "benchmarks", "pipeline")
         if bench_dir not in sys.path:
             sys.path.insert(0, bench_dir)
         import importlib
+
         import evaluate
+
         importlib.reload(evaluate)
         v = evaluate.VARIANTS["clean_reranker"]
         assert v.get("HOTNESS_WEIGHT") == "0", "Legacy hotness must be disabled"
-        assert v.get("TEMPORAL_DECAY_HALFLIFE_DAYS") == "0", "Legacy temporal decay must be disabled"
+        assert v.get("TEMPORAL_DECAY_HALFLIFE_DAYS") == "0", (
+            "Legacy temporal decay must be disabled"
+        )
         assert v.get("RERANK_ENABLED") == "false", "Legacy rerank must be disabled"
 
     def test_legacy_path_preserved(self):
         """The legacy path (RERANKER_ENABLED=False) must still exist for shadow comparison."""
         import inspect
+
         from rlm_retriever import recursive_retrieve
+
         source = inspect.getsource(recursive_retrieve)
-        assert "LEGACY PATH" in source, (
-            "Legacy path comment marker must still exist"
-        )
+        assert "LEGACY PATH" in source, "Legacy path comment marker must still exist"
         assert "apply_temporal_decay" in source, (
             "Legacy temporal decay must still exist in the legacy path"
         )
@@ -918,7 +999,9 @@ class TestPhase3NominateThenRerank:
     def test_v2_no_threshold_filter(self):
         """The v2 reranker path must use threshold=0.0, no dynamic threshold."""
         import inspect
+
         from rlm_retriever import recursive_retrieve
+
         source = inspect.getsource(recursive_retrieve)
         lines = source.split("\n")
         in_v2 = False
@@ -937,14 +1020,19 @@ class TestPhase3NominateThenRerank:
 
     def test_benchmark_summary_includes_nomination_pool(self):
         """Benchmark summary must include avg_nomination_pool_size."""
-        import sys, os
+        import os
+        import sys
+
         bench_dir = os.path.join(os.path.dirname(__file__), "..", "benchmarks", "pipeline")
         if bench_dir not in sys.path:
             sys.path.insert(0, bench_dir)
         import importlib
+
         import evaluate
+
         importlib.reload(evaluate)
         import inspect
+
         source = inspect.getsource(evaluate.run_variant)
         assert "nomination_pool_size" in source, (
             "run_variant must extract nomination_pool_size from trace"
@@ -960,6 +1048,7 @@ class TestPhase4ParentTextAtIndexTime:
     def test_enrich_with_parent_deleted(self):
         """enrich_with_parent must no longer exist in rlm_retriever."""
         import rlm_retriever
+
         assert not hasattr(rlm_retriever, "enrich_with_parent"), (
             "enrich_with_parent must be deleted — parent text is stored at index time"
         )
@@ -967,7 +1056,9 @@ class TestPhase4ParentTextAtIndexTime:
     def test_no_enrich_with_parent_calls(self):
         """recursive_retrieve must not call enrich_with_parent anywhere."""
         import inspect
+
         from rlm_retriever import recursive_retrieve
+
         source = inspect.getsource(recursive_retrieve)
         assert "enrich_with_parent" not in source, (
             "All enrich_with_parent calls must be removed from recursive_retrieve"
@@ -976,7 +1067,9 @@ class TestPhase4ParentTextAtIndexTime:
     def test_search_vectors_returns_parent_text(self):
         """search_vectors result rows must include parent_text from payload."""
         import inspect
+
         from rlm_retriever import search_vectors
+
         source = inspect.getsource(search_vectors)
         assert '"parent_text"' in source or "'parent_text'" in source, (
             "search_vectors must propagate parent_text from Qdrant payload"
@@ -985,7 +1078,9 @@ class TestPhase4ParentTextAtIndexTime:
     def test_indexer_stores_parent_text_hierarchical(self):
         """Hierarchical indexing must store parent_text on child chunks."""
         import inspect
+
         from indexer import index_file
+
         source = inspect.getsource(index_file)
         assert "parent_text" in source, (
             "index_file must store parent_text in payload for child chunks"
@@ -1002,9 +1097,7 @@ class TestPhase4ParentTextAtIndexTime:
             {"id": "c2", "parent_id": "p1", "content": "Another child", "is_parent": False},
             {"id": "p2", "parent_id": None, "content": "Second parent", "is_parent": True},
         ]
-        _parent_text_map = {
-            c["id"]: c["content"] for c in hier_chunks if c["is_parent"]
-        }
+        _parent_text_map = {c["id"]: c["content"] for c in hier_chunks if c["is_parent"]}
         assert _parent_text_map["p1"] == "Parent text here"
         assert _parent_text_map["p2"] == "Second parent"
         assert "c1" not in _parent_text_map
@@ -1017,7 +1110,9 @@ class TestPhase4ParentTextAtIndexTime:
     def test_indexer_flat_chunks_have_empty_parent_text(self):
         """Flat chunks (no hierarchy) must store parent_text as empty string."""
         import inspect
+
         from indexer import index_file
+
         source = inspect.getsource(index_file)
         # The flat chunk payload must include parent_text with empty default
         assert source.count('"parent_text"') >= 2, (
@@ -1027,6 +1122,7 @@ class TestPhase4ParentTextAtIndexTime:
     def test_reranker_reads_parent_text(self):
         """_build_pair must read parent_text (index-time field), not parent_context."""
         from reranker import _build_pair
+
         candidate_with_text = {
             "text": "Child chunk content",
             "parent_text": "Full parent context from indexing",
@@ -1038,6 +1134,7 @@ class TestPhase4ParentTextAtIndexTime:
     def test_reranker_backward_compat_parent_context(self):
         """_build_pair should fall back to parent_context for pre-Phase-4 indexed data."""
         from reranker import _build_pair
+
         candidate_legacy = {
             "text": "Child chunk content",
             "parent_context": "Legacy parent context",
@@ -1048,6 +1145,7 @@ class TestPhase4ParentTextAtIndexTime:
     def test_reranker_no_parent_text_omits_section(self):
         """_build_pair omits parent context section when parent_text is empty."""
         from reranker import _build_pair
+
         candidate_no_parent = {
             "text": "Standalone chunk content",
             "parent_text": "",
@@ -1058,11 +1156,11 @@ class TestPhase4ParentTextAtIndexTime:
     def test_refine_uses_parent_text(self):
         """_refine_one_chunk must read parent_text, not parent_context."""
         import inspect
+
         from rlm_retriever import _refine_one_chunk
+
         source = inspect.getsource(_refine_one_chunk)
-        assert "parent_text" in source, (
-            "_refine_one_chunk must read from parent_text field"
-        )
+        assert "parent_text" in source, "_refine_one_chunk must read from parent_text field"
         assert "parent_context" not in source, (
             "_refine_one_chunk must not reference the deleted parent_context field"
         )
@@ -1070,12 +1168,12 @@ class TestPhase4ParentTextAtIndexTime:
     def test_v2_trace_parent_enriched_uses_parent_text(self):
         """The v2 path trace must check parent_text, not parent_context."""
         import inspect
+
         from rlm_retriever import recursive_retrieve
+
         source = inspect.getsource(recursive_retrieve)
-        assert 'parent_text' in source, (
-            "Trace parent_enriched must check parent_text field"
-        )
-        assert 'parent_context' not in source, (
+        assert "parent_text" in source, "Trace parent_enriched must check parent_text field"
+        assert "parent_context" not in source, (
             "No references to parent_context should remain in recursive_retrieve"
         )
 
@@ -1086,6 +1184,7 @@ class TestPhase5SemanticChunking:
     def test_chunking_strategy_config_exists(self):
         """CHUNKING_STRATEGY config variable must exist and default to 'semantic'."""
         import config
+
         assert hasattr(config, "CHUNKING_STRATEGY"), (
             "CHUNKING_STRATEGY must be defined in config.py"
         )
@@ -1094,6 +1193,7 @@ class TestPhase5SemanticChunking:
         )
         # Default must be semantic
         import os
+
         if "CHUNKING_STRATEGY" not in os.environ:
             assert config.CHUNKING_STRATEGY == "semantic", (
                 "Default CHUNKING_STRATEGY must be 'semantic'"
@@ -1102,11 +1202,13 @@ class TestPhase5SemanticChunking:
     def test_chunk_text_semantic_exported(self):
         """chunk_text_semantic must be importable from chunking module."""
         from chunking import chunk_text_semantic
+
         assert callable(chunk_text_semantic)
 
     def test_chunk_text_semantic_short_doc_fast_path(self):
         """Short documents (len <= size) return a single unchanged chunk."""
         from chunking import chunk_text_semantic
+
         text = "## Title\n\nShort content that fits in one chunk easily."
         result = chunk_text_semantic(text, size=2000)
         assert len(result) == 1
@@ -1115,6 +1217,7 @@ class TestPhase5SemanticChunking:
     def test_chunk_text_semantic_long_doc_splits(self):
         """Long documents with multiple headings are split per heading."""
         from chunking import chunk_text_semantic
+
         body = "Content word. " * 50  # ~700 chars
         text = f"## Section A\n\n{body}\n\n## Section B\n\n{body}"
         result = chunk_text_semantic(text, size=800)
@@ -1125,11 +1228,9 @@ class TestPhase5SemanticChunking:
     def test_chunk_text_semantic_no_cross_section_merge(self):
         """Content from different heading sections must not merge into one chunk."""
         from chunking import chunk_text_semantic
+
         body = "unique_marker_{n}. " * 40
-        text = (
-            f"## One\n\n{body.format(n='A')}\n\n"
-            f"## Two\n\n{body.format(n='B')}"
-        )
+        text = f"## One\n\n{body.format(n='A')}\n\n## Two\n\n{body.format(n='B')}"
         result = chunk_text_semantic(text, size=500)
         for chunk in result:
             has_a = "unique_marker_A" in chunk
@@ -1139,19 +1240,20 @@ class TestPhase5SemanticChunking:
     def test_hierarchical_accepts_strategy_param(self):
         """chunk_text_hierarchical must accept and propagate the strategy parameter."""
         import inspect
+
         from chunking import chunk_text_hierarchical
+
         sig = inspect.signature(chunk_text_hierarchical)
         assert "strategy" in sig.parameters, (
             "chunk_text_hierarchical must have a 'strategy' parameter"
         )
         default = sig.parameters["strategy"].default
-        assert default == "semantic", (
-            f"Default strategy must be 'semantic', got {default!r}"
-        )
+        assert default == "semantic", f"Default strategy must be 'semantic', got {default!r}"
 
     def test_hierarchical_semantic_uses_chunk_text_semantic(self, monkeypatch):
         """With strategy='semantic', chunk_text_hierarchical must call chunk_text_semantic."""
         import chunking
+
         calls = []
 
         original = chunking.chunk_text_semantic
@@ -1164,13 +1266,12 @@ class TestPhase5SemanticChunking:
         body = "word " * 100
         text = f"## Section\n\n{body}"
         chunking.chunk_text_hierarchical(text, "test.md", parent_size=300, strategy="semantic")
-        assert len(calls) > 0, (
-            "chunk_text_semantic was not called when strategy='semantic'"
-        )
+        assert len(calls) > 0, "chunk_text_semantic was not called when strategy='semantic'"
 
     def test_hierarchical_fixed_does_not_use_chunk_text_semantic(self, monkeypatch):
         """With strategy='fixed', chunk_text_hierarchical must NOT call chunk_text_semantic."""
         import chunking
+
         calls = []
 
         original = chunking.chunk_text_semantic
@@ -1183,23 +1284,23 @@ class TestPhase5SemanticChunking:
         body = "word " * 100
         text = f"## Section\n\n{body}"
         chunking.chunk_text_hierarchical(text, "test.md", parent_size=300, strategy="fixed")
-        assert len(calls) == 0, (
-            "chunk_text_semantic must NOT be called when strategy='fixed'"
-        )
+        assert len(calls) == 0, "chunk_text_semantic must NOT be called when strategy='fixed'"
 
     def test_indexer_imports_chunking_strategy(self):
         """indexer.py must import CHUNKING_STRATEGY from config."""
         import inspect
+
         import indexer
+
         source = inspect.getsource(indexer)
-        assert "CHUNKING_STRATEGY" in source, (
-            "indexer.py must import and use CHUNKING_STRATEGY"
-        )
+        assert "CHUNKING_STRATEGY" in source, "indexer.py must import and use CHUNKING_STRATEGY"
 
     def test_indexer_passes_strategy_to_hierarchical(self):
         """indexer.py must pass strategy= to chunk_text_hierarchical."""
         import inspect
+
         import indexer
+
         source = inspect.getsource(indexer)
         assert "strategy=CHUNKING_STRATEGY" in source, (
             "indexer.py must forward strategy=CHUNKING_STRATEGY to chunk_text_hierarchical"
@@ -1208,6 +1309,7 @@ class TestPhase5SemanticChunking:
     def test_short_document_strategy_invariant(self):
         """Short documents produce identical parent content for both strategies."""
         from chunking import chunk_text_hierarchical
+
         text = "## Note\n\nA short note that fits comfortably inside one parent chunk."
         sem = chunk_text_hierarchical(text, "note.md", parent_size=2000, strategy="semantic")
         fix = chunk_text_hierarchical(text, "note.md", parent_size=2000, strategy="fixed")
@@ -1217,3 +1319,67 @@ class TestPhase5SemanticChunking:
             "Short documents must produce identical parent chunks regardless of strategy"
         )
 
+
+class TestGetReferenceDocs:
+    """Unit tests for archivist_get_reference_docs handler."""
+
+    @pytest.mark.asyncio
+    async def test_full_return(self, tmp_path, monkeypatch):
+        """Handler returns full file content when no section is given."""
+        import handlers.tools_docs as tools_docs
+
+        doc = tmp_path / "CURSOR_SKILL.md"
+        doc.write_text("## Search\n\ncontent A\n\n## Storage\n\ncontent B\n")
+        monkeypatch.setattr(tools_docs, "_SKILL_DOC", doc)
+
+        result = await tools_docs._handle_get_reference_docs({})
+        assert len(result) == 1
+        assert "content A" in result[0].text
+        assert "content B" in result[0].text
+
+    @pytest.mark.asyncio
+    async def test_section_filter_match(self, tmp_path, monkeypatch):
+        """Handler returns only the matching section block."""
+        import handlers.tools_docs as tools_docs
+
+        doc = tmp_path / "CURSOR_SKILL.md"
+        doc.write_text("## Search\n\ncontent A\n\n## Storage\n\ncontent B\n")
+        monkeypatch.setattr(tools_docs, "_SKILL_DOC", doc)
+
+        result = await tools_docs._handle_get_reference_docs({"section": "storage"})
+        assert len(result) == 1
+        assert "content B" in result[0].text
+        assert "content A" not in result[0].text
+
+    @pytest.mark.asyncio
+    async def test_section_filter_no_match(self, tmp_path, monkeypatch):
+        """Handler returns error JSON listing available sections when no match."""
+        import json
+
+        import handlers.tools_docs as tools_docs
+
+        doc = tmp_path / "CURSOR_SKILL.md"
+        doc.write_text("## Search\n\ncontent A\n\n## Storage\n\ncontent B\n")
+        monkeypatch.setattr(tools_docs, "_SKILL_DOC", doc)
+
+        result = await tools_docs._handle_get_reference_docs({"section": "nonexistent"})
+        assert len(result) == 1
+        payload = json.loads(result[0].text)
+        assert payload["error"] == "section_not_found"
+        assert "Search" in payload["available_sections"]
+        assert "Storage" in payload["available_sections"]
+
+    @pytest.mark.asyncio
+    async def test_missing_doc_returns_error(self, tmp_path, monkeypatch):
+        """Handler returns error JSON when the doc file does not exist."""
+        import json
+
+        import handlers.tools_docs as tools_docs
+
+        monkeypatch.setattr(tools_docs, "_SKILL_DOC", tmp_path / "missing.md")
+        monkeypatch.setattr(tools_docs, "_FALLBACK_DOC", tmp_path / "also_missing.md")
+
+        result = await tools_docs._handle_get_reference_docs({})
+        assert len(result) == 1
+        payload = json.loads(result[0].text)
+        assert payload["error"] == "reference_docs_not_found"

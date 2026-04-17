@@ -121,10 +121,11 @@ class TestWebhookPendingFires:
 
     @pytest.mark.asyncio
     async def test_fire_background_tracks_task(self, monkeypatch):
-        from webhooks import fire_background, _pending_fires
+        from webhooks import _pending_fires, fire_background
 
         monkeypatch.setenv("WEBHOOK_URL", "http://localhost:9999/hook")
         import webhooks
+
         monkeypatch.setattr(webhooks, "WEBHOOK_URL", "http://localhost:9999/hook")
         monkeypatch.setattr(webhooks, "WEBHOOK_EVENTS", set())
 

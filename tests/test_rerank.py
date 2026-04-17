@@ -1,7 +1,7 @@
 """Tests for the reranker module."""
 
-import sys
 import os
+import sys
 
 # Allow importing from src/
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))

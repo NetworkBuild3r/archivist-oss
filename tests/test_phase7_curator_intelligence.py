@@ -4,10 +4,7 @@ Tests cover: curator_queue, LLM dedup dataclasses, hotness scoring, skill relati
 tip consolidation schema, context-status signaling, and metrics names.
 """
 
-import json
-import math
 import os
-import sqlite3
 import sys
 import uuid
 
@@ -24,20 +21,23 @@ if src not in sys.path:
 
 # ── Curator Queue ────────────────────────────────────────────────────────────
 
-class TestCuratorQueue:
 
+class TestCuratorQueue:
     def test_enqueue_returns_uuid(self):
         from curator_queue import enqueue
+
         op_id = enqueue("merge_memory", {"ids": ["a", "b"]})
         assert len(op_id) == 36  # UUID format
 
     def test_enqueue_invalid_op_type(self):
         from curator_queue import enqueue
+
         with pytest.raises(ValueError, match="Invalid op_type"):
             enqueue("invalid_op", {})
 
     def test_stats_counts_pending(self):
         from curator_queue import enqueue, stats
+
         enqueue("merge_memory", {})
         enqueue("archive_memory", {})
         s = stats()
@@ -46,7 +46,8 @@ class TestCuratorQueue:
 
     @pytest.mark.asyncio
     async def test_drain_applies_ops(self):
-        from curator_queue import enqueue, drain, stats
+        from curator_queue import drain, enqueue, stats
+
         enqueue("skip_store", {"reason": "test"})
         applied = await drain(limit=10)
         assert len(applied) >= 1
@@ -57,15 +58,18 @@ class TestCuratorQueue:
     @pytest.mark.asyncio
     async def test_drain_empty_returns_empty(self):
         from curator_queue import drain
+
         applied = await drain(limit=10)
         assert applied == []
 
 
 # ── Conflict Detection (LLM dedup dataclasses) ──────────────────────────────
 
+
 class TestDedupResult:
     def test_dedup_result_dataclass(self):
         from conflict_detection import DedupResult
+
         r = DedupResult(
             action="skip",
             existing_ids=["abc"],
@@ -78,25 +82,30 @@ class TestDedupResult:
 
 # ── Hotness Scoring ──────────────────────────────────────────────────────────
 
+
 class TestHotnessScoring:
     def test_compute_hotness_fresh(self):
         from hotness import compute_hotness
+
         score = compute_hotness(retrieval_count=10, days_since_last_access=0, halflife=7)
         assert 0.0 < score <= 1.0
 
     def test_compute_hotness_decays(self):
         from hotness import compute_hotness
+
         fresh = compute_hotness(retrieval_count=10, days_since_last_access=0, halflife=7)
         old = compute_hotness(retrieval_count=10, days_since_last_access=30, halflife=7)
         assert fresh > old
 
     def test_compute_hotness_zero_count(self):
         from hotness import compute_hotness
+
         score = compute_hotness(retrieval_count=0, days_since_last_access=0, halflife=7)
         assert 0.4 < score < 0.6  # sigmoid(log1p(0)) = sigmoid(0) = 0.5
 
     def test_sigmoid_bounds(self):
         from hotness import _sigmoid
+
         assert _sigmoid(0) == 0.5
         assert _sigmoid(100) > 0.99
         assert _sigmoid(-100) < 0.01
@@ -104,10 +113,10 @@ class TestHotnessScoring:
 
 # ── Skill Relations ──────────────────────────────────────────────────────────
 
-class TestSkillRelations:
 
+class TestSkillRelations:
     def test_add_and_get_relation(self):
-        from skills import register_skill, add_skill_relation, get_skill_relations
+        from skills import add_skill_relation, get_skill_relations, register_skill
 
         r1 = register_skill(name="kubectl", provider="k8s", registered_by="test")
         r2 = register_skill(name="helm", provider="k8s", registered_by="test")
@@ -128,11 +137,12 @@ class TestSkillRelations:
 
     def test_invalid_relation_type(self):
         from skills import add_skill_relation
+
         with pytest.raises(ValueError, match="Invalid relation_type"):
             add_skill_relation("a", "b", "invalid_type", created_by="test")
 
     def test_get_substitutes(self):
-        from skills import register_skill, add_skill_relation, get_skill_substitutes
+        from skills import add_skill_relation, get_skill_substitutes, register_skill
 
         r1 = register_skill(name="docker", provider="oci", registered_by="test")
         r2 = register_skill(name="podman", provider="oci", registered_by="test")
@@ -152,13 +162,15 @@ class TestSkillRelations:
 
 # ── Trajectory (tip consolidation schema) ────────────────────────────────────
 
-class TestTipConsolidationSchema:
 
+class TestTipConsolidationSchema:
     def test_tips_table_has_negative_example_column(self):
         from trajectory import _ensure_trajectory_schema
+
         _ensure_trajectory_schema()
 
         from graph import get_db
+
         conn = get_db()
         info = conn.execute("PRAGMA table_info(tips)").fetchall()
         columns = {row["name"] for row in info}
@@ -166,8 +178,9 @@ class TestTipConsolidationSchema:
         assert "archived" in columns
 
     def test_search_tips_excludes_archived(self):
-        from trajectory import _ensure_trajectory_schema, search_tips
         from graph import get_db
+        from trajectory import _ensure_trajectory_schema, search_tips
+
         _ensure_trajectory_schema()
 
         conn = get_db()
@@ -196,9 +209,11 @@ class TestTipConsolidationSchema:
 
 # ── Metrics ──────────────────────────────────────────────────────────────────
 
+
 class TestCuratorMetrics:
     def test_curator_metric_names_exist(self):
         import metrics as m
+
         assert hasattr(m, "CURATOR_QUEUE_DEPTH")
         assert hasattr(m, "CURATOR_DEDUP_DECISION")
         assert hasattr(m, "CURATOR_TIP_CONSOLIDATIONS")
@@ -207,6 +222,7 @@ class TestCuratorMetrics:
 
     def test_curator_metrics_emit(self):
         import metrics as m
+
         m.inc(m.CURATOR_LLM_CALLS)
         m.inc(m.CURATOR_DEDUP_DECISION, {"decision": "skip"})
         m.inc(m.CURATOR_TIP_CONSOLIDATIONS)
@@ -221,12 +237,18 @@ class TestCuratorMetrics:
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
+
 class TestCuratorConfig:
     def test_config_defaults(self):
         from config import (
-            DEDUP_LLM_ENABLED, DEDUP_LLM_THRESHOLD, CURATOR_TIP_BUDGET,
-            CURATOR_QUEUE_DRAIN_INTERVAL, HOTNESS_WEIGHT, HOTNESS_HALFLIFE_DAYS,
+            CURATOR_QUEUE_DRAIN_INTERVAL,
+            CURATOR_TIP_BUDGET,
+            DEDUP_LLM_ENABLED,
+            DEDUP_LLM_THRESHOLD,
+            HOTNESS_HALFLIFE_DAYS,
+            HOTNESS_WEIGHT,
         )
+
         assert isinstance(DEDUP_LLM_ENABLED, bool)
         assert 0.0 <= DEDUP_LLM_THRESHOLD <= 1.0
         assert CURATOR_TIP_BUDGET > 0

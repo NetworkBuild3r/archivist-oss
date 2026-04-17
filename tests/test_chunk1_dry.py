@@ -9,9 +9,6 @@ Covers:
 """
 
 import hashlib
-import re
-
-import pytest
 
 
 class TestNeedlePatternsConsistency:
@@ -27,6 +24,7 @@ class TestNeedlePatternsConsistency:
 
     def test_patterns_are_public(self):
         import chunking
+
         assert hasattr(chunking, "NEEDLE_PATTERNS")
         assert not hasattr(chunking, "_NEEDLE_PATTERNS"), (
             "_NEEDLE_PATTERNS should be renamed to NEEDLE_PATTERNS (public)"
@@ -74,9 +72,7 @@ class TestHostnameOvermatch:
         for phrase in false_positives:
             entities = extract_needle_entities(phrase)
             hostnames = [e for e in entities if e["type"] == "hostname"]
-            assert not hostnames, (
-                f"'{phrase}' should NOT be extracted as a hostname"
-            )
+            assert not hostnames, f"'{phrase}' should NOT be extracted as a hostname"
 
     def test_accepts_real_hostnames(self):
         from pre_extractor import extract_needle_entities
@@ -99,9 +95,7 @@ class TestReverseHydeCacheKey:
         key_a = hashlib.md5(text_a.encode()).hexdigest()
         key_b = hashlib.md5(text_b.encode()).hexdigest()
 
-        assert key_a != key_b, (
-            "Texts sharing a 200-char prefix must have different cache keys"
-        )
+        assert key_a != key_b, "Texts sharing a 200-char prefix must have different cache keys"
 
     def test_old_prefix_key_would_collide(self):
         shared_prefix = "A" * 200
@@ -117,16 +111,14 @@ class TestHydeConfigFromConfigPy:
 
     def test_no_direct_env_reads_in_hyde(self):
         import inspect
+
         import hyde
 
         source = inspect.getsource(hyde)
-        assert "os.getenv" not in source, (
-            "hyde.py must not call os.getenv — use config.py imports"
-        )
+        assert "os.getenv" not in source, "hyde.py must not call os.getenv — use config.py imports"
 
     def test_imports_config_values(self):
         import hyde
-        from config import REVERSE_HYDE_ENABLED, REVERSE_HYDE_QUESTIONS_PER_CHUNK
 
         assert hasattr(hyde, "REVERSE_HYDE_ENABLED") or "REVERSE_HYDE_ENABLED" in dir(hyde) or True
         # The real test is that the module imports compile without error
@@ -137,7 +129,7 @@ class TestNeedleRegistrySchema:
     """Needle registry must have composite index on (token, namespace)."""
 
     def test_composite_index_exists(self, graph_db):
-        from graph import get_db, _ensure_needle_registry
+        from graph import _ensure_needle_registry, get_db
 
         _ensure_needle_registry()
         conn = get_db()
@@ -157,9 +149,11 @@ class TestDeleteNeedleTokensLogsError:
     """delete_needle_tokens_by_memory must log errors, not silently pass."""
 
     def test_returns_count(self, graph_db):
-        from graph import register_needle_tokens, delete_needle_tokens_by_memory
+        from graph import delete_needle_tokens_by_memory, register_needle_tokens
 
-        register_needle_tokens("mem-1", "Server 192.168.1.1 on :8443", namespace="ns1", agent_id="a1")
+        register_needle_tokens(
+            "mem-1", "Server 192.168.1.1 on :8443", namespace="ns1", agent_id="a1"
+        )
         count = delete_needle_tokens_by_memory("mem-1")
         assert count >= 1, "Should return count of deleted rows"
 
@@ -175,6 +169,7 @@ class TestRlmRetrieverNoShadow:
 
     def test_no_m_loop_variable(self):
         import inspect
+
         import rlm_retriever
 
         source = inspect.getsource(rlm_retriever._extract_literal_tokens)
@@ -184,12 +179,12 @@ class TestRlmRetrieverNoShadow:
 
     def test_no_duplicate_metrics_import(self):
         import inspect
+
         import rlm_retriever
 
         source = inspect.getsource(rlm_retriever)
         import_lines = [
-            line.strip() for line in source.splitlines()
-            if line.strip() == "import metrics as m"
+            line.strip() for line in source.splitlines() if line.strip() == "import metrics as m"
         ]
         assert len(import_lines) <= 1, (
             f"Found {len(import_lines)} 'import metrics as m' lines — should be exactly 1"

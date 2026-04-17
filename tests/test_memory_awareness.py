@@ -5,7 +5,6 @@ import pytest
 
 class TestNamespaceInventory:
     def test_inventory_counts_by_type_and_ttl_invalidate(self, monkeypatch):
-        import time
         import namespace_inventory as ni
         from graph import upsert_fts_chunk
 
@@ -18,7 +17,14 @@ class TestNamespaceInventory:
             )
         for i in range(20):
             upsert_fts_chunk(
-                f"id-e-{i}", "experience text", f"e{i}.md", i, "a1", "ns1", "2026-01-01", "experience"
+                f"id-e-{i}",
+                "experience text",
+                f"e{i}.md",
+                i,
+                "a1",
+                "ns1",
+                "2026-01-01",
+                "experience",
             )
 
         inv = ni.get_inventory("ns1")
@@ -131,15 +137,18 @@ class TestCompactionMultiAgent:
     @pytest.mark.asyncio
     async def test_structured_multi_agent_prompt(self, mock_llm):
         import json
+
         from compaction import compact_structured
 
-        mock_llm.return_value = json.dumps({
-            "goal": "g",
-            "progress": ["p"],
-            "decisions": [],
-            "next_steps": [],
-            "critical_context": "",
-        })
+        mock_llm.return_value = json.dumps(
+            {
+                "goal": "g",
+                "progress": ["p"],
+                "decisions": [],
+                "next_steps": [],
+                "critical_context": "",
+            }
+        )
         await compact_structured([("a", "t")], multi_agent=True)
         assert mock_llm.call_count >= 1
         call_kw = mock_llm.call_args[1]

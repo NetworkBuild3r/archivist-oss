@@ -9,16 +9,13 @@ Covers:
 - RetrievalSource enum values
 """
 
-from unittest.mock import MagicMock, patch
-
-import pytest
-
 
 class TestRetrievalSource:
     """RetrievalSource enum has all expected values."""
 
     def test_all_sources(self):
         from result_types import RetrievalSource
+
         assert RetrievalSource.VECTOR == "vector"
         assert RetrievalSource.BM25 == "bm25"
         assert RetrievalSource.LITERAL == "literal"
@@ -36,9 +33,20 @@ class TestResultCandidate:
         d = rc.to_dict()
 
         required_keys = {
-            "id", "score", "text", "agent_id", "file_path", "file_type",
-            "date", "namespace", "chunk_index", "parent_id", "is_parent",
-            "importance_score", "retention_class", "retrieval_source",
+            "id",
+            "score",
+            "text",
+            "agent_id",
+            "file_path",
+            "file_type",
+            "date",
+            "namespace",
+            "chunk_index",
+            "parent_id",
+            "is_parent",
+            "importance_score",
+            "retention_class",
+            "retrieval_source",
         }
         assert required_keys.issubset(set(d.keys()))
         assert d["retrieval_source"] == "vector"
@@ -99,12 +107,14 @@ class TestResultCandidate:
         from result_types import ResultCandidate
 
         rc = ResultCandidate(id="x", text="stale", agent_id="old")
-        rc.update_from_payload({
-            "text": "fresh full text",
-            "agent_id": "new_agent",
-            "file_path": "explicit/new_agent",
-            "importance_score": 0.9,
-        })
+        rc.update_from_payload(
+            {
+                "text": "fresh full text",
+                "agent_id": "new_agent",
+                "file_path": "explicit/new_agent",
+                "importance_score": 0.9,
+            }
+        )
         assert rc.text == "fresh full text"
         assert rc.agent_id == "new_agent"
         assert rc.importance_score == 0.9
@@ -116,6 +126,7 @@ class TestRegistryNoHardcodedScore:
     def test_no_hardcoded_095(self):
         """The retriever must not set score=0.95 for registry hits."""
         import inspect
+
         from rlm_retriever import recursive_retrieve
 
         source = inspect.getsource(recursive_retrieve)
@@ -124,6 +135,7 @@ class TestRegistryNoHardcodedScore:
     def test_registry_hits_in_source(self):
         """Registry hits should be built via ResultCandidate.from_registry_hit."""
         import inspect
+
         from rlm_retriever import recursive_retrieve
 
         source = inspect.getsource(recursive_retrieve)
@@ -135,6 +147,7 @@ class TestLiteralSearchNoHardcodedScore:
 
     def test_no_hardcoded_085(self):
         import inspect
+
         from rlm_retriever import _literal_search_sync
 
         source = inspect.getsource(_literal_search_sync)
@@ -147,6 +160,7 @@ class TestRegistryRRFIntegration:
     def test_registry_fed_into_rrf(self):
         """The RRF merge call should include registry hits as a ranking."""
         import inspect
+
         from rlm_retriever import recursive_retrieve
 
         source = inspect.getsource(recursive_retrieve)
@@ -161,18 +175,22 @@ class TestStaleRegistryDrop:
     def test_stale_entries_dropped(self):
         from result_types import ResultCandidate
 
-        rc1 = ResultCandidate.from_registry_hit({
-            "memory_id": "alive",
-            "chunk_text": "text",
-            "agent_id": "a",
-            "namespace": "ns",
-        })
-        rc2 = ResultCandidate.from_registry_hit({
-            "memory_id": "dead",
-            "chunk_text": "old text",
-            "agent_id": "a",
-            "namespace": "ns",
-        })
+        rc1 = ResultCandidate.from_registry_hit(
+            {
+                "memory_id": "alive",
+                "chunk_text": "text",
+                "agent_id": "a",
+                "namespace": "ns",
+            }
+        )
+        rc2 = ResultCandidate.from_registry_hit(
+            {
+                "memory_id": "dead",
+                "chunk_text": "old text",
+                "agent_id": "a",
+                "namespace": "ns",
+            }
+        )
 
         payload_map = {"alive": {"text": "fresh text", "agent_id": "a"}}
 
@@ -193,9 +211,8 @@ class TestFleetRegistryLookup:
 
     def test_per_agent_lookup(self):
         import inspect
+
         from rlm_retriever import recursive_retrieve
 
         source = inspect.getsource(recursive_retrieve)
-        assert "for aid in agent_ids:" in source, (
-            "Fleet registry lookup must iterate agent_ids"
-        )
+        assert "for aid in agent_ids:" in source, "Fleet registry lookup must iterate agent_ids"

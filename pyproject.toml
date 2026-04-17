@@ -9,6 +9,123 @@ markers = [
     "benchmark: marks performance benchmarks (run with 'pytest benchmarks/')",
 ]
 
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "UP",  # pyupgrade
+    "S",   # flake8-bandit (security)
+    "T20", # flake8-print (no bare print in library code)
+    "RUF", # Ruff-specific rules
+    "SIM", # flake8-simplify
+    "PIE", # flake8-pie
+    "Q",   # flake8-quotes
+]
+ignore = [
+    # Existing codebase baseline — tighten these over time
+    "E501",   # line too long — formatter handles most; rest needs per-file review
+    "E402",   # module-level import not at top — shim files legitimately use this
+    "S101",   # assert used — fine in tests
+    "S110",   # try-except-pass — legacy error-swallowing; tracked separately
+    "S112",   # try-except-continue — same
+    "S324",   # insecure hash (MD5/SHA1) — used for non-security checksums
+    "S608",   # hardcoded SQL expressions — parameterised elsewhere, FTS5 OK
+    "S104",   # hardcoded bind-all — intentional MCP server behaviour
+    "S603",   # subprocess without shell=True — not a risk in our context
+    "S607",   # partial executable path — same
+    "T201",   # print — allowed in CLI / benchmark entry points
+    "B007",   # unused loop variable — common in retry/backoff loops
+    "B905",   # zip without strict — intentional in zip-shortest uses
+    "C408",   # unnecessary dict/list/tuple call — minor style
+    "RUF001", # ambiguous Unicode string — doc strings are intentional
+    "RUF002", # ambiguous Unicode docstring — same
+    "RUF003", # ambiguous Unicode comment — same
+    "RUF005", # collection literal concat — intentional in some list builds
+    "RUF059", # unused unpacked variable — used for side-effect unpacking
+    "SIM102", # collapsible-if — readability preference
+    "SIM103", # return-negated-condition — readability preference
+    "SIM105", # suppressible-exception — contextlib.suppress refactor deferred
+    "SIM108", # ternary refactor — readability preference
+    "SIM117", # multiple-with — readability preference
+    "SIM118", # in-dict-keys — minor
+    "UP042",  # str-enum — requires Python 3.11+ min; deferred
+    "UP047",  # non-pep695-generic — requires Python 3.12 syntax; deferred
+    "F841",   # local variable assigned but never used — review manually
+    "E741",   # ambiguous variable name — isolated; review manually
+    "C401",   # unnecessary generator → set() — minor
+    "B008",   # function calls in defaults — common FastAPI pattern
+    "RUF012", # mutable class vars — dataclass fields
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S106", "T201", "S105"]
+"benchmarks/**" = ["T201", "S101"]
+"src/archivist/app/main.py" = ["T201"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["archivist"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"
+
+[tool.mypy]
+python_version = "3.11"
+mypy_path = "src"
+explicit_package_bases = true
+
+# Suppress errors for third-party packages with no stubs
+[[tool.mypy.overrides]]
+module = ["xgboost", "xgboost.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["yaml"]
+ignore_missing_imports = true
+
+# Optional reranker deps — only installed with requirements-rerank.txt
+[[tool.mypy.overrides]]
+module = ["sentence_transformers", "sentence_transformers.*"]
+ignore_missing_imports = true
+
+# MCP / Starlette / uvicorn — present at runtime, stubs vary by version
+[[tool.mypy.overrides]]
+module = ["mcp", "mcp.*", "starlette", "starlette.*", "uvicorn", "uvicorn.*", "watchfiles", "watchfiles.*"]
+ignore_missing_imports = true
+
+# Qdrant client — has stubs but version drift can cause issues
+[[tool.mypy.overrides]]
+module = ["qdrant_client", "qdrant_client.*"]
+ignore_missing_imports = true
+
+[tool.bandit]
+# B608: all SQL in this codebase uses ? placeholders — Bandit cannot detect
+# that the f-string builds only the IN (...) placeholder list, not user data.
+# Every flagged site has been manually verified as parameterised.
+# B104: 0.0.0.0 bind is intentional for the MCP server container entrypoint.
+skips = ["B608", "B104"]
+
+[tool.coverage.run]
+branch = true
+source = ["src/archivist"]
+omit = ["tests/*", "benchmarks/*", "src/*/__init__.py"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+precision = 1
+fail_under = 46  # baseline 51.4% (2026-04-17) — raise by 2-5 pts each quarter
+
 [tool.pytest-benchmark]
 disable_gc = true
 warmup = true

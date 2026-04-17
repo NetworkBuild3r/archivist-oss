@@ -1,6 +1,5 @@
 """Metrics hardening (v1.11): METRICS_ENABLED gating, storage gauges, naming, auth exempt."""
 
-import pytest
 from starlette.testclient import TestClient
 
 
@@ -44,14 +43,14 @@ def test_metrics_disabled_endpoint_404(monkeypatch):
 
 def test_storage_gauge_constants_exist():
     from metrics import (
-        TOTAL_MEMORIES,
-        SQLITE_SIZE_BYTES,
-        QDRANT_VECTORS_TOTAL,
-        QDRANT_AVAILABLE,
-        SQLITE_AVAILABLE,
-        SEARCH_RESULTS,
         EMBED_CACHE_HIT,
         EMBED_CACHE_MISS,
+        QDRANT_AVAILABLE,
+        QDRANT_VECTORS_TOTAL,
+        SEARCH_RESULTS,
+        SQLITE_AVAILABLE,
+        SQLITE_SIZE_BYTES,
+        TOTAL_MEMORIES,
     )
 
     for name in (
@@ -113,7 +112,7 @@ def test_metrics_requires_auth_when_not_exempt(monkeypatch):
 
 
 def test_config_metrics_flags():
-    from config import METRICS_ENABLED, METRICS_AUTH_EXEMPT, METRICS_COLLECT_INTERVAL_SECONDS
+    from config import METRICS_AUTH_EXEMPT, METRICS_COLLECT_INTERVAL_SECONDS, METRICS_ENABLED
 
     assert isinstance(METRICS_ENABLED, bool)
     assert isinstance(METRICS_AUTH_EXEMPT, bool)

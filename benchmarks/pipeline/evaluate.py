@@ -36,7 +36,6 @@ import os
 import statistics
 import sys
 import time
-from pathlib import Path
 
 env_path = os.path.join(os.path.dirname(__file__), "..", "..", ".env")
 if os.path.exists(env_path):
@@ -127,7 +126,6 @@ VARIANTS = {
         "RETRIEVAL_THRESHOLD": "0.0",
         "SYNTHETIC_QUESTIONS_ENABLED": "true",
     },
-
     # ── v2 clean nominate-then-rerank (Phase 3) ──────────────────────────────
     # Full nomination pool (vector + synth + BM25 + needle registry + graph)
     # → ID-dedupe → cross-encoder rerank → top-K.  No RRF, no threshold, no
@@ -141,7 +139,6 @@ VARIANTS = {
         "RETRIEVAL_THRESHOLD": "0.0",
         "SYNTHETIC_QUESTIONS_ENABLED": "true",
     },
-
     # ── One-time expansion A/B (delete after proof run) ──────────────────────
     "expansion_off": {
         **_COMMON_DISABLED,
@@ -157,7 +154,6 @@ VARIANTS = {
         "SYNTHETIC_QUESTIONS_ENABLED": "false",
         "QUERY_EXPANSION_ENABLED": "true",
     },
-
     # ── Legacy additive variants (kept for historical comparison) ────────────
     "plus_bm25": {
         **_COMMON_DISABLED,
@@ -228,7 +224,9 @@ def _apply_variant(variant_name: str):
         os.environ[key] = value
 
     import importlib
+
     import config
+
     importlib.reload(config)
 
     bench_coll = os.environ.get("QDRANT_COLLECTION", "")
@@ -245,9 +243,17 @@ def _apply_variant(variant_name: str):
             setattr(config, attr, config_val)
 
     propagation_targets = [
-        "rlm_retriever", "graph_retrieval", "retrieval_filters",
-        "memory_fusion", "hot_cache", "hotness", "synthetic_questions",
-        "reranker", "query_expansion", "fts_search", "rank_fusion",
+        "rlm_retriever",
+        "graph_retrieval",
+        "retrieval_filters",
+        "memory_fusion",
+        "hot_cache",
+        "hotness",
+        "synthetic_questions",
+        "reranker",
+        "query_expansion",
+        "fts_search",
+        "rank_fusion",
     ]
     for mod_name in propagation_targets:
         if mod_name in sys.modules:
@@ -362,7 +368,9 @@ def filter_questions_for_scale(questions: list[dict], memory_scale: str | None) 
     if n_dropped:
         logger.info(
             "Filtered %d/%d questions not applicable to scale=%s",
-            n_dropped, len(questions), memory_scale,
+            n_dropped,
+            len(questions),
+            memory_scale,
         )
     return out
 
@@ -376,6 +384,7 @@ def _benchmark_collection_name(memory_scale: str | None) -> str:
 async def index_corpus(corpus_dir: str, memory_scale: str | None = None):
     """Index the seed corpus files into Qdrant and FTS5."""
     import config
+
     config.MEMORY_ROOT = corpus_dir
 
     # Use a benchmark-specific collection so production data is never touched
@@ -393,13 +402,17 @@ async def index_corpus(corpus_dir: str, memory_scale: str | None = None):
     config.TIERED_CONTEXT_ENABLED = False
 
     # Synthetic questions are opt-in for benchmarks (set env or pass variant list with vector_plus_synth)
-    _synth_q = os.environ.get("SYNTHETIC_QUESTIONS_ENABLED", "false").lower() in ("true", "1", "yes")
+    _synth_q = os.environ.get("SYNTHETIC_QUESTIONS_ENABLED", "false").lower() in (
+        "true",
+        "1",
+        "yes",
+    )
     config.SYNTHETIC_QUESTIONS_ENABLED = _synth_q
     if _synth_q:
         logger.info("Synthetic question generation ENABLED for this indexing run")
 
     from qdrant_client import QdrantClient
-    from qdrant_client.models import VectorParams, Distance, PayloadSchemaType
+    from qdrant_client.models import Distance, PayloadSchemaType, VectorParams
 
     client = QdrantClient(url=config.QDRANT_URL, timeout=30)
     collections = [c.name for c in client.get_collections().collections]
@@ -422,7 +435,11 @@ async def index_corpus(corpus_dir: str, memory_scale: str | None = None):
                 field_name=field,
                 field_schema=schema,
             )
-        logger.info("Created benchmark collection '%s' (%d-dim)", config.QDRANT_COLLECTION, config.VECTOR_DIM)
+        logger.info(
+            "Created benchmark collection '%s' (%d-dim)",
+            config.QDRANT_COLLECTION,
+            config.VECTOR_DIM,
+        )
     else:
         info = client.get_collection(config.QDRANT_COLLECTION)
         if info.points_count > 0:
@@ -431,11 +448,12 @@ async def index_corpus(corpus_dir: str, memory_scale: str | None = None):
                 collection_name=config.QDRANT_COLLECTION,
                 vectors_config=VectorParams(size=config.VECTOR_DIM, distance=Distance.COSINE),
             )
-            logger.info("Recreated benchmark collection '%s' for clean run", config.QDRANT_COLLECTION)
+            logger.info(
+                "Recreated benchmark collection '%s' for clean run", config.QDRANT_COLLECTION
+            )
 
     # Always start from a clean SQLite DB so schema migrations never run against
     # a stale database from a previous benchmark run.
-    import sqlite3 as _sqlite3
     _db_path = os.environ.get("SQLITE_PATH", "")
     if _db_path and os.path.exists(_db_path):
         os.remove(_db_path)
@@ -443,8 +461,9 @@ async def index_corpus(corpus_dir: str, memory_scale: str | None = None):
     if _db_path:
         os.makedirs(os.path.dirname(_db_path), exist_ok=True)
 
-    from indexer import full_index
     from graph import init_schema
+    from indexer import full_index
+
     init_schema()
     logger.info("Indexing corpus from %s ...", corpus_dir)
     count = await full_index(hierarchical=True)
@@ -472,6 +491,7 @@ async def run_variant(
     # variant may have populated the cache while it was enabled.  We must clear
     # the raw data structures to prevent cross-variant leakage.
     import hot_cache as _hc
+
     _hc.force_invalidate_all()
 
     # Re-import recursive_retrieve from the freshly-reloaded rlm_retriever
@@ -547,22 +567,24 @@ async def run_variant(
             n10 = _ndcg_at_k(sources, expected_kw, k=10)
             ndcg_at_10.append(n10)
 
-            results.append({
-                "question_id": q["id"],
-                "query": q["query"],
-                "query_type": q.get("query_type", ""),
-                "latency_ms": round(elapsed_ms, 1),
-                "token_cost": token_cost,
-                "recall_at_1": round(r1, 4),
-                "recall_at_5": round(r5, 4),
-                "recall_at_10": round(r10, 4),
-                "ndcg_at_5": round(n5, 4),
-                "ndcg_at_10": round(n10, 4),
-                "sources_count": len(sources),
-                "synthetic_hits": trace.get("synthetic_hits", 0),
-                "nomination_pool_size": trace.get("nomination_pool_size", 0),
-                "trace": trace,
-            })
+            results.append(
+                {
+                    "question_id": q["id"],
+                    "query": q["query"],
+                    "query_type": q.get("query_type", ""),
+                    "latency_ms": round(elapsed_ms, 1),
+                    "token_cost": token_cost,
+                    "recall_at_1": round(r1, 4),
+                    "recall_at_5": round(r5, 4),
+                    "recall_at_10": round(r10, 4),
+                    "ndcg_at_5": round(n5, 4),
+                    "ndcg_at_10": round(n10, 4),
+                    "sources_count": len(sources),
+                    "synthetic_hits": trace.get("synthetic_hits", 0),
+                    "nomination_pool_size": trace.get("nomination_pool_size", 0),
+                    "trace": trace,
+                }
+            )
 
             progress.step(
                 len(results),
@@ -583,23 +605,40 @@ async def run_variant(
         "ndcg_at_5": round(statistics.mean(ndcg_at_5), 4) if ndcg_at_5 else 0,
         "ndcg_at_10": round(statistics.mean(ndcg_at_10), 4) if ndcg_at_10 else 0,
         "latency_p50_ms": round(statistics.median(latencies), 1) if latencies else 0,
-        "latency_p95_ms": round(sorted(latencies)[int(len(latencies) * 0.95)] if latencies else 0, 1),
+        "latency_p95_ms": round(
+            sorted(latencies)[int(len(latencies) * 0.95)] if latencies else 0, 1
+        ),
         "latency_mean_ms": round(statistics.mean(latencies), 1) if latencies else 0,
         "total_tokens": sum(token_costs),
         "avg_tokens_per_query": round(statistics.mean(token_costs), 0) if token_costs else 0,
         "total_synthetic_hits": sum(r.get("synthetic_hits", 0) for r in results),
         "queries_with_synthetic_hits": sum(1 for r in results if r.get("synthetic_hits", 0) > 0),
         "avg_nomination_pool_size": round(
-            statistics.mean([r.get("nomination_pool_size", 0) for r in results if r.get("nomination_pool_size", 0) > 0]),
+            statistics.mean(
+                [
+                    r.get("nomination_pool_size", 0)
+                    for r in results
+                    if r.get("nomination_pool_size", 0) > 0
+                ]
+            ),
             1,
-        ) if any(r.get("nomination_pool_size", 0) > 0 for r in results) else 0,
+        )
+        if any(r.get("nomination_pool_size", 0) > 0 for r in results)
+        else 0,
     }
 
     by_type = {}
     for r in results:
         qt = r["query_type"]
         if qt not in by_type:
-            by_type[qt] = {"recall_1": [], "recall_5": [], "recall_10": [], "ndcg_5": [], "ndcg_10": [], "latency": []}
+            by_type[qt] = {
+                "recall_1": [],
+                "recall_5": [],
+                "recall_10": [],
+                "ndcg_5": [],
+                "ndcg_10": [],
+                "latency": [],
+            }
         by_type[qt]["recall_1"].append(r["recall_at_1"])
         by_type[qt]["recall_5"].append(r["recall_at_5"])
         by_type[qt]["recall_10"].append(r["recall_at_10"])
@@ -683,7 +722,7 @@ def format_retention_slices_table(
             r5 = row.get("recall_at_5")
             ndcg = row.get("ndcg_at_5")
             n = row.get("count", 0)
-            if isinstance(r5, (int, float)) and isinstance(ndcg, (int, float)):
+            if isinstance(r5, int | float) and isinstance(ndcg, int | float):
                 cells.append(f"{r5:.4f} / {ndcg:.4f} (n={n})")
             else:
                 cells.append("---")
@@ -718,7 +757,9 @@ def format_comparison_table(
         fits = "NO — OVERFLOW" if corpus_overflow else "YES"
 
         stuffing_recall = f"{ss.get('recall', 0):.4f}" if ss.get("llm_called") else "—(no LLM)"
-        stuffing_p50 = f"{ss['latency_p50_ms']:.0f}" if ss.get("latency_p50_ms") is not None else "—"
+        stuffing_p50 = (
+            f"{ss['latency_p50_ms']:.0f}" if ss.get("latency_p50_ms") is not None else "—"
+        )
 
         arch_variants = archivist_by_scale.get(scale, [])
         if arch_variants:
@@ -750,8 +791,16 @@ def format_full_comparison_table(
     archivist_summaries: list[dict],
 ) -> str:
     """Per-query-type side-by-side: context stuffing (with real LLM) vs best Archivist variant."""
-    query_types = ["single_hop", "multi_hop", "temporal", "adversarial",
-                   "agent_scoped", "broad", "contradiction", "needle"]
+    query_types = [
+        "single_hop",
+        "multi_hop",
+        "temporal",
+        "adversarial",
+        "agent_scoped",
+        "broad",
+        "contradiction",
+        "needle",
+    ]
 
     stuffing_by_scale: dict[str, dict] = {
         ss.get("memory_scale", "default"): ss for ss in stuffing_summaries
@@ -761,10 +810,12 @@ def format_full_comparison_table(
         scale = s.get("memory_scale", "default")
         archivist_by_scale.setdefault(scale, []).append(s)
 
-    scales = list(dict.fromkeys(
-        [ss.get("memory_scale", "default") for ss in stuffing_summaries]
-        + list(archivist_by_scale.keys())
-    ))
+    scales = list(
+        dict.fromkeys(
+            [ss.get("memory_scale", "default") for ss in stuffing_summaries]
+            + list(archivist_by_scale.keys())
+        )
+    )
 
     lines = [
         "## Full Comparison: Context Stuffing vs Archivist — Per Query Type",
@@ -784,7 +835,9 @@ def format_full_comparison_table(
         overflow_label = ""
         if ss:
             if ss.get("corpus_overflow"):
-                overflow_label = f" **OVERFLOW** ({ss['corpus_tokens']:,} tok > {ss['context_budget']:,} budget)"
+                overflow_label = (
+                    f" **OVERFLOW** ({ss['corpus_tokens']:,} tok > {ss['context_budget']:,} budget)"
+                )
             else:
                 pct = round(ss.get("corpus_tokens", 0) / max(ss.get("context_budget", 1), 1) * 100)
                 overflow_label = f" ({ss['corpus_tokens']:,} tok, {pct}% of window)"
@@ -792,8 +845,12 @@ def format_full_comparison_table(
         arch_label = f"Archivist/{best_arch['variant']}" if best_arch else "Archivist"
         lines.append(f"### Scale: {scale}{overflow_label}")
         lines.append("")
-        lines.append(f"| Query Type | Count | Stuffing Recall | Stuffing Overflow% | {arch_label} Recall | Delta |")
-        lines.append("|------------|-------|-----------------|--------------------|---------------------|-------|")
+        lines.append(
+            f"| Query Type | Count | Stuffing Recall | Stuffing Overflow% | {arch_label} Recall | Delta |"
+        )
+        lines.append(
+            "|------------|-------|-----------------|--------------------|---------------------|-------|"
+        )
 
         all_types_here: list[str] = []
         stuff_by_type = (ss or {}).get("by_query_type", {})
@@ -869,20 +926,27 @@ _FIXTURE_GLOSSARY = {
 
 def _seed_graph_from_fixtures(corpus_dir: str):
     """Deterministic graph population from a known glossary — no LLM calls."""
-    from graph import upsert_entity, add_fact, init_schema
+    from graph import add_fact, init_schema, upsert_entity
+
     init_schema()
 
     for name, meta in _FIXTURE_GLOSSARY.items():
         eid = upsert_entity(name, meta["type"])
-        add_fact(eid, f"{name} is a {meta['type']} in the benchmark corpus", "benchmark/fixtures", "benchmark")
+        add_fact(
+            eid,
+            f"{name} is a {meta['type']} in the benchmark corpus",
+            "benchmark/fixtures",
+            "benchmark",
+        )
         for alias in meta.get("aliases", []):
             upsert_entity(alias, meta["type"])
 
     import glob as _glob
+
     md_files = _glob.glob(os.path.join(corpus_dir, "**", "*.md"), recursive=True)
     for fpath in md_files[:50]:
         try:
-            with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+            with open(fpath, encoding="utf-8", errors="replace") as f:
                 text = f.read(2000).lower()
         except Exception:
             continue
@@ -910,6 +974,7 @@ async def _run_benchmark_session(
     Prints a clear session header/footer with timing data for easy copy-paste.
     """
     import importlib
+
     import config
 
     corpus_dir = os.path.abspath(corpus_dir)
@@ -924,7 +989,10 @@ async def _run_benchmark_session(
     scale_label = memory_scale or "default"
     logger.info(
         "━━━ Session: scale=%s  variants=%s  questions=%d  refine=%s ━━━",
-        scale_label, ",".join(variant_names), len(questions), refine,
+        scale_label,
+        ",".join(variant_names),
+        len(questions),
+        refine,
     )
 
     if not skip_index:
@@ -993,7 +1061,9 @@ async def _run_benchmark_session(
     session_elapsed = time.monotonic() - session_start
     logger.info(
         "━━━ Session complete: scale=%s  %d variants  %.1fs total ━━━",
-        scale_label, len(variant_names), session_elapsed,
+        scale_label,
+        len(variant_names),
+        session_elapsed,
     )
 
     return all_results, all_summaries
@@ -1009,8 +1079,12 @@ async def main():
         help="Comma-separated variants (used with --scale-sweep); default all variants",
     )
     parser.add_argument("--skip-index", action="store_true", help="Skip corpus indexing")
-    parser.add_argument("--index-only", action="store_true", help="Only index corpus, don't run queries")
-    parser.add_argument("--no-refine", action="store_true", help="Skip LLM refinement stages (faster)")
+    parser.add_argument(
+        "--index-only", action="store_true", help="Only index corpus, don't run queries"
+    )
+    parser.add_argument(
+        "--no-refine", action="store_true", help="Skip LLM refinement stages (faster)"
+    )
     parser.add_argument("--output", type=str, help="Output JSON file path")
     parser.add_argument("--limit", type=int, default=0, help="Limit number of questions (0=all)")
     parser.add_argument(
@@ -1100,7 +1174,7 @@ async def main():
     logging.getLogger("httpcore").setLevel(logging.WARNING)
 
     questions_path = args.questions or QUESTIONS_PATH
-    with open(questions_path, "r", encoding="utf-8") as f:
+    with open(questions_path, encoding="utf-8") as f:
         questions_all = json.load(f)
     if args.limit > 0:
         questions_all = questions_all[: args.limit]
@@ -1146,6 +1220,7 @@ async def main():
 
             if args.compare_stuffing:
                 from benchmarks.pipeline.context_stuffing_baseline import run_stuffing_baseline
+
                 logger.info("Running context stuffing baseline for scale=%s ...", scale)
                 stuffing_data = await run_stuffing_baseline(
                     corpus_dir=corpus_dir,
@@ -1200,10 +1275,14 @@ async def main():
                 "comparison_table": format_table(combined_summaries),
             }
             if args.print_slices:
-                output_data["retention_slices_table"] = format_retention_slices_table(combined_summaries)
+                output_data["retention_slices_table"] = format_retention_slices_table(
+                    combined_summaries
+                )
             if args.compare_stuffing and stuffing_summaries:
                 output_data["stuffing_summaries"] = stuffing_summaries
-                output_data["breakeven_table"] = format_comparison_table(stuffing_summaries, combined_summaries)
+                output_data["breakeven_table"] = format_comparison_table(
+                    stuffing_summaries, combined_summaries
+                )
                 if args.stuffing_call_llm:
                     output_data["full_comparison_table"] = format_full_comparison_table(
                         stuffing_summaries, combined_summaries
@@ -1226,6 +1305,7 @@ async def main():
     single_stuffing_summary: dict | None = None
     if args.compare_stuffing:
         from benchmarks.pipeline.context_stuffing_baseline import run_stuffing_baseline
+
         logger.info("Running context stuffing baseline ...")
         stuffing_data = await run_stuffing_baseline(
             corpus_dir=corpus_dir,

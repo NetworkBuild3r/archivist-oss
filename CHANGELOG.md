@@ -5,6 +5,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-04-17
+
+### Added
+
+- **Official 2.0 release** — Version **2.0.0** (`v2.0.0` tag): package layout under `src/archivist/`, documented in [`docs/RELEASE_NOTES_v2.0.md`](docs/RELEASE_NOTES_v2.0.md).
+- **Pipeline benchmark snapshot (Phase 5)** — Results for `clean_reranker` vs `vector_plus_synth` on `memory_scale=small` (108 queries per variant) documented in [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md); reproducible JSON at `.benchmarks/phase5_semantic_chunking.json` when running the harness locally.
+
+### Changed
+
+- **`archivist` package layout** — Production code organized into `core/`, `storage/`, `lifecycle/`, `retrieval/`, `write/`, `features/`, `utils/`, and `app/`; top-level `src/*.py` shims preserve backward-compatible imports.
+- **Mypy** — `[tool.mypy]` in `pyproject.toml` sets `mypy_path = "src"` and `explicit_package_bases = true`, with targeted `ignore_missing_imports` for `xgboost` and `yaml` stubs.
+- **Version strings** — Health endpoint, startup log, and backup manifest `archivist_version` set to **2.0.0**.
+
 ## [1.12.0] - 2026-04-14
 
 ### Added

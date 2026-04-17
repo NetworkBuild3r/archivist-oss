@@ -1,11 +1,9 @@
 """Tests for graph.py — entity, fact, relationship CRUD and FTS5 with real SQLite."""
 
-import pytest
-
 
 class TestEntityOperations:
     def test_upsert_entity_creates(self, graph_db):
-        from graph import upsert_entity, search_entities
+        from graph import search_entities, upsert_entity
 
         eid = upsert_entity("Kubernetes", "tool")
         assert eid > 0
@@ -15,7 +13,7 @@ class TestEntityOperations:
         assert results[0]["name"] == "Kubernetes"
 
     def test_upsert_entity_increments_mention_count(self, graph_db):
-        from graph import upsert_entity, get_db
+        from graph import get_db, upsert_entity
 
         eid1 = upsert_entity("ArgoCD", "tool")
         eid2 = upsert_entity("ArgoCD", "tool")
@@ -36,7 +34,7 @@ class TestEntityOperations:
 
 class TestFactOperations:
     def test_add_and_retrieve_fact(self, graph_db):
-        from graph import upsert_entity, add_fact, get_entity_facts
+        from graph import add_fact, get_entity_facts, upsert_entity
 
         eid = upsert_entity("PostgreSQL", "database")
         fid = add_fact(eid, "Migration approved for Q2 2026", "test.md", "chief")
@@ -47,7 +45,7 @@ class TestFactOperations:
         assert "Migration approved" in facts[0]["fact_text"]
 
     def test_multiple_facts_for_entity(self, graph_db):
-        from graph import upsert_entity, add_fact, get_entity_facts
+        from graph import add_fact, get_entity_facts, upsert_entity
 
         eid = upsert_entity("Redis")
         add_fact(eid, "Used for caching", "a.md", "chief")
@@ -59,7 +57,7 @@ class TestFactOperations:
 
 class TestRelationshipOperations:
     def test_add_relationship(self, graph_db):
-        from graph import upsert_entity, add_relationship, get_entity_relationships
+        from graph import add_relationship, get_entity_relationships, upsert_entity
 
         eid1 = upsert_entity("ArgoCD")
         eid2 = upsert_entity("Kubernetes")
@@ -70,7 +68,7 @@ class TestRelationshipOperations:
         assert rels[0]["relation_type"] == "deploys_to"
 
     def test_relationship_upsert_updates_evidence(self, graph_db):
-        from graph import upsert_entity, add_relationship, get_db
+        from graph import add_relationship, get_db, upsert_entity
 
         eid1 = upsert_entity("A")
         eid2 = upsert_entity("B")
@@ -89,14 +87,14 @@ class TestRelationshipOperations:
 
 class TestSearchEntities:
     def test_search_by_partial_name(self, graph_db):
-        from graph import upsert_entity, search_entities
+        from graph import search_entities, upsert_entity
 
         upsert_entity("GitLab CI/CD", "tool")
         results = search_entities("gitlab")
         assert len(results) >= 1
 
     def test_search_limit(self, graph_db):
-        from graph import upsert_entity, search_entities
+        from graph import search_entities, upsert_entity
 
         for i in range(20):
             upsert_entity(f"entity_{i}", "test")
@@ -105,19 +103,20 @@ class TestSearchEntities:
 
     def test_search_empty_query(self, graph_db):
         from graph import search_entities
+
         results = search_entities("")
         assert isinstance(results, list)
 
 
 class TestCuratorState:
     def test_set_and_get(self, graph_db):
-        from graph import set_curator_state, get_curator_state
+        from graph import get_curator_state, set_curator_state
 
         set_curator_state("test_key", "test_value")
         assert get_curator_state("test_key") == "test_value"
 
     def test_overwrite(self, graph_db):
-        from graph import set_curator_state, get_curator_state
+        from graph import get_curator_state, set_curator_state
 
         set_curator_state("k", "v1")
         set_curator_state("k", "v2")
@@ -125,12 +124,13 @@ class TestCuratorState:
 
     def test_missing_key(self, graph_db):
         from graph import get_curator_state
+
         assert get_curator_state("nonexistent") is None
 
 
 class TestFTS5:
     def test_upsert_and_search(self, graph_db):
-        from graph import upsert_fts_chunk, search_fts
+        from graph import search_fts, upsert_fts_chunk
 
         upsert_fts_chunk(
             qdrant_id="abc-123",
@@ -146,16 +146,18 @@ class TestFTS5:
         assert results[0]["qdrant_id"] == "abc-123"
 
     def test_search_with_namespace_filter(self, graph_db):
-        from graph import upsert_fts_chunk, search_fts
+        from graph import search_fts, upsert_fts_chunk
 
         upsert_fts_chunk("id1", "kubernetes cluster health", "a.md", 0, "argo", "deployer")
-        upsert_fts_chunk("id2", "kubernetes monitoring dashboards", "b.md", 0, "grafgreg", "pipeline")
+        upsert_fts_chunk(
+            "id2", "kubernetes monitoring dashboards", "b.md", 0, "grafgreg", "pipeline"
+        )
 
         results = search_fts("kubernetes", namespace="deployer")
         assert all(r["namespace"] == "deployer" for r in results)
 
     def test_delete_by_file(self, graph_db):
-        from graph import upsert_fts_chunk, delete_fts_chunks_by_file, search_fts
+        from graph import delete_fts_chunks_by_file, search_fts, upsert_fts_chunk
 
         upsert_fts_chunk("id1", "some text content", "file_a.md", 0)
         upsert_fts_chunk("id2", "other text content", "file_a.md", 1)

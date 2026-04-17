@@ -1,16 +1,18 @@
 """Phase 6 tests — metrics, webhooks, dashboard, batch heuristic."""
 
-import sys
 import os
 import sqlite3
+import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 
 # ── Metrics ──────────────────────────────────────────────────────────────────
 
+
 def test_metrics_counter():
     import metrics as m
+
     m._counters.clear()
     m._gauges.clear()
     m._histogram_buckets.clear()
@@ -27,6 +29,7 @@ def test_metrics_counter():
 
 def test_metrics_histogram():
     import metrics as m
+
     m._counters.clear()
     m._gauges.clear()
     m._histogram_buckets.clear()
@@ -44,6 +47,7 @@ def test_metrics_histogram():
 
 def test_metrics_gauge():
     import metrics as m
+
     m._counters.clear()
     m._gauges.clear()
     m._histogram_buckets.clear()
@@ -60,6 +64,7 @@ def test_metrics_gauge():
 
 def test_metrics_render_format():
     import metrics as m
+
     m._counters.clear()
     m._gauges.clear()
     m._histogram_buckets.clear()
@@ -72,8 +77,10 @@ def test_metrics_render_format():
 
 # ── Webhooks ─────────────────────────────────────────────────────────────────
 
+
 def test_webhook_config():
-    from config import WEBHOOK_URL, WEBHOOK_TIMEOUT, WEBHOOK_EVENTS
+    from config import WEBHOOK_EVENTS, WEBHOOK_TIMEOUT, WEBHOOK_URL
+
     assert isinstance(WEBHOOK_URL, str)
     assert WEBHOOK_TIMEOUT > 0
     assert isinstance(WEBHOOK_EVENTS, set)
@@ -82,6 +89,7 @@ def test_webhook_config():
 def test_webhook_fire_no_url():
     """fire_background should be a no-op when WEBHOOK_URL is empty."""
     import webhooks
+
     original = webhooks.WEBHOOK_URL
     try:
         webhooks.WEBHOOK_URL = ""
@@ -127,15 +135,17 @@ def _patch_dbs():
     """)
     _test_conn.commit()
 
-    import graph
     import dashboard as dash_mod
+    import graph
+
     graph._original_get_db = graph.get_db
     graph.get_db = lambda: _test_conn
-    dash_mod._original_get_db = dash_mod.get_db if hasattr(dash_mod, 'get_db') else None
+    dash_mod._original_get_db = dash_mod.get_db if hasattr(dash_mod, "get_db") else None
 
 
 def _unpatch_dbs():
     import graph
+
     graph.get_db = graph._original_get_db
     if _test_conn:
         _test_conn.close()
@@ -160,6 +170,7 @@ def test_batch_heuristic_default():
 def test_batch_heuristic_range():
     """Batch size should always be between 1 and 10."""
     from dashboard import batch_heuristic
+
     _patch_dbs()
     try:
         h = batch_heuristic(1)
@@ -172,12 +183,15 @@ def test_batch_heuristic_range():
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
+
 def test_metrics_enabled_config():
     from config import METRICS_ENABLED
+
     assert isinstance(METRICS_ENABLED, bool)
 
 
 def test_webhook_events_parsing():
     """WEBHOOK_EVENTS should be a set (possibly empty)."""
     from config import WEBHOOK_EVENTS
+
     assert isinstance(WEBHOOK_EVENTS, set)
