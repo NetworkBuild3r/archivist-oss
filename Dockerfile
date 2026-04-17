@@ -22,4 +22,4 @@ EXPOSE 3100
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD python -c "import httpx; httpx.get('http://localhost:3100/health').raise_for_status()"
 
-CMD ["python", "archivist/app/main.py"]
+CMD ["python3", "-m", "archivist.app.main"]
