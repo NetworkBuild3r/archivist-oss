@@ -4,8 +4,6 @@ Sets up in-memory SQLite, mock LLM, and isolated config for unit tests.
 """
 
 import os
-import sqlite3
-import tempfile
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -27,6 +25,7 @@ def _isolate_env(monkeypatch, tmp_path):
 
     import config
     import graph
+
     monkeypatch.setattr(config, "SQLITE_PATH", db_path)
     monkeypatch.setattr(graph, "SQLITE_PATH", db_path)
     graph.init_schema()
@@ -61,11 +60,14 @@ def graph_db(tmp_path, monkeypatch):
     monkeypatch.setenv("SQLITE_PATH", db_path)
 
     import importlib
+
     import config
+
     importlib.reload(config)
     monkeypatch.setattr("config.SQLITE_PATH", db_path)
 
     import graph
+
     monkeypatch.setattr(graph, "SQLITE_PATH", db_path)
     graph.init_schema()
     return db_path
@@ -101,7 +103,9 @@ agent_namespaces:
     monkeypatch.setenv("NAMESPACES_CONFIG_PATH", str(config_yaml))
 
     import importlib
+
     import rbac
+
     importlib.reload(rbac)
     rbac._config = None
     rbac._permissive_fallback = False

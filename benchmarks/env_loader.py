@@ -1,4 +1,5 @@
 """Load repo root `.env` into os.environ (for benchmarks)."""
+
 import os
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))

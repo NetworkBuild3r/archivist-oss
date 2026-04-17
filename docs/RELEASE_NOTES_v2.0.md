@@ -1,7 +1,7 @@
 # Archivist 2.0.0 — Release Notes
 
-**Release date:** 2026-04-17  
-**Git tag:** `v2.0.0`  
+**Release date:** 2026-04-17
+**Git tag:** `v2.0.0`
 **Branch:** `feature/v1.12-cascade-tech-debt` (merge target: `main`)
 
 ## Summary

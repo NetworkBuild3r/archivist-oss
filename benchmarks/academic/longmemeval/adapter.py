@@ -42,6 +42,7 @@ Setup:
     Scripted thin runs: see ``benchmarks/README.md``.
 
 """
+
 from __future__ import annotations
 
 import argparse
@@ -123,10 +124,12 @@ VARIANTS = {
 def _apply_variant(variant_name: str):
     """Apply config overrides for a variant by setting env vars and reloading config."""
     import importlib
+
     env_overrides = VARIANTS[variant_name]
     for key, value in env_overrides.items():
         os.environ[key] = value
     import config
+
     importlib.reload(config)
 
 
@@ -135,8 +138,10 @@ def _apply_variant(variant_name: str):
 # official repo (MIT license).  They produce a yes/no verdict with >97% human
 # agreement per the paper.
 
-def _get_judge_prompt(task: str, question: str, answer: str, response: str,
-                      abstention: bool = False) -> str:
+
+def _get_judge_prompt(
+    task: str, question: str, answer: str, response: str, abstention: bool = False
+) -> str:
     """Build the official LongMemEval answer-check prompt for the LLM judge."""
     if abstention:
         return (
@@ -201,6 +206,7 @@ def _get_judge_prompt(task: str, question: str, answer: str, response: str,
 
 # ── Official retrieval metrics (from src/retrieval/eval_utils.py) ─────────────
 
+
 def _dcg(relevances: list[int], k: int) -> float:
     """Discounted Cumulative Gain at k."""
     rel = relevances[:k]
@@ -232,9 +238,10 @@ def _recall_at_k(retrieved_session_ids: list[int], evidence_ids: set[int], k: in
 
 # ── Data loading and helpers ──────────────────────────────────────────────────
 
+
 def _load_data(data_file: str) -> list[dict]:
     """Load a LongMemEval JSON file (longmemeval_s_cleaned.json etc.)."""
-    with open(data_file, "r", encoding="utf-8") as f:
+    with open(data_file, encoding="utf-8") as f:
         data = json.load(f)
     if isinstance(data, dict) and "data" in data:
         data = data["data"]
@@ -269,6 +276,7 @@ async def _run_curator_on_files(mem_root: str) -> None:
     """Run curator entity extraction on all indexed files."""
     from curator import extract_knowledge, process_extraction
     from graph import init_schema
+
     init_schema()
     md_files = sorted(Path(mem_root).rglob("*.md"))
     for fp in md_files:
@@ -282,8 +290,9 @@ async def _run_curator_on_files(mem_root: str) -> None:
             logger.debug("Curator extraction failed for %s: %s", fp, e)
 
 
-async def _llm_judge(question: str, ground_truth: str, hypothesis: str,
-                     question_type: str, is_abstention: bool) -> bool:
+async def _llm_judge(
+    question: str, ground_truth: str, hypothesis: str, question_type: str, is_abstention: bool
+) -> bool:
     """Call the LLM to judge whether the hypothesis answers the question correctly.
 
     Uses the same task-specific prompts as the official LongMemEval evaluation.
@@ -337,6 +346,7 @@ async def _llm_judge(question: str, ground_truth: str, hypothesis: str,
 
 # ── Main benchmark runner ────────────────────────────────────────────────────
 
+
 async def run_longmemeval_benchmark(
     data_file: str,
     limit: int = 0,
@@ -370,6 +380,7 @@ async def run_longmemeval_benchmark(
     os.makedirs(mem_root, exist_ok=True)
 
     import config
+
     original_memory_root = config.MEMORY_ROOT
     original_sqlite = config.SQLITE_PATH
 
@@ -380,11 +391,12 @@ async def run_longmemeval_benchmark(
         config.SQLITE_PATH = sqlite_path
         os.environ["SQLITE_PATH"] = sqlite_path
 
+        from qdrant_client import QdrantClient
+        from qdrant_client.models import Distance, VectorParams
+
+        from graph import init_schema
         from indexer import full_index
         from rlm_retriever import recursive_retrieve
-        from graph import init_schema
-        from qdrant_client import QdrantClient
-        from qdrant_client.models import VectorParams, Distance
 
         qclient = QdrantClient(url=config.QDRANT_URL, timeout=30)
         init_schema()
@@ -420,7 +432,8 @@ async def run_longmemeval_benchmark(
             qclient.create_collection(
                 collection_name=config.QDRANT_COLLECTION,
                 vectors_config=VectorParams(
-                    size=config.VECTOR_DIM, distance=Distance.COSINE,
+                    size=config.VECTOR_DIM,
+                    distance=Distance.COSINE,
                 ),
             )
 
@@ -432,8 +445,11 @@ async def run_longmemeval_benchmark(
             t0 = time.monotonic()
             try:
                 result = await recursive_retrieve(
-                    query=question, namespace="", limit=search_limit,
-                    refine=refine, tier="l2",
+                    query=question,
+                    namespace="",
+                    limit=search_limit,
+                    refine=refine,
+                    tier="l2",
                 )
             except Exception as e:
                 logger.warning("Query %s failed: %s", qid, e)
@@ -459,7 +475,9 @@ async def run_longmemeval_benchmark(
             seen: set[int] = set()
             for rf in retrieved_files:
                 for si in range(len(sessions)):
-                    if si not in seen and (f"session-{si + 1:04d}" in rf or f"session-{si:04d}" in rf):
+                    if si not in seen and (
+                        f"session-{si + 1:04d}" in rf or f"session-{si:04d}" in rf
+                    ):
                         retrieved_session_ids.append(si)
                         seen.add(si)
                         break
@@ -468,9 +486,11 @@ async def run_longmemeval_benchmark(
             if evidence_ids and not is_abstention:
                 for k in (5, 10):
                     retrieval_metrics[f"recall@{k}"] = round(
-                        _recall_at_k(retrieved_session_ids, evidence_ids, k), 4)
+                        _recall_at_k(retrieved_session_ids, evidence_ids, k), 4
+                    )
                     retrieval_metrics[f"ndcg@{k}"] = round(
-                        _ndcg_at_k(retrieved_session_ids, evidence_ids, k), 4)
+                        _ndcg_at_k(retrieved_session_ids, evidence_ids, k), 4
+                    )
 
             entry = {
                 "question_id": qid,
@@ -503,7 +523,11 @@ async def run_longmemeval_benchmark(
                 running_acc = _mean([float(r["correct"]) for r in all_results])
                 logger.info(
                     "[%d/%d] %s q=%s acc=%.1f%%",
-                    qi + 1, len(items), status, qid, running_acc * 100,
+                    qi + 1,
+                    len(items),
+                    status,
+                    qid,
+                    running_acc * 100,
                 )
 
         # ── Build official-format summary ─────────────────────────────────
@@ -585,20 +609,26 @@ def _print_summary(s: dict) -> None:
     print(f"  Questions:  {s['evaluated_questions']}/{s['total_questions']}")
     print(f"  Protocol:   {s.get('eval_protocol', 'llm-as-judge')}")
     print()
-    print(f"  ┌─────────────────────────────────────────────────────────────┐")
+    print("  ┌─────────────────────────────────────────────────────────────┐")
     print(f"  │  Overall Accuracy:        {s['overall_accuracy']:>6.1%}                         │")
-    print(f"  │  Task-Averaged Accuracy:  {s['task_averaged_accuracy']:>6.1%}                         │")
+    print(
+        f"  │  Task-Averaged Accuracy:  {s['task_averaged_accuracy']:>6.1%}                         │"
+    )
     if s.get("abstention_accuracy") is not None:
-        print(f"  │  Abstention Accuracy:     {s['abstention_accuracy']:>6.1%}                         │")
-    print(f"  └─────────────────────────────────────────────────────────────┘")
+        print(
+            f"  │  Abstention Accuracy:     {s['abstention_accuracy']:>6.1%}                         │"
+        )
+    print("  └─────────────────────────────────────────────────────────────┘")
     print()
 
     retr = s.get("retrieval", {})
     if retr:
-        print(f"  Retrieval:  Recall@5={retr.get('recall@5', 0):.4f}  "
-              f"NDCG@5={retr.get('ndcg@5', 0):.4f}  "
-              f"Recall@10={retr.get('recall@10', 0):.4f}  "
-              f"NDCG@10={retr.get('ndcg@10', 0):.4f}")
+        print(
+            f"  Retrieval:  Recall@5={retr.get('recall@5', 0):.4f}  "
+            f"NDCG@5={retr.get('ndcg@5', 0):.4f}  "
+            f"Recall@10={retr.get('recall@10', 0):.4f}  "
+            f"NDCG@10={retr.get('ndcg@10', 0):.4f}"
+        )
         print()
 
     print(f"  {'Question Type':<28s}  {'Acc':>6s}  {'R@5':>6s}  {'NDCG@5':>6s}  {'n':>4s}")
@@ -619,7 +649,7 @@ def _print_ablation_comparison(ablation_data: dict) -> None:
         return
 
     print(f"\n{'=' * 80}")
-    print(f"  LongMemEval Ablation — QA Accuracy (Official LLM-as-Judge)")
+    print("  LongMemEval Ablation — QA Accuracy (Official LLM-as-Judge)")
     print(f"{'=' * 80}")
     print(f"  {'Variant':<25s}  {'Accuracy':>10s}  {'Task-Avg':>10s}  {'R@5':>8s}  {'NDCG@5':>8s}")
     print(f"  {'-' * 25}  {'-' * 10}  {'-' * 10}  {'-' * 8}  {'-' * 8}")
@@ -640,7 +670,8 @@ async def main():
         description="LongMemEval benchmark adapter for Archivist (official eval protocol)",
     )
     parser.add_argument(
-        "--data-file", required=True,
+        "--data-file",
+        required=True,
         help="Path to longmemeval_s_cleaned.json or longmemeval_m_cleaned.json",
     )
     parser.add_argument("--limit", type=int, default=0, help="Limit questions (0=all)")
@@ -648,19 +679,25 @@ async def main():
     parser.add_argument("--run-curator", action="store_true", help="Run curator KG extraction")
     parser.add_argument("--search-limit", type=int, default=10, help="Top-k retrieval limit")
     parser.add_argument(
-        "--variant", choices=list(VARIANTS.keys()),
+        "--variant",
+        choices=list(VARIANTS.keys()),
         help="Run a single pipeline variant (default: no overrides)",
     )
     parser.add_argument(
-        "--ablation", action="store_true",
+        "--ablation",
+        action="store_true",
         help="Run all variants sequentially and produce comparison table",
     )
     parser.add_argument(
-        "--variants", type=str, default="",
+        "--variants",
+        type=str,
+        default="",
         help="Comma-separated variant names for --ablation (default: all)",
     )
     parser.add_argument(
-        "--output", type=str, default=".benchmarks/longmemeval_results.json",
+        "--output",
+        type=str,
+        default=".benchmarks/longmemeval_results.json",
         help="Output JSON path",
     )
     args = parser.parse_args()
@@ -672,7 +709,8 @@ async def main():
     if args.ablation:
         variant_names = (
             [v.strip() for v in args.variants.split(",") if v.strip()]
-            if args.variants else list(VARIANTS.keys())
+            if args.variants
+            else list(VARIANTS.keys())
         )
         ablation_results: dict = {
             "benchmark": "LongMemEval",

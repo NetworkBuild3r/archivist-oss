@@ -6,6 +6,7 @@ Use it for a compact, comparable IR number (same class of metric as BEIR papers)
 
 Requires: ``pip install -r requirements-benchmark.txt``
 """
+
 from __future__ import annotations
 
 import argparse

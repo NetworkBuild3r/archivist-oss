@@ -1,13 +1,13 @@
 # Archivist Benchmark Results
 
-> Latest pipeline snapshot: **v2.0.0** — 2026-04-17  
+> Latest pipeline snapshot: **v2.0.0** — 2026-04-17
 > Stack (pipeline run): Qdrant + embedding + LLM per your `.env` (see reproduction below)
 
 ---
 
 ## Archivist 2.0 — Pipeline evaluation (Phase 5, semantic chunking)
 
-**Run:** `scale=small`, **2 variants** (`clean_reranker`, `vector_plus_synth`), **108 queries** each.  
+**Run:** `scale=small`, **2 variants** (`clean_reranker`, `vector_plus_synth`), **108 queries** each.
 **Artifacts:** Full JSON is written locally to `.benchmarks/phase5_semantic_chunking.json` when you reproduce the run (directory is gitignored; summary tables below are canonical for the release).
 
 **Session log (excerpt):**
@@ -41,8 +41,8 @@ Session complete: scale=small  2 variants  2212.9s total
 
 ## Historical snapshot (v1.5 era)
 
-> Generated: 2026-03-25  
-> Version: v1.5.0  
+> Generated: 2026-03-25
+> Version: v1.5.0
 > Stack: Qdrant + vLLM `BAAI/bge-base-en-v1.5` (768-dim) + xAI Grok (LLM)
 
 ## Overview

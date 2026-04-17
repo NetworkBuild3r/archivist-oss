@@ -1,6 +1,6 @@
 # Archivist Multi-Agent Memory Tool — Roadmap (April 2026)
 
-**Status**: Retrieval foundation is solid (v2 pipeline complete). Semantic chunking (Phase 5) is done.  
+**Status**: Retrieval foundation is solid (v2 pipeline complete). Semantic chunking (Phase 5) is done.
 **Goal**: Become the **clear #1 production-ready multi-agent memory system** in 2026 — more trustworthy, observable, and collaborative than Mem0, Hindsight, Letta, Zep/Graphiti, or LangGraph+LangMem.
 
 ---
@@ -14,7 +14,7 @@ Current top systems win on:
 - Checkpointing / time-travel
 - Strong observability & auditability
 
-Archivist already has strong retrieval (synthetic questions, reranker, semantic chunking, needle registry, graph).  
+Archivist already has strong retrieval (synthetic questions, reranker, semantic chunking, needle registry, graph).
 We now shift from “great retrieval” to “great memory system for collaborating agents.”
 
 ---
@@ -56,7 +56,7 @@ These six features combined will make Archivist the **most trustworthy and produ
 
 ## Phase 6.5 — OpenClaw Compatibility Fix (April 2026)
 
-**Status**: Done  
+**Status**: Done
 **Motivation**: OpenClaw v2026.4.8 uses the deprecated SSE MCP transport and has a client-side env-var interpolation bug in the `mcp.servers` headers config — it sends the literal string `"Bearer ${ARCHIVIST_API_KEY}"` rather than the resolved key.
 
 **Changes**:
@@ -108,5 +108,5 @@ Expected console flow: `Encoding Batch …` → tqdm batch bar → nDCG / MAP / 
 
 _Add new rows when you change default embed models, BEIR limits, or the thin harness._
 
-**Last Updated**: April 14, 2026  
+**Last Updated**: April 14, 2026
 **Goal**: Become the most trustworthy, observable, and production-ready multi-agent memory system in 2026.

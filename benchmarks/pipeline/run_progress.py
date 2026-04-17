@@ -1,11 +1,12 @@
 """Milestone progress logging and atomic JSON checkpoints for long benchmark runs."""
+
 from __future__ import annotations
 
 import json
 import logging
 import os
 import tempfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +42,7 @@ class ProgressTracker:
         if use_progress_bar:
             try:
                 from tqdm import tqdm
+
                 self._bar = tqdm(total=total, desc=phase or "queries", unit="q", dynamic_ncols=True)
             except ImportError:
                 pass
@@ -62,18 +64,26 @@ class ProgressTracker:
             self._last_pct_logged = pct
             logger.info(
                 "[%s] %d/%d (%.0f%%) recall=%.3f mrr=%.3f",
-                self.phase, completed, self.total, pct, rolling_recall, rolling_mrr,
+                self.phase,
+                completed,
+                self.total,
+                pct,
+                rolling_recall,
+                rolling_mrr,
             )
 
         if self.checkpoint_path and results:
-            write_checkpoint(self.checkpoint_path, {
-                "phase": self.phase,
-                "memory_scale": self.memory_scale,
-                "completed": completed,
-                "total": self.total,
-                "rolling_recall_mean": round(rolling_recall, 4),
-                "results": results,
-            })
+            write_checkpoint(
+                self.checkpoint_path,
+                {
+                    "phase": self.phase,
+                    "memory_scale": self.memory_scale,
+                    "completed": completed,
+                    "total": self.total,
+                    "rolling_recall_mean": round(rolling_recall, 4),
+                    "results": results,
+                },
+            )
 
     def close(self) -> None:
         if self._bar is not None:
@@ -83,7 +93,7 @@ class ProgressTracker:
 def write_checkpoint(path: str, data: dict[str, Any]) -> None:
     """Atomically write JSON (temp file + replace) so readers never see partial files."""
     d = dict(data)
-    d["updated_at"] = datetime.now(timezone.utc).isoformat()
+    d["updated_at"] = datetime.now(UTC).isoformat()
     parent = os.path.dirname(path) or "."
     os.makedirs(parent, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=".checkpoint_", suffix=".tmp", dir=parent)

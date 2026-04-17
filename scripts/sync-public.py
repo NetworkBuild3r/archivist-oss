@@ -5,6 +5,7 @@ Run from anywhere:
 
 Uses repo root = parent of scripts/.
 """
+
 from __future__ import annotations
 
 import subprocess
