@@ -156,9 +156,17 @@ async def log_trajectory(
                 memory_ids_used, created_at, metadata)
                VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
             (
-                traj_id, agent_id, session_id, task_description, fp,
-                json.dumps(actions), outcome, outcome_score,
-                json.dumps(memory_ids_used or []), now, json.dumps(metadata or {}),
+                traj_id,
+                agent_id,
+                session_id,
+                task_description,
+                fp,
+                json.dumps(actions),
+                outcome,
+                outcome_score,
+                json.dumps(memory_ids_used or []),
+                now,
+                json.dumps(metadata or {}),
             ),
         )
 
@@ -272,9 +280,13 @@ async def extract_tips(trajectory_id: str) -> list[dict]:
                 """INSERT INTO tips (id, trajectory_id, agent_id, category, tip_text, context, created_at)
                    VALUES (?,?,?,?,?,?,?)""",
                 (
-                    tip_id, trajectory_id, traj["agent_id"],
-                    t.get("category", "strategy"), t.get("tip", ""),
-                    t.get("context", ""), now,
+                    tip_id,
+                    trajectory_id,
+                    traj["agent_id"],
+                    t.get("category", "strategy"),
+                    t.get("tip", ""),
+                    t.get("context", ""),
+                    now,
                 ),
             )
             stored_tips.append({"tip_id": tip_id, **t})

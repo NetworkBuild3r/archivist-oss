@@ -63,9 +63,17 @@ async def log_retrieval(
                 retrieval_trace, result_count, cache_hit, duration_ms, created_at)
                VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
             (
-                log_id, agent_id, query, namespace, tier, memory_type,
-                json.dumps(retrieval_trace), result_count,
-                1 if cache_hit else 0, duration_ms, now,
+                log_id,
+                agent_id,
+                query,
+                namespace,
+                tier,
+                memory_type,
+                json.dumps(retrieval_trace),
+                result_count,
+                1 if cache_hit else 0,
+                duration_ms,
+                now,
             ),
         )
 

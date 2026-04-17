@@ -446,7 +446,9 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
                     actor_id=actor_id,
                     actor_type=actor_type,
                 )
-                await add_fact(_eid, text[:200], f"explicit/{agent_id}", agent_id, **_extracted_fact_kw)
+                await add_fact(
+                    _eid, text[:200], f"explicit/{agent_id}", agent_id, **_extracted_fact_kw
+                )
     else:
         _auto_hints = pre_extract(text)
 
@@ -515,7 +517,9 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
         collection_name=_coll,
         points=[PointStruct(id=pid, vector=vec, payload=payload)],
     )
-    await register_memory_points_batch([{"memory_id": pid, "qdrant_id": pid, "point_type": "primary"}])
+    await register_memory_points_batch(
+        [{"memory_id": pid, "qdrant_id": pid, "point_type": "primary"}]
+    )
 
     from archivist.core.config import BM25_ENABLED
 

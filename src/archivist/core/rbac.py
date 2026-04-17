@@ -169,9 +169,7 @@ def check_access(agent_id: str, action: str, namespace: str) -> AccessPolicy:
         return AccessPolicy(allowed=True)
 
     if action == "read":
-        hint = (
-            f"Use archivist_namespaces(agent_id='{agent_id}') to see your accessible namespaces."
-        )
+        hint = f"Use archivist_namespaces(agent_id='{agent_id}') to see your accessible namespaces."
     else:
         hint = (
             f"Use archivist_namespaces(agent_id='{agent_id}') to confirm your"

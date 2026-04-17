@@ -50,7 +50,17 @@ async def log_memory_event(
             await conn.execute(
                 """INSERT INTO audit_log (id, timestamp, agent_id, action, memory_id, namespace, text_hash, version, metadata)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (entry_id, now, agent_id, action, memory_id, namespace, text_hash, version, meta_json),
+                (
+                    entry_id,
+                    now,
+                    agent_id,
+                    action,
+                    memory_id,
+                    namespace,
+                    text_hash,
+                    version,
+                    meta_json,
+                ),
             )
     except Exception as e:
         logger.error("Failed to write audit log: %s", e)

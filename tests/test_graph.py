@@ -3,7 +3,7 @@
 
 class TestEntityOperations:
     async def test_upsert_entity_creates(self, async_pool):
-        from graph import get_db, search_entities, upsert_entity
+        from graph import search_entities, upsert_entity
 
         eid = await upsert_entity("Kubernetes", "tool")
         assert eid > 0

@@ -404,7 +404,9 @@ async def decay_old_entries() -> dict[str, int]:
     if total:
         logger.info(
             "Decayed %d facts (%d aged 90d, %d superseded/ephemeral 30d; durable/permanent preserved)",
-            total, aged_out, superseded_out,
+            total,
+            aged_out,
+            superseded_out,
         )
     return {"aged_out": aged_out, "superseded_out": superseded_out, "total": total}
 

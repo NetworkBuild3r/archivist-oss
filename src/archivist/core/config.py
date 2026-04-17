@@ -386,23 +386,15 @@ def _validate_config() -> None:
     if CHUNK_SIZE < 1:
         errors.append(f"CHUNK_SIZE must be >= 1, got {CHUNK_SIZE}")
     if CHUNK_OVERLAP >= CHUNK_SIZE:
-        errors.append(
-            f"CHUNK_OVERLAP ({CHUNK_OVERLAP}) must be < CHUNK_SIZE ({CHUNK_SIZE})"
-        )
+        errors.append(f"CHUNK_OVERLAP ({CHUNK_OVERLAP}) must be < CHUNK_SIZE ({CHUNK_SIZE})")
     if not (0.0 <= RETRIEVAL_THRESHOLD <= 1.0):
-        errors.append(
-            f"RETRIEVAL_THRESHOLD must be in [0, 1], got {RETRIEVAL_THRESHOLD}"
-        )
+        errors.append(f"RETRIEVAL_THRESHOLD must be in [0, 1], got {RETRIEVAL_THRESHOLD}")
     if VECTOR_DIM < 1:
         errors.append(f"VECTOR_DIM must be >= 1, got {VECTOR_DIM}")
     if SQLITE_WAL_AUTOCHECKPOINT < 0:
-        errors.append(
-            f"SQLITE_WAL_AUTOCHECKPOINT must be >= 0, got {SQLITE_WAL_AUTOCHECKPOINT}"
-        )
+        errors.append(f"SQLITE_WAL_AUTOCHECKPOINT must be >= 0, got {SQLITE_WAL_AUTOCHECKPOINT}")
     if SQLITE_BUSY_TIMEOUT_MS < 0:
-        errors.append(
-            f"SQLITE_BUSY_TIMEOUT_MS must be >= 0, got {SQLITE_BUSY_TIMEOUT_MS}"
-        )
+        errors.append(f"SQLITE_BUSY_TIMEOUT_MS must be >= 0, got {SQLITE_BUSY_TIMEOUT_MS}")
     if errors:
         raise ValueError(
             "Archivist config validation failed:\n" + "\n".join(f"  - {e}" for e in errors)

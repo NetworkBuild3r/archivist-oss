@@ -37,43 +37,34 @@ class TestConfigDefaults:
 class TestConfigValidation:
     def test_invalid_chunk_overlap_raises(self, monkeypatch, tmp_path):
         """CHUNK_OVERLAP >= CHUNK_SIZE should fail validation."""
-        monkeypatch.setenv("SQLITE_PATH", str(tmp_path / "graph.db"))
-        monkeypatch.setenv("CHUNK_SIZE", "100")
-        monkeypatch.setenv("CHUNK_OVERLAP", "100")
-
-        import sys
-
-        for mod in list(sys.modules.keys()):
-            if "archivist.core.config" in mod or mod == "config":
-                del sys.modules[mod]
-
         with pytest.raises(ValueError, match="CHUNK_OVERLAP"):
-            pass
+            _reload_config(
+                monkeypatch,
+                {
+                    "SQLITE_PATH": str(tmp_path / "graph.db"),
+                    "CHUNK_SIZE": "100",
+                    "CHUNK_OVERLAP": "100",
+                },
+            )
 
     def test_negative_wal_autocheckpoint_raises(self, monkeypatch, tmp_path):
         """Negative SQLITE_WAL_AUTOCHECKPOINT should fail validation."""
-        monkeypatch.setenv("SQLITE_PATH", str(tmp_path / "graph.db"))
-        monkeypatch.setenv("SQLITE_WAL_AUTOCHECKPOINT", "-1")
-
-        import sys
-
-        for mod in list(sys.modules.keys()):
-            if "archivist.core.config" in mod or mod == "config":
-                del sys.modules[mod]
-
         with pytest.raises(ValueError, match="SQLITE_WAL_AUTOCHECKPOINT"):
-            pass
+            _reload_config(
+                monkeypatch,
+                {
+                    "SQLITE_PATH": str(tmp_path / "graph.db"),
+                    "SQLITE_WAL_AUTOCHECKPOINT": "-1",
+                },
+            )
 
     def test_negative_busy_timeout_raises(self, monkeypatch, tmp_path):
         """Negative SQLITE_BUSY_TIMEOUT_MS should fail validation."""
-        monkeypatch.setenv("SQLITE_PATH", str(tmp_path / "graph.db"))
-        monkeypatch.setenv("SQLITE_BUSY_TIMEOUT_MS", "-500")
-
-        import sys
-
-        for mod in list(sys.modules.keys()):
-            if "archivist.core.config" in mod or mod == "config":
-                del sys.modules[mod]
-
         with pytest.raises(ValueError, match="SQLITE_BUSY_TIMEOUT_MS"):
-            pass
+            _reload_config(
+                monkeypatch,
+                {
+                    "SQLITE_PATH": str(tmp_path / "graph.db"),
+                    "SQLITE_BUSY_TIMEOUT_MS": "-500",
+                },
+            )

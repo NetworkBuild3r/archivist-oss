@@ -286,9 +286,7 @@ class TestNeedleTokenRegistration:
         await graph.register_needle_tokens(
             "mem-cron", "Backup runs on schedule: 0 3 * * 0", namespace="ns1"
         )
-        hits = await graph.lookup_needle_tokens(
-            "what is the cron 0 3 * * 0?", namespace="ns1"
-        )
+        hits = await graph.lookup_needle_tokens("what is the cron 0 3 * * 0?", namespace="ns1")
         assert any(h["memory_id"] == "mem-cron" for h in hits)
 
     async def test_key_value_registered_and_found(self, async_pool):
@@ -344,18 +342,14 @@ class TestNeedleTokenRegistration:
     async def test_namespace_isolation_different_ns_returns_nothing(self, async_pool):
         import graph
 
-        await graph.register_needle_tokens(
-            "mem-nsA", "internal addr 172.16.0.5", namespace="ns-A"
-        )
+        await graph.register_needle_tokens("mem-nsA", "internal addr 172.16.0.5", namespace="ns-A")
         hits = await graph.lookup_needle_tokens("172.16.0.5", namespace="ns-B")
         assert hits == [], "Token registered in ns-A must not appear in ns-B lookup"
 
     async def test_namespace_isolation_same_ns_returns_match(self, async_pool):
         import graph
 
-        await graph.register_needle_tokens(
-            "mem-nsX", "service ip 172.16.1.1", namespace="ns-X"
-        )
+        await graph.register_needle_tokens("mem-nsX", "service ip 172.16.1.1", namespace="ns-X")
         hits = await graph.lookup_needle_tokens("172.16.1.1", namespace="ns-X")
         assert any(h["memory_id"] == "mem-nsX" for h in hits)
 
@@ -363,9 +357,7 @@ class TestNeedleTokenRegistration:
         """Passing namespace='' returns matches regardless of stored namespace."""
         import graph
 
-        await graph.register_needle_tokens(
-            "mem-open", "address 10.1.2.3", namespace="some-ns"
-        )
+        await graph.register_needle_tokens("mem-open", "address 10.1.2.3", namespace="some-ns")
         hits = await graph.lookup_needle_tokens("10.1.2.3", namespace="")
         assert any(h["memory_id"] == "mem-open" for h in hits)
 
@@ -392,9 +384,7 @@ class TestNeedleTokenRegistration:
         text = "Hosts: 10.0.0.1 and 10.0.0.2 in the same cluster"
         await graph.register_needle_tokens("mem-dedup", text, namespace="ns1")
         # If both IPs appear in the query, the memory should still appear once
-        hits = await graph.lookup_needle_tokens(
-            "compare 10.0.0.1 with 10.0.0.2", namespace="ns1"
-        )
+        hits = await graph.lookup_needle_tokens("compare 10.0.0.1 with 10.0.0.2", namespace="ns1")
         mem_ids = [h["memory_id"] for h in hits if h["memory_id"] == "mem-dedup"]
         assert len(mem_ids) == 1, "Same memory must not appear multiple times in a single lookup"
 
@@ -404,12 +394,8 @@ class TestNeedleTokenRegistration:
         """Two memories sharing the same IP are both returned for that IP query."""
         import graph
 
-        await graph.register_needle_tokens(
-            "mem-A", "Primary node at 192.0.2.1", namespace="ns1"
-        )
-        await graph.register_needle_tokens(
-            "mem-B", "Replica node at 192.0.2.1", namespace="ns1"
-        )
+        await graph.register_needle_tokens("mem-A", "Primary node at 192.0.2.1", namespace="ns1")
+        await graph.register_needle_tokens("mem-B", "Replica node at 192.0.2.1", namespace="ns1")
         hits = await graph.lookup_needle_tokens("tell me about 192.0.2.1", namespace="ns1")
         ids = {h["memory_id"] for h in hits}
         assert "mem-A" in ids and "mem-B" in ids, (
@@ -897,9 +883,9 @@ class TestSoftDeleteMemory:
 
     async def test_marks_fts_excluded(self, async_pool):
         """The primary memory_chunk row is marked is_excluded=1."""
-        import config
         import sqlite3
 
+        import config
         from memory_lifecycle import soft_delete_memory
 
         conn = sqlite3.connect(config.SQLITE_PATH)

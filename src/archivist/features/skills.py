@@ -141,8 +141,16 @@ def register_skill(
                     registered_by, registered_at, updated_at, metadata)
                    VALUES (?,?,?,?,?,?,?,?,?,?)""",
                 (
-                    skill_id, name, provider, mcp_endpoint, version, description,
-                    registered_by, now, now, json.dumps(metadata or {}),
+                    skill_id,
+                    name,
+                    provider,
+                    mcp_endpoint,
+                    version,
+                    description,
+                    registered_by,
+                    now,
+                    now,
+                    json.dumps(metadata or {}),
                 ),
             )
             conn.execute(
@@ -275,8 +283,17 @@ def log_skill_event(
                 duration_ms, error_message, trajectory_id, created_at, metadata)
                VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
             (
-                event_id, skill_id, agent_id, event_type, outcome, skill_version,
-                duration_ms, error_message, trajectory_id, now, json.dumps(metadata or {}),
+                event_id,
+                skill_id,
+                agent_id,
+                event_type,
+                outcome,
+                skill_version,
+                duration_ms,
+                error_message,
+                trajectory_id,
+                now,
+                json.dumps(metadata or {}),
             ),
         )
         conn.commit()

@@ -122,7 +122,11 @@ async def merge_memories(
         except PartialDeletionError as exc:
             logger.error(
                 "merge.delete_original.partial_failure",
-                extra={"memory_id": mid, "merged_id": merged_id, "failed_steps": exc.result.failed_steps},
+                extra={
+                    "memory_id": mid,
+                    "merged_id": merged_id,
+                    "failed_steps": exc.result.failed_steps,
+                },
             )
         except Exception as exc:
             logger.error(

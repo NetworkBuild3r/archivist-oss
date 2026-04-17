@@ -10,8 +10,6 @@ Verifies that after merge_memories():
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-
 
 def _make_mock_point(pid: str, namespace: str = "test-ns") -> MagicMock:
     pt = MagicMock()

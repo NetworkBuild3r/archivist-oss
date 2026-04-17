@@ -432,7 +432,18 @@ async def upsert_fts_chunk(
             await conn.execute(
                 "INSERT INTO memory_chunks (qdrant_id, text, file_path, chunk_index, agent_id, namespace, date, memory_type, actor_id, actor_type) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (qdrant_id, text, file_path, chunk_index, agent_id, namespace, date, memory_type, actor_id, actor_type),
+                (
+                    qdrant_id,
+                    text,
+                    file_path,
+                    chunk_index,
+                    agent_id,
+                    namespace,
+                    date,
+                    memory_type,
+                    actor_id,
+                    actor_type,
+                ),
             )
             rowid_row = await (
                 await conn.execute(
@@ -452,9 +463,7 @@ async def upsert_fts_chunk(
             except Exception:
                 pass
     except Exception as e:
-        logging.getLogger("archivist.graph").warning(
-            "FTS upsert failed for %s: %s", qdrant_id, e
-        )
+        logging.getLogger("archivist.graph").warning("FTS upsert failed for %s: %s", qdrant_id, e)
 
 
 async def _delete_fts_rows_async(conn, rows):
@@ -499,9 +508,7 @@ async def delete_fts_chunks_by_file(file_path: str):
             await _delete_fts_rows_async(conn, rows)
             await conn.execute("DELETE FROM memory_chunks WHERE file_path = ?", (file_path,))
     except Exception as e:
-        logging.getLogger("archivist.graph").warning(
-            "FTS delete failed for %s: %s", file_path, e
-        )
+        logging.getLogger("archivist.graph").warning("FTS delete failed for %s: %s", file_path, e)
 
 
 async def delete_fts_chunks_by_qdrant_id(qdrant_id: str) -> int:
@@ -647,9 +654,7 @@ async def upsert_entity(
         )
         row = await cur.fetchone()
         if row:
-            existing_rc = (
-                row["retention_class"] if "retention_class" in row.keys() else "standard"
-            )
+            existing_rc = row["retention_class"] if "retention_class" in row.keys() else "standard"
             new_rc = (
                 retention_class
                 if _RETENTION_RANK.get(retention_class, 1) > _RETENTION_RANK.get(existing_rc, 1)
@@ -732,9 +737,19 @@ async def add_fact(
             "retention_class, valid_from, valid_until, namespace, memory_id, confidence, provenance, actor_id) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
-                entity_id, fact_text, source_file, agent_id, now,
-                retention_class, valid_from, valid_until, namespace, memory_id,
-                confidence, provenance, actor_id,
+                entity_id,
+                fact_text,
+                source_file,
+                agent_id,
+                now,
+                retention_class,
+                valid_from,
+                valid_until,
+                namespace,
+                memory_id,
+                confidence,
+                provenance,
+                actor_id,
             ),
         )
         fid = cur.lastrowid
@@ -1132,6 +1147,7 @@ async def delete_fts_chunks_batch(qdrant_ids: list[str]) -> int:
         except Exception as e:
             if attempt == 0 and "locked" in str(e).lower():
                 import asyncio as _asyncio
+
                 await _asyncio.sleep(0.2)
                 continue
             raise
@@ -1165,7 +1181,8 @@ async def set_fts_excluded_batch(qdrant_ids: list[str], excluded: int = 1) -> in
                 total += cur.rowcount
     except Exception as e:
         logging.getLogger("archivist.graph").warning(
-            "set_fts_excluded_batch failed: %s", e,
+            "set_fts_excluded_batch failed: %s",
+            e,
         )
     return total
 
@@ -1198,6 +1215,7 @@ async def delete_needle_tokens_batch(memory_ids: list[str]) -> int:
         except Exception as e:
             if attempt == 0 and "locked" in str(e).lower():
                 import asyncio as _asyncio
+
                 await _asyncio.sleep(0.2)
                 continue
             raise
@@ -1271,7 +1289,8 @@ async def register_memory_points_batch(
                 total += len(chunk)
     except Exception as e:
         logging.getLogger("archivist.graph").warning(
-            "register_memory_points_batch failed: %s", e,
+            "register_memory_points_batch failed: %s",
+            e,
         )
     return total
 
@@ -1297,7 +1316,9 @@ async def lookup_memory_points(memory_id: str) -> list[dict]:
             return [dict(r) for r in rows]
     except Exception as e:
         logging.getLogger("archivist.graph").warning(
-            "lookup_memory_points failed for %s: %s", memory_id, e,
+            "lookup_memory_points failed for %s: %s",
+            memory_id,
+            e,
         )
         return []
 
@@ -1319,7 +1340,9 @@ async def delete_memory_points(memory_id: str) -> int:
             return cur.rowcount
     except Exception as e:
         logging.getLogger("archivist.graph").warning(
-            "delete_memory_points failed for %s: %s", memory_id, e,
+            "delete_memory_points failed for %s: %s",
+            memory_id,
+            e,
         )
         return 0
 
@@ -1345,5 +1368,7 @@ async def log_delete_failure(memory_id: str, qdrant_ids: list[str], error: str) 
             )
     except Exception as e:
         logging.getLogger("archivist.graph").warning(
-            "log_delete_failure insert failed for %s: %s", memory_id, e,
+            "log_delete_failure insert failed for %s: %s",
+            memory_id,
+            e,
         )

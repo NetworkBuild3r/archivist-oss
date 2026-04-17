@@ -5,10 +5,6 @@ called without await. These tests would have been coroutine-no-ops (silent
 data loss) before the Phase 2 fixes were applied.
 """
 
-from unittest.mock import AsyncMock, MagicMock, patch
-
-import pytest
-
 
 class TestEntityAndFactWrite:
     """upsert_entity and add_fact correctly persist when properly awaited."""
@@ -55,9 +51,7 @@ class TestEntityAndFactWrite:
             "SELECT fact_text FROM facts WHERE memory_id = 'mem-fact-regression-001'"
         ).fetchone()
         conn.close()
-        assert row is not None, (
-            "Fact row not found in SQLite — add_fact was not awaited"
-        )
+        assert row is not None, "Fact row not found in SQLite — add_fact was not awaited"
 
 
 class TestMemoryPointsWrite:
@@ -67,9 +61,15 @@ class TestMemoryPointsWrite:
         """Directly verify that await register_memory_points_batch writes a row."""
         from graph import get_db, register_memory_points_batch
 
-        await register_memory_points_batch([
-            {"memory_id": "mp-regression-001", "qdrant_id": "mp-regression-001", "point_type": "primary"}
-        ])
+        await register_memory_points_batch(
+            [
+                {
+                    "memory_id": "mp-regression-001",
+                    "qdrant_id": "mp-regression-001",
+                    "point_type": "primary",
+                }
+            ]
+        )
 
         conn = get_db()
         row = conn.execute(

@@ -102,17 +102,25 @@ class TestDeleteMemoryComplete:
 
     @pytest.fixture
     def mock_fts(self):
-        with patch("memory_lifecycle.delete_fts_chunks_batch", new_callable=AsyncMock, return_value=1) as m:
+        with patch(
+            "memory_lifecycle.delete_fts_chunks_batch", new_callable=AsyncMock, return_value=1
+        ) as m:
             yield m
 
     @pytest.fixture
     def mock_needle(self):
-        with patch("memory_lifecycle.delete_needle_tokens_batch", new_callable=AsyncMock, return_value=3) as m:
+        with patch(
+            "memory_lifecycle.delete_needle_tokens_batch", new_callable=AsyncMock, return_value=3
+        ) as m:
             yield m
 
     @pytest.fixture
     def mock_entity_facts(self):
-        with patch("memory_lifecycle._delete_entity_facts_for_memory", new_callable=AsyncMock, return_value=2) as m:
+        with patch(
+            "memory_lifecycle._delete_entity_facts_for_memory",
+            new_callable=AsyncMock,
+            return_value=2,
+        ) as m:
             yield m
 
     @pytest.fixture
@@ -724,9 +732,7 @@ class TestQdrantRetry:
         client.delete.side_effect = ResponseHandlingException("network")
 
         failed = []
-        count = await _qdrant_delete(
-            client, "col", ["p1", "p2", "p3"], "step_x", "mem-1", failed
-        )
+        count = await _qdrant_delete(client, "col", ["p1", "p2", "p3"], "step_x", "mem-1", failed)
 
         assert count == 3  # pre-count = len(selector)
         assert "step_x" in failed
