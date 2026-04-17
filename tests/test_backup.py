@@ -83,7 +83,7 @@ class TestManifest(unittest.TestCase):
         with open(manifest_path) as f:
             on_disk = json.load(f)
         assert on_disk["snapshot_id"] == snap_id
-        assert on_disk["archivist_version"] == "2.0.0"
+        assert on_disk["archivist_version"] == "2.0.1"
 
     @patch("backup_manager.collections_for_query")
     @patch("backup_manager._qdrant_http")

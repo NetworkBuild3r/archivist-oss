@@ -262,13 +262,13 @@ class TestParallelPipeline:
 
         assert hasattr(asyncio, "to_thread")
 
-    def test_bm25_search_is_sync(self):
-        """BM25 search is synchronous (SQLite) — needs to_thread for parallel."""
+    def test_bm25_search_is_async(self):
+        """BM25 search is async (awaits aiosqlite) — called directly in concurrent gather."""
         import inspect
 
         from fts_search import search_bm25
 
-        assert not inspect.iscoroutinefunction(search_bm25)
+        assert inspect.iscoroutinefunction(search_bm25)
 
 
 # ── Collection Routing Integration Tests (12a wiring) ────────────────────────

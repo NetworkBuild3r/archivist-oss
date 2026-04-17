@@ -156,7 +156,7 @@ def _fts5_phrase_query(raw_query: str) -> str:
     return '"' + " ".join(content_tokens) + '"'
 
 
-def search_bm25(
+async def search_bm25(
     query: str,
     namespace: str = "",
     agent_id: str = "",
@@ -177,7 +177,7 @@ def search_bm25(
     or_q = _fts5_safe_query(query)
     or_hits: list[dict] = []
     if or_q:
-        or_hits = search_fts(
+        or_hits = await search_fts(
             query=or_q,
             namespace=namespace,
             agent_id=agent_id,
@@ -195,7 +195,7 @@ def search_bm25(
         and_q = _fts5_and_query(query)
         if and_q:
             try:
-                and_hits = search_fts(
+                and_hits = await search_fts(
                     query=and_q,
                     namespace=namespace,
                     agent_id=agent_id,
@@ -211,7 +211,7 @@ def search_bm25(
         phrase_q = _fts5_phrase_query(query)
         if phrase_q and phrase_q != and_q:
             try:
-                phrase_hits = search_fts(
+                phrase_hits = await search_fts(
                     query=phrase_q,
                     namespace=namespace,
                     agent_id=agent_id,
@@ -228,7 +228,7 @@ def search_bm25(
             exact_q = _fts5_safe_query(query)
             if exact_q:
                 try:
-                    exact_hits = search_fts_exact(
+                    exact_hits = await search_fts_exact(
                         query=exact_q,
                         namespace=namespace,
                         agent_id=agent_id,
@@ -246,7 +246,7 @@ def search_bm25(
             exact_q = _fts5_safe_query(query)
             if exact_q:
                 try:
-                    exact_hits = search_fts_exact(
+                    exact_hits = await search_fts_exact(
                         query=exact_q,
                         namespace=namespace,
                         agent_id=agent_id,

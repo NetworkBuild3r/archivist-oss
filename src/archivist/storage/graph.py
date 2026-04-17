@@ -1,5 +1,7 @@
 """SQLite-backed temporal knowledge graph for entity/relationship tracking."""
 
+from __future__ import annotations
+
 import logging
 import os
 import re
@@ -7,6 +9,10 @@ import sqlite3
 import threading
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import aiosqlite
 
 from archivist.core.config import SQLITE_PATH
 from archivist.utils.chunking import NEEDLE_PATTERNS
@@ -206,9 +212,47 @@ def init_schema():
         );
         CREATE INDEX IF NOT EXISTS idx_df_memory ON delete_failures(memory_id);
         CREATE INDEX IF NOT EXISTS idx_df_created ON delete_failures(created_at);
+
+        -- Transactional outbox for cross-store writes (Phase 3).
+        -- Events are written atomically with SQLite artifacts and applied to
+        -- Qdrant by the OutboxProcessor background task.
+        CREATE TABLE IF NOT EXISTS outbox (
+            id           TEXT PRIMARY KEY,
+            event_type   TEXT NOT NULL,
+            payload      TEXT NOT NULL,
+            status       TEXT NOT NULL DEFAULT 'pending',
+            retry_count  INTEGER NOT NULL DEFAULT 0,
+            last_attempt TEXT,
+            created_at   TEXT NOT NULL,
+            error        TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_outbox_status ON outbox(status, created_at);
+        CREATE INDEX IF NOT EXISTS idx_outbox_event  ON outbox(event_type, status);
+
+        -- Needle registry for O(1) structured-token lookup (v2.0).
+        -- Also initialised lazily by _ensure_needle_registry; including it here
+        -- ensures the table exists before any MemoryTransaction acquires the
+        -- pool write-lock (avoids a deadlock when the schema guard fires inside
+        -- an open transaction).
+        CREATE TABLE IF NOT EXISTS needle_registry (
+            token TEXT NOT NULL,
+            memory_id TEXT NOT NULL,
+            namespace TEXT NOT NULL DEFAULT '',
+            agent_id TEXT NOT NULL DEFAULT '',
+            actor_id TEXT NOT NULL DEFAULT '',
+            actor_type TEXT NOT NULL DEFAULT '',
+            chunk_text TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (token, memory_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_needle_token ON needle_registry(token);
+        CREATE INDEX IF NOT EXISTS idx_needle_token_ns ON needle_registry(token, namespace);
     """)
         conn.commit()
         conn.close()
+    # Mark the needle-registry schema guard as already applied so it never tries
+    # to acquire a second sync connection while the async pool lock is held.
+    _ensure_needle_registry.applied = True  # type: ignore[attr-defined]
     _migrate_schema()
     _migrate_entity_unique_constraint()
     _init_fts5()
@@ -404,64 +448,78 @@ async def upsert_fts_chunk(
     memory_type: str = "general",
     actor_id: str = "",
     actor_type: str = "",
+    conn: aiosqlite.Connection | None = None,
 ):
-    """Insert or replace a chunk in memory_chunks and sync to both FTS5 indexes."""
+    """Insert or replace a chunk in memory_chunks and sync to both FTS5 indexes.
+
+    Args:
+        conn: Optional open ``aiosqlite.Connection``.  When provided (e.g. from
+            inside a ``MemoryTransaction``), writes join the caller's transaction
+            instead of acquiring a new ``pool.write()`` lock.  When ``None``
+            (default), a fresh write-lock is acquired from the pool.
+    """
+    import aiosqlite as _aiosqlite
+
     from archivist.storage.sqlite_pool import pool
 
-    try:
-        async with pool.write() as conn:
-            old = await (
-                await conn.execute(
-                    "SELECT rowid, text FROM memory_chunks WHERE qdrant_id = ?", (qdrant_id,)
-                )
-            ).fetchone()
-            if old:
-                await conn.execute(
-                    "INSERT INTO memory_fts(memory_fts, rowid, text) VALUES('delete', ?, ?)",
-                    (old["rowid"], old["text"]),
-                )
-                try:
-                    await conn.execute(
-                        "INSERT INTO memory_fts_exact(memory_fts_exact, rowid, text) VALUES('delete', ?, ?)",
-                        (old["rowid"], old["text"]),
-                    )
-                except Exception:
-                    pass
-                await conn.execute("DELETE FROM memory_chunks WHERE qdrant_id = ?", (qdrant_id,))
-
-            await conn.execute(
-                "INSERT INTO memory_chunks (qdrant_id, text, file_path, chunk_index, agent_id, namespace, date, memory_type, actor_id, actor_type) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    qdrant_id,
-                    text,
-                    file_path,
-                    chunk_index,
-                    agent_id,
-                    namespace,
-                    date,
-                    memory_type,
-                    actor_id,
-                    actor_type,
-                ),
+    async def _run(c: _aiosqlite.Connection) -> None:
+        old = await (
+            await c.execute(
+                "SELECT rowid, text FROM memory_chunks WHERE qdrant_id = ?", (qdrant_id,)
             )
-            rowid_row = await (
-                await conn.execute(
-                    "SELECT rowid FROM memory_chunks WHERE qdrant_id = ?", (qdrant_id,)
-                )
-            ).fetchone()
-            rowid = rowid_row["rowid"]
-            await conn.execute(
-                "INSERT INTO memory_fts (rowid, text) VALUES (?, ?)",
-                (rowid, text),
+        ).fetchone()
+        if old:
+            await c.execute(
+                "INSERT INTO memory_fts(memory_fts, rowid, text) VALUES('delete', ?, ?)",
+                (old["rowid"], old["text"]),
             )
             try:
-                await conn.execute(
-                    "INSERT INTO memory_fts_exact (rowid, text) VALUES (?, ?)",
-                    (rowid, text),
+                await c.execute(
+                    "INSERT INTO memory_fts_exact(memory_fts_exact, rowid, text) VALUES('delete', ?, ?)",
+                    (old["rowid"], old["text"]),
                 )
             except Exception:
                 pass
+            await c.execute("DELETE FROM memory_chunks WHERE qdrant_id = ?", (qdrant_id,))
+
+        await c.execute(
+            "INSERT INTO memory_chunks (qdrant_id, text, file_path, chunk_index, agent_id, namespace, date, memory_type, actor_id, actor_type) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                qdrant_id,
+                text,
+                file_path,
+                chunk_index,
+                agent_id,
+                namespace,
+                date,
+                memory_type,
+                actor_id,
+                actor_type,
+            ),
+        )
+        rowid_row = await (
+            await c.execute("SELECT rowid FROM memory_chunks WHERE qdrant_id = ?", (qdrant_id,))
+        ).fetchone()
+        rowid = rowid_row["rowid"]
+        await c.execute(
+            "INSERT INTO memory_fts (rowid, text) VALUES (?, ?)",
+            (rowid, text),
+        )
+        try:
+            await c.execute(
+                "INSERT INTO memory_fts_exact (rowid, text) VALUES (?, ?)",
+                (rowid, text),
+            )
+        except Exception:
+            pass
+
+    try:
+        if conn is not None:
+            await _run(conn)
+        else:
+            async with pool.write() as c:
+                await _run(c)
     except Exception as e:
         logging.getLogger("archivist.graph").warning("FTS upsert failed for %s: %s", qdrant_id, e)
 
@@ -642,13 +700,21 @@ async def upsert_entity(
     namespace: str = "global",
     actor_id: str = "",
     actor_type: str = "",
+    conn: aiosqlite.Connection | None = None,
 ) -> int:
-    """Insert or update an entity, returning its integer ID."""
+    """Insert or update an entity, returning its integer ID.
+
+    Args:
+        conn: Optional open ``aiosqlite.Connection``.  When provided the write
+            joins the caller's transaction; when ``None`` a fresh
+            ``pool.write()`` lock is acquired.
+    """
     from archivist.storage.sqlite_pool import pool
 
     now = datetime.now(UTC).isoformat()
-    async with pool.write() as conn:
-        cur = await conn.execute(
+
+    async def _run(c: aiosqlite.Connection) -> int:
+        cur = await c.execute(
             "SELECT id, mention_count, retention_class FROM entities WHERE name = ? COLLATE NOCASE AND namespace = ?",
             (name, namespace),
         )
@@ -660,17 +726,22 @@ async def upsert_entity(
                 if _RETENTION_RANK.get(retention_class, 1) > _RETENTION_RANK.get(existing_rc, 1)
                 else existing_rc
             )
-            await conn.execute(
+            await c.execute(
                 "UPDATE entities SET last_seen=?, mention_count=mention_count+1, retention_class=? WHERE id=?",
                 (now, new_rc, row["id"]),
             )
             return row["id"]
-        cur2 = await conn.execute(
+        cur2 = await c.execute(
             "INSERT INTO entities (name, entity_type, first_seen, last_seen, retention_class, namespace, actor_id, actor_type) "
             "VALUES (?,?,?,?,?,?,?,?)",
             (name, entity_type, now, now, retention_class, namespace, actor_id, actor_type),
         )
         return cur2.lastrowid
+
+    if conn is not None:
+        return await _run(conn)
+    async with pool.write() as c:
+        return await _run(c)
 
 
 async def add_relationship(
@@ -719,20 +790,27 @@ async def add_fact(
     confidence: float = 1.0,
     provenance: str = "unknown",
     actor_id: str = "",
+    conn: aiosqlite.Connection | None = None,
 ) -> int:
-    """Insert a new fact and auto-supersede overlapping existing facts."""
+    """Insert a new fact and auto-supersede overlapping existing facts.
+
+    Args:
+        conn: Optional open ``aiosqlite.Connection``.  When provided the write
+            joins the caller's transaction; when ``None`` a fresh
+            ``pool.write()`` lock is acquired.
+    """
     from archivist.storage.sqlite_pool import pool
 
     now = datetime.now(UTC).isoformat()
     new_words = _word_set(fact_text)
 
     if not valid_from and source_file:
-        m = _DATE_IN_PATH_RE.search(source_file)
-        if m:
-            valid_from = m.group(1)
+        _m = _DATE_IN_PATH_RE.search(source_file)
+        if _m:
+            valid_from = _m.group(1)
 
-    async with pool.write() as conn:
-        cur = await conn.execute(
+    async def _run(c: aiosqlite.Connection) -> int:
+        cur = await c.execute(
             "INSERT INTO facts (entity_id, fact_text, source_file, agent_id, created_at, "
             "retention_class, valid_from, valid_until, namespace, memory_id, confidence, provenance, actor_id) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -755,7 +833,7 @@ async def add_fact(
         fid = cur.lastrowid
 
         if new_words:
-            old_facts_cur = await conn.execute(
+            old_facts_cur = await c.execute(
                 "SELECT id, fact_text FROM facts "
                 "WHERE entity_id=? AND is_active=1 AND id!=? AND superseded_by IS NULL",
                 (entity_id, fid),
@@ -773,12 +851,17 @@ async def add_fact(
 
             if superseded_ids:
                 placeholders = ",".join("?" for _ in superseded_ids)
-                await conn.execute(
+                await c.execute(
                     f"UPDATE facts SET superseded_by=? WHERE id IN ({placeholders})",
                     [fid] + superseded_ids,
                 )
 
         return fid
+
+    if conn is not None:
+        return await _run(conn)
+    async with pool.write() as c:
+        return await _run(c)
 
 
 async def invalidate_fact(fact_id: int, ended: str = ""):
@@ -1036,8 +1119,18 @@ async def register_needle_tokens(
     agent_id: str = "",
     actor_id: str = "",
     actor_type: str = "",
+    conn: aiosqlite.Connection | None = None,
 ):
-    """Extract and register high-specificity tokens from text for O(1) lookup."""
+    """Extract and register high-specificity tokens from text for O(1) lookup.
+
+    Args:
+        conn: Optional open ``aiosqlite.Connection``.  When provided (e.g. from
+            inside a ``MemoryTransaction``), writes join the caller's transaction
+            instead of acquiring a new ``pool.write()`` lock.  When ``None``
+            (default), a fresh write-lock is acquired from the pool.
+    """
+    import aiosqlite as _aiosqlite
+
     from archivist.storage.sqlite_pool import pool
 
     _ensure_needle_registry()
@@ -1051,15 +1144,22 @@ async def register_needle_tokens(
         return
     now = datetime.now(UTC).isoformat()
     snippet = text[:500]
+
+    async def _run(c: _aiosqlite.Connection) -> None:
+        for tok in tokens:
+            await c.execute(
+                "INSERT OR REPLACE INTO needle_registry "
+                "(token, memory_id, namespace, agent_id, actor_id, actor_type, chunk_text, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (tok, memory_id, namespace, agent_id, actor_id, actor_type, snippet, now),
+            )
+
     try:
-        async with pool.write() as conn:
-            for tok in tokens:
-                await conn.execute(
-                    "INSERT OR REPLACE INTO needle_registry "
-                    "(token, memory_id, namespace, agent_id, actor_id, actor_type, chunk_text, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (tok, memory_id, namespace, agent_id, actor_id, actor_type, snippet, now),
-                )
+        if conn is not None:
+            await _run(conn)
+        else:
+            async with pool.write() as c:
+                await _run(c)
     except Exception as e:
         logging.getLogger("archivist.graph").warning("Needle registry insert failed: %s", e)
 

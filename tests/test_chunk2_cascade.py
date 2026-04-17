@@ -20,6 +20,22 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 
+def _mock_txn_ctx():
+    """Return a no-op MemoryTransaction async context manager mock."""
+    txn = MagicMock()
+    txn.execute = AsyncMock()
+    txn.executemany = AsyncMock()
+    txn.upsert_fts_chunk = AsyncMock()
+    txn.register_needle_tokens = AsyncMock()
+    txn.enqueue_qdrant_upsert = MagicMock()
+    txn.enqueue_qdrant_delete = MagicMock()
+    txn.__aenter__ = AsyncMock(return_value=txn)
+    txn.__aexit__ = AsyncMock(return_value=False)
+    cm = MagicMock()
+    cm.return_value = txn
+    return cm
+
+
 class TestDeleteResult:
     """DeleteResult dataclass behaves correctly."""
 
@@ -665,9 +681,7 @@ class TestMergeUsesLifecycle:
             patch("merge.embed_text", new_callable=AsyncMock, return_value=[0.1] * 1024),
             patch("merge.llm_query", new_callable=AsyncMock, return_value="merged text"),
             patch("merge.record_version", new_callable=AsyncMock, return_value=2),
-            patch("merge.register_memory_points_batch", new_callable=AsyncMock),
-            patch("merge.upsert_fts_chunk", new_callable=AsyncMock),
-            patch("merge.register_needle_tokens", new_callable=AsyncMock),
+            patch("archivist.storage.transaction.MemoryTransaction", _mock_txn_ctx()),
             patch("merge.log_memory_event", new_callable=AsyncMock),
             patch("memory_lifecycle.delete_memory_complete", mock_del),
         ):

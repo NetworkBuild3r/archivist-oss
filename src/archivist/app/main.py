@@ -287,12 +287,29 @@ async def _startup():
 
     ensure_qdrant_collection()
 
-    for coro, name in [
+    # Initialise the OutboxProcessor singleton and register it globally so that
+    # MemoryTransaction can locate it (optional — the transaction does not call
+    # the processor directly, but having the singleton available helps tests).
+    from archivist.core.config import OUTBOX_ENABLED
+    from archivist.storage.backends import QdrantVectorBackend
+    from archivist.storage.outbox import OutboxProcessor, set_processor
+
+    _outbox_processor = OutboxProcessor(QdrantVectorBackend(qdrant_client()))
+    set_processor(_outbox_processor)
+
+    background_tasks_spec = [
         (run_initial_index(), "initial_index"),
         (file_watcher(), "file_watcher"),
         (curator_loop(), "curator_loop"),
         (curator_queue_drain_loop(), "curator_queue_drain"),
-    ]:
+        (_outbox_processor.drain_loop(), "outbox_drain"),
+    ]
+    if not OUTBOX_ENABLED:
+        logger.info(
+            "OutboxProcessor drain loop started (OUTBOX_ENABLED=false — "
+            "drain is a no-op until flag is flipped)"
+        )
+    for coro, name in background_tasks_spec:
         t = asyncio.create_task(coro, name=name)
         t.add_done_callback(_log_task_exception)
         _background_tasks.append(t)

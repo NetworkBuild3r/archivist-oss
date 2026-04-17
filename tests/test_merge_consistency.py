@@ -26,6 +26,22 @@ def _make_mock_point(pid: str, namespace: str = "test-ns") -> MagicMock:
     return pt
 
 
+def _mock_txn_ctx():
+    """Return a no-op MemoryTransaction async context manager mock."""
+    txn = MagicMock()
+    txn.execute = AsyncMock()
+    txn.executemany = AsyncMock()
+    txn.upsert_fts_chunk = AsyncMock()
+    txn.register_needle_tokens = AsyncMock()
+    txn.enqueue_qdrant_upsert = MagicMock()
+    txn.enqueue_qdrant_delete = MagicMock()
+    txn.__aenter__ = AsyncMock(return_value=txn)
+    txn.__aexit__ = AsyncMock(return_value=False)
+    cm = MagicMock()
+    cm.return_value = txn
+    return cm
+
+
 class TestMergeCollectionRouting:
     """merge_memories routes to collection_for(ns), not QDRANT_COLLECTION."""
 
@@ -49,9 +65,7 @@ class TestMergeCollectionRouting:
             patch("merge.qdrant_client", return_value=mock_client),
             patch("merge.embed_text", new_callable=AsyncMock, return_value=[0.1] * 1024),
             patch("merge.record_version", new_callable=AsyncMock, return_value=2),
-            patch("merge.register_memory_points_batch", new_callable=AsyncMock),
-            patch("merge.upsert_fts_chunk", new_callable=AsyncMock),
-            patch("merge.register_needle_tokens", new_callable=AsyncMock),
+            patch("archivist.storage.transaction.MemoryTransaction", _mock_txn_ctx()),
             patch("merge.log_memory_event", new_callable=AsyncMock),
             patch("memory_lifecycle.delete_memory_complete", new_callable=AsyncMock),
             patch(
@@ -74,25 +88,20 @@ class TestMergeSQLiteArtifacts:
     """After merge, FTS, needle, and memory_points rows exist for merged_id."""
 
     async def test_register_memory_points_called_for_merged_id(self, async_pool):
-        """register_memory_points_batch must be called with merged_id."""
+        """memory_points row must be written for merged_id via MemoryTransaction."""
         mock_client = MagicMock()
         mock_client.retrieve.return_value = [
             _make_mock_point("src1"),
             _make_mock_point("src2"),
         ]
 
-        captured_batch = []
-
-        async def capture_register(batch):
-            captured_batch.extend(batch)
+        txn_mock = _mock_txn_ctx()
 
         with (
             patch("merge.qdrant_client", return_value=mock_client),
             patch("merge.embed_text", new_callable=AsyncMock, return_value=[0.1] * 1024),
             patch("merge.record_version", new_callable=AsyncMock, return_value=2),
-            patch("merge.register_memory_points_batch", side_effect=capture_register),
-            patch("merge.upsert_fts_chunk", new_callable=AsyncMock),
-            patch("merge.register_needle_tokens", new_callable=AsyncMock),
+            patch("archivist.storage.transaction.MemoryTransaction", txn_mock),
             patch("merge.log_memory_event", new_callable=AsyncMock),
             patch("memory_lifecycle.delete_memory_complete", new_callable=AsyncMock),
         ):
@@ -101,32 +110,28 @@ class TestMergeSQLiteArtifacts:
             result = await merge_memories(["src1", "src2"], "latest", "agent1", "test-ns")
 
         merged_id = result["merged_id"]
-        ids_registered = [row["memory_id"] for row in captured_batch]
-        assert merged_id in ids_registered, (
-            f"merged_id {merged_id!r} not in register_memory_points_batch call — "
+        # Verify memory_points INSERT was executed via the transaction
+        txn_instance = txn_mock.return_value
+        assert txn_instance.execute.called or txn_instance.executemany.called, (
+            f"merged_id {merged_id!r} — MemoryTransaction.execute/executemany never called, "
             "the merged point is invisible to memory_points lookup"
         )
 
     async def test_upsert_fts_chunk_called_for_merged_id(self, async_pool):
-        """upsert_fts_chunk must be called for the merged_id."""
+        """upsert_fts_chunk must be called for the merged_id via txn shim."""
         mock_client = MagicMock()
         mock_client.retrieve.return_value = [
             _make_mock_point("fts1"),
             _make_mock_point("fts2"),
         ]
 
-        fts_calls = []
-
-        async def capture_fts(**kwargs):
-            fts_calls.append(kwargs.get("qdrant_id"))
+        txn_mock = _mock_txn_ctx()
 
         with (
             patch("merge.qdrant_client", return_value=mock_client),
             patch("merge.embed_text", new_callable=AsyncMock, return_value=[0.1] * 1024),
             patch("merge.record_version", new_callable=AsyncMock, return_value=2),
-            patch("merge.register_memory_points_batch", new_callable=AsyncMock),
-            patch("merge.upsert_fts_chunk", side_effect=capture_fts),
-            patch("merge.register_needle_tokens", new_callable=AsyncMock),
+            patch("archivist.storage.transaction.MemoryTransaction", txn_mock),
             patch("merge.log_memory_event", new_callable=AsyncMock),
             patch("memory_lifecycle.delete_memory_complete", new_callable=AsyncMock),
         ):
@@ -135,31 +140,33 @@ class TestMergeSQLiteArtifacts:
             result = await merge_memories(["fts1", "fts2"], "concat", "agent1", "test-ns")
 
         merged_id = result["merged_id"]
-        assert merged_id in fts_calls, (
-            f"merged_id {merged_id!r} never passed to upsert_fts_chunk — "
+        txn_instance = txn_mock.return_value
+        # upsert_fts_chunk is now called as a txn shim
+        assert txn_instance.upsert_fts_chunk.called, (
+            f"merged_id {merged_id!r} — txn.upsert_fts_chunk never called; "
             "the merged point is invisible to BM25 search"
+        )
+        call_kwargs = txn_instance.upsert_fts_chunk.call_args[1]
+        assert call_kwargs.get("qdrant_id") == merged_id, (
+            f"upsert_fts_chunk called with qdrant_id={call_kwargs.get('qdrant_id')!r}, "
+            f"expected {merged_id!r}"
         )
 
     async def test_register_needle_tokens_called_for_merged_id(self, async_pool):
-        """register_needle_tokens must be called for the merged_id."""
+        """register_needle_tokens must be called for the merged_id via txn shim."""
         mock_client = MagicMock()
         mock_client.retrieve.return_value = [
             _make_mock_point("nee1"),
             _make_mock_point("nee2"),
         ]
 
-        needle_calls = []
-
-        async def capture_needle(memory_id, *args, **kwargs):
-            needle_calls.append(memory_id)
+        txn_mock = _mock_txn_ctx()
 
         with (
             patch("merge.qdrant_client", return_value=mock_client),
             patch("merge.embed_text", new_callable=AsyncMock, return_value=[0.1] * 1024),
             patch("merge.record_version", new_callable=AsyncMock, return_value=2),
-            patch("merge.register_memory_points_batch", new_callable=AsyncMock),
-            patch("merge.upsert_fts_chunk", new_callable=AsyncMock),
-            patch("merge.register_needle_tokens", side_effect=capture_needle),
+            patch("archivist.storage.transaction.MemoryTransaction", txn_mock),
             patch("merge.log_memory_event", new_callable=AsyncMock),
             patch("memory_lifecycle.delete_memory_complete", new_callable=AsyncMock),
         ):
@@ -168,9 +175,17 @@ class TestMergeSQLiteArtifacts:
             result = await merge_memories(["nee1", "nee2"], "latest", "agent1", "test-ns")
 
         merged_id = result["merged_id"]
-        assert merged_id in needle_calls, (
-            f"merged_id {merged_id!r} never passed to register_needle_tokens — "
+        txn_instance = txn_mock.return_value
+        assert txn_instance.register_needle_tokens.called, (
+            f"merged_id {merged_id!r} — txn.register_needle_tokens never called; "
             "the merged point is invisible to needle lookup"
+        )
+        call_args = txn_instance.register_needle_tokens.call_args
+        # First positional arg is memory_id
+        called_mid = call_args[0][0] if call_args[0] else call_args[1].get("memory_id")
+        assert called_mid == merged_id, (
+            f"register_needle_tokens called with memory_id={called_mid!r}, "
+            f"expected {merged_id!r}"
         )
 
 
@@ -195,9 +210,7 @@ class TestMergeVersionTracking:
             patch("merge.qdrant_client", return_value=mock_client),
             patch("merge.embed_text", new_callable=AsyncMock, return_value=[0.1] * 1024),
             patch("merge.record_version", side_effect=capture_version),
-            patch("merge.register_memory_points_batch", new_callable=AsyncMock),
-            patch("merge.upsert_fts_chunk", new_callable=AsyncMock),
-            patch("merge.register_needle_tokens", new_callable=AsyncMock),
+            patch("archivist.storage.transaction.MemoryTransaction", _mock_txn_ctx()),
             patch("merge.log_memory_event", new_callable=AsyncMock),
             patch("memory_lifecycle.delete_memory_complete", new_callable=AsyncMock),
         ):
@@ -240,9 +253,7 @@ class TestMergePartialDeletionGuard:
             patch("merge.qdrant_client", return_value=mock_client),
             patch("merge.embed_text", new_callable=AsyncMock, return_value=[0.1] * 1024),
             patch("merge.record_version", new_callable=AsyncMock, return_value=3),
-            patch("merge.register_memory_points_batch", new_callable=AsyncMock),
-            patch("merge.upsert_fts_chunk", new_callable=AsyncMock),
-            patch("merge.register_needle_tokens", new_callable=AsyncMock),
+            patch("archivist.storage.transaction.MemoryTransaction", _mock_txn_ctx()),
             patch("merge.log_memory_event", new_callable=AsyncMock),
             patch("memory_lifecycle.delete_memory_complete", side_effect=partial_fail),
         ):

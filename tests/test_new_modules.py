@@ -153,11 +153,12 @@ class TestFTSSearch:
 
         assert _fts5_safe_query("") == ""
 
-    def test_search_bm25_disabled(self, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_search_bm25_disabled(self, monkeypatch):
         monkeypatch.setattr("fts_search.BM25_ENABLED", False)
         from fts_search import search_bm25
 
-        results = search_bm25("test query")
+        results = await search_bm25("test query")
         assert results == []
 
     def test_merge_vector_and_bm25_empty_bm25(self):

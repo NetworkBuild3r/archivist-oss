@@ -36,9 +36,7 @@ from archivist.storage.graph import (
     add_fact,
     delete_fts_chunks_by_file,
     register_memory_points_batch,
-    register_needle_tokens,
     upsert_entity,
-    upsert_fts_chunk,
 )
 from archivist.storage.qdrant import qdrant_client
 from archivist.utils.chunking import chunk_text, chunk_text_hierarchical
@@ -304,10 +302,11 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
 
     if points:
         _coll = ensure_collection(meta.get("namespace", ""))
-        client.upsert(collection_name=_coll, points=points)
-        _metrics.inc(_metrics.INDEX_CHUNKS, value=len(points))
+        _now_iso = datetime.now(UTC).isoformat()
 
-        # Register all indexed points in memory_points for fast cascade lookup.
+        from archivist.core.config import OUTBOX_ENABLED
+        from archivist.storage.transaction import MemoryTransaction
+
         _mp_records = []
         for p in points:
             pid_str = str(p.id)
@@ -320,31 +319,59 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
                 _mp_records.append(
                     {"memory_id": pid_str, "qdrant_id": pid_str, "point_type": "primary"}
                 )
+
         try:
-            await register_memory_points_batch(_mp_records)
+            async with MemoryTransaction() as txn:
+                # FTS5 and needle registry join the same transaction as memory_points
+                # and the outbox event — all commit atomically or none do.
+                if BM25_ENABLED:
+                    for p in points:
+                        await txn.upsert_fts_chunk(
+                            qdrant_id=str(p.id),
+                            text=p.payload.get("text", ""),
+                            file_path=p.payload.get("file_path", ""),
+                            chunk_index=p.payload.get("chunk_index", 0),
+                            agent_id=p.payload.get("agent_id", ""),
+                            namespace=p.payload.get("namespace", ""),
+                            date=p.payload.get("date", ""),
+                            memory_type=p.payload.get("memory_type", "general"),
+                            actor_id=p.payload.get("actor_id", ""),
+                            actor_type=p.payload.get("actor_type", ""),
+                        )
+                for p in points:
+                    await txn.register_needle_tokens(
+                        str(p.id),
+                        p.payload.get("text", ""),
+                        namespace=meta.get("namespace", ""),
+                        agent_id=meta.get("agent_id", ""),
+                        actor_id=meta.get("actor_id", ""),
+                        actor_type=meta.get("actor_type", ""),
+                    )
+                await txn.executemany(
+                    """INSERT OR IGNORE INTO memory_points
+                           (memory_id, qdrant_id, point_type, created_at)
+                       VALUES (?, ?, ?, ?)""",
+                    [
+                        (r["memory_id"], r["qdrant_id"], r["point_type"], _now_iso)
+                        for r in _mp_records
+                    ],
+                )
+                txn.enqueue_qdrant_upsert(_coll, points, memory_id=meta.get("file_path", ""))
         except Exception as _e:
             logger.debug("indexer.register_memory_points failed: %s", _e)
 
-        if BM25_ENABLED:
-            for p in points:
-                await upsert_fts_chunk(
-                    qdrant_id=str(p.id),
-                    text=p.payload.get("text", ""),
-                    file_path=p.payload.get("file_path", ""),
-                    chunk_index=p.payload.get("chunk_index", 0),
-                    agent_id=p.payload.get("agent_id", ""),
-                    namespace=p.payload.get("namespace", ""),
-                    date=p.payload.get("date", ""),
-                    memory_type=p.payload.get("memory_type", "general"),
-                    actor_id=p.payload.get("actor_id", ""),
-                    actor_type=p.payload.get("actor_type", ""),
-                )
+        # When the outbox is disabled, apply the Qdrant write inline (legacy).
+        if not OUTBOX_ENABLED:
+            client.upsert(collection_name=_coll, points=points)
+
+        _metrics.inc(_metrics.INDEX_CHUNKS, value=len(points))
 
         _agent = meta.get("agent_id", "")
         _src_file = meta.get("file_path", "")
         _ns = meta.get("namespace", "")
         _actor_id = meta.get("actor_id", "")
         _actor_type = meta.get("actor_type", "")
+
         _seen_entity_names: set[str] = set()
         for p in points:
             if not p.payload.get("is_parent", False):
@@ -374,16 +401,6 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
                         provenance="file_indexer",
                         actor_id=_actor_id,
                     )
-
-        for p in points:
-            await register_needle_tokens(
-                str(p.id),
-                p.payload.get("text", ""),
-                namespace=meta.get("namespace", ""),
-                agent_id=_agent,
-                actor_id=_actor_id,
-                actor_type=_actor_type,
-            )
 
         # Reverse HyDE: generate hypothetical questions for parent chunks (parallel)
         from archivist.core.config import REVERSE_HYDE_ENABLED

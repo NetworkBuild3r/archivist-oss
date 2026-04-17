@@ -12,11 +12,6 @@ from archivist.core.config import MEMORY_ROOT
 from archivist.features.embeddings import embed_text
 from archivist.features.llm import llm_query
 from archivist.storage.collection_router import collection_for
-from archivist.storage.graph import (
-    register_memory_points_batch,
-    register_needle_tokens,
-    upsert_fts_chunk,
-)
 from archivist.storage.qdrant import qdrant_client
 from archivist.storage.versioning import record_version
 from archivist.utils.text_utils import compute_memory_checksum
@@ -91,27 +86,41 @@ async def merge_memories(
     }
 
     _coll = collection_for(ns)
-    client.upsert(
-        collection_name=_coll,
-        points=[PointStruct(id=merged_id, vector=vec, payload=merged_payload)],
-    )
 
-    # Write all SQLite artifacts for the merged point so it is visible to
-    # BM25, needle, and memory_points lookups.
-    await register_memory_points_batch(
-        [{"memory_id": merged_id, "qdrant_id": merged_id, "point_type": "primary"}]
-    )
-    await upsert_fts_chunk(
-        qdrant_id=merged_id,
-        text=merged_text,
-        file_path=f"merge/{agent_id}",
-        chunk_index=0,
-        agent_id=agent_id,
-        namespace=ns,
-        date=datetime.now(UTC).strftime("%Y-%m-%d"),
-        memory_type="merged",
-    )
-    await register_needle_tokens(merged_id, merged_text, namespace=ns, agent_id=agent_id)
+    from archivist.core.config import OUTBOX_ENABLED
+    from archivist.storage.transaction import MemoryTransaction
+
+    _merged_point = PointStruct(id=merged_id, vector=vec, payload=merged_payload)
+    _now_iso = datetime.now(UTC).isoformat()
+
+    # Persist all SQLite artefacts for the merged point plus an outbox event for
+    # the Qdrant upsert — all in a single pool.write() transaction so a crash
+    # cannot produce a Qdrant-orphan merged point (failure mode D from plan).
+    async with MemoryTransaction() as txn:
+        await txn.execute(
+            """INSERT OR IGNORE INTO memory_points (memory_id, qdrant_id, point_type, created_at)
+               VALUES (?, ?, 'primary', ?)""",
+            (merged_id, merged_id, _now_iso),
+        )
+        await txn.upsert_fts_chunk(
+            qdrant_id=merged_id,
+            text=merged_text,
+            file_path=f"merge/{agent_id}",
+            chunk_index=0,
+            agent_id=agent_id,
+            namespace=ns,
+            date=datetime.now(UTC).strftime("%Y-%m-%d"),
+            memory_type="merged",
+        )
+        await txn.register_needle_tokens(merged_id, merged_text, namespace=ns, agent_id=agent_id)
+        txn.enqueue_qdrant_upsert(_coll, [_merged_point], memory_id=merged_id)
+
+    # When the outbox is disabled, apply the Qdrant write inline (legacy behaviour).
+    if not OUTBOX_ENABLED:
+        client.upsert(
+            collection_name=_coll,
+            points=[_merged_point],
+        )
 
     from archivist.lifecycle.cascade import PartialDeletionError
     from archivist.lifecycle.memory_lifecycle import delete_memory_complete

@@ -869,11 +869,10 @@ async def recursive_retrieve(
         return await search_vectors(q, **_vec_common, topic=topic, _query_vec=vec)
 
     async def _bm25_async() -> list[dict]:
-        """Wrap synchronous BM25/SQLite search for concurrent execution."""
+        """Run async BM25/SQLite search concurrently with vector search."""
         if not BM25_ENABLED:
             return []
-        return await asyncio.to_thread(
-            search_bm25,
+        return await search_bm25(
             query,
             namespace=namespace,
             agent_id=agent_id if not agent_ids else "",

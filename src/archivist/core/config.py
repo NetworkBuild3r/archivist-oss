@@ -268,6 +268,18 @@ SQLITE_WAL_AUTOCHECKPOINT = int(os.getenv("SQLITE_WAL_AUTOCHECKPOINT", "1000"))
 # Milliseconds SQLite waits on a locked write before raising OperationalError.
 SQLITE_BUSY_TIMEOUT_MS = int(os.getenv("SQLITE_BUSY_TIMEOUT_MS", "5000"))
 
+# ── Transactional outbox (v2.1 — Phase 3) ────────────────────────────────────
+# Feature flag: when False, enqueue_* calls in MemoryTransaction are no-ops and
+# callers perform Qdrant operations inline (legacy behaviour preserved).
+# Start with False; flip to True after staging validation.
+OUTBOX_ENABLED = _env_bool("OUTBOX_ENABLED", "false")
+# Seconds between OutboxProcessor drain cycles.
+OUTBOX_DRAIN_INTERVAL = int(os.getenv("OUTBOX_DRAIN_INTERVAL", "2"))
+# Maximum events processed per drain cycle (bounds individual drain latency).
+OUTBOX_BATCH_SIZE = int(os.getenv("OUTBOX_BATCH_SIZE", "50"))
+# After this many consecutive failures an outbox event is moved to 'dead'.
+OUTBOX_MAX_RETRIES = int(os.getenv("OUTBOX_MAX_RETRIES", "5"))
+
 # ── Context window management (v1.1) ─────────────────────────────────────────
 DEFAULT_CONTEXT_BUDGET = int(os.getenv("DEFAULT_CONTEXT_BUDGET", "128000"))
 
