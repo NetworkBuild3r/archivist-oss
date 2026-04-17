@@ -1,0 +1,184 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Archivist CD — triggers on version tags (vX.Y.Z) and GitHub releases
+#
+# Jobs:
+#   validate   → Confirm the tag matches __version__ in the package
+#   docker     → Multi-platform build (amd64 + arm64) → ghcr.io
+#   release    → Attach RELEASE_NOTES and CHANGELOG to the GitHub Release
+#
+# Required repository secrets / variables:
+#   None beyond the default GITHUB_TOKEN (write:packages permission below).
+#
+# Required one-time setup:
+#   • Enable "Read and write permissions" for GITHUB_TOKEN in:
+#     Settings → Actions → General → Workflow permissions
+#   OR add the permissions block below — it grants only what's needed.
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: CD
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"        # v2.0.0, v2.1.3, …
+      - "v[0-9]+.[0-9]+.[0-9]+-rc*"    # v2.1.0-rc1
+  release:
+    types: [published]
+
+concurrency:
+  group: cd-${{ github.ref }}
+  cancel-in-progress: false  # Never cancel an in-flight release
+
+permissions:
+  contents: write     # Attach assets to GitHub Release
+  packages: write     # Push to ghcr.io
+  id-token: write     # OIDC (future: cosign keyless signing)
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+# ─── Validate tag matches package version ────────────────────────────────────
+jobs:
+  validate:
+    name: Validate Release Tag
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Extract version from package
+        id: ver
+        run: |
+          PKG_VERSION=$(python -c "
+          import sys; sys.path.insert(0, 'src')
+          import archivist; print(archivist.__version__)
+          ")
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          echo "Package version : $PKG_VERSION"
+          echo "Tag version     : $TAG_VERSION"
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match archivist.__version__ = $PKG_VERSION"
+            exit 1
+          fi
+          echo "version=$PKG_VERSION" >> "$GITHUB_OUTPUT"
+
+# ─── Multi-platform Docker build → ghcr.io ───────────────────────────────────
+  docker:
+    name: Build & Push Docker Image
+    runs-on: ubuntu-24.04
+    needs: [validate]
+    env:
+      VERSION: ${{ needs.validate.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha,prefix=sha-,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Set up QEMU (arm64 emulation)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push multi-platform image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            VERSION=${{ env.VERSION }}
+
+      - name: Image digest
+        run: echo "Pushed ${{ steps.meta.outputs.tags }}"
+
+# ─── Attach release assets ───────────────────────────────────────────────────
+  release-assets:
+    name: Attach Release Notes & Changelog
+    runs-on: ubuntu-24.04
+    needs: [validate, docker]
+    env:
+      VERSION: ${{ needs.validate.outputs.version }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Upload release notes
+        run: |
+          NOTES_FILE="docs/RELEASE_NOTES_v${VERSION}.md"
+          if [ -f "$NOTES_FILE" ]; then
+            gh release upload "$GITHUB_REF_NAME" "$NOTES_FILE" \
+              --clobber --repo "$GITHUB_REPOSITORY"
+            echo "Attached $NOTES_FILE"
+          else
+            echo "No release notes file at $NOTES_FILE — skipping"
+          fi
+
+      - name: Upload CHANGELOG excerpt
+        run: |
+          # Extract just the section for this version from CHANGELOG.md
+          awk "/^## \[$VERSION\]/{flag=1} flag; /^## \[/{if(!flag) next; if(flag>1) exit; flag++}" \
+            CHANGELOG.md > "CHANGELOG_${VERSION}.md" || true
+
+          if [ -s "CHANGELOG_${VERSION}.md" ]; then
+            gh release upload "$GITHUB_REF_NAME" "CHANGELOG_${VERSION}.md" \
+              --clobber --repo "$GITHUB_REPOSITORY"
+            echo "Attached CHANGELOG_${VERSION}.md"
+          fi
+
+      - name: Upload benchmark snapshot (if present)
+        run: |
+          BENCH_FILE=".benchmarks/phase5_semantic_chunking.json"
+          if [ -f "$BENCH_FILE" ]; then
+            cp "$BENCH_FILE" "benchmarks_v${VERSION}.json"
+            gh release upload "$GITHUB_REF_NAME" "benchmarks_v${VERSION}.json" \
+              --clobber --repo "$GITHUB_REPOSITORY"
+            echo "Attached benchmark snapshot"
+          fi
+
+      - name: Update Release body with Docker pull command
+        run: |
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.VERSION }}"
+          BODY=$(gh release view "$GITHUB_REF_NAME" --json body -q .body)
+          DOCKER_SNIPPET="
+
+          ---
+          ### Docker
+
+          \`\`\`bash
+          docker pull ${IMAGE}
+          \`\`\`
+          "
+          gh release edit "$GITHUB_REF_NAME" \
+            --notes "${BODY}${DOCKER_SNIPPET}" \
+            --repo "$GITHUB_REPOSITORY"
