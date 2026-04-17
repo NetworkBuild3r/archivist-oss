@@ -825,6 +825,7 @@ async def search_entities(query: str, limit: int = 10, namespace: str = "") -> l
 async def add_entity_alias(entity_id: int, alias: str):
     """Add an alias to an entity (idempotent)."""
     import json as _json
+
     from archivist.storage.sqlite_pool import pool
 
     norm = _normalize(alias)
@@ -1331,6 +1332,7 @@ async def log_delete_failure(memory_id: str, qdrant_ids: list[str], error: str) 
     """
     import json as _json
     import uuid as _uuid
+
     from archivist.storage.sqlite_pool import pool
 
     now = datetime.now(UTC).isoformat()

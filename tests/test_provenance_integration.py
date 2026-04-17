@@ -55,7 +55,7 @@ def _store_patches(mock_client):
         ),
         patch("handlers.tools_storage.qdrant_client", return_value=mock_client),
         patch("handlers.tools_storage.ensure_collection", return_value="test_coll"),
-        patch("handlers.tools_storage.register_memory_points_batch", lambda pts: None),
+        patch("handlers.tools_storage.register_memory_points_batch", new_callable=AsyncMock),
         patch("handlers.tools_storage.get_namespace_config", return_value=None),
         patch("handlers.tools_storage._rbac_gate", return_value=None),
         patch("audit.log_memory_event", new_callable=AsyncMock),
@@ -66,7 +66,7 @@ def _store_patches(mock_client):
 
 
 @pytest.mark.asyncio
-async def test_store_with_provenance_sets_payload(monkeypatch):
+async def test_store_with_provenance_sets_payload(async_pool, monkeypatch):
     """archivist_store with provenance fields propagates to primary Qdrant point."""
     monkeypatch.setattr("config.REVERSE_HYDE_ENABLED", False)
     monkeypatch.setattr("config.SYNTHETIC_QUESTIONS_ENABLED", False)
@@ -116,7 +116,7 @@ async def test_store_with_provenance_sets_payload(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_store_provenance_defaults(monkeypatch):
+async def test_store_provenance_defaults(async_pool, monkeypatch):
     """When no provenance fields provided, defaults are applied."""
     monkeypatch.setattr("config.REVERSE_HYDE_ENABLED", False)
     monkeypatch.setattr("config.SYNTHETIC_QUESTIONS_ENABLED", False)
@@ -163,7 +163,7 @@ async def test_store_provenance_defaults(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_store_propagates_to_sqlite(monkeypatch):
+async def test_store_propagates_to_sqlite(async_pool, monkeypatch):
     """Verify provenance reaches SQLite tables (facts, memory_chunks)."""
     monkeypatch.setattr("config.REVERSE_HYDE_ENABLED", False)
     monkeypatch.setattr("config.SYNTHETIC_QUESTIONS_ENABLED", False)
@@ -267,7 +267,7 @@ def test_reranker_passage_includes_provenance_from_candidate():
 
 
 @pytest.mark.asyncio
-async def test_micro_chunks_inherit_provenance(monkeypatch):
+async def test_micro_chunks_inherit_provenance(async_pool, monkeypatch):
     """Micro-chunk Qdrant points carry the same provenance as the parent."""
     monkeypatch.setattr("config.REVERSE_HYDE_ENABLED", False)
     monkeypatch.setattr("config.SYNTHETIC_QUESTIONS_ENABLED", False)

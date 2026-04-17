@@ -398,6 +398,10 @@ async def _handle_search(arguments: dict) -> list[TextContent]:
                 {
                     "error": "access_denied",
                     "reason": "Caller cannot read any of the requested agents' namespaces",
+                    "hint": (
+                        f"Use archivist_namespaces(agent_id='{caller}') to see your"
+                        " accessible namespaces."
+                    ),
                     "denied_agents": denied_list,
                     "caller_agent_id": caller,
                 }
@@ -406,10 +410,19 @@ async def _handle_search(arguments: dict) -> list[TextContent]:
     elif agent_id:
         allowed, denied_list = filter_agents_for_read(caller, [agent_id])
         if not allowed:
+            resolved_ns = get_namespace_for_agent(agent_id)
             return error_response(
                 {
                     "error": "access_denied",
-                    "reason": f"Cannot read memories for agent '{agent_id}'",
+                    "reason": (
+                        f"Cannot read memories for agent '{agent_id}' — resolved to"
+                        f" namespace '{resolved_ns}', caller lacks read access"
+                    ),
+                    "hint": (
+                        f"To search your own namespace, pass namespace='{resolved_ns}'"
+                        f" directly instead of agent_id='{agent_id}', or omit agent_id"
+                        " entirely."
+                    ),
                     "denied_agents": denied_list,
                     "caller_agent_id": caller,
                 }
@@ -506,10 +519,18 @@ async def _handle_timeline(arguments: dict) -> list[TextContent]:
     if agent_id:
         allowed, denied_list = filter_agents_for_read(caller, [agent_id])
         if not allowed:
+            resolved_ns = get_namespace_for_agent(agent_id)
             return error_response(
                 {
                     "error": "access_denied",
-                    "reason": "Caller cannot read this agent's memories",
+                    "reason": (
+                        f"Cannot read timeline for agent '{agent_id}' — resolved to"
+                        f" namespace '{resolved_ns}', caller lacks read access"
+                    ),
+                    "hint": (
+                        f"Use archivist_namespaces(agent_id='{caller}') to see your"
+                        " accessible namespaces."
+                    ),
                     "denied_agents": denied_list,
                 }
             )
@@ -746,7 +767,7 @@ async def _handle_wake_up(arguments: dict) -> list[TextContent]:
     if not ctx:
         ctx = cache_wake_up(namespace, agent_id=agent_id)
 
-    return [TextContent(type="text", text=format_wake_up_text(ctx))]
+    return [TextContent(type="text", text=format_wake_up_text(ctx, agent_id=agent_id))]
 
 
 # ---------------------------------------------------------------------------

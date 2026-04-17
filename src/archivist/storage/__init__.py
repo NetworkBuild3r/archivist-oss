@@ -13,9 +13,9 @@ from archivist.storage.sqlite_pool import (
 )
 
 __all__ = [
-    "pool",
-    "SQLitePool",
-    "initialize_pool",
-    "close_pool",
     "GRAPH_WRITE_LOCK_ASYNC",
+    "SQLitePool",
+    "close_pool",
+    "initialize_pool",
+    "pool",
 ]

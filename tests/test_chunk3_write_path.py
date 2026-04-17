@@ -40,7 +40,7 @@ class TestMicroChunkCap:
     """Micro-chunks are truncated to MAX_MICRO_CHUNKS_PER_MEMORY."""
 
     @pytest.mark.asyncio
-    async def test_micro_chunks_capped(self, monkeypatch):
+    async def test_micro_chunks_capped(self, async_pool, monkeypatch):
         many_chunks = [f"chunk-{i}: 192.168.1.{i}" for i in range(20)]
 
         with (
@@ -100,7 +100,7 @@ class TestReverseHydeFireAndForget:
     """Reverse HyDE runs as background task, not blocking store response."""
 
     @pytest.mark.asyncio
-    async def test_store_returns_before_hyde_completes(self, monkeypatch):
+    async def test_store_returns_before_hyde_completes(self, async_pool, monkeypatch):
         hyde_started = asyncio.Event()
         hyde_gate = asyncio.Event()
 
@@ -161,7 +161,7 @@ class TestReverseHydeFireAndForget:
             await asyncio.sleep(0.05)
 
     @pytest.mark.asyncio
-    async def test_hyde_failure_logs_warning(self, monkeypatch):
+    async def test_hyde_failure_logs_warning(self, async_pool, monkeypatch):
         logged_warnings = []
         original_warning = None
 

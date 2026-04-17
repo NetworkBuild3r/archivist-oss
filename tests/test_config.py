@@ -26,12 +26,12 @@ class TestConfigDefaults:
     def test_sqlite_wal_autocheckpoint_default(self):
         import archivist.core.config as cfg
 
-        assert cfg.SQLITE_WAL_AUTOCHECKPOINT == int(os.getenv("SQLITE_WAL_AUTOCHECKPOINT", "1000"))
+        assert int(os.getenv("SQLITE_WAL_AUTOCHECKPOINT", "1000")) == cfg.SQLITE_WAL_AUTOCHECKPOINT
 
     def test_sqlite_busy_timeout_default(self):
         import archivist.core.config as cfg
 
-        assert cfg.SQLITE_BUSY_TIMEOUT_MS == int(os.getenv("SQLITE_BUSY_TIMEOUT_MS", "5000"))
+        assert int(os.getenv("SQLITE_BUSY_TIMEOUT_MS", "5000")) == cfg.SQLITE_BUSY_TIMEOUT_MS
 
 
 class TestConfigValidation:

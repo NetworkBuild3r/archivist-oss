@@ -729,7 +729,7 @@ async def recursive_retrieve(
             out["retrieval_trace"].get("auto_classified_type") or auto_type,
             user_memory_type,
         )
-        retrieval_log.log_retrieval(
+        await retrieval_log.log_retrieval(
             agent_id=agent_id or "fleet",
             query=query,
             namespace=namespace,
@@ -957,11 +957,11 @@ async def recursive_retrieve(
     detected_entities: list[dict] = []
     _t_graph = time.monotonic()
     if GRAPH_RETRIEVAL_ENABLED:
-        entities = extract_entity_mentions(query, namespace=namespace)
+        entities = await extract_entity_mentions(query, namespace=namespace)
         detected_entities = entities
         n_graph_entities = len(entities)
         if entities:
-            graph_items = graph_context_for_entities(
+            graph_items = await graph_context_for_entities(
                 [e["id"] for e in entities],
                 depth=MULTI_HOP_DEPTH,
             )
@@ -1561,7 +1561,7 @@ async def recursive_retrieve(
         memory_type=effective_memory_type,
         extra=cache_extra,
     )
-    retrieval_log.log_retrieval(
+    await retrieval_log.log_retrieval(
         agent_id=agent_id or "fleet",
         query=query,
         namespace=namespace,

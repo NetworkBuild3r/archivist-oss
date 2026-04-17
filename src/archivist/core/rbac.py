@@ -31,6 +31,7 @@ class NamespaceConfig:
 class AccessPolicy:
     allowed: bool
     reason: str = ""
+    hint: str | None = None
 
 
 @dataclass
@@ -129,16 +130,31 @@ def get_namespace_config(namespace: str) -> NamespaceConfig | None:
 
 
 def check_access(agent_id: str, action: str, namespace: str) -> AccessPolicy:
-    """Check if agent_id has permission for action (read/write/delete) on namespace."""
+    """Check if agent_id has permission for action (read/write/delete) on namespace.
+
+    Returns an AccessPolicy with ``allowed=False`` and a context-aware ``hint``
+    on every denial so callers can surface actionable guidance without a separate
+    lookup.
+    """
     if _permissive_fallback:
         return AccessPolicy(allowed=True, reason="permissive fallback — config not loaded")
 
     cfg = get_config()
     ns = cfg.namespaces.get(namespace)
     if ns is None:
+        accessible = list_accessible_namespaces(agent_id)
+        ns_names = [entry["namespace"] for entry in accessible]
+        _MAX_HINT_NS = 6
+        if len(ns_names) > _MAX_HINT_NS:
+            ns_list = ", ".join(ns_names[:_MAX_HINT_NS]) + ", ..."
+        elif ns_names:
+            ns_list = ", ".join(ns_names)
+        else:
+            ns_list = "(none)"
         return AccessPolicy(
             allowed=False,
             reason=f"Unknown namespace: {namespace}",
+            hint=f"Available namespaces for caller '{agent_id}': {ns_list}",
         )
 
     if action in ("write", "delete"):
@@ -152,9 +168,19 @@ def check_access(agent_id: str, action: str, namespace: str) -> AccessPolicy:
     if agent_id in allowed_list:
         return AccessPolicy(allowed=True)
 
+    if action == "read":
+        hint = (
+            f"Use archivist_namespaces(agent_id='{agent_id}') to see your accessible namespaces."
+        )
+    else:
+        hint = (
+            f"Use archivist_namespaces(agent_id='{agent_id}') to confirm your"
+            " write-accessible namespaces."
+        )
     return AccessPolicy(
         allowed=False,
         reason=f"Agent '{agent_id}' lacks {action} permission for namespace '{namespace}'",
+        hint=hint,
     )
 
 

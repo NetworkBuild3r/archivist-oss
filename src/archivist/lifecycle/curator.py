@@ -494,7 +494,7 @@ async def curator_loop():
                 try:
                     from archivist.lifecycle.cascade import sweep_orphans
 
-                    sr = await asyncio.to_thread(sweep_orphans)
+                    sr = await sweep_orphans()
                     orphans_cleaned = sr.get("fts_cleaned", 0) + sr.get("needle_cleaned", 0)
                     if orphans_cleaned:
                         logger.info("Orphan sweep cleaned %d rows", orphans_cleaned)

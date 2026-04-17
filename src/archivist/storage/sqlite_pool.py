@@ -27,8 +27,8 @@ Usage::
 import asyncio
 import logging
 import time
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
 
 import aiosqlite
 
@@ -128,9 +128,9 @@ async def initialize_pool() -> None:
     Must be called once during app startup before any async graph functions are
     used.  Uses SQLITE_PATH and SQLITE_WAL_AUTOCHECKPOINT from config.
     """
-    from archivist.core.config import SQLITE_PATH, SQLITE_WAL_AUTOCHECKPOINT
-
     import os
+
+    from archivist.core.config import SQLITE_PATH, SQLITE_WAL_AUTOCHECKPOINT
 
     os.makedirs(os.path.dirname(SQLITE_PATH), exist_ok=True)
     await pool.initialize(SQLITE_PATH, wal_autocheckpoint=SQLITE_WAL_AUTOCHECKPOINT)

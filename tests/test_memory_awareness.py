@@ -4,7 +4,7 @@ import pytest
 
 
 class TestNamespaceInventory:
-    def test_inventory_counts_by_type_and_ttl_invalidate(self, monkeypatch):
+    async def test_inventory_counts_by_type_and_ttl_invalidate(self, async_pool, monkeypatch):
         import namespace_inventory as ni
         from graph import upsert_fts_chunk
 
@@ -12,11 +12,11 @@ class TestNamespaceInventory:
         monkeypatch.setattr(ni, "INVENTORY_TTL_SECONDS", 3600)
 
         for i in range(30):
-            upsert_fts_chunk(
+            await upsert_fts_chunk(
                 f"id-s-{i}", "skill text", f"f{i}.md", i, "a1", "ns1", "2026-01-01", "skill"
             )
         for i in range(20):
-            upsert_fts_chunk(
+            await upsert_fts_chunk(
                 f"id-e-{i}",
                 "experience text",
                 f"e{i}.md",
