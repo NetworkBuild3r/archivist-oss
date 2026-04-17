@@ -208,17 +208,11 @@ async def qa_pool(tmp_path, monkeypatch):
 
     * Patches ``archivist.storage.sqlite_pool.pool`` so ``MemoryTransaction``
       and ``OutboxProcessor`` use this isolated pool.
-    * Replaces ``GRAPH_WRITE_LOCK_ASYNC`` with a fresh ``asyncio.Lock`` bound
-      to the current event loop (avoids "bound to a different event loop" errors
-      when ``asyncio_mode = "auto"`` spawns a new loop per test).
+    * ``pool.write()`` now calls ``_get_graph_write_lock()`` which is
+      loop-aware, so no explicit lock monkeypatching is required.
     * Resets all graph schema guards so the DDL can re-run on the fresh DB.
     """
-    import asyncio
-
     from archivist.storage import sqlite_pool as _sp
-
-    # Fresh lock — must be created inside the fixture (inside the new event loop).
-    monkeypatch.setattr(_sp, "GRAPH_WRITE_LOCK_ASYNC", asyncio.Lock())
 
     p = _sp.SQLitePool()
     db_path = str(tmp_path / "qa_test.db")

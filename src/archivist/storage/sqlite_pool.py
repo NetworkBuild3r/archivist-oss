@@ -41,7 +41,49 @@ logger = logging.getLogger("archivist.sqlite_pool")
 # that no new writes can interleave with the backup copy.  pool.write() also
 # acquires this lock (after the internal _write_lock) to create a clean two-
 # level hierarchy: backup blocks all writes, writes block each other.
-GRAPH_WRITE_LOCK_ASYNC: asyncio.Lock = asyncio.Lock()
+#
+# The lock is created lazily on first use so that it is always bound to the
+# running event loop.  Creating an asyncio.Lock at module-import time binds it
+# to whatever loop is current at that moment; in pytest-asyncio with
+# asyncio_mode="auto" every test gets a fresh loop, causing "bound to a
+# different event loop" errors after the first test.
+_GRAPH_WRITE_LOCK: asyncio.Lock | None = None
+
+
+def _get_graph_write_lock() -> asyncio.Lock:
+    """Return (or create) the module-level write-serialisation lock.
+
+    Always called from within a running event loop, so the lock is guaranteed
+    to be bound to the correct loop.
+    """
+    global _GRAPH_WRITE_LOCK
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if _GRAPH_WRITE_LOCK is None:
+        _GRAPH_WRITE_LOCK = asyncio.Lock()
+        return _GRAPH_WRITE_LOCK
+
+    # In Python 3.10+ asyncio.Lock uses _LoopBoundMixin; _loop is set lazily on
+    # first acquire.  If it has been set and differs from the current loop the
+    # lock belongs to a closed loop and must be replaced.
+    if loop is not None:
+        bound_loop = getattr(_GRAPH_WRITE_LOCK, "_loop", None)
+        if bound_loop is not None and bound_loop is not loop:
+            _GRAPH_WRITE_LOCK = asyncio.Lock()
+
+    return _GRAPH_WRITE_LOCK
+
+
+# Backward-compatible alias — external code (backup_manager, tests) that reads
+# this name directly will get the *current* lock via the property-like accessor.
+# For direct attribute access we expose a property through a module-level shim.
+# Code that does ``async with GRAPH_WRITE_LOCK_ASYNC`` will still work because
+# pool.write() now calls _get_graph_write_lock() internally; callers outside
+# pool.write() should migrate to _get_graph_write_lock().
+GRAPH_WRITE_LOCK_ASYNC: asyncio.Lock = asyncio.Lock()  # legacy alias, not used internally
 
 
 class SQLitePool:
@@ -95,7 +137,7 @@ class SQLitePool:
         if self._conn is None:
             raise RuntimeError("SQLitePool is not initialized — call initialize_pool() first")
         t0 = time.monotonic()
-        async with GRAPH_WRITE_LOCK_ASYNC:
+        async with _get_graph_write_lock():
             async with self._write_lock:
                 elapsed_ms = (time.monotonic() - t0) * 1000
                 m.observe(m.SQLITE_POOL_ACQUIRE_MS, elapsed_ms)

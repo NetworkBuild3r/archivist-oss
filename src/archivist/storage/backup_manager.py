@@ -32,7 +32,7 @@ from archivist.core.config import (
     VECTOR_DIM,
 )
 from archivist.storage.collection_router import collections_for_query
-from archivist.storage.sqlite_pool import GRAPH_WRITE_LOCK_ASYNC
+from archivist.storage.sqlite_pool import _get_graph_write_lock
 
 logger = logging.getLogger("archivist.backup")
 
@@ -349,7 +349,7 @@ def _restore_sqlite(backup_path: Path) -> None:
     loop = _asyncio.get_event_loop()
 
     async def _acquire_and_restore():
-        async with GRAPH_WRITE_LOCK_ASYNC:
+        async with _get_graph_write_lock():
             source = sqlite3.connect(str(backup_path))
             dest = sqlite3.connect(SQLITE_PATH)
             try:

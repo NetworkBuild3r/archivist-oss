@@ -158,11 +158,7 @@ def test_payload_json_1000_events_under_10ms():
 
 async def test_schema_ddl_under_200ms(tmp_path, monkeypatch):
     """Full schema DDL on a fresh DB completes in < 200 ms."""
-    import asyncio
-
     from archivist.storage import sqlite_pool as _sp
-
-    monkeypatch.setattr(_sp, "GRAPH_WRITE_LOCK_ASYNC", asyncio.Lock())
 
     p = _sp.SQLitePool()
     db_path = str(tmp_path / "schema_bench.db")
