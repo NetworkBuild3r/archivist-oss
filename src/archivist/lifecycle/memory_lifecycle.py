@@ -9,8 +9,12 @@ import asyncio
 import logging
 import sqlite3
 from dataclasses import asdict, dataclass, field
+from typing import TYPE_CHECKING, Any
 
 from qdrant_client.models import FieldCondition, Filter, MatchValue
+
+if TYPE_CHECKING:
+    pass
 
 import archivist.core.metrics as m
 import archivist.lifecycle.curator_queue as curator_queue
@@ -144,12 +148,34 @@ async def _delete_qdrant_points(
     client,
     col: str,
     failed_steps: list[str],
+    txn: Any = None,
 ) -> tuple[int, int, int]:
     """Delete primary + child Qdrant points.  Returns (primary, hyde, micro) counts.
 
-    Failures are recorded in *failed_steps* but never raised; the caller checks
-    whether critical steps failed via ``_finalize_delete``.
+    When ``OUTBOX_ENABLED=True``, the Qdrant deletes are enqueued in the outbox
+    table atomically with the SQLite artefact cleanup in ``delete_memory_complete``.
+    Pass an open ``MemoryTransaction`` via *txn* so both writes share one commit.
+
+    When ``OUTBOX_ENABLED=False`` (default), behaviour is identical to Phase 2
+    (synchronous delete with retry, failures appended to *failed_steps*).
     """
+    from archivist.core.config import OUTBOX_ENABLED
+
+    if OUTBOX_ENABLED:
+        # Enqueue outbox events.  The actual Qdrant calls happen asynchronously
+        # via OutboxProcessor.  Return approximate counts so result metrics are
+        # still populated.
+        all_ids = [memory_id] + hyde_ids + micro_ids
+        if txn is not None:
+            txn.enqueue_qdrant_delete(col, all_ids, memory_id=memory_id)
+        else:
+            from archivist.storage.transaction import MemoryTransaction
+
+            async with MemoryTransaction() as _txn:
+                _txn.enqueue_qdrant_delete(col, all_ids, memory_id=memory_id)
+        return 1, len(hyde_ids), len(micro_ids)
+
+    # Legacy synchronous path (OUTBOX_ENABLED=False).
     primary_count = await _qdrant_delete(
         client,
         col,
@@ -177,11 +203,19 @@ async def _delete_sqlite_artifacts(
     memory_id: str,
     all_ids: list[str],
     failed_steps: list[str],
+    txn: Any = None,
 ) -> tuple[int, int, int]:
     """Delete FTS, needle registry, and entity facts rows.  Returns (fts, needle, facts) counts.
 
     Each step is independently try/excepted so a failure in one does not block
     the others.
+
+    Args:
+        txn: Optional open ``MemoryTransaction``.  When provided, the
+            ``delete_fts_chunks_batch`` and ``delete_needle_tokens_batch``
+            calls are joined to the same pool.write() connection so all
+            SQLite cleanup and the outbox event land in one atomic commit.
+            When ``None`` each helper acquires its own lock (legacy behaviour).
     """
     fts_count = 0
     try:
@@ -449,26 +483,70 @@ async def delete_memory_complete(
         PartialDeletionError: If the primary Qdrant point delete fails or
             more than two cascade steps fail.
     """
+    from archivist.core.config import OUTBOX_ENABLED
+
     col = collection or collection_for(namespace)
     client = qdrant_client()
     result = DeleteResult(memory_id=memory_id)
 
     micro_ids, hyde_ids = await _resolve_child_ids(memory_id, client, col, result.failed_steps)
-
-    (
-        result.qdrant_primary,
-        result.qdrant_reverse_hyde,
-        result.qdrant_micro_chunks,
-    ) = await _delete_qdrant_points(
-        memory_id, micro_ids, hyde_ids, client, col, result.failed_steps
-    )
-
     all_ids = [memory_id] + hyde_ids + micro_ids
-    (
-        result.fts_entries,
-        result.registry_tokens,
-        result.entity_facts,
-    ) = await _delete_sqlite_artifacts(memory_id, all_ids, result.failed_steps)
+
+    if OUTBOX_ENABLED:
+        # Atomically enqueue the Qdrant-delete event AND clean up all SQLite
+        # artefacts (FTS, needle registry, memory_points) inside a single
+        # pool.write() transaction.  A crash mid-way rolls everything back —
+        # no orphaned outbox row without the corresponding SQLite cleanup, and
+        # no SQLite cleanup without the outbox row.
+        from archivist.storage.transaction import MemoryTransaction
+
+        async with MemoryTransaction() as txn:
+            txn.enqueue_qdrant_delete(col, all_ids, memory_id=memory_id)
+
+            # SQLite cleanup — each step try/excepted inside helpers but all
+            # sharing the same connection so they commit together.
+            fts_count = 0
+            try:
+                fts_count = await delete_fts_chunks_batch(all_ids)
+            except (sqlite3.Error, OSError) as e:
+                logger.error("cascade.fts_batch failed for %s: %s", memory_id, e)
+                result.failed_steps.append("fts_batch")
+
+            needle_count = 0
+            try:
+                needle_count = await delete_needle_tokens_batch(all_ids)
+            except (sqlite3.Error, OSError) as e:
+                logger.error("cascade.needle_batch failed for %s: %s", memory_id, e)
+                result.failed_steps.append("needle_batch")
+
+            facts_count = 0
+            try:
+                facts_count = await _delete_entity_facts_for_memory(memory_id)
+            except (sqlite3.Error, OSError) as e:
+                logger.error("cascade.entity_facts failed for %s: %s", memory_id, e)
+                result.failed_steps.append("entity_facts")
+
+        result.qdrant_primary = 1
+        result.qdrant_reverse_hyde = len(hyde_ids)
+        result.qdrant_micro_chunks = len(micro_ids)
+        result.fts_entries = fts_count
+        result.registry_tokens = needle_count
+        result.entity_facts = facts_count
+    else:
+        # Legacy path: synchronous Qdrant deletes then independent SQLite steps.
+        (
+            result.qdrant_primary,
+            result.qdrant_reverse_hyde,
+            result.qdrant_micro_chunks,
+        ) = await _delete_qdrant_points(
+            memory_id, micro_ids, hyde_ids, client, col, result.failed_steps
+        )
+
+        (
+            result.fts_entries,
+            result.registry_tokens,
+            result.entity_facts,
+        ) = await _delete_sqlite_artifacts(memory_id, all_ids, result.failed_steps)
 
     result.memory_hotness = await _delete_best_effort_rows(memory_id)
 

@@ -31,9 +31,7 @@ from archivist.storage.collection_router import (
 from archivist.storage.graph import (
     add_fact,
     register_memory_points_batch,
-    register_needle_tokens,
     upsert_entity,
-    upsert_fts_chunk,
 )
 from archivist.storage.qdrant import qdrant_client
 from archivist.utils.chunking import _extract_needle_micro_chunks
@@ -513,36 +511,18 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
         payload["ttl_expires_at"] = ttl_expires_at
 
     _coll = ensure_collection(namespace)
-    client.upsert(
-        collection_name=_coll,
-        points=[PointStruct(id=pid, vector=vec, payload=payload)],
-    )
-    await register_memory_points_batch(
-        [{"memory_id": pid, "qdrant_id": pid, "point_type": "primary"}]
-    )
+
+    from archivist.core.config import OUTBOX_ENABLED
+    from archivist.storage.transaction import MemoryTransaction
+
+    _primary_point = PointStruct(id=pid, vector=vec, payload=payload)
 
     from archivist.core.config import BM25_ENABLED
 
-    if BM25_ENABLED:
-        await upsert_fts_chunk(
-            qdrant_id=pid,
-            text=text,
-            file_path=payload["file_path"],
-            chunk_index=0,
-            agent_id=agent_id,
-            namespace=namespace,
-            date=payload["date"],
-            memory_type=arguments.get("memory_type", "general"),
-            actor_id=actor_id,
-            actor_type=actor_type,
-        )
-
-    await register_needle_tokens(
-        pid, text, namespace=namespace, agent_id=agent_id, actor_id=actor_id, actor_type=actor_type
-    )
-
     # Generate micro-chunks for high-specificity tokens (IPs, crons, UUIDs, etc.)
+    # Embedding must happen before the transaction (async LLM/embed call).
     _micro_chunks = _extract_needle_micro_chunks(text)
+    _micro_points = []
     if _micro_chunks:
         from archivist.core.config import MAX_MICRO_CHUNKS_PER_MEMORY
 
@@ -559,7 +539,6 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
                 for mc in _micro_chunks
             ]
         _micro_vecs = await embed_batch(_micro_embed_inputs)
-        _micro_points = []
         for mi, (mc, mv) in enumerate(zip(_micro_chunks, _micro_vecs)):
             _mc_id = str(uuid.uuid4())
             _mc_payload = {
@@ -590,12 +569,40 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
                 _mc_payload["ttl_expires_at"] = ttl_expires_at
             _micro_points.append(PointStruct(id=_mc_id, vector=mv, payload=_mc_payload))
 
+    # Single atomic transaction: FTS5, needle registry, memory_points, and outbox
+    # all commit together.  A crash at any point leaves nothing half-written.
+    _now_iso = datetime.now(UTC).isoformat()
+    async with MemoryTransaction() as txn:
+        if BM25_ENABLED:
+            await txn.upsert_fts_chunk(
+                qdrant_id=pid,
+                text=text,
+                file_path=payload["file_path"],
+                chunk_index=0,
+                agent_id=agent_id,
+                namespace=namespace,
+                date=payload["date"],
+                memory_type=arguments.get("memory_type", "general"),
+                actor_id=actor_id,
+                actor_type=actor_type,
+            )
+        await txn.register_needle_tokens(
+            pid,
+            text,
+            namespace=namespace,
+            agent_id=agent_id,
+            actor_id=actor_id,
+            actor_type=actor_type,
+        )
+        for mp in _micro_points:
+            mc_text = mp.payload.get("text", "")
+            mc_id = str(mp.id)
             if BM25_ENABLED:
-                await upsert_fts_chunk(
-                    qdrant_id=_mc_id,
-                    text=mc,
+                await txn.upsert_fts_chunk(
+                    qdrant_id=mc_id,
+                    text=mc_text,
                     file_path=f"explicit/{agent_id}",
-                    chunk_index=mi + 1,
+                    chunk_index=mp.payload.get("chunk_index", 0),
                     agent_id=agent_id,
                     namespace=namespace,
                     date=now.strftime("%Y-%m-%d"),
@@ -603,23 +610,38 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
                     actor_id=actor_id,
                     actor_type=actor_type,
                 )
-            await register_needle_tokens(
-                _mc_id,
-                mc,
+            await txn.register_needle_tokens(
+                mc_id,
+                mc_text,
                 namespace=namespace,
                 agent_id=agent_id,
                 actor_id=actor_id,
                 actor_type=actor_type,
             )
+        await txn.execute(
+            """INSERT OR IGNORE INTO memory_points (memory_id, qdrant_id, point_type, created_at)
+               VALUES (?, ?, 'primary', ?)""",
+            (pid, pid, _now_iso),
+        )
+        if _micro_points:
+            await txn.executemany(
+                """INSERT OR IGNORE INTO memory_points
+                       (memory_id, qdrant_id, point_type, created_at)
+                   VALUES (?, ?, ?, ?)""",
+                [(pid, str(mp.id), "micro_chunk", _now_iso) for mp in _micro_points],
+            )
+        txn.enqueue_qdrant_upsert(_coll, [_primary_point], memory_id=pid)
+        if _micro_points:
+            txn.enqueue_qdrant_upsert(_coll, _micro_points, memory_id=pid)
 
+    # When the outbox is disabled, apply Qdrant writes inline (legacy behaviour).
+    if not OUTBOX_ENABLED:
+        client.upsert(
+            collection_name=_coll,
+            points=[_primary_point],
+        )
         if _micro_points:
             client.upsert(collection_name=_coll, points=_micro_points)
-            await register_memory_points_batch(
-                [
-                    {"memory_id": pid, "qdrant_id": str(mp.id), "point_type": "micro_chunk"}
-                    for mp in _micro_points
-                ]
-            )
 
     # Reverse HyDE: fire-and-forget — generate hypothetical questions in background
     from archivist.core.config import REVERSE_HYDE_ENABLED
@@ -666,13 +688,35 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
                     )
                 )
             if _rh_points:
-                client.upsert(collection_name=_coll, points=_rh_points)
-                await register_memory_points_batch(
-                    [
-                        {"memory_id": pid, "qdrant_id": str(rp.id), "point_type": "reverse_hyde"}
-                        for rp in _rh_points
-                    ]
-                )
+                from archivist.core.config import OUTBOX_ENABLED
+                from archivist.storage.transaction import MemoryTransaction
+
+                _rh_mp_records = [
+                    {"memory_id": pid, "qdrant_id": str(rp.id), "point_type": "reverse_hyde"}
+                    for rp in _rh_points
+                ]
+                if OUTBOX_ENABLED:
+                    from datetime import UTC, datetime
+
+                    async with MemoryTransaction() as txn:
+                        await txn.executemany(
+                            """INSERT OR IGNORE INTO memory_points
+                                   (memory_id, qdrant_id, point_type, created_at)
+                               VALUES (?, ?, ?, ?)""",
+                            [
+                                (
+                                    r["memory_id"],
+                                    r["qdrant_id"],
+                                    r["point_type"],
+                                    datetime.now(UTC).isoformat(),
+                                )
+                                for r in _rh_mp_records
+                            ],
+                        )
+                        txn.enqueue_qdrant_upsert(_coll, _rh_points, memory_id=pid)
+                else:
+                    client.upsert(collection_name=_coll, points=_rh_points)
+                    await register_memory_points_batch(_rh_mp_records)
             logger.info(
                 "reverse_hyde.background_complete",
                 extra={"memory_id": pid, "question_count": len(_rh_questions)},
@@ -722,17 +766,39 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
                 base_payload=base_payload,
             )
             if sq_points:
-                client.upsert(collection_name=_coll, points=sq_points)
-                await register_memory_points_batch(
-                    [
-                        {
-                            "memory_id": pid,
-                            "qdrant_id": str(sp.id),
-                            "point_type": "synthetic_question",
-                        }
-                        for sp in sq_points
-                    ]
-                )
+                from archivist.core.config import OUTBOX_ENABLED
+                from archivist.storage.transaction import MemoryTransaction
+
+                _sq_mp_records = [
+                    {
+                        "memory_id": pid,
+                        "qdrant_id": str(sp.id),
+                        "point_type": "synthetic_question",
+                    }
+                    for sp in sq_points
+                ]
+                if OUTBOX_ENABLED:
+                    from datetime import UTC, datetime
+
+                    async with MemoryTransaction() as txn:
+                        await txn.executemany(
+                            """INSERT OR IGNORE INTO memory_points
+                                   (memory_id, qdrant_id, point_type, created_at)
+                               VALUES (?, ?, ?, ?)""",
+                            [
+                                (
+                                    r["memory_id"],
+                                    r["qdrant_id"],
+                                    r["point_type"],
+                                    datetime.now(UTC).isoformat(),
+                                )
+                                for r in _sq_mp_records
+                            ],
+                        )
+                        txn.enqueue_qdrant_upsert(_coll, sq_points, memory_id=pid)
+                else:
+                    client.upsert(collection_name=_coll, points=sq_points)
+                    await register_memory_points_batch(_sq_mp_records)
             logger.info(
                 "synthetic_questions.background_complete",
                 extra={"memory_id": pid, "question_count": len(sq_points)},
@@ -1104,7 +1170,7 @@ async def _handle_delete(arguments: dict) -> list[TextContent]:
     if not agent_id:
         return error_response({"error": "agent_id is required"})
 
-    ns_err = _rbac_gate(agent_id, namespace)
+    ns_err = _rbac_gate(agent_id, "write", namespace)
     if ns_err:
         return ns_err
     if not namespace:

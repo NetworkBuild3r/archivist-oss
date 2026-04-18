@@ -1,13 +1,27 @@
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
-python_files = ["test_*.py", "bench_*.py"]
+python_files = ["test_*.py"]
 asyncio_mode = "auto"
 markers = [
-    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
-    "integration: marks integration tests requiring external services",
-    "benchmark: marks performance benchmarks (run with 'pytest benchmarks/')",
+    # Speed / tier markers
+    "unit: pure logic tests, no I/O (fastest — run on every save)",
+    "integration: real SQLite + mocked external services",
+    "system: full MCP handler coverage across all tools",
+    "chaos: fault injection, adversarial, concurrent stress tests",
+    "performance: timing regression assertions — run isolated",
+    "regression: specific bug regression guards",
+    # Domain markers
+    "storage: tests touching SQLite, Qdrant, outbox, or backup",
+    "lifecycle: tests for delete/archive/merge/cascade paths",
+    "retrieval: tests for search, ranking, graph retrieval, synthesis",
+    "mcp: tests for MCP tool handlers and transport layer",
+    "rbac: tests for namespace access control",
+    # Utility markers
+    "slow: tests taking more than 2 seconds (deselect during development)",
+    "benchmark: performance benchmarks (run with 'pytest benchmarks/')",
 ]
+addopts = ["--strict-markers", "--tb=short", "-q"]
 
 [tool.ruff]
 target-version = "py312"

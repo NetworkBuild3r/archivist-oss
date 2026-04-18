@@ -218,7 +218,7 @@ async def _handle_log_trajectory(arguments: dict) -> list[TextContent]:
 
 async def _handle_annotate(arguments: dict) -> list[TextContent]:
     """Add a quality annotation to a memory point."""
-    ann_id = add_annotation(
+    ann_id = await add_annotation(
         memory_id=arguments["memory_id"],
         agent_id=arguments["agent_id"],
         content=arguments["content"],
@@ -249,7 +249,7 @@ async def _handle_annotate(arguments: dict) -> list[TextContent]:
 
 async def _handle_rate(arguments: dict) -> list[TextContent]:
     """Rate a memory as helpful or unhelpful."""
-    rating_id = add_rating(
+    rating_id = await add_rating(
         memory_id=arguments["memory_id"],
         agent_id=arguments["agent_id"],
         rating=arguments["rating"],

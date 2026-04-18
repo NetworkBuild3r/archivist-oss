@@ -1,4 +1,6 @@
-# Archivist MCP Skill Reference
+# Archivist MCP skill reference
+
+Authoritative parameter lists and examples for every MCP tool. A condensed table lives in [`REFERENCE.md`](REFERENCE.md); operational testing is covered in [`QA.md`](QA.md) and [`QA_CHECKLIST.md`](../QA_CHECKLIST.md).
 
 ## Overview
 

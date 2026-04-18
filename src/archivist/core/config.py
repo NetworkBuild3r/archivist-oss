@@ -268,6 +268,27 @@ SQLITE_WAL_AUTOCHECKPOINT = int(os.getenv("SQLITE_WAL_AUTOCHECKPOINT", "1000"))
 # Milliseconds SQLite waits on a locked write before raising OperationalError.
 SQLITE_BUSY_TIMEOUT_MS = int(os.getenv("SQLITE_BUSY_TIMEOUT_MS", "5000"))
 
+# ── Transactional outbox (v2.1 — Phase 3) ────────────────────────────────────
+# Feature flag: when False, enqueue_* calls in MemoryTransaction are no-ops and
+# callers perform Qdrant operations inline (legacy behaviour preserved).
+# Start with False; flip to True after staging validation.
+OUTBOX_ENABLED = _env_bool("OUTBOX_ENABLED", "false")
+# Seconds between OutboxProcessor drain cycles.
+OUTBOX_DRAIN_INTERVAL = int(os.getenv("OUTBOX_DRAIN_INTERVAL", "2"))
+# Maximum events processed per drain cycle (bounds individual drain latency).
+OUTBOX_BATCH_SIZE = int(os.getenv("OUTBOX_BATCH_SIZE", "50"))
+# After this many consecutive failures an outbox event is moved to 'dead'.
+OUTBOX_MAX_RETRIES = int(os.getenv("OUTBOX_MAX_RETRIES", "5"))
+# Seconds before a 'processing' event is considered orphaned (crashed mid-drain)
+# and reset to 'pending'.  Must exceed the worst-case single-event apply latency.
+OUTBOX_ORPHAN_TIMEOUT_SECONDS = int(os.getenv("OUTBOX_ORPHAN_TIMEOUT_SECONDS", "60"))
+# How often (in drain cycles) the orphan sweep runs.  At a 2s interval,
+# the default of 30 means a sweep every ~60 seconds.
+OUTBOX_ORPHAN_SWEEP_EVERY_N = int(os.getenv("OUTBOX_ORPHAN_SWEEP_EVERY_N", "30"))
+# Days to retain 'applied' outbox rows before pruning.  Pruning runs on the
+# same cadence as the orphan sweep.
+OUTBOX_RETENTION_DAYS = int(os.getenv("OUTBOX_RETENTION_DAYS", "7"))
+
 # ── Context window management (v1.1) ─────────────────────────────────────────
 DEFAULT_CONTEXT_BUDGET = int(os.getenv("DEFAULT_CONTEXT_BUDGET", "128000"))
 
@@ -364,6 +385,18 @@ def _log_feature_flags() -> None:
             "disabled": disabled,
             "enabled_count": len(enabled),
             "disabled_count": len(disabled),
+        },
+    )
+    logger.info(
+        "config.outbox",
+        extra={
+            "OUTBOX_ENABLED": OUTBOX_ENABLED,
+            "OUTBOX_DRAIN_INTERVAL": OUTBOX_DRAIN_INTERVAL,
+            "OUTBOX_BATCH_SIZE": OUTBOX_BATCH_SIZE,
+            "OUTBOX_MAX_RETRIES": OUTBOX_MAX_RETRIES,
+            "OUTBOX_ORPHAN_TIMEOUT_SECONDS": OUTBOX_ORPHAN_TIMEOUT_SECONDS,
+            "OUTBOX_ORPHAN_SWEEP_EVERY_N": OUTBOX_ORPHAN_SWEEP_EVERY_N,
+            "OUTBOX_RETENTION_DAYS": OUTBOX_RETENTION_DAYS,
         },
     )
     if CURATOR_LLM_MODEL:

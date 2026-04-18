@@ -1,11 +1,14 @@
-# Archivist Multi-Agent Memory Tool — Roadmap (April 2026)
+# Archivist multi-agent memory — roadmap (April 2026)
 
-**Status**: Retrieval foundation is solid (v2 pipeline complete). Semantic chunking (Phase 5) is done.
-**Goal**: Become the **clear #1 production-ready multi-agent memory system** in 2026 — more trustworthy, observable, and collaborative than Mem0, Hindsight, Letta, Zep/Graphiti, or LangGraph+LangMem.
+**Status** — Retrieval foundation is solid (v2 pipeline complete). Semantic chunking (Phase 5) is done. **Phase 3 + 3.5 (transactional outbox + `MemoryTransaction` + conn-passing shims)** is **complete**: see [`docs/rearchitect_storage_phase3.md`](rearchitect_storage_phase3.md) and [`CHANGELOG.md`](../CHANGELOG.md) **v2.1.0**.
+
+**Goal** — Remain the most **trustworthy and production-ready** open multi-agent memory layer in 2026: observable, RBAC-aware, and safe to run under fleet load.
+
+**Next milestones (engineering)** — **Pydantic v2–style config validation** (single source of truth for env + invalid combinations) and a **PostgreSQL-backed graph/outbox path** via the existing `GraphBackend` / pool abstraction (no MCP signature changes).
 
 ---
 
-## Why This Roadmap Matters
+## Why this roadmap matters
 
 Current top systems win on:
 - Hybrid storage (vector + graph + relational)
@@ -84,12 +87,13 @@ Set `MCP_SSE_ENABLED=false` once all clients are on the modern transport to recl
 
 ---
 
-## Tracking Checklist
+## Tracking checklist
 
-- [x] Phase 5 — Semantic Chunking
-- [x] Phase 6 — Provenance & Actor-Aware Memory
-- [x] Phase 6.5 — OpenClaw Compatibility Fix
-- [ ] Phase 7 — Multi-Tier Memory + Checkpointing
+- [x] Phase 5 — Semantic chunking
+- [x] Phase 6 — Provenance & actor-aware memory
+- [x] Phase 6.5 — OpenClaw compatibility fix
+- [x] Phase 3 + 3.5 — Transactional outbox + atomic SQLite writes (see `docs/rearchitect_storage_phase3.md`)
+- [ ] Phase 7 — Multi-tier memory + checkpointing
 - [ ] Phase 8 — Intelligent Lifecycle Management
 - [ ] Phase 9 — Observability & Control Plane
 - [ ] Phase 10 — Multi-Agent Coordination Primitives

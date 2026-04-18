@@ -9,6 +9,7 @@ Each snapshot is a timestamped directory under BACKUP_DIR containing the above
 artefacts plus a manifest.json with metadata for validation during restore.
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -32,12 +33,12 @@ from archivist.core.config import (
     VECTOR_DIM,
 )
 from archivist.storage.collection_router import collections_for_query
-from archivist.storage.sqlite_pool import GRAPH_WRITE_LOCK_ASYNC
+from archivist.storage.sqlite_pool import _get_graph_write_lock
 
 logger = logging.getLogger("archivist.backup")
 
 MANIFEST_VERSION = 1
-ARCHIVIST_VERSION = "2.0.0"
+ARCHIVIST_VERSION = "2.0.1"
 
 
 def _snapshot_dir(snapshot_id: str) -> Path:
@@ -349,7 +350,7 @@ def _restore_sqlite(backup_path: Path) -> None:
     loop = _asyncio.get_event_loop()
 
     async def _acquire_and_restore():
-        async with GRAPH_WRITE_LOCK_ASYNC:
+        async with _get_graph_write_lock():
             source = sqlite3.connect(str(backup_path))
             dest = sqlite3.connect(SQLITE_PATH)
             try:
@@ -564,15 +565,17 @@ def import_agent(ndjson_path: str, dry_run: bool = False) -> dict:
                     batch.clear()
 
                 if BM25_ENABLED and payload.get("text"):
-                    upsert_fts_chunk(
-                        qdrant_id=point_id,
-                        text=payload["text"],
-                        file_path=payload.get("file_path", ""),
-                        chunk_index=payload.get("chunk_index", 0),
-                        agent_id=payload.get("agent_id", ""),
-                        namespace=payload.get("namespace", ""),
-                        date=payload.get("date", ""),
-                        memory_type=payload.get("memory_type", "general"),
+                    asyncio.run(
+                        upsert_fts_chunk(
+                            qdrant_id=point_id,
+                            text=payload["text"],
+                            file_path=payload.get("file_path", ""),
+                            chunk_index=payload.get("chunk_index", 0),
+                            agent_id=payload.get("agent_id", ""),
+                            namespace=payload.get("namespace", ""),
+                            date=payload.get("date", ""),
+                            memory_type=payload.get("memory_type", "general"),
+                        )
                     )
                     fts_rebuilt += 1
             else:

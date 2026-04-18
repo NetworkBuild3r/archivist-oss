@@ -1,5 +1,7 @@
 # Benchmarks
 
+This directory holds the **in-repo pipeline** harness and thin reference scripts (LongMemEval, BEIR). Canonical result tables and competitive discussion live in **[`docs/BENCHMARKS.md`](../docs/BENCHMARKS.md)**. For pytest and `tests/qa/`, see **[`docs/QA.md`](../docs/QA.md)**.
+
 ## Using your local setup
 
 Work from **your repo clone** (example: `cd /opt/appdata/archivist-oss`). Do **not** copy the placeholder path from older docs.

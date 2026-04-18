@@ -1,4 +1,4 @@
-# Inspiration & Build Reference
+# Inspiration and build reference
 
 Archivist-OSS is **synthesis**, not a solo eureka: research, open source,
 papers, and posts from the agent-memory and tooling community—then choosing

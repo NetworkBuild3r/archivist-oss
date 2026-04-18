@@ -36,9 +36,7 @@ from archivist.storage.graph import (
     add_fact,
     delete_fts_chunks_by_file,
     register_memory_points_batch,
-    register_needle_tokens,
     upsert_entity,
-    upsert_fts_chunk,
 )
 from archivist.storage.qdrant import qdrant_client
 from archivist.utils.chunking import chunk_text, chunk_text_hierarchical
@@ -304,10 +302,11 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
 
     if points:
         _coll = ensure_collection(meta.get("namespace", ""))
-        client.upsert(collection_name=_coll, points=points)
-        _metrics.inc(_metrics.INDEX_CHUNKS, value=len(points))
+        _now_iso = datetime.now(UTC).isoformat()
 
-        # Register all indexed points in memory_points for fast cascade lookup.
+        from archivist.core.config import OUTBOX_ENABLED
+        from archivist.storage.transaction import MemoryTransaction
+
         _mp_records = []
         for p in points:
             pid_str = str(p.id)
@@ -320,31 +319,59 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
                 _mp_records.append(
                     {"memory_id": pid_str, "qdrant_id": pid_str, "point_type": "primary"}
                 )
+
         try:
-            await register_memory_points_batch(_mp_records)
+            async with MemoryTransaction() as txn:
+                # FTS5 and needle registry join the same transaction as memory_points
+                # and the outbox event — all commit atomically or none do.
+                if BM25_ENABLED:
+                    for p in points:
+                        await txn.upsert_fts_chunk(
+                            qdrant_id=str(p.id),
+                            text=p.payload.get("text", ""),
+                            file_path=p.payload.get("file_path", ""),
+                            chunk_index=p.payload.get("chunk_index", 0),
+                            agent_id=p.payload.get("agent_id", ""),
+                            namespace=p.payload.get("namespace", ""),
+                            date=p.payload.get("date", ""),
+                            memory_type=p.payload.get("memory_type", "general"),
+                            actor_id=p.payload.get("actor_id", ""),
+                            actor_type=p.payload.get("actor_type", ""),
+                        )
+                for p in points:
+                    await txn.register_needle_tokens(
+                        str(p.id),
+                        p.payload.get("text", ""),
+                        namespace=meta.get("namespace", ""),
+                        agent_id=meta.get("agent_id", ""),
+                        actor_id=meta.get("actor_id", ""),
+                        actor_type=meta.get("actor_type", ""),
+                    )
+                await txn.executemany(
+                    """INSERT OR IGNORE INTO memory_points
+                           (memory_id, qdrant_id, point_type, created_at)
+                       VALUES (?, ?, ?, ?)""",
+                    [
+                        (r["memory_id"], r["qdrant_id"], r["point_type"], _now_iso)
+                        for r in _mp_records
+                    ],
+                )
+                txn.enqueue_qdrant_upsert(_coll, points, memory_id=meta.get("file_path", ""))
         except Exception as _e:
             logger.debug("indexer.register_memory_points failed: %s", _e)
 
-        if BM25_ENABLED:
-            for p in points:
-                await upsert_fts_chunk(
-                    qdrant_id=str(p.id),
-                    text=p.payload.get("text", ""),
-                    file_path=p.payload.get("file_path", ""),
-                    chunk_index=p.payload.get("chunk_index", 0),
-                    agent_id=p.payload.get("agent_id", ""),
-                    namespace=p.payload.get("namespace", ""),
-                    date=p.payload.get("date", ""),
-                    memory_type=p.payload.get("memory_type", "general"),
-                    actor_id=p.payload.get("actor_id", ""),
-                    actor_type=p.payload.get("actor_type", ""),
-                )
+        # When the outbox is disabled, apply the Qdrant write inline (legacy).
+        if not OUTBOX_ENABLED:
+            client.upsert(collection_name=_coll, points=points)
+
+        _metrics.inc(_metrics.INDEX_CHUNKS, value=len(points))
 
         _agent = meta.get("agent_id", "")
         _src_file = meta.get("file_path", "")
         _ns = meta.get("namespace", "")
         _actor_id = meta.get("actor_id", "")
         _actor_type = meta.get("actor_type", "")
+
         _seen_entity_names: set[str] = set()
         for p in points:
             if not p.payload.get("is_parent", False):
@@ -374,16 +401,6 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
                         provenance="file_indexer",
                         actor_id=_actor_id,
                     )
-
-        for p in points:
-            await register_needle_tokens(
-                str(p.id),
-                p.payload.get("text", ""),
-                namespace=meta.get("namespace", ""),
-                agent_id=_agent,
-                actor_id=_actor_id,
-                actor_type=_actor_type,
-            )
 
         # Reverse HyDE: generate hypothetical questions for parent chunks (parallel)
         from archivist.core.config import REVERSE_HYDE_ENABLED
@@ -440,21 +457,46 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
                     continue
                 _rh_points.extend(batch)
             if _rh_points:
-                client.upsert(collection_name=_coll, points=_rh_points)
+                from archivist.core.config import OUTBOX_ENABLED
+                from archivist.storage.transaction import MemoryTransaction
+
+                _rh_mp_records = [
+                    {
+                        "memory_id": rp.payload.get("source_memory_id", str(rp.id)),
+                        "qdrant_id": str(rp.id),
+                        "point_type": "reverse_hyde",
+                    }
+                    for rp in _rh_points
+                ]
+                if OUTBOX_ENABLED:
+                    try:
+                        async with MemoryTransaction() as txn:
+                            await txn.executemany(
+                                """INSERT OR IGNORE INTO memory_points
+                                       (memory_id, qdrant_id, point_type, created_at)
+                                   VALUES (?, ?, ?, ?)""",
+                                [
+                                    (
+                                        r["memory_id"],
+                                        r["qdrant_id"],
+                                        r["point_type"],
+                                        datetime.now(UTC).isoformat(),
+                                    )
+                                    for r in _rh_mp_records
+                                ],
+                            )
+                            txn.enqueue_qdrant_upsert(
+                                _coll, _rh_points, memory_id=meta.get("file_path", "")
+                            )
+                    except Exception as _e:
+                        logger.debug("indexer.reverse_hyde transaction failed: %s", _e)
+                else:
+                    client.upsert(collection_name=_coll, points=_rh_points)
+                    try:
+                        await register_memory_points_batch(_rh_mp_records)
+                    except Exception as _e:
+                        logger.debug("indexer.register_memory_points (reverse_hyde) failed: %s", _e)
                 _metrics.inc(_metrics.INDEX_CHUNKS, value=len(_rh_points))
-                try:
-                    await register_memory_points_batch(
-                        [
-                            {
-                                "memory_id": rp.payload.get("source_memory_id", str(rp.id)),
-                                "qdrant_id": str(rp.id),
-                                "point_type": "reverse_hyde",
-                            }
-                            for rp in _rh_points
-                        ]
-                    )
-                except Exception as _e:
-                    logger.debug("indexer.register_memory_points (reverse_hyde) failed: %s", _e)
 
         # Synthetic question generation: multi-representation indexing
         import archivist.core.config as _cfg
@@ -493,23 +535,48 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
                     continue
                 _sq_points.extend(batch)
             if _sq_points:
-                client.upsert(collection_name=_coll, points=_sq_points)
+                from archivist.core.config import OUTBOX_ENABLED
+                from archivist.storage.transaction import MemoryTransaction
+
+                _sq_mp_records = [
+                    {
+                        "memory_id": sp.payload.get("source_memory_id", str(sp.id)),
+                        "qdrant_id": str(sp.id),
+                        "point_type": "synthetic_question",
+                    }
+                    for sp in _sq_points
+                ]
+                if OUTBOX_ENABLED:
+                    try:
+                        async with MemoryTransaction() as txn:
+                            await txn.executemany(
+                                """INSERT OR IGNORE INTO memory_points
+                                       (memory_id, qdrant_id, point_type, created_at)
+                                   VALUES (?, ?, ?, ?)""",
+                                [
+                                    (
+                                        r["memory_id"],
+                                        r["qdrant_id"],
+                                        r["point_type"],
+                                        datetime.now(UTC).isoformat(),
+                                    )
+                                    for r in _sq_mp_records
+                                ],
+                            )
+                            txn.enqueue_qdrant_upsert(
+                                _coll, _sq_points, memory_id=meta.get("file_path", "")
+                            )
+                    except Exception as _e:
+                        logger.debug("indexer.synthetic_questions transaction failed: %s", _e)
+                else:
+                    client.upsert(collection_name=_coll, points=_sq_points)
+                    try:
+                        await register_memory_points_batch(_sq_mp_records)
+                    except Exception as _e:
+                        logger.debug(
+                            "indexer.register_memory_points (synthetic_questions) failed: %s", _e
+                        )
                 _metrics.inc(_metrics.INDEX_CHUNKS, value=len(_sq_points))
-                try:
-                    await register_memory_points_batch(
-                        [
-                            {
-                                "memory_id": sp.payload.get("source_memory_id", str(sp.id)),
-                                "qdrant_id": str(sp.id),
-                                "point_type": "synthetic_question",
-                            }
-                            for sp in _sq_points
-                        ]
-                    )
-                except Exception as _e:
-                    logger.debug(
-                        "indexer.register_memory_points (synthetic_questions) failed: %s", _e
-                    )
                 logger.info(
                     "Indexed %d synthetic question points for %s",
                     len(_sq_points),
@@ -532,16 +599,31 @@ async def delete_file_points(filepath: str):
     """Remove all points for a given file path from Qdrant and FTS5."""
     rel = os.path.relpath(filepath, MEMORY_ROOT)
     client = qdrant_client()
+    from archivist.core.config import OUTBOX_ENABLED
+
     for _coll in collections_for_query(""):
-        try:
-            client.delete(
-                collection_name=_coll,
-                points_selector=Filter(
-                    must=[FieldCondition(key="file_path", match=MatchValue(value=rel))]
-                ),
-            )
-        except Exception:
-            pass
+        if OUTBOX_ENABLED:
+            try:
+                from archivist.storage.transaction import MemoryTransaction
+
+                _filt = Filter(must=[FieldCondition(key="file_path", match=MatchValue(value=rel))])
+                async with MemoryTransaction() as txn:
+                    txn.enqueue_qdrant_delete_filter(
+                        _coll,
+                        _filt.model_dump(mode="json"),
+                    )
+            except Exception:
+                pass
+        else:
+            try:
+                client.delete(
+                    collection_name=_coll,
+                    points_selector=Filter(
+                        must=[FieldCondition(key="file_path", match=MatchValue(value=rel))]
+                    ),
+                )
+            except Exception:
+                pass
     if BM25_ENABLED:
         await delete_fts_chunks_by_file(rel)
 

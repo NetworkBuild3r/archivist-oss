@@ -1,7 +1,9 @@
-# Archivist Benchmark Results
+# Archivist benchmark results
 
 > Latest pipeline snapshot: **v2.0.0** — 2026-04-17
 > Stack (pipeline run): Qdrant + embedding + LLM per your `.env` (see reproduction below)
+
+For **CI-style test commands** (unit suite, `tests/qa/`, lint, mypy), see [`QA.md`](QA.md).
 
 ---
 

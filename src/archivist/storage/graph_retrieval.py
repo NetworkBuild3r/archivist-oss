@@ -406,7 +406,7 @@ def merge_graph_context_into_results(
     return vector_results
 
 
-def get_entity_brief(entity_id: int, as_of: str = "") -> dict | None:
+async def get_entity_brief(entity_id: int, as_of: str = "") -> dict | None:
     """Build a structured summary card for an entity.
 
     Reusable by MCP tools (archivist_entity_brief, archivist_recall) and
@@ -414,12 +414,12 @@ def get_entity_brief(entity_id: int, as_of: str = "") -> dict | None:
 
     When *as_of* is provided only facts valid at that date are included.
     """
-    entity = get_entity_by_id(entity_id)
+    entity = await get_entity_by_id(entity_id)
     if not entity:
         return None
 
-    facts = get_entity_facts(entity_id, as_of=as_of)
-    rels = get_entity_relationships(entity_id)
+    facts = await get_entity_facts(entity_id, as_of=as_of)
+    rels = await get_entity_relationships(entity_id)
 
     return {
         "entity": {
@@ -459,7 +459,7 @@ def get_entity_brief(entity_id: int, as_of: str = "") -> dict | None:
     }
 
 
-def build_entity_fact_results(
+async def build_entity_fact_results(
     entities: list[dict],
     min_score: float = 0.70,
     max_injected: int | None = None,
@@ -484,7 +484,7 @@ def build_entity_fact_results(
     seen_texts: set[str] = set()
 
     eids = [e["id"] for e in entities]
-    all_facts = get_entity_facts_bulk(eids, as_of=as_of)
+    all_facts = await get_entity_facts_bulk(eids, as_of=as_of)
     entity_map = {e["id"]: e for e in entities}
 
     for eid in eids:
@@ -536,13 +536,13 @@ def build_entity_fact_results(
     return results
 
 
-def detect_contradictions(entity_id: int) -> list[dict]:
+async def detect_contradictions(entity_id: int) -> list[dict]:
     """Find potentially contradicting facts about the same entity.
 
     Uses simple heuristic: facts from different agents about the same entity
     where one supersedes the other, or facts that contain opposing keywords.
     """
-    facts = get_entity_facts(entity_id)
+    facts = await get_entity_facts(entity_id)
     if len(facts) < 2:
         return []
 

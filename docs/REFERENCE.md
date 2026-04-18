@@ -1,7 +1,6 @@
-# Archivist-OSS MCP Tool Reference
+# Archivist MCP tool reference
 
-Quick-reference for all 30 MCP tools exposed by the Archivist server. For full
-parameter schemas and examples, see [CURSOR_SKILL.md](CURSOR_SKILL.md).
+Quick reference for **31** MCP tools exposed by the Archivist server. For full parameter schemas, defaults, and examples, see [`CURSOR_SKILL.md`](CURSOR_SKILL.md).
 
 ## Search & Retrieval (7)
 
