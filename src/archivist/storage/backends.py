@@ -118,9 +118,15 @@ class VectorBackend(Protocol):
 class GraphBackend(Protocol):
     """Thin protocol over any relational or graph store.
 
-    The ``SQLitePool`` singleton already satisfies this protocol structurally
-    via its ``write()`` / ``read()`` context managers.  Future PostgreSQL or
-    DuckDB adapters only need to expose these three methods.
+    Both ``SQLiteGraphBackend`` (the refactored ``SQLitePool``) and
+    ``AsyncpgGraphBackend`` satisfy this protocol structurally — they expose
+    ``execute``, ``executemany``, and ``fetchall`` as convenience methods in
+    addition to their concrete ``write()`` / ``read()`` context managers.
+
+    The ``write()`` / ``read()`` context managers remain implementation details
+    on the concrete classes, not part of this protocol.  This follows the
+    "thin Protocol" philosophy: keep the contract minimal now; expand only
+    when a third backend reveals the true common interface.
 
     Note: this protocol is deliberately *not* a context manager — callers use
     ``MemoryTransaction`` to scope transactions, not the backend directly.

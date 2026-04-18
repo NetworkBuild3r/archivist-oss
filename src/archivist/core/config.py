@@ -257,6 +257,15 @@ class ArchivistSettings(BaseSettings):
     sqlite_wal_autocheckpoint: int = Field(default=1000, ge=0)
     sqlite_busy_timeout_ms: int = Field(default=5000, ge=0)
 
+    # ── Graph backend selection (v2.4 — Phase 4) ─────────────────────────────
+    # Set GRAPH_BACKEND=postgres to switch from SQLite to PostgreSQL.
+    # When GRAPH_BACKEND=sqlite (default) DATABASE_URL is ignored entirely.
+    graph_backend: str = "sqlite"
+    # PostgreSQL DSN in asyncpg format: postgresql://user:pw@host:5432/dbname
+    database_url: str = ""
+    pg_pool_min: int = Field(default=5, ge=1)
+    pg_pool_max: int = Field(default=20, ge=1)
+
     # ── Transactional outbox (v2.1 — Phase 3) ────────────────────────────────
     outbox_enabled: bool = False
     outbox_drain_interval: int = Field(default=2, ge=1)
@@ -724,6 +733,11 @@ BACKUP_PRE_PRUNE = _settings.backup_pre_prune
 
 SQLITE_WAL_AUTOCHECKPOINT = _settings.sqlite_wal_autocheckpoint
 SQLITE_BUSY_TIMEOUT_MS = _settings.sqlite_busy_timeout_ms
+
+GRAPH_BACKEND = _settings.graph_backend
+DATABASE_URL = _settings.database_url
+PG_POOL_MIN = _settings.pg_pool_min
+PG_POOL_MAX = _settings.pg_pool_max
 
 OUTBOX_ENABLED = _settings.outbox_enabled
 OUTBOX_DRAIN_INTERVAL = _settings.outbox_drain_interval

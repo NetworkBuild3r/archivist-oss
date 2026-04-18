@@ -266,7 +266,8 @@ def _log_task_exception(task: asyncio.Task):
 
 async def _startup():
     """Run on app startup: init DB, load RBAC, ensure Qdrant collection, start background tasks."""
-    from archivist.storage.sqlite_pool import initialize_pool
+    import archivist.storage.sqlite_pool as _pool_module
+    from archivist.storage.backend_factory import create_graph_backend
 
     logger.info("Archivist v2.0.0 starting up...")
     logger.info(
@@ -276,8 +277,13 @@ async def _startup():
         else " [SSE disabled — set MCP_SSE_ENABLED=true to enable legacy SSE]",
     )
 
-    await initialize_pool()
-    logger.info("SQLite async pool initialized")
+    # Create and initialize the graph backend (SQLite or PostgreSQL) based on
+    # GRAPH_BACKEND config.  The returned backend is injected into the
+    # sqlite_pool module singleton so all existing pool.write()/read() callers
+    # continue to work without any changes.
+    backend = await create_graph_backend()
+    _pool_module.pool = backend  # type: ignore[assignment]
+    logger.info("Graph backend initialized (%s)", backend.__class__.__name__)
 
     init_schema()
     logger.info("Graph schema initialized")
@@ -337,7 +343,7 @@ async def lifespan(_app: Starlette):
             try:
                 yield
             finally:
-                from archivist.storage.sqlite_pool import close_pool
+                import archivist.storage.sqlite_pool as _pool_module
 
                 for t in _background_tasks:
                     if not t.done():
@@ -345,8 +351,8 @@ async def lifespan(_app: Starlette):
                 if _background_tasks:
                     await asyncio.gather(*_background_tasks, return_exceptions=True)
                 _background_tasks.clear()
-                await close_pool()
-                logger.info("SQLite async pool closed")
+                await _pool_module.pool.close()
+                logger.info("Graph backend closed (%s)", _pool_module.pool.__class__.__name__)
     finally:
         streamable_http_session_manager = None
 

@@ -36,7 +36,25 @@ def get_db() -> sqlite3.Connection:
     requires a synchronous connection) and for test fixtures that work with
     in-memory databases.  All normal application code should use
     ``archivist.storage.sqlite_pool.pool`` instead.
+
+    Deprecation
+    -----------
+    This function will be removed in the follow-up PR that migrates all callers
+    to ``await pool.read()`` / ``await pool.write()``.  When
+    ``GRAPH_BACKEND=postgres`` is set this function logs a ``WARNING`` and
+    returns a direct synchronous connection to the SQLite path for schema init
+    only — callers that perform real data reads/writes against PostgreSQL must
+    use the async pool instead.
     """
+    from archivist.core.config import GRAPH_BACKEND
+
+    if (GRAPH_BACKEND or "sqlite").lower() == "postgres":
+        logging.getLogger("archivist.graph").warning(
+            "get_db() is not supported with GRAPH_BACKEND=postgres. "
+            "Returning a temporary SQLite connection for schema init only. "
+            "Migrate all callers to 'async with pool.read()' or 'async with pool.write()'. "
+            "get_db() will be removed in a future release."
+        )
     _ensure_dir()
     conn = sqlite3.connect(SQLITE_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
