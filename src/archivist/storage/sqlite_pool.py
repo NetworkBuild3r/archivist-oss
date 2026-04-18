@@ -22,6 +22,12 @@ Usage::
 
     # In app shutdown:
     await close_pool()
+
+Class hierarchy
+---------------
+``SQLiteGraphBackend`` is the canonical class name.  ``SQLitePool`` is a
+backward-compatible alias retained so that existing imports and tests require
+no changes.
 """
 
 import asyncio
@@ -29,6 +35,7 @@ import logging
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 
 import aiosqlite
 
@@ -86,8 +93,8 @@ def _get_graph_write_lock() -> asyncio.Lock:
 GRAPH_WRITE_LOCK_ASYNC: asyncio.Lock = asyncio.Lock()  # legacy alias, not used internally
 
 
-class SQLitePool:
-    """Single-connection async SQLite pool.
+class SQLiteGraphBackend:
+    """Single-connection async SQLite backend satisfying ``GraphBackend``.
 
     WAL mode allows only one writer at a time at the engine level, so a queue
     of N connections offers zero additional write throughput.  One connection
@@ -96,6 +103,11 @@ class SQLitePool:
     cases.
 
     Reads share the same connection safely under WAL mode.
+
+    In addition to the ``write()`` / ``read()`` context managers used by all
+    existing callers, this class exposes ``execute``, ``executemany``,
+    ``fetchall``, and ``execute_ddl`` convenience methods so that it structurally
+    satisfies the ``GraphBackend`` Protocol defined in ``backends.py``.
     """
 
     def __init__(self) -> None:
@@ -107,6 +119,10 @@ class SQLitePool:
 
         Called once at app startup via :func:`initialize_pool`.  Idempotent —
         a second call while already initialized is a no-op.
+
+        Args:
+            db_path: Path to the SQLite database file.
+            wal_autocheckpoint: Pages before automatic WAL checkpoint (0 = off).
         """
         if self._conn is not None:
             return
@@ -159,9 +175,74 @@ class SQLitePool:
             raise RuntimeError("SQLitePool is not initialized — call initialize_pool() first")
         yield self._conn
 
+    # ------------------------------------------------------------------
+    # GraphBackend Protocol convenience methods
+    # These delegate through write()/read() so callers that prefer a
+    # flat function-call API (e.g. future generic helpers) can use them.
+    # ------------------------------------------------------------------
 
+    async def execute(self, sql: str, params: tuple[Any, ...] = ()) -> Any:
+        """Execute *sql* with *params* inside a write transaction and return the cursor.
+
+        Args:
+            sql: SQL statement to execute.
+            params: Positional parameters for ``?`` placeholders.
+
+        Returns:
+            The ``aiosqlite.Cursor`` after execution.
+        """
+        async with self.write() as conn:
+            return await conn.execute(sql, params)
+
+    async def executemany(self, sql: str, params: list[tuple[Any, ...]]) -> None:
+        """Execute *sql* for each row in *params* inside a single write transaction.
+
+        Args:
+            sql: SQL statement to execute.
+            params: List of parameter tuples, one per row.
+        """
+        async with self.write() as conn:
+            await conn.executemany(sql, params)
+
+    async def fetchall(self, sql: str, params: tuple[Any, ...] = ()) -> list[Any]:
+        """Execute a SELECT *sql* and return all rows.
+
+        Args:
+            sql: SQL SELECT statement.
+            params: Positional parameters for ``?`` placeholders.
+
+        Returns:
+            List of ``aiosqlite.Row`` objects (empty list if no rows).
+        """
+        async with self.read() as conn:
+            cursor = await conn.execute(sql, params)
+            return list(await cursor.fetchall())
+
+    async def execute_ddl(self, sql: str) -> None:
+        """Execute a DDL statement (CREATE TABLE, CREATE INDEX, etc.).
+
+        Used by schema-init code that previously relied on the synchronous
+        ``get_db()`` path.  Runs inside a write transaction; changes are
+        committed on clean exit.
+
+        Args:
+            sql: DDL SQL to execute.
+        """
+        async with self.write() as conn:
+            await conn.executescript(sql)
+
+
+# ---------------------------------------------------------------------------
 # Module-level singleton — imported everywhere.
-pool: SQLitePool = SQLitePool()
+# ---------------------------------------------------------------------------
+
+# The canonical class is SQLiteGraphBackend.  SQLitePool is preserved as a
+# backward-compatible alias so that all existing ``from sqlite_pool import pool``
+# and ``isinstance(pool, SQLitePool)`` references continue to work without
+# any changes to consumer files.
+SQLitePool = SQLiteGraphBackend
+
+pool: SQLiteGraphBackend = SQLiteGraphBackend()
 
 
 async def initialize_pool() -> None:

@@ -122,6 +122,11 @@ ignore_missing_imports = true
 module = ["qdrant_client", "qdrant_client.*"]
 ignore_missing_imports = true
 
+# asyncpg — optional dependency (only needed for GRAPH_BACKEND=postgres)
+[[tool.mypy.overrides]]
+module = ["asyncpg", "asyncpg.*"]
+ignore_missing_imports = true
+
 [tool.bandit]
 # B608: all SQL in this codebase uses ? placeholders — Bandit cannot detect
 # that the f-string builds only the IN (...) placeholder list, not user data.

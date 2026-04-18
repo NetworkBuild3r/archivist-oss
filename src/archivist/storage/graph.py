@@ -36,7 +36,25 @@ def get_db() -> sqlite3.Connection:
     requires a synchronous connection) and for test fixtures that work with
     in-memory databases.  All normal application code should use
     ``archivist.storage.sqlite_pool.pool`` instead.
+
+    Deprecation
+    -----------
+    This function will be removed in the follow-up PR that migrates all callers
+    to ``await pool.read()`` / ``await pool.write()``.  When
+    ``GRAPH_BACKEND=postgres`` is set this function logs a ``WARNING`` and
+    returns a direct synchronous connection to the SQLite path for schema init
+    only — callers that perform real data reads/writes against PostgreSQL must
+    use the async pool instead.
     """
+    from archivist.core.config import GRAPH_BACKEND
+
+    if (GRAPH_BACKEND or "sqlite").lower() == "postgres":
+        logging.getLogger("archivist.graph").warning(
+            "get_db() is not supported with GRAPH_BACKEND=postgres. "
+            "Returning a temporary SQLite connection for schema init only. "
+            "Migrate all callers to 'async with pool.read()' or 'async with pool.write()'. "
+            "get_db() will be removed in a future release."
+        )
     _ensure_dir()
     conn = sqlite3.connect(SQLITE_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
@@ -446,6 +464,54 @@ def _init_fts5():
             conn.close()
 
 
+async def init_schema_async() -> None:
+    """Async schema initializer that dispatches by active backend.
+
+    Called from ``app/main.py`` startup instead of (or after) the synchronous
+    ``init_schema()`` so that Postgres backends can apply the full DDL from
+    ``schema_postgres.sql`` without blocking the event loop.
+
+    Behaviour by backend:
+
+    - **SQLite**: delegates synchronously to :func:`init_schema` (unchanged).
+    - **Postgres**: reads ``schema_postgres.sql`` from the package data directory
+      and executes it via ``pool.execute_ddl()``.  The SQL file uses
+      ``IF NOT EXISTS`` guards throughout, so it is safe to run on both fresh
+      and pre-existing databases.  After DDL, registers ``fts5`` as healthy
+      (the ``fts5`` health key is re-used for Postgres tsvector availability).
+    """
+    import archivist.core.health as health
+    from archivist.core.config import GRAPH_BACKEND
+
+    if (GRAPH_BACKEND or "sqlite").lower() != "postgres":
+        init_schema()
+        return
+
+    from pathlib import Path
+
+    from archivist.storage.sqlite_pool import pool
+
+    schema_path = Path(__file__).with_name("schema_postgres.sql")
+    if not schema_path.exists():
+        logging.getLogger("archivist.graph").error(
+            "Postgres schema file not found: %s", schema_path
+        )
+        health.register("fts5", healthy=False, detail="schema_postgres.sql missing")
+        return
+
+    ddl = schema_path.read_text()
+    try:
+        await pool.execute_ddl(ddl)
+        health.register("fts5", healthy=True)
+        logging.getLogger("archivist.graph").info(
+            "Postgres schema applied from %s", schema_path.name
+        )
+    except Exception as exc:
+        logging.getLogger("archivist.graph").error("Postgres schema init failed: %s", exc)
+        health.register("fts5", healthy=False, detail=str(exc))
+        raise
+
+
 async def upsert_fts_chunk(
     qdrant_id: str,
     text: str,
@@ -459,7 +525,13 @@ async def upsert_fts_chunk(
     actor_type: str = "",
     conn: aiosqlite.Connection | None = None,
 ):
-    """Insert or replace a chunk in memory_chunks and sync to both FTS5 indexes.
+    """Insert or replace a chunk in memory_chunks and sync to both FTS indexes.
+
+    On SQLite this also maintains the FTS5 shadow-row tables (``memory_fts``
+    and ``memory_fts_exact``).  On Postgres the ``fts_vector`` /
+    ``fts_vector_simple`` columns are ``GENERATED ALWAYS AS ... STORED``
+    so they update automatically when the ``text`` column changes — no
+    shadow-row maintenance is needed.
 
     Args:
         conn: Optional open ``aiosqlite.Connection``.  When provided (e.g. from
@@ -467,6 +539,103 @@ async def upsert_fts_chunk(
             instead of acquiring a new ``pool.write()`` lock.  When ``None``
             (default), a fresh write-lock is acquired from the pool.
     """
+    from archivist.core.config import GRAPH_BACKEND
+
+    if (GRAPH_BACKEND or "sqlite").lower() == "postgres":
+        await _upsert_fts_chunk_postgres(
+            qdrant_id=qdrant_id,
+            text=text,
+            file_path=file_path,
+            chunk_index=chunk_index,
+            agent_id=agent_id,
+            namespace=namespace,
+            date=date,
+            memory_type=memory_type,
+            actor_id=actor_id,
+            actor_type=actor_type,
+        )
+        return
+
+    await _upsert_fts_chunk_sqlite(
+        qdrant_id=qdrant_id,
+        text=text,
+        file_path=file_path,
+        chunk_index=chunk_index,
+        agent_id=agent_id,
+        namespace=namespace,
+        date=date,
+        memory_type=memory_type,
+        actor_id=actor_id,
+        actor_type=actor_type,
+        conn=conn,
+    )
+
+
+async def _upsert_fts_chunk_postgres(
+    qdrant_id: str,
+    text: str,
+    file_path: str,
+    chunk_index: int,
+    agent_id: str = "",
+    namespace: str = "",
+    date: str = "",
+    memory_type: str = "general",
+    actor_id: str = "",
+    actor_type: str = "",
+) -> None:
+    """Postgres upsert: insert/replace memory_chunks row.
+
+    ``fts_vector`` and ``fts_vector_simple`` are GENERATED ALWAYS AS STORED
+    columns, so no shadow-row maintenance is required.
+    """
+    from archivist.storage.sqlite_pool import pool
+
+    try:
+        async with pool.write() as conn:
+            await conn.execute(
+                "INSERT INTO memory_chunks "
+                "(qdrant_id, text, file_path, chunk_index, agent_id, namespace, date, "
+                "memory_type, actor_id, actor_type) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT (qdrant_id) DO UPDATE SET "
+                "text=EXCLUDED.text, file_path=EXCLUDED.file_path, "
+                "chunk_index=EXCLUDED.chunk_index, agent_id=EXCLUDED.agent_id, "
+                "namespace=EXCLUDED.namespace, date=EXCLUDED.date, "
+                "memory_type=EXCLUDED.memory_type, actor_id=EXCLUDED.actor_id, "
+                "actor_type=EXCLUDED.actor_type",
+                (
+                    qdrant_id,
+                    text,
+                    file_path,
+                    chunk_index,
+                    agent_id,
+                    namespace,
+                    date,
+                    memory_type,
+                    actor_id,
+                    actor_type,
+                ),
+            )
+    except Exception as e:
+        logging.getLogger("archivist.graph").warning(
+            "Postgres FTS upsert failed for %s: %s", qdrant_id, e
+        )
+
+
+async def _upsert_fts_chunk_sqlite(
+    qdrant_id: str,
+    text: str,
+    file_path: str,
+    chunk_index: int,
+    agent_id: str = "",
+    namespace: str = "",
+    date: str = "",
+    memory_type: str = "general",
+    actor_id: str = "",
+    actor_type: str = "",
+    conn: aiosqlite.Connection | None = None,
+) -> None:
+    """SQLite upsert: insert/replace memory_chunks row and maintain FTS5 shadow rows."""
     import aiosqlite as _aiosqlite
 
     from archivist.storage.sqlite_pool import pool
@@ -534,10 +703,19 @@ async def upsert_fts_chunk(
 
 
 async def _delete_fts_rows_async(conn, rows):
-    """Delete FTS5 shadow-table entries for the given memory_chunks rows (async version).
+    """Delete FTS5 shadow-table entries for the given memory_chunks rows (async).
 
-    Best-effort — FTS5 extension may be unavailable.
+    On Postgres this is a no-op — deleting the ``memory_chunks`` row
+    automatically removes the corresponding ``GENERATED ALWAYS AS`` tsvector
+    data.  On SQLite the FTS5 shadow rows must be explicitly removed.
+
+    Best-effort — FTS5 extension may be unavailable on SQLite.
     """
+    from archivist.core.config import GRAPH_BACKEND
+
+    if (GRAPH_BACKEND or "sqlite").lower() == "postgres":
+        return
+
     for row in rows:
         try:
             await conn.execute(
@@ -593,8 +771,63 @@ async def search_fts(
     memory_type: str = "",
     limit: int = 30,
     actor_type: str = "",
+    raw_query: str = "",
+    fts_mode: str = "or",
 ) -> list[dict]:
-    """BM25 keyword search via FTS5. Returns ranked results with qdrant_id and score."""
+    """BM25 keyword search via FTS5 (SQLite) or tsvector (Postgres).
+
+    Dispatches to the appropriate search implementation based on
+    the active ``GRAPH_BACKEND`` setting.
+
+    Args:
+        query: Pre-built FTS5 query string for SQLite (e.g. ``"k8s" OR "deploy"``).
+            Ignored when the backend is Postgres — ``raw_query`` is used instead.
+        namespace: Filter by namespace (empty = all namespaces).
+        agent_id: Filter by agent ID (empty = all agents).
+        memory_type: Filter by memory type (empty = all types).
+        limit: Maximum number of results to return.
+        actor_type: Filter by actor type (empty = all types).
+        raw_query: Original unformatted user query.  Used by the Postgres backend
+            to build an appropriate ``tsquery`` expression.  Falls back to
+            ``query`` when empty.
+        fts_mode: Query mode for Postgres tsquery building.  One of ``"or"``
+            (default, high recall), ``"and"`` (high precision), or ``"phrase"``
+            (sequential token match).  Ignored for SQLite.
+
+    Returns:
+        List of result dicts with ``qdrant_id``, ``bm25_score``, and payload fields.
+    """
+    from archivist.core.config import GRAPH_BACKEND
+
+    if (GRAPH_BACKEND or "sqlite").lower() == "postgres":
+        return await _search_fts_postgres(
+            raw_query=raw_query or query,
+            fts_mode=fts_mode,
+            namespace=namespace,
+            agent_id=agent_id,
+            memory_type=memory_type,
+            limit=limit,
+            actor_type=actor_type,
+        )
+    return await _search_fts_sqlite(
+        query=query,
+        namespace=namespace,
+        agent_id=agent_id,
+        memory_type=memory_type,
+        limit=limit,
+        actor_type=actor_type,
+    )
+
+
+async def _search_fts_sqlite(
+    query: str,
+    namespace: str = "",
+    agent_id: str = "",
+    memory_type: str = "",
+    limit: int = 30,
+    actor_type: str = "",
+) -> list[dict]:
+    """SQLite FTS5 BM25 search implementation (stemmed / ``memory_fts``)."""
     from archivist.storage.sqlite_pool import pool
 
     try:
@@ -642,6 +875,76 @@ async def search_fts(
         return []
 
 
+async def _search_fts_postgres(
+    raw_query: str,
+    fts_mode: str = "or",
+    namespace: str = "",
+    agent_id: str = "",
+    memory_type: str = "",
+    limit: int = 30,
+    actor_type: str = "",
+) -> list[dict]:
+    """Postgres tsvector FTS search implementation (stemmed / ``fts_vector``)."""
+    from archivist.storage.fts_search import _pg_tsquery_and, _pg_tsquery_or, _pg_tsquery_phrase
+    from archivist.storage.sqlite_pool import pool
+
+    builder = {
+        "or": _pg_tsquery_or,
+        "and": _pg_tsquery_and,
+        "phrase": _pg_tsquery_phrase,
+    }.get(fts_mode, _pg_tsquery_or)
+
+    tsquery_expr = builder(raw_query)
+    if not tsquery_expr:
+        return []
+
+    try:
+        async with pool.read() as conn:
+            where_clauses = ["mc.is_excluded = 0"]
+            params: list = [tsquery_expr]
+
+            if namespace:
+                where_clauses.append("mc.namespace = ?")
+                params.append(namespace)
+            if agent_id:
+                where_clauses.append("mc.agent_id = ?")
+                params.append(agent_id)
+            if memory_type:
+                where_clauses.append("mc.memory_type = ?")
+                params.append(memory_type)
+            if actor_type:
+                where_clauses.append("mc.actor_type = ?")
+                params.append(actor_type)
+
+            where_sql = " AND " + " AND ".join(where_clauses)
+
+            # ts_rank_cd returns values in [0,1]; multiply by 32 to normalize
+            # into the same ballpark as SQLite FTS5 BM25 scores (~0.5-30 range).
+            sql = (
+                "SELECT mc.qdrant_id, mc.file_path, mc.chunk_index, mc.agent_id, "
+                "mc.namespace, mc.date, mc.memory_type, mc.text, "
+                "mc.actor_id, mc.actor_type, "
+                "ts_rank_cd(mc.fts_vector, to_tsquery('english', ?)) * 32 AS bm25_rank "
+                "FROM memory_chunks mc "
+                f"WHERE mc.fts_vector @@ to_tsquery('english', ?) {where_sql} "
+                "ORDER BY bm25_rank DESC "
+                "LIMIT ?"
+            )
+            # tsquery_expr used twice: once in SELECT ranking, once in WHERE
+            params = [tsquery_expr, tsquery_expr] + params[1:] + [limit]
+
+            cur = await conn.execute(sql, params)
+            results = []
+            for row in await cur.fetchall():
+                r = dict(row)
+                r["bm25_score"] = r.pop("bm25_rank", 0)
+                results.append(r)
+            return results
+    except Exception as e:
+        logging.getLogger("archivist.graph").warning("FTS Postgres search failed: %s", e)
+        return []
+
+
 async def search_fts_exact(
     query: str,
     namespace: str = "",
@@ -649,8 +952,56 @@ async def search_fts_exact(
     memory_type: str = "",
     limit: int = 30,
     actor_type: str = "",
+    raw_query: str = "",
 ) -> list[dict]:
-    """Non-stemmed BM25 search via memory_fts_exact for exact token matching."""
+    """Non-stemmed keyword search for exact token matching (IPs, UUIDs, ticket IDs).
+
+    Dispatches to FTS5 ``memory_fts_exact`` (SQLite) or ``fts_vector_simple``
+    tsvector (Postgres) based on the active ``GRAPH_BACKEND``.
+
+    Args:
+        query: Pre-built FTS5 query string for SQLite.  Ignored on Postgres.
+        namespace: Filter by namespace (empty = all namespaces).
+        agent_id: Filter by agent ID (empty = all agents).
+        memory_type: Filter by memory type (empty = all types).
+        limit: Maximum number of results to return.
+        actor_type: Filter by actor type (empty = all types).
+        raw_query: Original unformatted user query.  Used by the Postgres backend
+            to build the ``tsquery`` expression.  Falls back to ``query`` when empty.
+
+    Returns:
+        List of result dicts with ``qdrant_id``, ``bm25_score``, and payload fields.
+    """
+    from archivist.core.config import GRAPH_BACKEND
+
+    if (GRAPH_BACKEND or "sqlite").lower() == "postgres":
+        return await _search_fts_exact_postgres(
+            raw_query=raw_query or query,
+            namespace=namespace,
+            agent_id=agent_id,
+            memory_type=memory_type,
+            limit=limit,
+            actor_type=actor_type,
+        )
+    return await _search_fts_exact_sqlite(
+        query=query,
+        namespace=namespace,
+        agent_id=agent_id,
+        memory_type=memory_type,
+        limit=limit,
+        actor_type=actor_type,
+    )
+
+
+async def _search_fts_exact_sqlite(
+    query: str,
+    namespace: str = "",
+    agent_id: str = "",
+    memory_type: str = "",
+    limit: int = 30,
+    actor_type: str = "",
+) -> list[dict]:
+    """SQLite FTS5 exact (non-stemmed) BM25 search via ``memory_fts_exact``."""
     from archivist.storage.sqlite_pool import pool
 
     try:
@@ -695,6 +1046,70 @@ async def search_fts_exact(
             return results
     except Exception as e:
         logging.getLogger("archivist.graph").warning("FTS exact search failed: %s", e)
+        return []
+
+
+async def _search_fts_exact_postgres(
+    raw_query: str,
+    namespace: str = "",
+    agent_id: str = "",
+    memory_type: str = "",
+    limit: int = 30,
+    actor_type: str = "",
+) -> list[dict]:
+    """Postgres exact (non-stemmed) FTS search via ``fts_vector_simple``.
+
+    Uses the ``simple`` text-search configuration which skips stemming —
+    equivalent to FTS5's ``unicode61`` tokenizer.
+    """
+    from archivist.storage.fts_search import _pg_tsquery_or
+    from archivist.storage.sqlite_pool import pool
+
+    tsquery_expr = _pg_tsquery_or(raw_query)
+    if not tsquery_expr:
+        return []
+
+    try:
+        async with pool.read() as conn:
+            where_clauses = ["mc.is_excluded = 0"]
+            params: list = [tsquery_expr]
+
+            if namespace:
+                where_clauses.append("mc.namespace = ?")
+                params.append(namespace)
+            if agent_id:
+                where_clauses.append("mc.agent_id = ?")
+                params.append(agent_id)
+            if memory_type:
+                where_clauses.append("mc.memory_type = ?")
+                params.append(memory_type)
+            if actor_type:
+                where_clauses.append("mc.actor_type = ?")
+                params.append(actor_type)
+
+            where_sql = " AND " + " AND ".join(where_clauses)
+
+            sql = (
+                "SELECT mc.qdrant_id, mc.file_path, mc.chunk_index, mc.agent_id, "
+                "mc.namespace, mc.date, mc.memory_type, mc.text, "
+                "mc.actor_id, mc.actor_type, "
+                "ts_rank_cd(mc.fts_vector_simple, to_tsquery('simple', ?)) * 32 AS bm25_rank "
+                "FROM memory_chunks mc "
+                f"WHERE mc.fts_vector_simple @@ to_tsquery('simple', ?) {where_sql} "
+                "ORDER BY bm25_rank DESC "
+                "LIMIT ?"
+            )
+            params = [tsquery_expr, tsquery_expr] + params[1:] + [limit]
+
+            cur = await conn.execute(sql, params)
+            results = []
+            for row in await cur.fetchall():
+                r = dict(row)
+                r["bm25_score"] = r.pop("bm25_rank", 0)
+                results.append(r)
+            return results
+    except Exception as e:
+        logging.getLogger("archivist.graph").warning("FTS exact Postgres search failed: %s", e)
         return []
 
 
