@@ -7,9 +7,10 @@ via pytest's conftest resolution.
 Key design decisions
 --------------------
 * ``qa_pool`` — a fresh ``SQLitePool`` per test, backed by a temp-file DB with
-  the full Archivist schema applied inline.  ``GRAPH_WRITE_LOCK_ASYNC`` is also
-  replaced with a fresh ``asyncio.Lock`` bound to the current event loop so
-  tests do not interfere with each other across event-loop boundaries.
+  the full Archivist schema applied inline.  No lock monkeypatching is needed
+  because ``pool.write()`` calls ``_get_graph_write_lock()``, a lazy accessor
+  that always returns a lock bound to the current running event loop.  See
+  ``test_write_lock_contract.py`` for explicit coverage of that contract.
 
 * ``OUTBOX_ENABLED=True`` is set as an autouse override so every test in this
   suite exercises the transactional outbox by default.
