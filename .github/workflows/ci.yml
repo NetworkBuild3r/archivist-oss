@@ -133,6 +133,8 @@ jobs:
       - name: Run unit + regression tests
         # unit: pure logic — no I/O, no SQLite, no Qdrant — fastest feedback loop
         # regression: specific bug guards — also no external services
+        # --cov-fail-under=0: overrides pyproject.toml fail_under (46%) which is
+        # calibrated for the full suite; unit+regression alone cover ~24% by design.
         run: |
           python -m pytest \
             tests/unit/ tests/regression/ \
@@ -143,6 +145,7 @@ jobs:
             --cov-report=xml:coverage-${{ matrix.python-version }}.xml \
             --cov-report=term-missing \
             --cov-branch \
+            --cov-fail-under=0 \
             -q
         env:
           SQLITE_PATH: ":memory:"
