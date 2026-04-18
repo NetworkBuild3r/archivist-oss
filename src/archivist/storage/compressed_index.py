@@ -283,10 +283,10 @@ def build_wake_up_context(namespace: str, agent_id: str = "") -> dict:
     }
 
 
-def get_cached_wake_up(namespace: str, agent_id: str = "") -> dict | None:
+async def get_cached_wake_up(namespace: str, agent_id: str = "") -> dict | None:
     """Return pre-computed wake-up context from curator_state, or None."""
     key = f"{_WAKE_UP_CACHE_PREFIX}{namespace}:{agent_id}"
-    raw = get_curator_state(key)
+    raw = await get_curator_state(key)
     if raw:
         try:
             return json.loads(raw)
@@ -295,11 +295,11 @@ def get_cached_wake_up(namespace: str, agent_id: str = "") -> dict | None:
     return None
 
 
-def cache_wake_up(namespace: str, agent_id: str = "") -> dict:
+async def cache_wake_up(namespace: str, agent_id: str = "") -> dict:
     """Build wake-up context and persist it in curator_state for fast retrieval."""
     ctx = build_wake_up_context(namespace, agent_id=agent_id)
     key = f"{_WAKE_UP_CACHE_PREFIX}{namespace}:{agent_id}"
-    set_curator_state(key, json.dumps(ctx))
+    await set_curator_state(key, json.dumps(ctx))
     return ctx
 
 

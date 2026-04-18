@@ -9,6 +9,7 @@ Each snapshot is a timestamped directory under BACKUP_DIR containing the above
 artefacts plus a manifest.json with metadata for validation during restore.
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -564,15 +565,17 @@ def import_agent(ndjson_path: str, dry_run: bool = False) -> dict:
                     batch.clear()
 
                 if BM25_ENABLED and payload.get("text"):
-                    upsert_fts_chunk(
-                        qdrant_id=point_id,
-                        text=payload["text"],
-                        file_path=payload.get("file_path", ""),
-                        chunk_index=payload.get("chunk_index", 0),
-                        agent_id=payload.get("agent_id", ""),
-                        namespace=payload.get("namespace", ""),
-                        date=payload.get("date", ""),
-                        memory_type=payload.get("memory_type", "general"),
+                    asyncio.run(
+                        upsert_fts_chunk(
+                            qdrant_id=point_id,
+                            text=payload["text"],
+                            file_path=payload.get("file_path", ""),
+                            chunk_index=payload.get("chunk_index", 0),
+                            agent_id=payload.get("agent_id", ""),
+                            namespace=payload.get("namespace", ""),
+                            date=payload.get("date", ""),
+                            memory_type=payload.get("memory_type", "general"),
+                        )
                     )
                     fts_rebuilt += 1
             else:

@@ -763,9 +763,9 @@ async def _handle_wake_up(arguments: dict) -> list[TextContent]:
         if denied:
             return [TextContent(type="text", text=denied)]
 
-    ctx = get_cached_wake_up(namespace, agent_id=agent_id)
+    ctx = await get_cached_wake_up(namespace, agent_id=agent_id)
     if not ctx:
-        ctx = cache_wake_up(namespace, agent_id=agent_id)
+        ctx = await cache_wake_up(namespace, agent_id=agent_id)
 
     return [TextContent(type="text", text=format_wake_up_text(ctx, agent_id=agent_id))]
 

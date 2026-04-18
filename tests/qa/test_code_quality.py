@@ -121,3 +121,84 @@ def test_no_trailing_whitespace_in_tests():
         "  find tests/ -name '*.py' | xargs sed -i 's/[[:space:]]*$//'\n\n"
         "Offending lines:\n" + "\n".join(offenders)
     )
+
+
+# ---------------------------------------------------------------------------
+# Unawaited-coroutine static detector
+# ---------------------------------------------------------------------------
+
+
+def test_no_sync_calls_to_known_async_functions():
+    """Detect bare (non-awaited) calls to functions known to be async.
+
+    Gap that prompted this test
+    ---------------------------
+    ``cache_wake_up`` in ``compressed_index.py`` called the async function
+    ``set_curator_state(...)`` without ``await``.  Python silently created
+    a coroutine object, returned the dict, and logged a RuntimeWarning at
+    shutdown.  The functional result *looked* correct — the caller got its
+    dict — but the DB write never happened.
+
+    ruff and mypy don't catch this pattern because the call site was inside a
+    sync function (no ``async def`` context), so ``await`` wasn't expected
+    syntactically and the coroutine return value was simply discarded.
+
+    This test walks every ``.py`` file under ``src/`` and reports any line
+    that calls a known async function without ``await``.  The list is manually
+    maintained here; add new async functions whenever they are introduced.
+    """
+    import ast
+
+    # Async functions whose bare (non-awaited) calls are silent bugs.
+    # Extend this list when new async leaf functions are added to the storage layer.
+    KNOWN_ASYNC = {
+        "set_curator_state",
+        "get_curator_state",
+        "get_cached_wake_up",
+        "upsert_entity",
+        "add_fact",
+        "upsert_fts_chunk",
+        "register_needle_tokens",
+        "cache_wake_up",
+        "soft_delete_memory",
+        "merge_memories",
+    }
+
+    src_dir = _REPO_ROOT / "src"
+    offenders: list[str] = []
+
+    for py_file in sorted(src_dir.rglob("*.py")):
+        try:
+            source = py_file.read_text(errors="replace")
+            tree = ast.parse(source, filename=str(py_file))
+        except SyntaxError:
+            continue
+
+        for node in ast.walk(tree):
+            # We want Call nodes that are NOT the child of an Await node.
+            # Strategy: collect all awaited call nodes, then flag bare calls.
+            if not isinstance(node, ast.Expr):
+                continue
+            inner = node.value
+            # Direct bare call: foo(...) as a statement (not awaited)
+            if isinstance(inner, ast.Call):
+                func = inner.func
+                name = ""
+                if isinstance(func, ast.Name):
+                    name = func.id
+                elif isinstance(func, ast.Attribute):
+                    name = func.attr
+                if name in KNOWN_ASYNC:
+                    rel = py_file.relative_to(_REPO_ROOT)
+                    lineno = node.lineno
+                    # Extract the source line for context.
+                    src_line = source.splitlines()[lineno - 1].strip()
+                    offenders.append(f"  {rel}:{lineno}: {src_line}")
+
+    assert not offenders, (
+        "Found bare (non-awaited) calls to known async functions in src/.\n"
+        "These calls create a coroutine that is immediately discarded — "
+        "the function body never executes.\n"
+        "Fix: add 'await' before the call, or make the enclosing function async.\n\n"
+        "Offending calls:\n" + "\n".join(offenders)
+    )

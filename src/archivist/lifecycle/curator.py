@@ -411,7 +411,7 @@ async def decay_old_entries() -> dict[str, int]:
     return {"aged_out": aged_out, "superseded_out": superseded_out, "total": total}
 
 
-def _refresh_wake_up_caches() -> int:
+async def _refresh_wake_up_caches() -> int:
     """Re-build wake-up context for each active namespace.
 
     Scans memory_chunks for distinct (namespace, agent_id) pairs and
@@ -439,7 +439,7 @@ def _refresh_wake_up_caches() -> int:
             continue
         seen.add(key)
         try:
-            cache_wake_up(ns, agent_id=aid)
+            await cache_wake_up(ns, agent_id=aid)
             refreshed += 1
         except Exception as e:
             logger.debug("Wake-up cache failed for %s/%s: %s", ns, aid, e)
@@ -485,7 +485,7 @@ async def curator_loop():
 
             wake_pairs = 0
             try:
-                wake_pairs = _refresh_wake_up_caches()
+                wake_pairs = await _refresh_wake_up_caches()
             except Exception as e:
                 logger.warning("Wake-up cache refresh failed (non-fatal): %s", e)
 

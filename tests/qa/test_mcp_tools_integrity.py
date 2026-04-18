@@ -386,3 +386,62 @@ async def test_store_handler_enqueues_outbox_event(qa_pool, memory_factory):
 
     # No failed or dead events regardless of whether the full store path ran
     assert await count_outbox(qa_pool, "dead") == 0
+
+
+# ---------------------------------------------------------------------------
+# cache_wake_up — persists to curator_state (regression: was unawaited)
+# ---------------------------------------------------------------------------
+
+
+async def test_cache_wake_up_persists_to_curator_state(qa_pool):
+    """cache_wake_up writes the wake-up payload to the curator_state table.
+
+    Regression guard for the bug reported in startup logs:
+        coroutine 'set_curator_state' was never awaited in compressed_index.py:302
+
+    Before the fix, ``cache_wake_up`` was a sync function that called the async
+    ``set_curator_state`` without ``await``.  The coroutine was created but
+    never executed, so the key was never written to the DB.  The function
+    returned the correct dict to callers but silently discarded the persist.
+    """
+    from archivist.storage.compressed_index import cache_wake_up, get_cached_wake_up
+
+    namespace = "qa-wakeup-ns"
+    agent_id = "qa-agent-wakeup"
+
+    ctx = await cache_wake_up(namespace, agent_id=agent_id)
+
+    # The function must return the context dict.
+    assert isinstance(ctx, dict)
+
+    # The key must now exist in the DB — this is what was silently skipped before.
+    cached = await get_cached_wake_up(namespace, agent_id=agent_id)
+    assert cached is not None, (
+        "cache_wake_up returned a dict but the value was NOT persisted to "
+        "curator_state — set_curator_state was not awaited"
+    )
+
+
+async def test_cache_wake_up_is_retrievable_by_handle_wake_up(qa_pool):
+    """_handle_wake_up returns cached wake-up context from DB after cache_wake_up runs.
+
+    If cache_wake_up silently fails (unawaited coroutine), get_cached_wake_up
+    returns None and _handle_wake_up falls back to a second cache_wake_up call.
+    This test proves the first call actually persisted, avoiding the silent
+    double-compute path.
+    """
+    from archivist.storage.compressed_index import cache_wake_up, get_cached_wake_up
+
+    namespace = "qa-wakeup-retrieve"
+    agent_id = "qa-agent-retrieve"
+
+    # Warm the cache.
+    await cache_wake_up(namespace, agent_id=agent_id)
+
+    # Immediately read back — must not be None.
+    first_read = await get_cached_wake_up(namespace, agent_id=agent_id)
+    assert first_read is not None
+
+    # A second read must return the same payload (idempotent cache).
+    second_read = await get_cached_wake_up(namespace, agent_id=agent_id)
+    assert second_read == first_read
