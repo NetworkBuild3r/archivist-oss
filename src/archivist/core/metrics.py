@@ -16,6 +16,7 @@ import logging
 import sqlite3
 import threading
 from collections import defaultdict
+from datetime import UTC, datetime
 
 _lock = threading.Lock()
 
@@ -230,6 +231,39 @@ def collect_storage_gauges_tick() -> None:
     except Exception:
         gauge_set(QDRANT_AVAILABLE, 0.0)
 
+    # Outbox: pending count, dead count, and lag of oldest pending row.
+    try:
+        from archivist.storage.graph import get_db
+
+        conn = get_db()
+        try:
+            cur = conn.execute(
+                "SELECT status, COUNT(*) FROM outbox GROUP BY status"
+            )
+            status_counts: dict[str, int] = {r[0]: r[1] for r in cur.fetchall()}
+            gauge_set(OUTBOX_PENDING, float(status_counts.get("pending", 0)))
+            gauge_set(OUTBOX_DEAD, float(status_counts.get("dead", 0)))
+
+            cur2 = conn.execute(
+                "SELECT MIN(created_at) FROM outbox WHERE status = 'pending'"
+            )
+            oldest_row = cur2.fetchone()
+            if oldest_row and oldest_row[0]:
+                try:
+                    oldest_dt = datetime.fromisoformat(oldest_row[0])
+                    if oldest_dt.tzinfo is None:
+                        oldest_dt = oldest_dt.replace(tzinfo=UTC)
+                    lag = (datetime.now(UTC) - oldest_dt).total_seconds()
+                    gauge_set(OUTBOX_LAG_SECONDS, max(0.0, lag))
+                except ValueError:
+                    pass
+            else:
+                gauge_set(OUTBOX_LAG_SECONDS, 0.0)
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.debug("metrics outbox gauges: %s", e)
+
 
 async def run_storage_gauges_loop(interval_seconds: float) -> None:
     """Background task: refresh storage gauges periodically (first tick runs immediately)."""
@@ -311,3 +345,21 @@ QUERY_EXPANSION_DURATION = "archivist_query_expansion_duration_ms"
 # ── SQLite async pool observability (v1.12) ──────────────────────────────────
 SQLITE_POOL_ACQUIRE_MS = "archivist_sqlite_pool_acquire_ms"
 SQLITE_POOL_WRITE_ERRORS = "archivist_sqlite_pool_write_errors_total"
+
+# ── Transactional outbox observability (Phase 3 enterprise hardening) ─────────
+OUTBOX_PENDING = "archivist_outbox_pending"
+"""Gauge: current count of outbox rows with status='pending'."""
+OUTBOX_DEAD = "archivist_outbox_dead"
+"""Gauge: current count of outbox rows with status='dead'."""
+OUTBOX_LAG_SECONDS = "archivist_outbox_lag_seconds"
+"""Gauge: age in seconds of the oldest pending outbox row (0 when queue empty)."""
+OUTBOX_DRAIN_DURATION = "archivist_outbox_drain_duration_ms"
+"""Histogram: wall-clock time per drain() call in milliseconds."""
+OUTBOX_APPLIED_TOTAL = "archivist_outbox_applied_total"
+"""Counter: cumulative events successfully applied to Qdrant."""
+OUTBOX_DEAD_LETTER_TOTAL = "archivist_outbox_dead_letter_total"
+"""Counter: cumulative events moved to dead-letter status."""
+OUTBOX_RECOVERY_COUNT = "archivist_outbox_recovery_total"
+"""Counter: cumulative 'processing' events recovered by the orphan sweep."""
+OUTBOX_PRUNED_TOTAL = "archivist_outbox_pruned_total"
+"""Counter: cumulative 'applied' rows deleted by retention pruning."""

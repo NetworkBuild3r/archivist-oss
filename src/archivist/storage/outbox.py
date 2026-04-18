@@ -24,6 +24,14 @@ Event flow
              → (Qdrant call fails, retries < max) → ``pending`` (backoff)
              → (retries == max) → ``dead`` + ``delete_failures`` audit row
 
+Crash safety (Phase 3 enterprise hardening)
+-------------------------------------------
+A periodic ``_sweep_orphaned_processing()`` call resets any rows that have
+been stuck in ``processing`` longer than ``OUTBOX_ORPHAN_TIMEOUT_SECONDS``
+(default 60 s) back to ``pending``.  This recovers from process crashes that
+occur between the batch-claim UPDATE and the ``_mark_applied`` / ``_mark_dead``
+call.
+
 Usage (for ``MemoryTransaction`` — not called by application code directly)::
 
     processor = OutboxProcessor(vector_backend)
@@ -37,10 +45,13 @@ import asyncio
 import enum
 import json
 import logging
+import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
+
+import archivist.core.metrics as m
 
 logger = logging.getLogger("archivist.outbox")
 
@@ -114,6 +125,20 @@ class OutboxProcessor:
     marked ``processing`` before the Qdrant call so that concurrent drain
     calls never double-apply an event.
 
+    Crash safety
+    ------------
+    ``_sweep_orphaned_processing()`` periodically resets rows that have been
+    stuck in ``processing`` longer than ``OUTBOX_ORPHAN_TIMEOUT_SECONDS`` back
+    to ``pending``.  This handles the crash window between the batch-claim
+    UPDATE and ``_mark_applied`` / ``_mark_dead``.  The sweep runs on startup
+    (drain cycle 0) and every ``OUTBOX_ORPHAN_SWEEP_EVERY_N`` cycles thereafter.
+
+    Retention
+    ---------
+    ``_prune_applied()`` deletes ``applied`` rows older than
+    ``OUTBOX_RETENTION_DAYS`` days to keep the table small.  It runs on the
+    same cadence as the orphan sweep.
+
     Idempotency
     -----------
     * ``QDRANT_UPSERT`` — Qdrant upserts are idempotent by point ID.
@@ -129,6 +154,7 @@ class OutboxProcessor:
 
     def __init__(self, vector_backend: Any) -> None:
         self._backend = vector_backend
+        self._drain_cycle: int = 0
 
     # ------------------------------------------------------------------
     # Public API
@@ -137,11 +163,39 @@ class OutboxProcessor:
     async def drain(self) -> int:
         """Fetch and process up to ``OUTBOX_BATCH_SIZE`` pending events.
 
+        On every ``OUTBOX_ORPHAN_SWEEP_EVERY_N``-th call (and on the first
+        call), runs ``_sweep_orphaned_processing()`` and ``_prune_applied()``
+        before draining.
+
         Returns:
             Number of events successfully applied in this drain cycle.
         """
-        from archivist.core.config import OUTBOX_BATCH_SIZE, OUTBOX_MAX_RETRIES
+        from archivist.core.config import (
+            OUTBOX_BATCH_SIZE,
+            OUTBOX_MAX_RETRIES,
+            OUTBOX_ORPHAN_SWEEP_EVERY_N,
+        )
         from archivist.storage.sqlite_pool import pool
+
+        t0 = time.monotonic()
+
+        if self._drain_cycle % OUTBOX_ORPHAN_SWEEP_EVERY_N == 0:
+            recovered = await self._sweep_orphaned_processing()
+            pruned = await self._prune_applied()
+            if recovered:
+                logger.warning(
+                    "outbox.sweep: recovered %d orphaned 'processing' events",
+                    recovered,
+                    extra={"recovered": recovered, "drain_cycle": self._drain_cycle},
+                )
+            if pruned:
+                logger.info(
+                    "outbox.prune: deleted %d expired 'applied' rows",
+                    pruned,
+                    extra={"pruned": pruned, "drain_cycle": self._drain_cycle},
+                )
+
+        self._drain_cycle += 1
 
         now_iso = datetime.now(UTC).isoformat()
         # Back-off: only retry events whose last_attempt is far enough in the
@@ -160,9 +214,11 @@ class OutboxProcessor:
                 """,
                 (now_iso, OUTBOX_BATCH_SIZE),
             )
-            rows = await cursor.fetchall()
+            rows: list[Any] = list(await cursor.fetchall())
 
             if not rows:
+                elapsed_ms = (time.monotonic() - t0) * 1000
+                m.observe(m.OUTBOX_DRAIN_DURATION, elapsed_ms)
                 return 0
 
             # Claim the batch atomically — set status='processing'.
@@ -174,6 +230,7 @@ class OutboxProcessor:
             )
 
         applied = 0
+        dead_count = 0
         for row in rows:
             event_id = row[0]
             retry_count = row[3] or 0
@@ -185,14 +242,17 @@ class OutboxProcessor:
                 )
                 await self._mark_applied(event_id)
                 applied += 1
+                m.inc(m.OUTBOX_APPLIED_TOTAL)
             except Exception as exc:
                 new_retry = retry_count + 1
                 logger.warning(
-                    "outbox.drain: event %s (%s) failed (attempt %d): %s",
-                    event_id,
-                    row[1],
-                    new_retry,
-                    exc,
+                    "outbox.drain: event failed",
+                    extra={
+                        "event_id": event_id,
+                        "event_type": row[1],
+                        "attempt": new_retry,
+                        "error": str(exc),
+                    },
                 )
                 if new_retry >= OUTBOX_MAX_RETRIES:
                     await self._mark_dead(
@@ -200,12 +260,29 @@ class OutboxProcessor:
                         payload=json.loads(row[2]),
                         error=str(exc),
                     )
+                    dead_count += 1
+                    m.inc(m.OUTBOX_DEAD_LETTER_TOTAL)
                 else:
                     backoff = min(2**new_retry * 0.5, 60.0)
                     next_attempt = datetime.fromtimestamp(
                         datetime.now(UTC).timestamp() + backoff, tz=UTC
                     ).isoformat()
                     await self._mark_failed(event_id, str(exc), new_retry, next_attempt)
+
+        elapsed_ms = (time.monotonic() - t0) * 1000
+        m.observe(m.OUTBOX_DRAIN_DURATION, elapsed_ms)
+
+        if applied or dead_count:
+            logger.info(
+                "outbox.drain_complete",
+                extra={
+                    "applied": applied,
+                    "dead": dead_count,
+                    "batch_size": len(rows),
+                    "duration_ms": round(elapsed_ms, 2),
+                    "drain_cycle": self._drain_cycle,
+                },
+            )
 
         return applied
 
@@ -218,15 +295,113 @@ class OutboxProcessor:
         """
         from archivist.core.config import OUTBOX_DRAIN_INTERVAL
 
-        logger.info("OutboxProcessor drain loop started (interval=%ds)", OUTBOX_DRAIN_INTERVAL)
+        logger.info(
+            "OutboxProcessor drain loop started",
+            extra={"interval_seconds": OUTBOX_DRAIN_INTERVAL},
+        )
         while True:
             try:
-                n = await self.drain()
-                if n:
-                    logger.debug("outbox.drain: applied %d event(s)", n)
+                await self.drain()
             except Exception as exc:
-                logger.error("outbox.drain_loop unhandled error: %s", exc, exc_info=True)
+                logger.error(
+                    "outbox.drain_loop unhandled error",
+                    extra={"error": str(exc)},
+                    exc_info=True,
+                )
             await asyncio.sleep(OUTBOX_DRAIN_INTERVAL)
+
+    async def _sweep_orphaned_processing(self) -> int:
+        """Reset events stuck in 'processing' past the orphan timeout to 'pending'.
+
+        A process crash between the batch-claim UPDATE (``status='processing'``)
+        and ``_mark_applied`` / ``_mark_dead`` leaves rows permanently orphaned
+        because ``drain()`` only queries ``WHERE status='pending'``.  This
+        method recovers those rows by resetting them after
+        ``OUTBOX_ORPHAN_TIMEOUT_SECONDS`` have elapsed since ``last_attempt``.
+
+        The ``retry_count`` is preserved so that an event that crashed many
+        times still eventually reaches the dead-letter limit.
+
+        Returns:
+            Number of orphaned events reset to 'pending'.
+        """
+        from archivist.core.config import OUTBOX_ORPHAN_TIMEOUT_SECONDS
+        from archivist.storage.sqlite_pool import pool
+
+        cutoff = (
+            datetime.now(UTC) - timedelta(seconds=OUTBOX_ORPHAN_TIMEOUT_SECONDS)
+        ).isoformat()
+
+        async with pool.write() as conn:
+            cursor = await conn.execute(
+                """
+                SELECT id FROM outbox
+                WHERE status = 'processing'
+                  AND last_attempt < ?
+                """,
+                (cutoff,),
+            )
+            stuck: list[Any] = list(await cursor.fetchall())
+            if not stuck:
+                return 0
+
+            ids = [r[0] for r in stuck]
+            placeholders = ",".join("?" * len(ids))
+            now_iso = datetime.now(UTC).isoformat()
+            await conn.execute(
+                f"""
+                UPDATE outbox
+                SET status = 'pending',
+                    last_attempt = ?,
+                    error = 'recovered by orphan sweep'
+                WHERE id IN ({placeholders})
+                """,
+                [now_iso, *ids],
+            )
+
+        recovered = len(stuck)
+        m.inc(m.OUTBOX_RECOVERY_COUNT, value=recovered)
+        for row in stuck:
+            logger.warning(
+                "outbox.sweep: recovered orphaned event",
+                extra={"event_id": row[0], "orphan_timeout_seconds": OUTBOX_ORPHAN_TIMEOUT_SECONDS},
+            )
+        return recovered
+
+    async def _prune_applied(self) -> int:
+        """Delete 'applied' outbox rows older than ``OUTBOX_RETENTION_DAYS``.
+
+        Pruning is capped at 1 000 rows per call to bound write-lock hold time.
+        If more rows are eligible they will be cleaned up on subsequent sweeps.
+
+        Returns:
+            Number of rows deleted.
+        """
+        from archivist.core.config import OUTBOX_RETENTION_DAYS
+        from archivist.storage.sqlite_pool import pool
+
+        cutoff = (datetime.now(UTC) - timedelta(days=OUTBOX_RETENTION_DAYS)).isoformat()
+
+        async with pool.write() as conn:
+            # Use a sub-select with LIMIT so we never hold the write lock for
+            # an unbounded DELETE on a large table.
+            cursor = await conn.execute(
+                """
+                DELETE FROM outbox
+                WHERE id IN (
+                    SELECT id FROM outbox
+                    WHERE status = 'applied'
+                      AND last_attempt < ?
+                    LIMIT 1000
+                )
+                """,
+                (cutoff,),
+            )
+            pruned = cursor.rowcount or 0
+
+        if pruned:
+            m.inc(m.OUTBOX_PRUNED_TOTAL, value=pruned)
+        return pruned
 
     # ------------------------------------------------------------------
     # Internal helpers

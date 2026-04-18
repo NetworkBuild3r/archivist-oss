@@ -279,6 +279,15 @@ OUTBOX_DRAIN_INTERVAL = int(os.getenv("OUTBOX_DRAIN_INTERVAL", "2"))
 OUTBOX_BATCH_SIZE = int(os.getenv("OUTBOX_BATCH_SIZE", "50"))
 # After this many consecutive failures an outbox event is moved to 'dead'.
 OUTBOX_MAX_RETRIES = int(os.getenv("OUTBOX_MAX_RETRIES", "5"))
+# Seconds before a 'processing' event is considered orphaned (crashed mid-drain)
+# and reset to 'pending'.  Must exceed the worst-case single-event apply latency.
+OUTBOX_ORPHAN_TIMEOUT_SECONDS = int(os.getenv("OUTBOX_ORPHAN_TIMEOUT_SECONDS", "60"))
+# How often (in drain cycles) the orphan sweep runs.  At a 2s interval,
+# the default of 30 means a sweep every ~60 seconds.
+OUTBOX_ORPHAN_SWEEP_EVERY_N = int(os.getenv("OUTBOX_ORPHAN_SWEEP_EVERY_N", "30"))
+# Days to retain 'applied' outbox rows before pruning.  Pruning runs on the
+# same cadence as the orphan sweep.
+OUTBOX_RETENTION_DAYS = int(os.getenv("OUTBOX_RETENTION_DAYS", "7"))
 
 # ── Context window management (v1.1) ─────────────────────────────────────────
 DEFAULT_CONTEXT_BUDGET = int(os.getenv("DEFAULT_CONTEXT_BUDGET", "128000"))

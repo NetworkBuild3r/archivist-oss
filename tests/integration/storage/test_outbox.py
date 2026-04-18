@@ -418,3 +418,218 @@ async def test_concurrent_drains_safe(outbox_pool, monkeypatch):
     # One drain applies 1 event, the other finds 0 (event already 'processing')
     assert sum(results) == 1
     assert apply_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 enterprise hardening tests
+# ---------------------------------------------------------------------------
+
+
+async def test_sweep_orphaned_processing_recovers_stuck_events(outbox_pool, monkeypatch):
+    """_sweep_orphaned_processing() resets orphaned 'processing' rows to 'pending'.
+
+    Inserts a row with status='processing' and last_attempt 120 seconds ago,
+    verifying that the orphan sweep resets it and a subsequent drain applies it.
+    """
+    import archivist.core.config as _cfg
+    from archivist.storage.outbox import OutboxProcessor
+
+    monkeypatch.setattr(_cfg, "OUTBOX_ORPHAN_TIMEOUT_SECONDS", 60)
+    monkeypatch.setattr(_cfg, "OUTBOX_BATCH_SIZE", 50)
+    monkeypatch.setattr(_cfg, "OUTBOX_MAX_RETRIES", 5)
+
+    from datetime import UTC, datetime, timedelta
+
+    stale_attempt = (datetime.now(UTC) - timedelta(seconds=120)).isoformat()
+
+    conn = outbox_pool._conn
+    await conn.execute(
+        """INSERT INTO outbox (id, event_type, payload, status, retry_count, last_attempt, created_at)
+           VALUES ('orphan-1', 'qdrant_delete',
+                   '{"collection":"col","ids":["x1"],"memory_id":"m1"}',
+                   'processing', 0, ?, ?)""",
+        (stale_attempt, stale_attempt),
+    )
+    await conn.commit()
+
+    mock_backend = MagicMock()
+    mock_backend.delete = AsyncMock(return_value=None)
+
+    processor = OutboxProcessor(mock_backend)
+    recovered = await processor._sweep_orphaned_processing()
+    assert recovered == 1
+
+    # After sweep, the row must be 'pending'
+    async with outbox_pool.read() as c:
+        cur = await c.execute("SELECT status FROM outbox WHERE id='orphan-1'")
+        row = await cur.fetchone()
+    assert row[0] == "pending"
+
+    # A subsequent drain must now apply it
+    n = await processor.drain()
+    assert n == 1
+    mock_backend.delete.assert_called_once()
+
+
+async def test_sweep_does_not_touch_recently_claimed_events(outbox_pool, monkeypatch):
+    """Orphan sweep leaves 'processing' rows younger than the timeout alone."""
+    import archivist.core.config as _cfg
+    from archivist.storage.outbox import OutboxProcessor
+
+    monkeypatch.setattr(_cfg, "OUTBOX_ORPHAN_TIMEOUT_SECONDS", 60)
+
+    from datetime import UTC, datetime, timedelta
+
+    recent_attempt = (datetime.now(UTC) - timedelta(seconds=5)).isoformat()
+
+    conn = outbox_pool._conn
+    await conn.execute(
+        """INSERT INTO outbox (id, event_type, payload, status, retry_count, last_attempt, created_at)
+           VALUES ('recent-1', 'qdrant_delete',
+                   '{"collection":"col","ids":["y1"],"memory_id":"m2"}',
+                   'processing', 0, ?, ?)""",
+        (recent_attempt, recent_attempt),
+    )
+    await conn.commit()
+
+    processor = OutboxProcessor(MagicMock())
+    recovered = await processor._sweep_orphaned_processing()
+    assert recovered == 0
+
+    async with outbox_pool.read() as c:
+        cur = await c.execute("SELECT status FROM outbox WHERE id='recent-1'")
+        row = await cur.fetchone()
+    assert row[0] == "processing"
+
+
+async def test_prune_applied_deletes_old_rows(outbox_pool, monkeypatch):
+    """_prune_applied() removes 'applied' rows older than OUTBOX_RETENTION_DAYS."""
+    import archivist.core.config as _cfg
+    from archivist.storage.outbox import OutboxProcessor
+
+    monkeypatch.setattr(_cfg, "OUTBOX_RETENTION_DAYS", 7)
+
+    from datetime import UTC, datetime, timedelta
+
+    old_attempt = (datetime.now(UTC) - timedelta(days=10)).isoformat()
+
+    conn = outbox_pool._conn
+    await conn.execute(
+        """INSERT INTO outbox (id, event_type, payload, status, retry_count, last_attempt, created_at)
+           VALUES ('old-applied', 'qdrant_delete',
+                   '{"collection":"col","ids":[],"memory_id":"m3"}',
+                   'applied', 0, ?, ?)""",
+        (old_attempt, old_attempt),
+    )
+    await conn.commit()
+
+    processor = OutboxProcessor(MagicMock())
+    pruned = await processor._prune_applied()
+    assert pruned == 1
+
+    async with outbox_pool.read() as c:
+        count = await _count_outbox(c, "applied")
+    assert count == 0
+
+
+async def test_prune_preserves_recent_applied(outbox_pool, monkeypatch):
+    """_prune_applied() leaves 'applied' rows within the retention window alone."""
+    import archivist.core.config as _cfg
+    from archivist.storage.outbox import OutboxProcessor
+
+    monkeypatch.setattr(_cfg, "OUTBOX_RETENTION_DAYS", 7)
+
+    from datetime import UTC, datetime, timedelta
+
+    recent_attempt = (datetime.now(UTC) - timedelta(days=1)).isoformat()
+
+    conn = outbox_pool._conn
+    await conn.execute(
+        """INSERT INTO outbox (id, event_type, payload, status, retry_count, last_attempt, created_at)
+           VALUES ('fresh-applied', 'qdrant_delete',
+                   '{"collection":"col","ids":[],"memory_id":"m4"}',
+                   'applied', 0, ?, ?)""",
+        (recent_attempt, recent_attempt),
+    )
+    await conn.commit()
+
+    processor = OutboxProcessor(MagicMock())
+    pruned = await processor._prune_applied()
+    assert pruned == 0
+
+    async with outbox_pool.read() as c:
+        count = await _count_outbox(c, "applied")
+    assert count == 1
+
+
+async def test_drain_emits_applied_metric(outbox_pool, monkeypatch):
+    """drain() increments OUTBOX_APPLIED_TOTAL for each successfully applied event."""
+    import archivist.core.config as _cfg
+    import archivist.core.metrics as m
+    from archivist.storage.outbox import OutboxProcessor
+    from archivist.storage.transaction import MemoryTransaction
+
+    monkeypatch.setattr(_cfg, "OUTBOX_MAX_RETRIES", 5)
+    monkeypatch.setattr(_cfg, "OUTBOX_BATCH_SIZE", 50)
+    monkeypatch.setattr(_cfg, "OUTBOX_ORPHAN_SWEEP_EVERY_N", 1000)
+    monkeypatch.setattr(_cfg, "METRICS_ENABLED", True)
+
+    async with MemoryTransaction(enabled=True) as txn:
+        txn.enqueue_qdrant_delete("col", ["metric-id"], memory_id="mmetric")
+
+    mock_backend = MagicMock()
+    mock_backend.delete = AsyncMock(return_value=None)
+
+    before = m._counters[m.OUTBOX_APPLIED_TOTAL]
+
+    processor = OutboxProcessor(mock_backend)
+    n = await processor.drain()
+    assert n == 1
+
+    after = m._counters[m.OUTBOX_APPLIED_TOTAL]
+    assert after == before + 1.0
+
+
+async def test_mid_drain_crash_recovery_via_sweep(outbox_pool, monkeypatch):
+    """Extend the mid-drain crash test: orphan sweep on next drain recovers the event.
+
+    This test replaces the original TODO comment in test_mid_drain_crash_idempotent —
+    after the sweep, the event is applied successfully.
+    """
+    import archivist.core.config as _cfg
+    from archivist.storage.outbox import OutboxProcessor
+
+    monkeypatch.setattr(_cfg, "OUTBOX_MAX_RETRIES", 5)
+    monkeypatch.setattr(_cfg, "OUTBOX_BATCH_SIZE", 50)
+    monkeypatch.setattr(_cfg, "OUTBOX_ORPHAN_TIMEOUT_SECONDS", 60)
+    # Force sweep to run on every drain cycle for this test
+    monkeypatch.setattr(_cfg, "OUTBOX_ORPHAN_SWEEP_EVERY_N", 1)
+    monkeypatch.setattr(_cfg, "OUTBOX_RETENTION_DAYS", 7)
+
+    from datetime import UTC, datetime, timedelta
+
+    stale = (datetime.now(UTC) - timedelta(seconds=120)).isoformat()
+    conn = outbox_pool._conn
+    await conn.execute(
+        """INSERT INTO outbox (id, event_type, payload, status, retry_count, last_attempt, created_at)
+           VALUES ('crash-event', 'qdrant_delete',
+                   '{"collection":"col","ids":["c1"],"memory_id":"mcrash"}',
+                   'processing', 0, ?, ?)""",
+        (stale, stale),
+    )
+    await conn.commit()
+
+    mock_backend = MagicMock()
+    mock_backend.delete = AsyncMock(return_value=None)
+
+    processor = OutboxProcessor(mock_backend)
+
+    # First drain: sweep runs, recovers the event, then drains it
+    n = await processor.drain()
+    assert n == 1
+    mock_backend.delete.assert_called_once_with("col", ["c1"])
+
+    async with outbox_pool.read() as c:
+        cur = await c.execute("SELECT status FROM outbox WHERE id='crash-event'")
+        row = await cur.fetchone()
+    assert row[0] == "applied"
