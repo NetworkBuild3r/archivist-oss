@@ -5,10 +5,12 @@
 #   pre-commit  → enforce local hooks — catches --no-verify bypasses
 #   lint        → Ruff format + lint
 #   typecheck   → mypy error-count ratchet (cannot increase above baseline)
-#   test        → pytest unit suite on 3.12 + 3.13, coverage enforced
+#   test        → unit + regression — no I/O, runs on every push (3.12 + 3.13)
+#   integration → integration + system — SQLite + mocked Qdrant (PRs to main)
+#   chaos       → fault injection / adversarial (PRs to main)
+#   performance → timing regression gates (main pushes only — isolated runner)
 #   security    → pip-audit (CVE) + Bandit (SAST) + Trivy (filesystem)
 #   docker      → build + smoke test; edge push on main merge
-#   integration → Qdrant service container (main PRs only)
 # ─────────────────────────────────────────────────────────────────────────────
 
 name: CI
@@ -105,9 +107,9 @@ jobs:
           fi
           echo "mypy ratchet OK: $COUNT ≤ $MYPY_MAX_ERRORS"
 
-# ─── Unit Tests ──────────────────────────────────────────────────────────────
+# ─── Unit + Regression Tests ─────────────────────────────────────────────────
   test:
-    name: Unit Tests (Python ${{ matrix.python-version }})
+    name: Unit & Regression Tests (Python ${{ matrix.python-version }})
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -128,10 +130,13 @@ jobs:
           pip install -r requirements.txt -r requirements-test.txt
           pip install pytest-cov coverage[toml]
 
-      - name: Run unit tests
+      - name: Run unit + regression tests
+        # unit: pure logic — no I/O, no SQLite, no Qdrant — fastest feedback loop
+        # regression: specific bug guards — also no external services
         run: |
-          python -m pytest tests/ \
-            -m "not integration" \
+          python -m pytest \
+            tests/unit/ tests/regression/ \
+            -m "unit or regression" \
             --tb=short \
             --junitxml=test-results-${{ matrix.python-version }}.xml \
             --cov=src/archivist \
@@ -159,22 +164,14 @@ jobs:
           path: coverage-3.12.xml
           retention-days: 14
 
-# ─── Integration Tests ───────────────────────────────────────────────────────
+# ─── Integration + System Tests ──────────────────────────────────────────────
   integration:
-    name: Integration Tests (Qdrant)
+    name: Integration & System Tests
     runs-on: ubuntu-24.04
     if: |
       github.event_name == 'push' ||
       (github.event_name == 'pull_request' &&
         (github.base_ref == 'main' || github.base_ref == 'master'))
-
-    services:
-      qdrant:
-        image: qdrant/qdrant:latest
-        ports:
-          - 6333:6333
-          - 6334:6334
-        # No health-cmd — qdrant image has no curl/wget; polled from runner below.
 
     steps:
       - uses: actions/checkout@v4
@@ -189,22 +186,20 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt -r requirements-test.txt pytest-timeout
 
-      - name: Wait for Qdrant
+      - name: Run integration + system tests
+        # integration: real SQLite, mocked Qdrant — lifecycle/storage/retrieval/MCP handlers
+        # system: full MCP handler smoke + RBAC — also mocked Qdrant (no service container needed)
         run: |
-          until curl -sf http://localhost:6333/readyz; do
-            echo "Waiting for Qdrant…"
-            sleep 2
-          done
-
-      - name: Run integration tests
-        run: |
-          python -m pytest tests/ -v --tb=short \
-            -m "integration" \
+          python -m pytest \
+            tests/integration/ tests/system/ \
+            -m "integration or system" \
+            --tb=short \
             --timeout=120 \
-            --junitxml=test-results-integration.xml
+            --junitxml=test-results-integration.xml \
+            -q
         env:
-          QDRANT_URL: "http://localhost:6333"
           SQLITE_PATH: "/tmp/archivist-test.db"
+          QDRANT_URL: ""
 
       - name: Upload integration test results
         if: always()
@@ -213,6 +208,96 @@ jobs:
           name: test-results-integration
           path: test-results-integration.xml
           retention-days: 14
+
+# ─── Chaos Tests ─────────────────────────────────────────────────────────────
+  chaos:
+    name: Chaos & Fault-Injection Tests
+    runs-on: ubuntu-24.04
+    if: |
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request' &&
+        (github.base_ref == 'main' || github.base_ref == 'master'))
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-test.txt pytest-timeout
+
+      - name: Run chaos tests
+        # Fault injection, concurrent writers, write-lock contracts, crash recovery.
+        # Isolated job so timing noise from other jobs does not affect these.
+        run: |
+          python -m pytest \
+            tests/chaos/ \
+            -m "chaos" \
+            --tb=short \
+            --timeout=120 \
+            --junitxml=test-results-chaos.xml \
+            -q
+        env:
+          SQLITE_PATH: "/tmp/archivist-chaos.db"
+          QDRANT_URL: ""
+
+      - name: Upload chaos test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-chaos
+          path: test-results-chaos.xml
+          retention-days: 14
+
+# ─── Performance Regression Tests ────────────────────────────────────────────
+  performance:
+    name: Performance Regression Tests
+    runs-on: ubuntu-24.04
+    # Run on all pushes to main — never on PRs (timing is noisy on shared runners).
+    # If you need to investigate a perf regression on a branch, run locally:
+    #   pytest tests/performance/ -m performance -v -s
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-test.txt pytest-timeout
+
+      - name: Run performance regression tests
+        # Timing gates: transaction open/close <50ms, outbox drain 50 events <500ms, etc.
+        # Runs on a dedicated job with no concurrent workload to minimise timer noise.
+        run: |
+          python -m pytest \
+            tests/performance/ \
+            -m "performance" \
+            --tb=short \
+            --timeout=60 \
+            --junitxml=test-results-performance.xml \
+            -v -s
+        env:
+          SQLITE_PATH: "/tmp/archivist-perf.db"
+          QDRANT_URL: ""
+
+      - name: Upload performance test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-performance
+          path: test-results-performance.xml
+          retention-days: 30
 
 # ─── Security ────────────────────────────────────────────────────────────────
   security:

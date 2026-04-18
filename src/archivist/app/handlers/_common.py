@@ -9,19 +9,34 @@ from archivist.core.rbac import check_access, is_permissive_mode
 
 logger = logging.getLogger("archivist.mcp")
 
+# Always-present guidance appended to every error response so agents can
+# self-correct without human intervention.
+_UNIVERSAL_NEXT_STEP = (
+    "Call archivist_get_reference_docs() (or archivist_get_reference_docs"
+    "(section='<topic>')) to read the full tool reference for this operation."
+)
+
 
 def _rbac_gate(agent_id: str, action: str, namespace: str) -> str | None:
     """Return error JSON string if access denied, None if allowed.
 
-    The JSON payload includes an optional ``hint`` field when the policy
-    provides one so callers receive actionable guidance without a separate
-    namespace lookup.
+    The JSON payload includes:
+    - ``hint``              — one-line actionable message
+    - ``similar_namespaces`` — fuzzy-matched alternative namespace names
+    - ``next_steps``        — ordered list of tool calls the agent should make
+                              to diagnose and fix the problem
+    - ``get_help``          — always points to archivist_get_reference_docs
     """
     policy = check_access(agent_id, action, namespace)
     if not policy.allowed:
         payload: dict = {"error": "access_denied", "reason": policy.reason}
         if policy.hint:
             payload["hint"] = policy.hint
+        if policy.similar_namespaces:
+            payload["similar_namespaces"] = policy.similar_namespaces
+        if policy.next_steps:
+            payload["next_steps"] = policy.next_steps
+        payload["get_help"] = _UNIVERSAL_NEXT_STEP
         return json.dumps(payload)
     return None
 
@@ -58,10 +73,19 @@ def require_caller(caller: str) -> list[TextContent] | None:
         return error_response(
             {
                 "error": "caller_required",
-                "reason": "caller_agent_id is required in strict RBAC mode",
+                "reason": "agent_id is required — Archivist needs to know which agent is making this call.",
+                "hint": "Add agent_id='<your_agent_id>' to your tool call arguments.",
+                "next_steps": _MISSING_CALLER_NEXT_STEPS,
+                "get_help": _UNIVERSAL_NEXT_STEP,
             }
         )
     return None
+
+
+_MISSING_CALLER_NEXT_STEPS = [
+    "Re-issue the call with agent_id='<your_agent_id>' set to your unique agent identifier.",
+    "Call archivist_get_reference_docs() to see required parameters for every tool.",
+]
 
 
 def error_response(data: dict, **json_kw) -> list[TextContent]:
