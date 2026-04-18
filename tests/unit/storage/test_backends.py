@@ -435,3 +435,184 @@ class TestGetDbDeprecation:
                 conn.close()
 
         assert "get_db() is not supported" not in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# FTS backend dispatch (unit tests — mocked pool)
+# ---------------------------------------------------------------------------
+
+
+class TestFtsBackendDispatch:
+    """search_fts() and search_fts_exact() route to the right implementation."""
+
+    async def test_search_fts_calls_sqlite_impl_by_default(self, monkeypatch):
+        """With GRAPH_BACKEND unset (sqlite), the SQLite FTS5 path is taken."""
+        calls = []
+
+        async def _fake_sqlite_search(**kwargs):
+            calls.append(("sqlite", kwargs))
+            return []
+
+        monkeypatch.setattr("archivist.core.config.GRAPH_BACKEND", "")
+        monkeypatch.setattr("archivist.storage.graph._search_fts_sqlite", _fake_sqlite_search)
+
+        from archivist.storage.graph import search_fts
+
+        await search_fts(query='"k8s"', namespace="ns1")
+        assert len(calls) == 1
+        assert calls[0][0] == "sqlite"
+        assert calls[0][1]["namespace"] == "ns1"
+
+    async def test_search_fts_calls_postgres_impl_when_configured(self, monkeypatch):
+        """With GRAPH_BACKEND=postgres, the Postgres tsvector path is taken."""
+        calls = []
+
+        async def _fake_pg_search(**kwargs):
+            calls.append(("postgres", kwargs))
+            return []
+
+        monkeypatch.setattr("archivist.core.config.GRAPH_BACKEND", "postgres")
+        monkeypatch.setattr("archivist.storage.graph._search_fts_postgres", _fake_pg_search)
+
+        from archivist.storage.graph import search_fts
+
+        await search_fts(query='"k8s"', raw_query="k8s", fts_mode="or", namespace="ns1")
+        assert len(calls) == 1
+        assert calls[0][0] == "postgres"
+        assert calls[0][1]["fts_mode"] == "or"
+        assert calls[0][1]["namespace"] == "ns1"
+
+    async def test_search_fts_exact_calls_sqlite_impl_by_default(self, monkeypatch):
+        calls = []
+
+        async def _fake_sqlite_exact(**kwargs):
+            calls.append(("sqlite", kwargs))
+            return []
+
+        monkeypatch.setattr("archivist.core.config.GRAPH_BACKEND", "sqlite")
+        monkeypatch.setattr(
+            "archivist.storage.graph._search_fts_exact_sqlite", _fake_sqlite_exact
+        )
+
+        from archivist.storage.graph import search_fts_exact
+
+        await search_fts_exact(query='"192.168.1.1"')
+        assert calls[0][0] == "sqlite"
+
+    async def test_search_fts_exact_calls_postgres_impl_when_configured(self, monkeypatch):
+        calls = []
+
+        async def _fake_pg_exact(**kwargs):
+            calls.append(("postgres", kwargs))
+            return []
+
+        monkeypatch.setattr("archivist.core.config.GRAPH_BACKEND", "postgres")
+        monkeypatch.setattr(
+            "archivist.storage.graph._search_fts_exact_postgres", _fake_pg_exact
+        )
+
+        from archivist.storage.graph import search_fts_exact
+
+        await search_fts_exact(query='"192.168.1.1"', raw_query="192.168.1.1")
+        assert calls[0][0] == "postgres"
+
+
+class TestUpsertFtsChunkNoopOnPostgres:
+    """upsert_fts_chunk() skips shadow-row ops on Postgres."""
+
+    async def test_postgres_path_calls_postgres_impl(self, monkeypatch):
+        pg_calls = []
+        sqlite_calls = []
+
+        async def _fake_pg(**kwargs):
+            pg_calls.append(kwargs)
+
+        async def _fake_sqlite(**kwargs):
+            sqlite_calls.append(kwargs)
+
+        monkeypatch.setattr("archivist.core.config.GRAPH_BACKEND", "postgres")
+        monkeypatch.setattr(
+            "archivist.storage.graph._upsert_fts_chunk_postgres", _fake_pg
+        )
+        monkeypatch.setattr(
+            "archivist.storage.graph._upsert_fts_chunk_sqlite", _fake_sqlite
+        )
+
+        from archivist.storage.graph import upsert_fts_chunk
+
+        await upsert_fts_chunk(
+            qdrant_id="abc",
+            text="hello world",
+            file_path="/f",
+            chunk_index=0,
+        )
+
+        assert len(pg_calls) == 1
+        assert len(sqlite_calls) == 0
+        assert pg_calls[0]["qdrant_id"] == "abc"
+
+    async def test_sqlite_path_calls_sqlite_impl(self, monkeypatch):
+        pg_calls = []
+        sqlite_calls = []
+
+        async def _fake_pg(**kwargs):
+            pg_calls.append(kwargs)
+
+        async def _fake_sqlite(**kwargs):
+            sqlite_calls.append(kwargs)
+
+        monkeypatch.setattr("archivist.core.config.GRAPH_BACKEND", "sqlite")
+        monkeypatch.setattr(
+            "archivist.storage.graph._upsert_fts_chunk_postgres", _fake_pg
+        )
+        monkeypatch.setattr(
+            "archivist.storage.graph._upsert_fts_chunk_sqlite", _fake_sqlite
+        )
+
+        from archivist.storage.graph import upsert_fts_chunk
+
+        await upsert_fts_chunk(
+            qdrant_id="xyz",
+            text="some text",
+            file_path="/g",
+            chunk_index=1,
+        )
+
+        assert len(sqlite_calls) == 1
+        assert len(pg_calls) == 0
+
+
+class TestDeleteFtsRowsAsyncNoopOnPostgres:
+    """_delete_fts_rows_async() is a no-op on Postgres."""
+
+    async def test_no_sql_executed_when_postgres(self, monkeypatch):
+        executed = []
+
+        class MockConn:
+            async def execute(self, sql, *args):
+                executed.append(sql)
+
+        monkeypatch.setattr("archivist.core.config.GRAPH_BACKEND", "postgres")
+
+        from archivist.storage.graph import _delete_fts_rows_async
+
+        rows = [{"rowid": 1}, {"rowid": 2}]
+        await _delete_fts_rows_async(MockConn(), rows)
+
+        assert executed == [], "Expected no SQL execution on Postgres"
+
+    async def test_sql_executed_when_sqlite(self, monkeypatch):
+        executed = []
+
+        class MockConn:
+            async def execute(self, sql, *args):
+                executed.append(sql)
+
+        monkeypatch.setattr("archivist.core.config.GRAPH_BACKEND", "sqlite")
+
+        from archivist.storage.graph import _delete_fts_rows_async
+
+        rows = [{"rowid": 1}]
+        await _delete_fts_rows_async(MockConn(), rows)
+
+        assert len(executed) > 0

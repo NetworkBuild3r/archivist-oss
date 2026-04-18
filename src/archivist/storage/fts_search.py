@@ -156,6 +156,101 @@ def _fts5_phrase_query(raw_query: str) -> str:
     return '"' + " ".join(content_tokens) + '"'
 
 
+# ---------------------------------------------------------------------------
+# Postgres tsquery builders (parallel to the FTS5 builders above)
+# ---------------------------------------------------------------------------
+
+def _pg_escape_token(t: str) -> str:
+    """Escape a single token for use inside a tsquery literal.
+
+    Strips punctuation that would break ``to_tsquery`` parsing and wraps the
+    token in single quotes so Postgres treats it as a lexeme regardless of
+    special characters.
+    """
+    cleaned = _clean_token(t)
+    # Replace internal single-quotes that would break the literal.
+    cleaned = cleaned.replace("'", "")
+    return cleaned
+
+
+def _pg_tsquery_or(raw_query: str) -> str:
+    """OR-mode Postgres tsquery: tokens joined with ``|``.
+
+    Equivalent of :func:`_fts5_safe_query` for the Postgres backend.
+    High recall — matches any chunk containing at least one query token.
+
+    Args:
+        raw_query: Raw user query string.
+
+    Returns:
+        A ``to_tsquery``-compatible expression such as ``'k8s' | 'deploy'``,
+        or an empty string if no usable tokens are found.
+    """
+    tokens = raw_query.strip().split()
+    if not tokens:
+        return ""
+    parts = []
+    for t in tokens:
+        escaped = _pg_escape_token(t)
+        if escaped and len(escaped) >= 1:
+            parts.append(f"'{escaped}'")
+    return " | ".join(parts) if parts else ""
+
+
+def _pg_tsquery_and(raw_query: str) -> str:
+    """AND-mode Postgres tsquery: non-stopword tokens joined with ``&``.
+
+    Equivalent of :func:`_fts5_and_query` for the Postgres backend.
+    High precision — matches only chunks that contain ALL significant tokens.
+
+    Args:
+        raw_query: Raw user query string.
+
+    Returns:
+        A ``to_tsquery``-compatible expression such as ``'kubernetes' & 'pod'``,
+        or an empty string when fewer than two content tokens remain after
+        stopword removal.
+    """
+    tokens = raw_query.strip().split()
+    if not tokens:
+        return ""
+    parts = []
+    for t in tokens:
+        escaped = _pg_escape_token(t).lower()
+        if escaped and len(escaped) >= 2 and escaped not in _STOPWORDS:
+            parts.append(f"'{escaped}'")
+    if len(parts) < 2:
+        return ""
+    return " & ".join(parts)
+
+
+def _pg_tsquery_phrase(raw_query: str) -> str:
+    """Phrase-mode Postgres tsquery: tokens joined with the ``<->`` operator.
+
+    Equivalent of :func:`_fts5_phrase_query` for the Postgres backend.
+    Highest precision — matches only chunks where tokens appear in sequence.
+
+    Args:
+        raw_query: Raw user query string.
+
+    Returns:
+        A ``to_tsquery``-compatible phrase expression such as
+        ``'kubernetes' <-> 'pod' <-> 'restart'``, or an empty string when
+        fewer than two content tokens remain after stopword removal.
+    """
+    tokens = raw_query.strip().split()
+    if not tokens:
+        return ""
+    parts = []
+    for t in tokens:
+        escaped = _pg_escape_token(t).lower()
+        if escaped and len(escaped) >= 2 and escaped not in _STOPWORDS:
+            parts.append(f"'{escaped}'")
+    if len(parts) < 2:
+        return ""
+    return " <-> ".join(parts)
+
+
 async def search_bm25(
     query: str,
     namespace: str = "",
@@ -164,21 +259,28 @@ async def search_bm25(
     limit: int = 30,
     actor_type: str = "",
 ) -> list[dict]:
-    """Run BM25 keyword search via FTS5 in dual AND+OR mode.
+    """Run BM25 keyword search via FTS5 (SQLite) or tsvector (Postgres) in dual AND+OR mode.
 
     Returns results from both AND (high precision) and OR (high recall)
     queries, merged via RRF to balance precision and recall.
+
+    For SQLite the pre-built FTS5 query strings are forwarded to
+    :func:`~archivist.storage.graph.search_fts`.  For Postgres the raw query
+    is forwarded and ``search_fts`` builds the appropriate ``tsquery``
+    expression internally using the Postgres query builders.
     """
     if not BM25_ENABLED or not health.is_healthy("fts5"):
         return []
 
     rankings: list[list[dict]] = []
 
-    or_q = _fts5_safe_query(query)
     or_hits: list[dict] = []
+    or_q = _fts5_safe_query(query)
     if or_q:
         or_hits = await search_fts(
             query=or_q,
+            raw_query=query,
+            fts_mode="or",
             namespace=namespace,
             agent_id=agent_id,
             memory_type=memory_type,
@@ -197,6 +299,8 @@ async def search_bm25(
             try:
                 and_hits = await search_fts(
                     query=and_q,
+                    raw_query=query,
+                    fts_mode="and",
                     namespace=namespace,
                     agent_id=agent_id,
                     memory_type=memory_type,
@@ -213,6 +317,8 @@ async def search_bm25(
             try:
                 phrase_hits = await search_fts(
                     query=phrase_q,
+                    raw_query=query,
+                    fts_mode="phrase",
                     namespace=namespace,
                     agent_id=agent_id,
                     memory_type=memory_type,
@@ -230,6 +336,7 @@ async def search_bm25(
                 try:
                     exact_hits = await search_fts_exact(
                         query=exact_q,
+                        raw_query=query,
                         namespace=namespace,
                         agent_id=agent_id,
                         memory_type=memory_type,
@@ -248,6 +355,7 @@ async def search_bm25(
                 try:
                     exact_hits = await search_fts_exact(
                         query=exact_q,
+                        raw_query=query,
                         namespace=namespace,
                         agent_id=agent_id,
                         memory_type=memory_type,

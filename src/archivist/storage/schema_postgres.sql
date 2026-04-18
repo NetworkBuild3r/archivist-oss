@@ -121,7 +121,8 @@ CREATE INDEX IF NOT EXISTS idx_memver_agent  ON memory_versions (agent_id);
 
 -- ---------------------------------------------------------------------------
 -- BM25 / full-text search tables
--- (FTS5 virtual tables replaced by tsvector + GIN; exact parity follow-up)
+-- (FTS5 virtual tables replaced by tsvector + GIN; exact parity delivered via
+-- fts_vector_simple using the 'simple' text-search config)
 -- ---------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS memory_chunks (
@@ -137,19 +138,43 @@ CREATE TABLE IF NOT EXISTS memory_chunks (
     is_excluded  INTEGER NOT NULL DEFAULT 0,
     actor_id     TEXT NOT NULL DEFAULT '',
     actor_type   TEXT NOT NULL DEFAULT '',
-    -- tsvector column for full-text search (Postgres equivalent of FTS5)
-    fts_vector   tsvector GENERATED ALWAYS AS (to_tsvector('english', text)) STORED,
+    -- tsvector for stemmed search (Porter/english -- equivalent of FTS5 'porter unicode61')
+    fts_vector        tsvector GENERATED ALWAYS AS (to_tsvector('english', text)) STORED,
+    -- tsvector for exact/unstemmed search (equivalent of FTS5 'unicode61' / memory_fts_exact)
+    fts_vector_simple tsvector GENERATED ALWAYS AS (to_tsvector('simple', text)) STORED,
     CONSTRAINT memory_chunks_qdrant_unique UNIQUE (qdrant_id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_mc_qdrant      ON memory_chunks (qdrant_id);
-CREATE INDEX IF NOT EXISTS idx_mc_namespace   ON memory_chunks (namespace);
-CREATE INDEX IF NOT EXISTS idx_mc_agent       ON memory_chunks (agent_id);
-CREATE INDEX IF NOT EXISTS idx_mc_excluded    ON memory_chunks (is_excluded);
-CREATE INDEX IF NOT EXISTS idx_mc_actor       ON memory_chunks (actor_id);
-CREATE INDEX IF NOT EXISTS idx_mc_actor_type  ON memory_chunks (actor_type);
--- GIN index accelerates tsvector full-text search (equivalent of FTS5 BM25 index)
-CREATE INDEX IF NOT EXISTS idx_mc_fts         ON memory_chunks USING GIN (fts_vector);
+CREATE INDEX IF NOT EXISTS idx_mc_qdrant        ON memory_chunks (qdrant_id);
+CREATE INDEX IF NOT EXISTS idx_mc_namespace     ON memory_chunks (namespace);
+CREATE INDEX IF NOT EXISTS idx_mc_agent         ON memory_chunks (agent_id);
+CREATE INDEX IF NOT EXISTS idx_mc_excluded      ON memory_chunks (is_excluded);
+CREATE INDEX IF NOT EXISTS idx_mc_actor         ON memory_chunks (actor_id);
+CREATE INDEX IF NOT EXISTS idx_mc_actor_type    ON memory_chunks (actor_type);
+-- GIN indexes accelerate tsvector full-text search (equivalent of FTS5 BM25 index)
+CREATE INDEX IF NOT EXISTS idx_mc_fts           ON memory_chunks USING GIN (fts_vector);
+CREATE INDEX IF NOT EXISTS idx_mc_fts_simple    ON memory_chunks USING GIN (fts_vector_simple);
+
+-- ---------------------------------------------------------------------------
+-- Migration: add fts_vector_simple to existing Postgres DBs created before
+-- this column was introduced (Phase 4 deployments).  Idempotent.
+-- ---------------------------------------------------------------------------
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_name = 'memory_chunks'
+           AND column_name = 'fts_vector_simple'
+    ) THEN
+        ALTER TABLE memory_chunks
+            ADD COLUMN fts_vector_simple
+                tsvector GENERATED ALWAYS AS (to_tsvector('simple', text)) STORED;
+    END IF;
+END
+$$;
+
+-- CREATE INDEX ... IF NOT EXISTS is idempotent, safe to run on existing DBs.
+CREATE INDEX IF NOT EXISTS idx_mc_fts_simple ON memory_chunks USING GIN (fts_vector_simple);
 
 
 CREATE TABLE IF NOT EXISTS memory_points (

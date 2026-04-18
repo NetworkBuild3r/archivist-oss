@@ -38,7 +38,7 @@ from archivist.core.config import (
 from archivist.core.rbac import load_config as load_rbac_config
 from archivist.lifecycle.curator import curator_loop
 from archivist.lifecycle.curator_queue import drain as drain_curator_queue
-from archivist.storage.graph import init_schema
+from archivist.storage.graph import init_schema_async
 from archivist.storage.qdrant import qdrant_client
 from archivist.write.indexer import delete_file_points, full_index, index_file
 from mcp_server import server
@@ -285,7 +285,7 @@ async def _startup():
     _pool_module.pool = backend  # type: ignore[assignment]
     logger.info("Graph backend initialized (%s)", backend.__class__.__name__)
 
-    init_schema()
+    await init_schema_async()
     logger.info("Graph schema initialized")
 
     load_rbac_config()
