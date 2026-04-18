@@ -329,9 +329,7 @@ class OutboxProcessor:
         from archivist.core.config import OUTBOX_ORPHAN_TIMEOUT_SECONDS
         from archivist.storage.sqlite_pool import pool
 
-        cutoff = (
-            datetime.now(UTC) - timedelta(seconds=OUTBOX_ORPHAN_TIMEOUT_SECONDS)
-        ).isoformat()
+        cutoff = (datetime.now(UTC) - timedelta(seconds=OUTBOX_ORPHAN_TIMEOUT_SECONDS)).isoformat()
 
         async with pool.write() as conn:
             cursor = await conn.execute(

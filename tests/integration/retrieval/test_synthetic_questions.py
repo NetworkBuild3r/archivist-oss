@@ -6,6 +6,7 @@ import pytest
 
 pytestmark = [pytest.mark.integration, pytest.mark.retrieval]
 
+
 class TestSyntheticQuestionParsing:
     def test_parse_json_array(self):
         from synthetic_questions import _parse_questions
@@ -47,6 +48,7 @@ class TestSyntheticQuestionParsing:
         raw = '["Q1?", "Q2?", broken'
         result = _parse_questions(raw, 5)
         assert isinstance(result, list)
+
 
 class TestSyntheticQuestionGeneration:
     async def test_disabled_returns_empty(self, monkeypatch):
@@ -103,6 +105,7 @@ class TestSyntheticQuestionGeneration:
 
         assert result == []
 
+
 class TestSyntheticQuestionPointGeneration:
     async def test_generates_qdrant_points(self, monkeypatch):
         import synthetic_questions
@@ -135,7 +138,6 @@ class TestSyntheticQuestionPointGeneration:
 
     async def test_returns_empty_when_disabled(self, monkeypatch):
         import synthetic_questions
-
 
         monkeypatch.setattr(synthetic_questions, "SYNTHETIC_QUESTIONS_ENABLED", False)
 

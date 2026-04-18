@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 
 pytestmark = [pytest.mark.integration, pytest.mark.storage]
 
+
 class TestManifest(unittest.TestCase):
     """Test manifest creation and validation."""
 
@@ -116,6 +117,7 @@ class TestManifest(unittest.TestCase):
         assert snapshots[0]["label"] == "second"
         assert snapshots[1]["label"] == "first"
 
+
 class TestSQLiteBackup(unittest.TestCase):
     """Test SQLite online backup round-trip."""
 
@@ -150,6 +152,7 @@ class TestSQLiteBackup(unittest.TestCase):
             import shutil
 
             shutil.rmtree(tmpdir, ignore_errors=True)
+
 
 class TestSnapshotDeleteAndPrune(unittest.TestCase):
     """Test snapshot deletion and retention pruning."""
@@ -216,6 +219,7 @@ class TestSnapshotDeleteAndPrune(unittest.TestCase):
         after = list_snapshots()
         assert len(after) == 2
 
+
 class TestRestoreValidation(unittest.TestCase):
     """Test restore validation (dimension mismatch, missing snapshot)."""
 
@@ -258,6 +262,7 @@ class TestRestoreValidation(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             restore_snapshot("dim_mismatch")
         assert "dimension mismatch" in str(ctx.exception).lower()
+
 
 class TestNDJSONExportImport(unittest.TestCase):
     """Test per-agent NDJSON export and import round-trip."""
@@ -379,6 +384,7 @@ class TestNDJSONExportImport(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             import_agent("/nonexistent/path.ndjson")
 
+
 class TestPrePruneHook(unittest.TestCase):
     """Test that the pre-prune hook debounces correctly."""
 
@@ -417,6 +423,7 @@ class TestPrePruneHook(unittest.TestCase):
                     cq._maybe_pre_prune_snapshot()
                     assert cq._last_pre_prune_snapshot == first_ts
 
+
 class TestBackupMemoryFiles(unittest.TestCase):
     """Test optional memory file tarball backup."""
 
@@ -450,8 +457,8 @@ class TestBackupMemoryFiles(unittest.TestCase):
         finally:
             import shutil
 
-
             shutil.rmtree(tmpdir, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main()

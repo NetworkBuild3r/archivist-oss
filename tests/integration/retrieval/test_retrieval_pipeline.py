@@ -17,13 +17,16 @@ pytestmark = [pytest.mark.integration, pytest.mark.retrieval]
 
 _BENCH_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "..", "benchmarks", "pipeline")
 
+
 def _add_bench_to_path():
     if _BENCH_DIR not in sys.path:
         sys.path.insert(0, _BENCH_DIR)
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase 2: Synthetic question pipeline
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class TestPhase2SyntheticQuestionPipeline:
     """Phase 2: verify synthetic question embeddings flow through the search path."""
@@ -191,9 +194,11 @@ class TestPhase2SyntheticQuestionPipeline:
         assert "total_synthetic_hits" in source
         assert "queries_with_synthetic_hits" in source
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase 3: Nominate-then-rerank pipeline
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class TestPhase3NominateThenRerank:
     """Phase 3: verify the clean nominate-then-rerank pipeline."""
@@ -369,9 +374,11 @@ class TestPhase3NominateThenRerank:
         assert "nomination_pool_size" in source
         assert "avg_nomination_pool_size" in source
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase 4: Parent text at index time
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class TestPhase4ParentTextAtIndexTime:
     """Phase 4: verify parent context is stored at index time, not fetched at runtime."""
@@ -468,9 +475,11 @@ class TestPhase4ParentTextAtIndexTime:
         assert "parent_text" in source
         assert "parent_context" not in source
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase 5: Semantic chunking
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class TestPhase5SemanticChunking:
     """Phase 5: Semantic / meaning-boundary chunking."""

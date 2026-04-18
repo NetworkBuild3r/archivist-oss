@@ -10,6 +10,7 @@ import pytest
 
 pytestmark = [pytest.mark.integration]
 
+
 def test_set_request_id_from_x_request_id():
     from observability import get_request_id, reset_request_id, set_request_id_from_scope
 
@@ -19,6 +20,7 @@ def test_set_request_id_from_x_request_id():
         assert get_request_id() == "trace-abc-99"
     finally:
         reset_request_id(tok)
+
 
 def test_set_request_id_generates_when_missing():
     from observability import get_request_id, reset_request_id, set_request_id_from_scope
@@ -31,6 +33,7 @@ def test_set_request_id_generates_when_missing():
         assert all(c in "0123456789abcdef" for c in rid)
     finally:
         reset_request_id(tok)
+
 
 def test_slow_embed_warning_when_over_threshold(monkeypatch, caplog):
     import observability as obs
@@ -47,6 +50,7 @@ def test_slow_embed_warning_when_over_threshold(monkeypatch, caplog):
     assert "embed" in caplog.text
     assert "req-xyz" in caplog.text
 
+
 def test_slow_embed_no_warning_when_disabled(monkeypatch, caplog):
     import observability as obs
 
@@ -54,6 +58,7 @@ def test_slow_embed_no_warning_when_disabled(monkeypatch, caplog):
     with caplog.at_level(logging.WARNING, logger="archivist.observability"):
         obs.slow_embed_check(9999.0)
     assert "slow_path" not in caplog.text
+
 
 async def test_dispatch_tool_records_tool_duration():
     import metrics as m
@@ -68,11 +73,11 @@ async def test_dispatch_tool_records_tool_duration():
     text = m.render()
     assert "archivist_mcp_tool_duration_ms" in text
 
+
 async def test_handle_invalidate_appends_export_jsonl(tmp_path, monkeypatch):
     import audit
     import main
     import memory_lifecycle
-
 
     export_path = tmp_path / "inv.jsonl"
     monkeypatch.setattr(main, "ARCHIVIST_INVALIDATION_EXPORT_PATH", str(export_path))

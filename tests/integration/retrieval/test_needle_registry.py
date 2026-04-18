@@ -16,6 +16,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.retrieval]
 
 # ── RRF Tests ────────────────────────────────────────────────────────────────
 
+
 class TestRRF:
     def test_single_ranking_passthrough(self):
         from rank_fusion import rrf_merge
@@ -105,7 +106,9 @@ class TestRRF:
         expected = round(2.0 / (20 + 1), 6)
         assert result[0]["rrf_score"] == expected
 
+
 # ── BM25 AND/OR/Phrase Tests ────────────────────────────────────────────────
+
 
 class TestBM25Modes:
     def test_fts5_and_query_removes_stopwords(self):
@@ -147,7 +150,9 @@ class TestBM25Modes:
         assert "OR" in q
         assert '"backup"' in q
 
+
 # ── Dynamic Threshold Tests ──────────────────────────────────────────────────
+
 
 class TestDynamicThreshold:
     def test_keeps_minimum_results(self):
@@ -198,7 +203,9 @@ class TestDynamicThreshold:
         assert len(filtered) == 1
         assert filtered[0]["text"] == "needle"
 
+
 # ── Embedding Cache Tests ────────────────────────────────────────────────────
+
 
 class TestEmbeddingCache:
     def test_cache_hit_returns_same_vector(self):
@@ -235,7 +242,9 @@ class TestEmbeddingCache:
         with _embed_cache_lock:
             assert len(_embed_cache) <= _EMBED_CACHE_MAX
 
+
 # ── Query Expansion Cache Tests ──────────────────────────────────────────────
+
 
 class TestQueryExpansionCache:
     def test_expansion_cache_roundtrip(self):
@@ -260,7 +269,9 @@ class TestQueryExpansionCache:
             _expansion_cache["ttl_exp_q"] = (ts - 1200, v)
         assert _cache_get("ttl_exp_q") is None
 
+
 # ── Benchmark Needle Questions Tests ─────────────────────────────────────────
+
 
 def _generate_questions_or_skip():
     """``benchmarks/`` is gitignored in minimal clones; skip when fixtures are absent."""
@@ -274,8 +285,8 @@ def _generate_questions_or_skip():
         )
         from generate_corpus import _generate_questions
 
-
     return _generate_questions
+
 
 class TestNeedleBenchmark:
     def test_needle_questions_count(self):

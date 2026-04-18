@@ -8,6 +8,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.mcp]
 
 pytestmark = pytest.mark.integration
 
+
 class TestToolRegistry:
     def test_all_tools_registered(self):
         from handlers._registry import ALL_TOOLS, TOOL_REGISTRY
@@ -77,6 +78,7 @@ class TestToolRegistry:
         missing = expected - names
         assert not missing, f"Missing expected tools: {missing}"
 
+
 class TestDispatch:
     async def test_unknown_tool_returns_error(self):
         from handlers._registry import dispatch_tool
@@ -113,7 +115,6 @@ class TestDispatch:
 
     async def test_namespaces_returns_result(self, rbac_config):
         from handlers._registry import dispatch_tool
-
 
         result = await dispatch_tool("archivist_namespaces", {"agent_id": "chief"})
         data = json.loads(result[0].text)

@@ -237,16 +237,12 @@ def collect_storage_gauges_tick() -> None:
 
         conn = get_db()
         try:
-            cur = conn.execute(
-                "SELECT status, COUNT(*) FROM outbox GROUP BY status"
-            )
+            cur = conn.execute("SELECT status, COUNT(*) FROM outbox GROUP BY status")
             status_counts: dict[str, int] = {r[0]: r[1] for r in cur.fetchall()}
             gauge_set(OUTBOX_PENDING, float(status_counts.get("pending", 0)))
             gauge_set(OUTBOX_DEAD, float(status_counts.get("dead", 0)))
 
-            cur2 = conn.execute(
-                "SELECT MIN(created_at) FROM outbox WHERE status = 'pending'"
-            )
+            cur2 = conn.execute("SELECT MIN(created_at) FROM outbox WHERE status = 'pending'")
             oldest_row = cur2.fetchone()
             if oldest_row and oldest_row[0]:
                 try:

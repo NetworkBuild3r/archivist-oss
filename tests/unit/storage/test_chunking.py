@@ -91,10 +91,7 @@ class TestReverseHydeCacheKey:
         text_b = shared_prefix + " beta"
 
         assert text_a[:200] == text_b[:200]
-        assert (
-            hashlib.md5(text_a.encode()).hexdigest()
-            != hashlib.md5(text_b.encode()).hexdigest()
-        )
+        assert hashlib.md5(text_a.encode()).hexdigest() != hashlib.md5(text_b.encode()).hexdigest()
 
 
 class TestHydeConfigFromConfigPy:

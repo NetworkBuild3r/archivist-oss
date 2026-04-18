@@ -7,6 +7,7 @@ import pytest
 
 pytestmark = [pytest.mark.integration]
 
+
 class TestLogTaskException:
     """Verify _log_task_exception callback in main.py."""
 
@@ -70,6 +71,7 @@ class TestLogTaskException:
         from main import _background_tasks
 
         assert isinstance(_background_tasks, list)
+
 
 class TestWebhookPendingFires:
     """Verify _pending_fires tracking and _log_fire_exception in webhooks.py."""
@@ -141,7 +143,6 @@ class TestWebhookPendingFires:
         """Task should be removed from _pending_fires once it completes."""
         import webhooks
         from webhooks import _pending_fires
-
 
         async def _fake_fire(event, payload):
             return True

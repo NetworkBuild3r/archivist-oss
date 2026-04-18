@@ -42,6 +42,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.storage]
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 async def _init_outbox_schema(conn: aiosqlite.Connection) -> None:
     """Create the outbox + memory_points tables used by tests."""
     await conn.executescript("""
@@ -76,6 +77,7 @@ async def _init_outbox_schema(conn: aiosqlite.Connection) -> None:
     """)
     await conn.commit()
 
+
 async def _count_outbox(conn: aiosqlite.Connection, status: str | None = None) -> int:
     if status:
         cur = await conn.execute("SELECT COUNT(*) FROM outbox WHERE status=?", (status,))
@@ -84,9 +86,11 @@ async def _count_outbox(conn: aiosqlite.Connection, status: str | None = None) -
     row = await cur.fetchone()
     return row[0]
 
+
 # ---------------------------------------------------------------------------
 # Unit tests (no async_pool required — use direct aiosqlite)
 # ---------------------------------------------------------------------------
+
 
 def test_event_type_serialization():
     """EventType values round-trip through JSON without loss."""
@@ -96,6 +100,7 @@ def test_event_type_serialization():
         serialised = json.dumps(et.value)
         recovered = EventType(json.loads(serialised))
         assert recovered == et
+
 
 def test_outbox_event_payload_json():
     """OutboxEvent.payload_json() produces compact JSON with no extra whitespace."""
@@ -112,6 +117,7 @@ def test_outbox_event_payload_json():
     # Compact: no trailing spaces in simple values
     assert " " not in raw.split(":")[0]
 
+
 def test_vector_backend_protocol_conforms():
     """QdrantVectorBackend satisfies the VectorBackend Protocol at runtime."""
     from archivist.storage.backends import QdrantVectorBackend, VectorBackend
@@ -119,6 +125,7 @@ def test_vector_backend_protocol_conforms():
     fake_client = MagicMock()
     backend = QdrantVectorBackend(fake_client)
     assert isinstance(backend, VectorBackend)
+
 
 def test_enqueue_noop_when_disabled():
     """When OUTBOX_ENABLED=False, enqueue_* calls do not accumulate events."""
@@ -130,6 +137,7 @@ def test_enqueue_noop_when_disabled():
     txn.enqueue_qdrant_delete_filter("col", {}, memory_id="x")
     txn.enqueue_qdrant_set_payload("col", {}, [], memory_id="x")
     assert txn._events == []
+
 
 def test_enqueue_accumulates_when_enabled():
     """When OUTBOX_ENABLED=True, enqueue_* calls add events to the queue."""
@@ -143,9 +151,11 @@ def test_enqueue_accumulates_when_enabled():
     assert txn._events[0].event_type == EventType.QDRANT_UPSERT
     assert txn._events[1].event_type == EventType.QDRANT_DELETE
 
+
 # ---------------------------------------------------------------------------
 # Integration tests (require async_pool fixture with outbox schema)
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 async def outbox_pool(async_pool, tmp_path):
@@ -153,6 +163,7 @@ async def outbox_pool(async_pool, tmp_path):
     conn = async_pool._conn
     await _init_outbox_schema(conn)
     return async_pool
+
 
 async def test_transaction_commit_writes_outbox(outbox_pool):
     """Clean MemoryTransaction exit → outbox rows committed with status='pending'."""
@@ -166,6 +177,7 @@ async def test_transaction_commit_writes_outbox(outbox_pool):
         count = await _count_outbox(conn, "pending")
     assert count == 2
 
+
 async def test_transaction_rollback_no_outbox(outbox_pool):
     """Exception inside MemoryTransaction body → zero outbox rows."""
     from archivist.storage.transaction import MemoryTransaction
@@ -178,6 +190,7 @@ async def test_transaction_rollback_no_outbox(outbox_pool):
     async with outbox_pool.read() as conn:
         count = await _count_outbox(conn)
     assert count == 0
+
 
 async def test_transaction_rollback_on_exception(outbox_pool):
     """Explicit exception in txn body rolls back both SQL and outbox inserts."""
@@ -198,6 +211,7 @@ async def test_transaction_rollback_on_exception(outbox_pool):
         ob_count = await _count_outbox(conn)
     assert mp_count == 0
     assert ob_count == 0
+
 
 async def test_outbox_processor_applies_pending(outbox_pool, monkeypatch):
     """OutboxProcessor.drain() calls the VectorBackend and marks events 'applied'."""
@@ -226,6 +240,7 @@ async def test_outbox_processor_applies_pending(outbox_pool, monkeypatch):
     async with outbox_pool.read() as conn:
         count = await _count_outbox(conn, "applied")
     assert count == 1
+
 
 async def test_outbox_retry_on_transient_failure(outbox_pool, monkeypatch):
     """VectorBackend raises once → event retried, second drain succeeds."""
@@ -272,6 +287,7 @@ async def test_outbox_retry_on_transient_failure(outbox_pool, monkeypatch):
     assert n2 == 1
     assert call_count == 2
 
+
 async def test_outbox_dead_letter_after_max_retries(outbox_pool, monkeypatch):
     """After OUTBOX_MAX_RETRIES failures, status='dead' and delete_failures row written."""
     import archivist.core.config as _cfg
@@ -308,9 +324,11 @@ async def test_outbox_dead_letter_after_max_retries(outbox_pool, monkeypatch):
     assert ob_row[0] == "dead"
     assert df_count == 1
 
+
 # ---------------------------------------------------------------------------
 # Chaos tests
 # ---------------------------------------------------------------------------
+
 
 async def test_crash_before_drain_then_resume(outbox_pool, monkeypatch):
     """Write txn succeeds, drain never runs → event survives; drain picks it up.
@@ -346,6 +364,7 @@ async def test_crash_before_drain_then_resume(outbox_pool, monkeypatch):
     async with outbox_pool.read() as conn:
         count = await _count_outbox(conn, "applied")
     assert count == 1
+
 
 async def test_mid_drain_crash_idempotent(outbox_pool, monkeypatch):
     """Event stuck in 'processing' after a crash → re-drain skips it (processing guard).
@@ -383,6 +402,7 @@ async def test_mid_drain_crash_idempotent(outbox_pool, monkeypatch):
     assert n == 0
     mock_backend.delete.assert_not_called()
 
+
 async def test_concurrent_drains_safe(outbox_pool, monkeypatch):
     """Two concurrent drain calls never double-apply the same event.
 
@@ -391,7 +411,6 @@ async def test_concurrent_drains_safe(outbox_pool, monkeypatch):
     import archivist.core.config as _cfg
     from archivist.storage.outbox import OutboxProcessor
     from archivist.storage.transaction import MemoryTransaction
-
 
     monkeypatch.setattr(_cfg, "OUTBOX_MAX_RETRIES", 5)
     monkeypatch.setattr(_cfg, "OUTBOX_BATCH_SIZE", 50)

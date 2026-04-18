@@ -13,6 +13,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.mcp]
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
+
 @pytest.fixture(autouse=True)
 def _isolate_sqlite(tmp_path, monkeypatch):
     """Point SQLite at a temp dir so tests don't mutate the real DB."""
@@ -25,6 +26,7 @@ def _isolate_sqlite(tmp_path, monkeypatch):
 
     monkeypatch.setattr(graph, "SQLITE_PATH", db_path)
     graph.init_schema()
+
 
 def _store_patches(mock_client):
     """Return a stack of context managers that mock all external dependencies."""
@@ -56,7 +58,9 @@ def _store_patches(mock_client):
         patch("audit.log_memory_event", new_callable=AsyncMock),
     ]
 
+
 # ── Integration: store with provenance → verify Qdrant payload ────────────────
+
 
 async def test_store_with_provenance_sets_payload(async_pool, monkeypatch):
     """archivist_store with provenance fields propagates to primary Qdrant point."""
@@ -106,6 +110,7 @@ async def test_store_with_provenance_sets_payload(async_pool, monkeypatch):
     assert p.payload["source_trace"]["upstream_source"] == "slack"
     assert p.payload["agent_id"] == "alice"
 
+
 async def test_store_provenance_defaults(async_pool, monkeypatch):
     """When no provenance fields provided, defaults are applied."""
     monkeypatch.setattr("config.REVERSE_HYDE_ENABLED", False)
@@ -148,7 +153,9 @@ async def test_store_provenance_defaults(async_pool, monkeypatch):
     assert p.payload["confidence"] == 0.8
     assert p.payload["source_trace"]["tool"] == "archivist_store"
 
+
 # ── Integration: SQLite provenance columns ────────────────────────────────────
+
 
 async def test_store_propagates_to_sqlite(async_pool, monkeypatch):
     """Verify provenance reaches SQLite tables (facts, memory_chunks)."""
@@ -204,7 +211,9 @@ async def test_store_propagates_to_sqlite(async_pool, monkeypatch):
     finally:
         conn.close()
 
+
 # ── Integration: ResultCandidate round-trip ───────────────────────────────────
+
 
 def test_result_candidate_qdrant_round_trip():
     """Provenance survives payload → ResultCandidate → dict → back."""
@@ -227,7 +236,9 @@ def test_result_candidate_qdrant_round_trip():
     assert rc2.confidence == 0.95
     assert rc2.source_trace["parent_memory_id"] == "pid-1"
 
+
 # ── Integration: reranker receives provenance ─────────────────────────────────
+
 
 def test_reranker_passage_includes_provenance_from_candidate():
     """The cross-encoder passage text includes provenance context."""
@@ -245,7 +256,9 @@ def test_reranker_passage_includes_provenance_from_candidate():
     assert "Server 10.0.0.1 is the gateway" in passage
     assert "Infrastructure notes" in passage
 
+
 # ── Integration: micro-chunk inherits provenance ─────────────────────────────
+
 
 async def test_micro_chunks_inherit_provenance(async_pool, monkeypatch):
     """Micro-chunk Qdrant points carry the same provenance as the parent."""
@@ -274,7 +287,6 @@ async def test_micro_chunks_inherit_provenance(async_pool, monkeypatch):
         patches[10],
     ):
         from handlers.tools_storage import _handle_store
-
 
         await _handle_store(
             {

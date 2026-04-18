@@ -177,7 +177,6 @@ class TestPhase1QueryExpansionKill:
     """Phase 1: verify query expansion is dead by default and variants are clean."""
 
     def _import_evaluate(self):
-
         if _BENCH_DIR not in sys.path:
             sys.path.insert(0, _BENCH_DIR)
         import evaluate
@@ -190,7 +189,6 @@ class TestPhase1QueryExpansionKill:
         assert QUERY_EXPANSION_ENABLED is False
 
     def test_all_variants_explicitly_disable_expansion(self):
-
         evaluate = self._import_evaluate()
         for name, overrides in evaluate.VARIANTS.items():
             if name == "expansion_on":

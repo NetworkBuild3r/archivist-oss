@@ -24,6 +24,7 @@ import pytest
 
 pytestmark = [pytest.mark.integration, pytest.mark.lifecycle]
 
+
 def _mock_txn_ctx():
     """Return a no-op MemoryTransaction async context manager mock."""
     txn = MagicMock()
@@ -38,6 +39,7 @@ def _mock_txn_ctx():
     cm = MagicMock()
     cm.return_value = txn
     return cm
+
 
 class TestDeleteResult:
     """DeleteResult dataclass behaves correctly."""
@@ -66,6 +68,7 @@ class TestDeleteResult:
         assert r.failed_steps == []
         assert r.memory_hotness == 0
 
+
 class TestArchiveResult:
     """ArchiveResult dataclass behaves correctly."""
 
@@ -87,6 +90,7 @@ class TestArchiveResult:
         assert r.total == 0
         assert r.failed_steps == []
 
+
 def _make_mock_client(scroll_side_effect=None, children=None):
     """Build a mock QdrantClient with configurable scroll behaviour."""
     client = MagicMock()
@@ -106,6 +110,7 @@ def _make_mock_client(scroll_side_effect=None, children=None):
     else:
         client.scroll.return_value = ([], None)
     return client
+
 
 class TestDeleteMemoryComplete:
     """delete_memory_complete cleans ALL artifact types."""
@@ -148,6 +153,7 @@ class TestDeleteMemoryComplete:
     def mock_audit(self):
         with patch("memory_lifecycle.log_memory_event", new_callable=AsyncMock) as m:
             yield m
+
     async def test_calls_all_cleanup_steps(
         self, mock_qdrant, mock_fts, mock_needle, mock_entity_facts, mock_audit
     ):
@@ -165,6 +171,7 @@ class TestDeleteMemoryComplete:
         mock_fts.assert_called_once()
         mock_needle.assert_called_once()
         mock_entity_facts.assert_called_once_with("mem-123")
+
     async def test_cleans_up_child_fts_and_needle(
         self, mock_fts, mock_needle, mock_entity_facts, mock_audit
     ):
@@ -196,6 +203,7 @@ class TestDeleteMemoryComplete:
 
         needle_ids = mock_needle.call_args[0][0]
         assert set(needle_ids) == {"mem-parent", "micro-1", "micro-2", "rhyde-1"}
+
     async def test_qdrant_failure_tracked_in_failed_steps(
         self, mock_fts, mock_needle, mock_entity_facts, mock_audit
     ):
@@ -220,6 +228,7 @@ class TestDeleteMemoryComplete:
         mock_fts.assert_called_once()
         mock_needle.assert_called_once()
         mock_entity_facts.assert_called_once_with("mem-fail")
+
     async def test_partial_deletion_error_on_many_failures(self, mock_audit):
         """PartialDeletionError raised when qdrant_primary or qdrant_children fail."""
         from cascade import PartialDeletionError
@@ -244,6 +253,7 @@ class TestDeleteMemoryComplete:
                 await delete_memory_complete("mem-x", "ns")
 
             assert "qdrant_primary" in exc_info.value.result.failed_steps
+
     async def test_uses_collection_router(
         self, mock_fts, mock_needle, mock_entity_facts, mock_audit
     ):
@@ -258,6 +268,7 @@ class TestDeleteMemoryComplete:
             await delete_memory_complete("m1", "custom-ns")
 
         cf.assert_called_once_with("custom-ns")
+
     async def test_collection_override(
         self, mock_qdrant, mock_fts, mock_needle, mock_entity_facts, mock_audit
     ):
@@ -267,6 +278,7 @@ class TestDeleteMemoryComplete:
         await delete_memory_complete("m1", "ns", collection="override_col")
 
         assert mock_qdrant.delete.call_args_list[0][1]["collection_name"] == "override_col"
+
     async def test_audit_logging_called(
         self, mock_qdrant, mock_fts, mock_needle, mock_entity_facts, mock_audit
     ):
@@ -283,8 +295,10 @@ class TestDeleteMemoryComplete:
         assert "memory_hotness" in kwargs["metadata"]
         assert kwargs["metadata"]["result_type"] == "delete"
 
+
 class TestPaginatedScroll:
     """_scroll_all paginates until next_page_offset is None."""
+
     async def test_discovers_all_children_across_pages(self):
         """Scroll with two pages discovers all children."""
         from qdrant_client.models import FieldCondition, Filter, MatchValue
@@ -318,6 +332,7 @@ class TestPaginatedScroll:
         assert ids == ["child-1", "child-2", "child-3"]
         assert failed == []
         assert client.scroll.call_count == 2
+
     async def test_records_failure_in_failed_steps(self):
         """Scroll failure is tracked in failed_steps."""
         from qdrant_client.models import FieldCondition, Filter, MatchValue
@@ -334,8 +349,10 @@ class TestPaginatedScroll:
         assert ids == []
         assert "scroll_test" in failed
 
+
 class TestArchiveMemoryComplete:
     """archive_memory_complete flags all related Qdrant points."""
+
     async def test_archives_primary_and_children(self):
         client = MagicMock()
         client.scroll.return_value = ([], None)  # no child points to enumerate
@@ -357,6 +374,7 @@ class TestArchiveMemoryComplete:
         for c in client.set_payload.call_args_list:
             assert c[1]["payload"] == {"archived": True}
             assert c[1]["collection_name"] == "test_col"
+
     async def test_archive_tracks_failures(self):
         """Failures in set_payload are tracked in ArchiveResult.failed_steps."""
         client = MagicMock()
@@ -374,6 +392,7 @@ class TestArchiveMemoryComplete:
         assert result.primary_archived is True
         assert result.reverse_hyde_archived is False
         assert "archive_reverse_hyde" in result.failed_steps
+
     async def test_archive_audit_logging(self):
         """Archive calls log_memory_event with action='archive' and result_type."""
         client = MagicMock()
@@ -391,6 +410,7 @@ class TestArchiveMemoryComplete:
         mock_audit.assert_called_once()
         assert mock_audit.call_args[1]["action"] == "archive"
         assert mock_audit.call_args[1]["metadata"]["result_type"] == "archive"
+
 
 class TestDeleteFtsChunksByQdrantId:
     """graph.delete_fts_chunks_by_qdrant_id works correctly."""
@@ -431,6 +451,7 @@ class TestDeleteFtsChunksByQdrantId:
         conn.close()
         assert kept == 1
 
+
 class TestBatchFtsDelete:
     """delete_fts_chunks_batch handles chunking correctly."""
 
@@ -466,6 +487,7 @@ class TestBatchFtsDelete:
         deleted = await delete_fts_chunks_batch(ids)
         assert deleted == 5
 
+
 class TestBatchNeedleDelete:
     """delete_needle_tokens_batch handles chunking correctly."""
 
@@ -473,6 +495,7 @@ class TestBatchNeedleDelete:
         from graph import delete_needle_tokens_batch
 
         assert await delete_needle_tokens_batch([]) == 0
+
 
 class TestDeleteEntityFactsForMemory:
     """_delete_entity_facts_for_memory soft-deactivates linked facts."""
@@ -511,6 +534,7 @@ class TestDeleteEntityFactsForMemory:
         ).fetchone()[0]
         conn.close()
         assert active == 1
+
 
 class TestOrphanSweeper:
     """sweep_orphans reconciles SQLite rows against Qdrant."""
@@ -572,14 +596,17 @@ class TestOrphanSweeper:
         conn.close()
         assert count == 1
 
+
 class TestCuratorQueueDrainAsync:
     """curator_queue.drain() is async and calls lifecycle functions."""
+
     async def test_drain_is_async_coroutine(self):
         import inspect
 
         from curator_queue import drain
 
         assert inspect.iscoroutinefunction(drain)
+
     async def test_delete_op_calls_lifecycle(self, async_pool):
         from curator_queue import drain, enqueue
 
@@ -590,6 +617,7 @@ class TestCuratorQueueDrainAsync:
         assert len(result) == 1
         assert result[0]["status"] == "applied"
         mock_del.assert_called_once()
+
     async def test_archive_op_calls_lifecycle(self, async_pool):
         from curator_queue import drain, enqueue
 
@@ -600,6 +628,7 @@ class TestCuratorQueueDrainAsync:
         assert len(result) == 1
         assert result[0]["status"] == "applied"
         mock_arc.assert_called_once()
+
     async def test_failed_op_marked_failed(self, async_pool):
         from curator_queue import drain, enqueue
 
@@ -611,8 +640,10 @@ class TestCuratorQueueDrainAsync:
 
         assert result[0]["status"] == "failed"
 
+
 class TestMergeUsesLifecycle:
     """merge.py uses delete_memory_complete for each original memory."""
+
     async def test_merge_calls_delete_per_id(self):
         mock_client = MagicMock()
         mock_points = []
@@ -647,6 +678,7 @@ class TestMergeUsesLifecycle:
             result = await merge_memories(["id1", "id2"], "semantic", "agent", "ns")
 
         assert mock_del.call_count == 2
+
 
 class TestQdrantRetry:
     """Transient-only retry behaviour in _qdrant_delete and _qdrant_set_payload."""
@@ -759,6 +791,7 @@ class TestQdrantRetry:
         assert ok is False
         assert "bad_step" in failed
         assert client.set_payload.call_count == 1
+
 
 class TestOrphanSweeperAdvanced:
     """Extended sweep_orphans tests for health guard, needle scan, retrieve failures."""
@@ -904,6 +937,7 @@ class TestOrphanSweeperAdvanced:
         conn.close()
         assert remaining == 0
 
+
 class TestDeleteHotness:
     """graph.delete_hotness removes memory_hotness rows."""
 
@@ -960,6 +994,7 @@ class TestDeleteHotness:
         conn.close()
 
         assert await delete_hotness("any-id") == 0
+
 
 class TestBatchSqliteRetry:
     """SQLite batch functions retry on OperationalError (database is locked)."""
@@ -1034,6 +1069,7 @@ class TestBatchSqliteRetry:
         assert deleted == 1
         assert call_count == 2
 
+
 class TestMetricsExist:
     """New lifecycle metrics are defined."""
 
@@ -1054,6 +1090,7 @@ class TestMetricsExist:
 
         assert hasattr(m, "ORPHAN_SWEEP")
         assert "orphan" in m.ORPHAN_SWEEP.lower()
+
 
 class TestEntityFactsMemoryId:
     """_delete_entity_facts_for_memory uses indexed memory_id column."""
@@ -1158,6 +1195,7 @@ class TestEntityFactsMemoryId:
 
         assert await _delete_entity_facts_for_memory("completely-unknown-id") == 0
 
+
 class TestAddFactMemoryId:
     """add_fact stores memory_id and it can be queried."""
 
@@ -1190,6 +1228,7 @@ class TestAddFactMemoryId:
         conn.close()
         assert row is not None
         assert row[0] == ""
+
 
 class TestScrollAllMaxPages:
     """_scroll_all safety guard limits pagination."""
@@ -1260,6 +1299,7 @@ class TestScrollAllMaxPages:
         assert ids == ["only-pt"]
         assert failed == []
 
+
 class TestPartialDeletionErrorThreshold:
     """PartialDeletionError is raised on qdrant_primary or qdrant_children failures."""
 
@@ -1293,14 +1333,17 @@ class TestPartialDeletionErrorThreshold:
         _critical = {"qdrant_primary", "qdrant_children"}
         assert not bool(_critical & set(result.failed_steps))
 
+
 # ==========================================================================
 # Migrated from tests/test_delete_cascade.py
 # ==========================================================================
+
 
 def _mock_point(pid: str):
     p = MagicMock()
     p.id = pid
     return p
+
 
 def _make_qdrant_client(scroll_return=None):
     client = MagicMock()
@@ -1310,9 +1353,11 @@ def _make_qdrant_client(scroll_return=None):
     client.scroll.return_value = scroll_return or ([], None)
     return client
 
+
 # ===========================================================================
 # Phase 1b — retrieval filter tests
 # ===========================================================================
+
 
 class TestSearchVectorsMustNotFilter:
     """search_vectors() includes must_not conditions for archived and deleted."""
@@ -1376,6 +1421,7 @@ class TestSearchVectorsMustNotFilter:
         assert must_not_by_key["archived"].match.value is True
         assert must_not_by_key["deleted"].match.value is True
 
+
 class TestLiteralSearchMustNotFilter:
     """_literal_search_sync() includes must_not for archived/deleted."""
 
@@ -1402,6 +1448,7 @@ class TestLiteralSearchMustNotFilter:
         keys = [c.key for c in must_not]
         assert "archived" in keys
         assert "deleted" in keys
+
 
 class TestNeedleRegistryArchivedFilter:
     """Needle registry payload validation in rlm_retriever drops archived/deleted entries.
@@ -1482,9 +1529,11 @@ class TestNeedleRegistryArchivedFilter:
         assert len(kept) == 1
         assert kept[0].id == "live-id"
 
+
 # ===========================================================================
 # Needle-in-a-haystack — token registration & lookup
 # ===========================================================================
+
 
 class TestNeedleTokenRegistration:
     """register_needle_tokens extracts high-specificity tokens; lookup finds them.
@@ -1646,9 +1695,11 @@ class TestNeedleTokenRegistration:
             "Both memories sharing the same token must appear in results"
         )
 
+
 # ===========================================================================
 # Needle-in-a-haystack — FTS lifecycle (store → archive → exclusion)
 # ===========================================================================
+
 
 class TestNeedleHaystackIsolation:
     """Needle is findable among generic chunks, then disappears when archived.
@@ -1871,6 +1922,7 @@ class TestNeedleHaystackIsolation:
             "Registry hit with deleted=True payload must be dropped before reaching the caller"
         )
 
+
 class TestFTSExcludedFilter:
     """search_fts and search_fts_exact skip rows with is_excluded=1."""
 
@@ -1924,6 +1976,7 @@ class TestFTSExcludedFilter:
         ids = [r["qdrant_id"] for r in results]
         assert "ex-active" in ids
         assert "ex-excluded" not in ids
+
 
 class TestSetFtsExcludedBatch:
     """set_fts_excluded_batch marks and restores memory_chunks rows."""
@@ -2001,6 +2054,7 @@ class TestSetFtsExcludedBatch:
         conn.close()
         assert n_excluded == 600
 
+
 class TestArchiveMemoryCompleteFTSExclusion:
     """archive_memory_complete marks related FTS rows as excluded."""
 
@@ -2037,9 +2091,11 @@ class TestArchiveMemoryCompleteFTSExclusion:
         assert row is not None
         assert row[0] == 1, "Primary chunk should be marked as excluded after archive"
 
+
 # ===========================================================================
 # Phase 1 — soft_delete_memory tests
 # ===========================================================================
+
 
 class TestSoftDeleteMemory:
     """soft_delete_memory() hot path behaves correctly."""
@@ -2168,9 +2224,11 @@ class TestSoftDeleteMemory:
             with pytest.raises((RuntimeError, Exception)):
                 await soft_delete_memory("mem-fail", "test-ns")
 
+
 # ===========================================================================
 # Phase 2 — memory_points table tests
 # ===========================================================================
+
 
 class TestRegisterMemoryPointsBatch:
     """register_memory_points_batch inserts correct rows."""
@@ -2226,6 +2284,7 @@ class TestRegisterMemoryPointsBatch:
         count = await graph.register_memory_points_batch(points)
         assert count == 600
 
+
 class TestLookupMemoryPoints:
     """lookup_memory_points returns correct rows or empty list."""
 
@@ -2251,6 +2310,7 @@ class TestLookupMemoryPoints:
         rows = await graph.lookup_memory_points("nonexistent-id")
         assert rows == []
 
+
 class TestDeleteMemoryPoints:
     """delete_memory_points removes rows for a memory_id."""
 
@@ -2274,6 +2334,7 @@ class TestDeleteMemoryPoints:
 
         count = await graph.delete_memory_points("does-not-exist")
         assert count == 0
+
 
 class TestDeleteMemoryCompleteUsesMemoryPoints:
     """delete_memory_complete uses memory_points table when rows exist."""
@@ -2348,6 +2409,7 @@ class TestDeleteMemoryCompleteUsesMemoryPoints:
         remaining = await graph.lookup_memory_points(memory_id)
         assert remaining == [], "memory_points rows must be deleted after hard-cascade"
 
+
 class TestLogDeleteFailure:
     """log_delete_failure writes to delete_failures table."""
 
@@ -2369,6 +2431,7 @@ class TestLogDeleteFailure:
         assert rows[0][0] == "mem-fail"
         assert json.loads(rows[0][1]) == ["qid-1", "qid-2"]
         assert "connection refused" in rows[0][2]
+
 
 class TestDeadLetterOnCascadeFailure:
     """Dead-letter table is populated when a Qdrant delete fails."""

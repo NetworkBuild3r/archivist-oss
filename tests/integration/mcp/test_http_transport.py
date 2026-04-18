@@ -14,6 +14,7 @@ from starlette.routing import Mount, Route
 
 pytestmark = [pytest.mark.integration, pytest.mark.mcp]
 
+
 def test_app_registers_streamable_http_route():
     import main
 
@@ -25,6 +26,7 @@ def test_app_registers_streamable_http_route():
     assert route is not None
     assert {"GET", "POST", "DELETE"} <= route.methods
     assert route.endpoint is main.streamable_http_app
+
 
 async def test_streamable_http_app_delegates_to_session_manager(monkeypatch):
     import main
@@ -51,6 +53,7 @@ async def test_streamable_http_app_delegates_to_session_manager(monkeypatch):
     assert called["scope"] is scope
     assert called["receive"] is _receive
     assert called["send"] is _send
+
 
 async def test_sse_app_connects_transport_and_runs_server(monkeypatch):
     import main
@@ -82,6 +85,7 @@ async def test_sse_app_connects_transport_and_runs_server(monkeypatch):
         ("connect", scope, _receive, _send),
         ("run", "read-stream", "write-stream", "init-options"),
     ]
+
 
 async def test_lifespan_initializes_and_clears_session_manager(monkeypatch):
     import main
@@ -115,7 +119,9 @@ async def test_lifespan_initializes_and_clears_session_manager(monkeypatch):
     assert events == ["manager_enter", "startup", "inside", "manager_exit"]
     assert main.streamable_http_session_manager is None
 
+
 # ── Phase 6.5 — OpenClaw Compatibility ───────────────────────────────────────
+
 
 def test_app_registers_sse_get_route():
     """Legacy SSE GET /mcp/sse must be registered (MCP_SSE_ENABLED defaults true)."""
@@ -129,6 +135,7 @@ def test_app_registers_sse_get_route():
     assert "GET" in route.methods
     assert route.endpoint is main.sse_app
 
+
 def test_app_registers_sse_messages_mount():
     """Legacy SSE POST /mcp/messages/ must be mounted for the SSE transport."""
     import main
@@ -139,6 +146,7 @@ def test_app_registers_sse_messages_mount():
     )
     assert mount is not None, "/mcp/messages/ mount not found — MCP_SSE_ENABLED may be false"
 
+
 def test_sse_transport_is_not_none_when_enabled():
     """When MCP_SSE_ENABLED is true, sse_transport must be a real SseServerTransport."""
     import main
@@ -146,6 +154,7 @@ def test_sse_transport_is_not_none_when_enabled():
     assert main.sse_transport is not None, (
         "sse_transport is None — expected a live SseServerTransport when MCP_SSE_ENABLED=true"
     )
+
 
 async def test_auth_middleware_accepts_actual_key(monkeypatch):
     """Standard Bearer token with the actual key must be accepted."""
@@ -181,6 +190,7 @@ async def test_auth_middleware_accepts_actual_key(monkeypatch):
     request = Request(scope, receive)
     response = await middleware.dispatch(request, call_next)
     assert accepted.get("called"), "call_next was not invoked — valid Bearer token was rejected"
+
 
 async def test_auth_middleware_accepts_openclaw_placeholder(monkeypatch):
     """OpenClaw compatibility: literal 'Bearer ${ARCHIVIST_API_KEY}' must be accepted with a warning."""
@@ -219,6 +229,7 @@ async def test_auth_middleware_accepts_openclaw_placeholder(monkeypatch):
         "call_next was not invoked — OpenClaw literal placeholder '${ARCHIVIST_API_KEY}' was rejected"
     )
 
+
 async def test_auth_middleware_rejects_unknown_token(monkeypatch):
     """An unrecognized Bearer token must still return 401."""
     import main
@@ -235,7 +246,6 @@ async def test_auth_middleware_rejects_unknown_token(monkeypatch):
         return JSONResponse({"ok": True})
 
     from starlette.requests import Request
-
 
     scope = {
         "type": "http",

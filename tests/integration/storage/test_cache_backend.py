@@ -18,6 +18,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.storage]
 
 # ── HNSW Config Tests ────────────────────────────────────────────────────────
 
+
 class TestHNSWConfig:
     def test_hnsw_defaults(self):
         from config import QDRANT_HNSW_EF_CONSTRUCT, QDRANT_HNSW_M, QDRANT_SEARCH_EF
@@ -32,7 +33,9 @@ class TestHNSWConfig:
         params = SearchParams(hnsw_ef=256)
         assert params.hnsw_ef == 256
 
+
 # ── Collection Router Tests ──────────────────────────────────────────────────
+
 
 class TestCollectionRouter:
     def test_single_collection_mode(self):
@@ -67,7 +70,9 @@ class TestCollectionRouter:
         assert "/" not in name or name == QDRANT_COLLECTION
         assert " " not in name or name == QDRANT_COLLECTION
 
+
 # ── Cache Backend Tests ──────────────────────────────────────────────────────
+
 
 class TestCacheBackendMemory:
     def test_put_and_get(self):
@@ -141,7 +146,9 @@ class TestCacheBackendMemory:
         backend = get_cache_backend()
         assert isinstance(backend, MemoryBackend)
 
+
 # ── Latency Budget Tests ────────────────────────────────────────────────────
+
 
 class TestLatencyBudget:
     def test_initial_state(self):
@@ -198,7 +205,9 @@ class TestLatencyBudget:
         time.sleep(0.02)
         assert b.is_expired()
 
+
 # ── Search Params in rlm_retriever Tests ─────────────────────────────────────
+
 
 class TestSearchParamsIntegration:
     def test_search_params_in_imports(self):
@@ -211,7 +220,9 @@ class TestSearchParamsIntegration:
         assert isinstance(QDRANT_SEARCH_EF, int)
         assert QDRANT_SEARCH_EF > 0
 
+
 # ── Enterprise Config Tests ──────────────────────────────────────────────────
+
 
 class TestEnterpriseConfig:
     def test_namespace_sharding_default_off(self):
@@ -239,7 +250,9 @@ class TestEnterpriseConfig:
 
         assert "localhost" in REDIS_URL or "redis" in REDIS_URL
 
+
 # ── Parallel Pipeline Tests (12c) ───────────────────────────────────────────
+
 
 class TestParallelPipeline:
     def test_asyncio_to_thread_available(self):
@@ -256,7 +269,9 @@ class TestParallelPipeline:
 
         assert inspect.iscoroutinefunction(search_bm25)
 
+
 # ── Collection Routing Integration Tests (12a wiring) ────────────────────────
+
 
 class TestCollectionRoutingIntegration:
     def test_search_vectors_uses_collection_router(self):
@@ -288,6 +303,5 @@ class TestCollectionRoutingIntegration:
     def test_drop_collection_noop_for_primary(self):
         """drop_collection should refuse to drop the primary collection."""
         from collection_router import drop_collection
-
 
         assert drop_collection("") is False

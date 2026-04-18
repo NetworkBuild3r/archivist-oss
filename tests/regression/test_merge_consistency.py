@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 pytestmark = [pytest.mark.regression, pytest.mark.lifecycle]
 
+
 def _make_mock_point(pid: str, namespace: str = "test-ns") -> MagicMock:
     pt = MagicMock()
     pt.id = pid
@@ -27,6 +28,7 @@ def _make_mock_point(pid: str, namespace: str = "test-ns") -> MagicMock:
         "consistency_level": "eventual",
     }
     return pt
+
 
 def _mock_txn_ctx():
     """Return a no-op MemoryTransaction async context manager mock."""
@@ -42,6 +44,7 @@ def _mock_txn_ctx():
     cm = MagicMock()
     cm.return_value = txn
     return cm
+
 
 class TestMergeCollectionRouting:
     """merge_memories routes to collection_for(ns), not QDRANT_COLLECTION."""
@@ -83,6 +86,7 @@ class TestMergeCollectionRouting:
             f"upsert used wrong collection: {upsert_calls[0]!r} — "
             "should be collection_for(ns), not the hardcoded constant"
         )
+
 
 class TestMergeSQLiteArtifacts:
     """After merge, FTS, needle, and memory_points rows exist for merged_id."""
@@ -187,6 +191,7 @@ class TestMergeSQLiteArtifacts:
             f"register_needle_tokens called with memory_id={called_mid!r}, expected {merged_id!r}"
         )
 
+
 class TestMergeVersionTracking:
     """record_version is awaited and the version is returned."""
 
@@ -223,6 +228,7 @@ class TestMergeVersionTracking:
             f"result version={result['version']!r} — expected 42 from record_version"
         )
 
+
 class TestMergePartialDeletionGuard:
     """Partial deletion errors in originals loop are caught, not propagated."""
 
@@ -255,7 +261,6 @@ class TestMergePartialDeletionGuard:
             patch("memory_lifecycle.delete_memory_complete", side_effect=partial_fail),
         ):
             from merge import merge_memories
-
 
             # Should NOT raise — partial failure is caught and logged
             result = await merge_memories(["del1", "del2"], "latest", "agent1", "test-ns")

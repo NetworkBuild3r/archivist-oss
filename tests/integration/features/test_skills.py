@@ -3,6 +3,7 @@ import pytest
 pytestmark = [pytest.mark.integration]
 """Phase 4 tests — skill registry, lessons, events, health scoring."""
 
+
 def test_register_and_find_skill():
     from skills import find_skill, list_skills, register_skill
 
@@ -34,6 +35,7 @@ def test_register_and_find_skill():
     all_skills = list_skills()
     assert len(all_skills) >= 1
 
+
 def test_lessons_crud():
     from skills import add_lesson, get_lessons, register_skill
 
@@ -61,6 +63,7 @@ def test_lessons_crud():
     lessons2 = get_lessons(sid, lesson_type="failure_mode")
     assert len(lessons2) == 1
 
+
 def test_skill_events_and_health():
     from skills import get_skill_health, log_skill_event, register_skill
 
@@ -79,6 +82,7 @@ def test_skill_events_and_health():
     assert health["success_rate"] == 0.7
     assert health["health"] == "warning"
     assert health["last_failure"] is not None
+
 
 def test_health_grades():
     from skills import get_skill_health, log_skill_event, register_skill, update_skill_status
@@ -101,9 +105,9 @@ def test_health_grades():
     h3 = get_skill_health(reg2["skill_id"])
     assert h3["health"] == "deprecated"
 
+
 def test_version_tracking():
     from skills import get_skill_health, record_version, register_skill
-
 
     reg = register_skill(name="api_tool", provider="acme", version="1.0.0", registered_by="a1")
     sid = reg["skill_id"]

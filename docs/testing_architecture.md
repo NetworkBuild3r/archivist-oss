@@ -381,7 +381,7 @@ addopts = [
 
 ### 5.4 `tests/qa/` — Migration Map
 
-| Current file | Destination | 
+| Current file | Destination |
 |---|---|
 | `conftest.py` | Merged into `tests/conftest.py` (schema DDL) + `tests/fixtures/schema.py` |
 | `test_chaos_fault_injection.py` | `chaos/test_fault_injection.py` |
@@ -473,7 +473,7 @@ from archivist.storage.sqlite_pool import SQLitePool
 @pytest.fixture
 async def integration_pool(tmp_path):
     """Full-schema async pool for integration tests.
-    
+
     Replaces the duplicate pool+schema setup in tests/qa/conftest.py.
     """
     db = str(tmp_path / "integration.db")
@@ -497,7 +497,7 @@ from archivist.storage.sqlite_pool import SQLitePool
 @pytest.fixture
 async def qa_pool(tmp_path):
     """Isolated pool + schema for system/MCP handler tests.
-    
+
     Direct replacement for tests/qa/conftest.py::qa_pool.
     """
     ...
@@ -624,7 +624,7 @@ strategy:
 
 ```yaml
 # Added to integration job
-- run: pytest tests/unit/ tests/integration/ --cov=src/archivist 
+- run: pytest tests/unit/ tests/integration/ --cov=src/archivist
          --cov-report=xml --cov-fail-under=70
 ```
 
@@ -739,4 +739,3 @@ At that point, migration proceeds in this order:
 6. Delete `tests/qa/` and all 40 flat `tests/test_*.py` files
 7. Run `ruff check . --fix && pytest --collect-only | head -100`
 8. Run full suite, confirm 835+ tests collected and passing
-

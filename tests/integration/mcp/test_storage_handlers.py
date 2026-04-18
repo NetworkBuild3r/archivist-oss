@@ -16,6 +16,7 @@ import pytest
 
 pytestmark = [pytest.mark.integration, pytest.mark.mcp, pytest.mark.storage]
 
+
 class TestMaxMicroChunksConfig:
     """MAX_MICRO_CHUNKS_PER_MEMORY config exists with correct default."""
 
@@ -35,6 +36,7 @@ class TestMaxMicroChunksConfig:
         assert config.MAX_MICRO_CHUNKS_PER_MEMORY == 10
         monkeypatch.setenv("MAX_MICRO_CHUNKS_PER_MEMORY", "5")
         importlib.reload(config)
+
 
 class TestMicroChunkCap:
     """Micro-chunks are truncated to MAX_MICRO_CHUNKS_PER_MEMORY."""
@@ -93,6 +95,7 @@ class TestMicroChunkCap:
                     if hasattr(p, "payload") and p.payload.get("parent_id"):
                         micro_points.append(p)
             assert len(micro_points) <= 3, f"Expected <= 3 micro-chunks, got {len(micro_points)}"
+
 
 class TestReverseHydeFireAndForget:
     """Reverse HyDE runs as background task, not blocking store response."""
@@ -218,6 +221,7 @@ class TestReverseHydeFireAndForget:
             f"Expected warning about HyDE failure, got: {logged_warnings}"
         )
 
+
 class TestIndexerParallelReverseHyde:
     """Indexer uses asyncio.gather with semaphore for reverse HyDE."""
 
@@ -255,7 +259,6 @@ class TestIndexerParallelReverseHyde:
         monkeypatch.setattr("config.MEMORY_ROOT", str(tmp_path / "memories"))
 
         import indexer
-
 
         monkeypatch.setattr(indexer, "MEMORY_ROOT", str(tmp_path / "memories"))
 

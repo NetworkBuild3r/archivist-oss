@@ -9,6 +9,7 @@ import pytest
 
 pytestmark = [pytest.mark.regression, pytest.mark.storage]
 
+
 class TestEntityAndFactWrite:
     """upsert_entity and add_fact correctly persist when properly awaited."""
 
@@ -54,6 +55,7 @@ class TestEntityAndFactWrite:
         conn.close()
         assert row is not None
 
+
 class TestMemoryPointsWrite:
     """register_memory_points_batch correctly persists when properly awaited."""
 
@@ -79,6 +81,7 @@ class TestMemoryPointsWrite:
         assert row is not None
         assert row[0] == "primary"
 
+
 class TestFtsWrite:
     """upsert_fts_chunk correctly persists when properly awaited."""
 
@@ -101,6 +104,7 @@ class TestFtsWrite:
         ).fetchone()
         conn.close()
         assert row is not None
+
 
 class TestNeedleTokensWrite:
     """register_needle_tokens correctly persists when properly awaited."""

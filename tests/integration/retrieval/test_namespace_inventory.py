@@ -4,6 +4,7 @@ import pytest
 
 pytestmark = [pytest.mark.integration, pytest.mark.retrieval, pytest.mark.rbac]
 
+
 class TestNamespaceInventory:
     async def test_inventory_counts_by_type_and_ttl_invalidate(self, async_pool, monkeypatch):
         import namespace_inventory as ni
@@ -47,6 +48,7 @@ class TestNamespaceInventory:
         ni.invalidate_all()
         inv = ni.get_inventory("")
         assert isinstance(inv.total_memories, int)
+
 
 class TestQueryClassifier:
     async def test_skip_small_namespace(self):
@@ -131,6 +133,7 @@ class TestQueryClassifier:
         mock_llm.return_value = "experience"
         assert await classify_query("q", inv) == ""
 
+
 class TestCompactionMultiAgent:
     async def test_structured_multi_agent_prompt(self, mock_llm):
         import json
@@ -153,7 +156,6 @@ class TestCompactionMultiAgent:
 
     async def test_flat_multi_agent_prompt(self, mock_llm):
         from compaction import compact_flat
-
 
         mock_llm.return_value = "summary"
         await compact_flat([("a", "text")], multi_agent=True)

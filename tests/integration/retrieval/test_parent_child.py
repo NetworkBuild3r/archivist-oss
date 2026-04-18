@@ -15,10 +15,12 @@ def test_chunk_text_basic():
     assert len(chunks) >= 1
     assert all(len(c) > 0 for c in chunks)
 
+
 def test_chunk_text_empty():
     """Empty text returns empty list."""
     assert chunk_text("") == []
     assert chunk_text("   ") == []
+
 
 def test_chunk_text_single_paragraph():
     """Text smaller than chunk size returns single chunk."""
@@ -26,6 +28,7 @@ def test_chunk_text_single_paragraph():
     chunks = chunk_text(text, size=1000, overlap=100)
     assert len(chunks) == 1
     assert chunks[0] == "Short text."
+
 
 def test_hierarchical_produces_parents_and_children():
     """Hierarchical chunking creates both parent and child chunks."""
@@ -49,6 +52,7 @@ def test_hierarchical_produces_parents_and_children():
     assert len(parents) >= 1, "Should have at least one parent chunk"
     assert len(children) >= 1, "Should have at least one child chunk"
 
+
 def test_hierarchical_parent_ids():
     """Every child references an existing parent."""
     paragraphs = [f"Content block {i} with enough text to split." for i in range(15)]
@@ -71,6 +75,7 @@ def test_hierarchical_parent_ids():
                 f"Child parent_id '{child['parent_id']}' not in parent set"
             )
 
+
 def test_hierarchical_parent_has_no_parent():
     """Parent chunks have parent_id=None."""
     text = "A decent chunk of text.\n\n" * 10
@@ -79,12 +84,14 @@ def test_hierarchical_parent_has_no_parent():
         if chunk["is_parent"]:
             assert chunk["parent_id"] is None
 
+
 def test_hierarchical_ids_are_unique():
     """All chunk IDs are unique."""
     text = "Test content.\n\n" * 20
     result = chunk_text_hierarchical(text, "unique.md", parent_size=200, child_size=80)
     ids = [c["id"] for c in result]
     assert len(ids) == len(set(ids)), "Duplicate IDs found"
+
 
 def test_hierarchical_small_text():
     """Small text produces at least one parent."""
@@ -93,6 +100,7 @@ def test_hierarchical_small_text():
     assert len(result) >= 1
     parents = [c for c in result if c["is_parent"]]
     assert len(parents) == 1
+
 
 def test_parent_ids_differ_by_filepath():
     """Same body text under different paths must not share parent IDs."""
@@ -103,7 +111,9 @@ def test_parent_ids_differ_by_filepath():
     ids_b = {c["id"] for c in b}
     assert ids_a.isdisjoint(ids_b), "Parent/child IDs should be unique per file path"
 
+
 # ── Semantic chunking tests ───────────────────────────────────────────────────
+
 
 def test_semantic_short_document_fast_path():
     """Documents shorter than size return a single chunk, unchanged."""
@@ -112,10 +122,12 @@ def test_semantic_short_document_fast_path():
     assert len(chunks) == 1
     assert chunks[0] == text.strip()
 
+
 def test_semantic_empty_returns_empty():
     """Empty and whitespace-only text returns an empty list."""
     assert chunk_text_semantic("") == []
     assert chunk_text_semantic("   \n\n  ") == []
+
 
 def test_semantic_heading_based_split():
     """Each top-level heading becomes its own chunk when document exceeds size."""
@@ -132,6 +144,7 @@ def test_semantic_heading_based_split():
     headings_found = sum(1 for c in chunks if c.startswith("## "))
     assert headings_found >= 3, "Each section chunk should start with its heading"
 
+
 def test_semantic_never_merges_across_headings():
     """Content from different sections must not appear in the same chunk."""
     intro_body = "Alpha content. " * 10
@@ -145,6 +158,7 @@ def test_semantic_never_merges_across_headings():
             "A single chunk must not contain content from both ## Alpha and ## Beta sections"
         )
 
+
 def test_semantic_code_block_not_split():
     """A fenced code block is never broken across chunks."""
     preamble = "Setup instructions follow.\n\n" * 5  # push over size limit
@@ -157,6 +171,7 @@ def test_semantic_code_block_not_split():
         # Opening and closing fences must both appear
         assert c.count("```") >= 2, f"Code block split across chunk boundary: {c}"
 
+
 def test_semantic_heading_prepended_to_sub_chunks():
     """When a section is split, the heading is prepended to each sub-chunk."""
     # Build a section that's definitely over 400 chars
@@ -168,6 +183,7 @@ def test_semantic_heading_prepended_to_sub_chunks():
         for c in chunks:
             assert "Big Section" in c, f"Sub-chunk missing heading context: {c[:80]!r}"
 
+
 def test_semantic_no_headings_falls_back_to_paragraph_split():
     """Documents without markdown headings fall back to paragraph splitting."""
     paragraphs = [f"Paragraph number {i}. " * 10 for i in range(8)]
@@ -176,6 +192,7 @@ def test_semantic_no_headings_falls_back_to_paragraph_split():
     chunks = chunk_text_semantic(text, size=300)
     assert len(chunks) >= 2, "Headingless long text should still be split"
     assert all(len(c) > 0 for c in chunks)
+
 
 def test_semantic_all_content_preserved():
     """No content is silently dropped — all unique words survive."""
@@ -191,6 +208,7 @@ def test_semantic_all_content_preserved():
     combined = " ".join(chunks)
     for word in sections.values():
         assert word in combined, f"Word '{word}' was dropped during semantic chunking"
+
 
 def test_semantic_hierarchical_uses_semantic_strategy():
     """chunk_text_hierarchical with strategy='semantic' calls chunk_text_semantic."""
@@ -215,6 +233,7 @@ def test_semantic_hierarchical_uses_semantic_strategy():
         f"{[p['content'][:60] for p in parents_semantic]}"
     )
 
+
 def test_semantic_short_document_same_as_fixed():
     """Short documents produce identical output regardless of strategy."""
     text = "## Note\n\nThis is a short note that fits in one chunk."
@@ -225,6 +244,7 @@ def test_semantic_short_document_same_as_fixed():
     assert sem_contents == fix_contents, (
         "Short documents must produce identical parent content regardless of strategy"
     )
+
 
 if __name__ == "__main__":
     test_chunk_text_basic()

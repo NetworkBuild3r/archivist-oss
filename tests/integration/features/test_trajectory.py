@@ -3,10 +3,12 @@ import pytest
 pytestmark = [pytest.mark.integration]
 """Tests for Phase 3 (v0.6.0) — trajectory, annotations, ratings, outcome-aware retrieval."""
 
+
 def test_outcome_adjustments_empty():
     from trajectory import get_outcome_adjustments
 
     assert get_outcome_adjustments([]) == {}
+
 
 async def test_add_annotation_and_retrieve(async_pool):
     from trajectory import _ensure_trajectory_schema, add_annotation, get_annotations
@@ -22,6 +24,7 @@ async def test_add_annotation_and_retrieve(async_pool):
     assert anns[0]["annotation_type"] == "stale"
     assert anns[0]["quality_score"] == 0.3
 
+
 async def test_add_rating_and_summary(async_pool):
     from trajectory import _ensure_trajectory_schema, add_rating, get_rating_summary
 
@@ -36,12 +39,14 @@ async def test_add_rating_and_summary(async_pool):
     assert summary["up"] == 2
     assert summary["down"] == 1
 
+
 def test_search_tips_empty():
     from trajectory import _ensure_trajectory_schema, search_tips
 
     _ensure_trajectory_schema()
     tips = search_tips("agent-x", category="strategy")
     assert tips == []
+
 
 def test_retrieval_trace_v06_fields():
     from rlm_retriever import _retrieval_trace
@@ -64,9 +69,9 @@ def test_retrieval_trace_v06_fields():
     assert trace["outcome_adjustments"] == 5
     assert "graph_retrieval_enabled" in trace
 
+
 async def test_rating_clamp(async_pool):
     from trajectory import _ensure_trajectory_schema, add_rating, get_rating_summary
-
 
     _ensure_trajectory_schema()
     await add_rating("mem-2", "agent-a", 5)  # clamps to 1

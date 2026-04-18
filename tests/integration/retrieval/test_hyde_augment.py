@@ -14,6 +14,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.retrieval]
 
 # ── HyDE Tests ───────────────────────────────────────────────────────────────
 
+
 class TestHyDE:
     def test_needle_detection_exact_keyword(self):
         from hyde import is_needle_query
@@ -55,7 +56,9 @@ class TestHyDE:
             _hyde_cache["hyde_ttl_test"] = (ts - 1200, doc)
         assert _cache_get("hyde_ttl_test") is None
 
+
 # ── LTR Feature Extraction Tests ────────────────────────────────────────────
+
 
 class TestLTRFeatures:
     def test_extract_features_basic(self):
@@ -108,7 +111,9 @@ class TestLTRFeatures:
 
         assert len(FEATURE_NAMES) == 12
 
+
 # ── Contextual Augmentation Tests ────────────────────────────────────────────
+
 
 class TestContextualAugment:
     def test_augment_adds_metadata_header(self):
@@ -160,7 +165,9 @@ class TestContextualAugment:
         result = augment_chunk("test", thought_type="decision")
         assert "Type: decision" in result
 
+
 # ── Iterative Retrieval Tests ────────────────────────────────────────────────
+
 
 class TestIterativeRetrieval:
     def test_recursive_retrieve_accepts_is_retry(self):
@@ -180,7 +187,9 @@ class TestIterativeRetrieval:
         sig = inspect.signature(recursive_retrieve)
         assert sig.parameters["_is_retry"].default is False
 
+
 # ── Ranker Training Data Builder Tests ───────────────────────────────────────
+
 
 class TestRankerTrainData:
     def test_feature_names_match(self):
@@ -197,7 +206,6 @@ class TestRankerTrainData:
         conn = sqlite3.connect(db_path)
         conn.close()
         from ranker_train import _load_training_data
-
 
         features, labels, groups = _load_training_data(db_path)
         assert features == []

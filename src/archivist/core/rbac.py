@@ -139,10 +139,7 @@ def _similar_namespaces(candidate: str, known: list[str], top_n: int = 3) -> lis
     prefix-mismatches (e.g. "athena-identity" → "athena-identities", "agent-nova"
     → "agents-nova") without returning completely unrelated names.
     """
-    scored = [
-        (SequenceMatcher(None, candidate.lower(), ns.lower()).ratio(), ns)
-        for ns in known
-    ]
+    scored = [(SequenceMatcher(None, candidate.lower(), ns.lower()).ratio(), ns) for ns in known]
     scored.sort(reverse=True)
     return [ns for ratio, ns in scored if ratio >= 0.4][:top_n]
 

@@ -704,7 +704,12 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
                                    (memory_id, qdrant_id, point_type, created_at)
                                VALUES (?, ?, ?, ?)""",
                             [
-                                (r["memory_id"], r["qdrant_id"], r["point_type"], datetime.now(UTC).isoformat())
+                                (
+                                    r["memory_id"],
+                                    r["qdrant_id"],
+                                    r["point_type"],
+                                    datetime.now(UTC).isoformat(),
+                                )
                                 for r in _rh_mp_records
                             ],
                         )
@@ -781,7 +786,12 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
                                    (memory_id, qdrant_id, point_type, created_at)
                                VALUES (?, ?, ?, ?)""",
                             [
-                                (r["memory_id"], r["qdrant_id"], r["point_type"], datetime.now(UTC).isoformat())
+                                (
+                                    r["memory_id"],
+                                    r["qdrant_id"],
+                                    r["point_type"],
+                                    datetime.now(UTC).isoformat(),
+                                )
                                 for r in _sq_mp_records
                             ],
                         )

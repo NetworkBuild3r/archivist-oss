@@ -63,4 +63,3 @@ async def perf_pool(tmp_path, monkeypatch):
 def mock_vector_backend():
     """VectorBackend-compatible mock with no real Qdrant calls."""
     return make_vector_backend_mock()
-

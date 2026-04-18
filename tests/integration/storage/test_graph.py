@@ -3,6 +3,7 @@ import pytest
 pytestmark = [pytest.mark.integration, pytest.mark.storage]
 """Tests for graph.py — entity, fact, relationship CRUD and FTS5 with real SQLite."""
 
+
 class TestEntityOperations:
     async def test_upsert_entity_creates(self, async_pool):
         from graph import search_entities, upsert_entity
@@ -33,6 +34,7 @@ class TestEntityOperations:
         eid2 = await upsert_entity("Grafana")
         assert eid1 == eid2
 
+
 class TestFactOperations:
     async def test_add_and_retrieve_fact(self, async_pool):
         from graph import add_fact, get_entity_facts, upsert_entity
@@ -54,6 +56,7 @@ class TestFactOperations:
 
         facts = await get_entity_facts(eid)
         assert len(facts) == 2
+
 
 class TestRelationshipOperations:
     async def test_add_relationship(self, async_pool):
@@ -84,6 +87,7 @@ class TestRelationshipOperations:
         assert row["confidence"] == 1.0  # capped at 1.0 by min(confidence+0.1, 1.0)
         assert row["evidence"] == "evidence2"  # updated to latest
 
+
 class TestSearchEntities:
     async def test_search_by_partial_name(self, async_pool):
         from graph import search_entities, upsert_entity
@@ -106,6 +110,7 @@ class TestSearchEntities:
         results = await search_entities("")
         assert isinstance(results, list)
 
+
 class TestCuratorState:
     async def test_set_and_get(self, async_pool):
         from graph import get_curator_state, set_curator_state
@@ -124,6 +129,7 @@ class TestCuratorState:
         from graph import get_curator_state
 
         assert await get_curator_state("nonexistent") is None
+
 
 class TestFTS5:
     async def test_upsert_and_search(self, async_pool):
@@ -155,7 +161,6 @@ class TestFTS5:
 
     async def test_delete_by_file(self, async_pool):
         from graph import delete_fts_chunks_by_file, search_fts, upsert_fts_chunk
-
 
         await upsert_fts_chunk("id1", "some text content", "file_a.md", 0)
         await upsert_fts_chunk("id2", "other text content", "file_a.md", 1)

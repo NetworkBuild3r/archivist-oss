@@ -15,6 +15,7 @@ pytestmark = [pytest.mark.integration]
 
 # ── Curator Queue ────────────────────────────────────────────────────────────
 
+
 class TestCuratorQueue:
     def test_enqueue_returns_uuid(self):
         from curator_queue import enqueue
@@ -53,7 +54,9 @@ class TestCuratorQueue:
         applied = await drain(limit=10)
         assert applied == []
 
+
 # ── Conflict Detection (LLM dedup dataclasses) ──────────────────────────────
+
 
 class TestDedupResult:
     def test_dedup_result_dataclass(self):
@@ -68,7 +71,9 @@ class TestDedupResult:
         assert r.action == "skip"
         assert r.max_similarity == 0.92
 
+
 # ── Hotness Scoring ──────────────────────────────────────────────────────────
+
 
 class TestHotnessScoring:
     def test_compute_hotness_fresh(self):
@@ -97,7 +102,9 @@ class TestHotnessScoring:
         assert _sigmoid(100) > 0.99
         assert _sigmoid(-100) < 0.01
 
+
 # ── Skill Relations ──────────────────────────────────────────────────────────
+
 
 class TestSkillRelations:
     def test_add_and_get_relation(self):
@@ -144,7 +151,9 @@ class TestSkillRelations:
         assert len(subs) >= 1
         assert subs[0]["name"] == "podman"
 
+
 # ── Trajectory (tip consolidation schema) ────────────────────────────────────
+
 
 class TestTipConsolidationSchema:
     def test_tips_table_has_negative_example_column(self):
@@ -189,7 +198,9 @@ class TestTipConsolidationSchema:
         assert len(tips) == 1
         assert tips[0]["tip_text"] == "active tip"
 
+
 # ── Metrics ──────────────────────────────────────────────────────────────────
+
 
 class TestCuratorMetrics:
     def test_curator_metric_names_exist(self):
@@ -215,7 +226,9 @@ class TestCuratorMetrics:
         assert "archivist_curator_queue_depth" in rendered
         assert "archivist_curator_drain_duration_ms" in rendered
 
+
 # ── Config ───────────────────────────────────────────────────────────────────
+
 
 class TestCuratorConfig:
     def test_config_defaults(self):

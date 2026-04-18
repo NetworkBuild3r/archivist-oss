@@ -476,7 +476,12 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
                                        (memory_id, qdrant_id, point_type, created_at)
                                    VALUES (?, ?, ?, ?)""",
                                 [
-                                    (r["memory_id"], r["qdrant_id"], r["point_type"], datetime.now(UTC).isoformat())
+                                    (
+                                        r["memory_id"],
+                                        r["qdrant_id"],
+                                        r["point_type"],
+                                        datetime.now(UTC).isoformat(),
+                                    )
                                     for r in _rh_mp_records
                                 ],
                             )
@@ -549,7 +554,12 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
                                        (memory_id, qdrant_id, point_type, created_at)
                                    VALUES (?, ?, ?, ?)""",
                                 [
-                                    (r["memory_id"], r["qdrant_id"], r["point_type"], datetime.now(UTC).isoformat())
+                                    (
+                                        r["memory_id"],
+                                        r["qdrant_id"],
+                                        r["point_type"],
+                                        datetime.now(UTC).isoformat(),
+                                    )
                                     for r in _sq_mp_records
                                 ],
                             )
@@ -596,9 +606,7 @@ async def delete_file_points(filepath: str):
             try:
                 from archivist.storage.transaction import MemoryTransaction
 
-                _filt = Filter(
-                    must=[FieldCondition(key="file_path", match=MatchValue(value=rel))]
-                )
+                _filt = Filter(must=[FieldCondition(key="file_path", match=MatchValue(value=rel))])
                 async with MemoryTransaction() as txn:
                     txn.enqueue_qdrant_delete_filter(
                         _coll,

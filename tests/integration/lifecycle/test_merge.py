@@ -17,6 +17,7 @@ def test_dedupe_drops_duplicate_file_chunk():
     out = dedupe_vector_hits(hits)
     assert len(out) == 2
 
+
 def test_dedupe_keeps_same_file_different_chunk():
     hits = [
         {"file_path": "a.md", "chunk_index": 0, "text": "one", "score": 0.9},
