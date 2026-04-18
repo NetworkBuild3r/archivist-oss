@@ -1,6 +1,7 @@
 """Tests for Phase 2 (v0.5.0) — tiering, graph retrieval, compressed index, contradictions."""
 
 from datetime import UTC, datetime
+from unittest.mock import AsyncMock
 
 # ── tiering ──────────────────────────────────────────────────────────────────
 
@@ -71,11 +72,10 @@ def test_temporal_decay_skips_without_content_date():
 # ── contradiction detection ──────────────────────────────────────────────────
 
 
-def test_detect_contradictions_opposing_keywords():
+async def test_detect_contradictions_opposing_keywords():
     import graph_retrieval
 
-    original_fn = graph_retrieval.get_entity_facts
-    graph_retrieval.get_entity_facts = lambda eid: [
+    mock_facts = [
         {
             "fact_text": "Service is enabled and running",
             "agent_id": "agent-a",
@@ -83,24 +83,27 @@ def test_detect_contradictions_opposing_keywords():
         },
         {"fact_text": "Service is disabled", "agent_id": "agent-b", "created_at": "2026-01-02"},
     ]
+    original_fn = graph_retrieval.get_entity_facts
+    graph_retrieval.get_entity_facts = AsyncMock(return_value=mock_facts)
     try:
-        contras = graph_retrieval.detect_contradictions(1)
+        contras = await graph_retrieval.detect_contradictions(1)
         assert len(contras) >= 1
         assert "enabled" in contras[0]["trigger"] or "disabled" in contras[0]["trigger"]
     finally:
         graph_retrieval.get_entity_facts = original_fn
 
 
-def test_detect_contradictions_same_agent_skipped():
+async def test_detect_contradictions_same_agent_skipped():
     import graph_retrieval
 
-    original_fn = graph_retrieval.get_entity_facts
-    graph_retrieval.get_entity_facts = lambda eid: [
+    mock_facts = [
         {"fact_text": "Service enabled", "agent_id": "agent-a", "created_at": "2026-01-01"},
         {"fact_text": "Service disabled", "agent_id": "agent-a", "created_at": "2026-01-02"},
     ]
+    original_fn = graph_retrieval.get_entity_facts
+    graph_retrieval.get_entity_facts = AsyncMock(return_value=mock_facts)
     try:
-        contras = graph_retrieval.detect_contradictions(1)
+        contras = await graph_retrieval.detect_contradictions(1)
         assert len(contras) == 0
     finally:
         graph_retrieval.get_entity_facts = original_fn

@@ -92,7 +92,13 @@ async def _handle_get_reference_docs(arguments: dict) -> list[TextContent]:
         return [
             TextContent(
                 type="text",
-                text=json.dumps({"error": "reference_docs_not_found", "path": str(doc)}),
+                text=json.dumps(
+                    {
+                        "error": "reference_docs_not_found",
+                        "tried": [str(_SKILL_DOC), str(_FALLBACK_DOC)],
+                        "hint": "Neither docs/CURSOR_SKILL.md nor docs/REFERENCE.md was found in the deployment.",
+                    }
+                ),
             )
         ]
 

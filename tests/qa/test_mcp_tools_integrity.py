@@ -445,3 +445,104 @@ async def test_cache_wake_up_is_retrievable_by_handle_wake_up(qa_pool):
     # A second read must return the same payload (idempotent cache).
     second_read = await get_cached_wake_up(namespace, agent_id=agent_id)
     assert second_read == first_read
+
+
+# ---------------------------------------------------------------------------
+# Regression guard: unawaited-async fixes (Nova QA 2026-04-18)
+# ---------------------------------------------------------------------------
+
+
+async def test_recall_does_not_return_coroutine_string(qa_pool):
+    """_handle_recall must not return 'coroutine' in text (was unawaited before fix).
+
+    Regression guard for Nova's finding: archivist_recall returned
+    'coroutine object is not subscriptable' when search_entities,
+    get_entity_facts, get_entity_relationships were called without await.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    from archivist.app.handlers.tools_search import _handle_recall
+
+    mock_entities = [{"id": 1, "name": "Regression", "entity_type": "concept"}]
+    mock_facts = [
+        {
+            "fact_text": "Regression test.",
+            "agent_id": "agent-1",
+            "source_file": "",
+            "created_at": "2026-01-01",
+            "retention_class": "standard",
+            "valid_from": "",
+            "valid_until": "",
+            "confidence": 1.0,
+        }
+    ]
+
+    with (
+        patch(
+            "archivist.app.handlers.tools_search.search_entities",
+            new_callable=AsyncMock,
+            return_value=mock_entities,
+        ),
+        patch(
+            "archivist.app.handlers.tools_search.get_entity_facts",
+            new_callable=AsyncMock,
+            return_value=mock_facts,
+        ),
+        patch(
+            "archivist.app.handlers.tools_search.get_entity_relationships",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
+        patch("archivist.app.handlers.tools_search._rbac_gate", return_value=None),
+        patch("archivist.app.handlers.tools_search.require_caller", return_value=None),
+        patch("archivist.app.handlers.tools_search.resolve_caller", return_value="agent-1"),
+    ):
+        result = await _handle_recall({"entity": "Regression", "agent_id": "agent-1"})
+
+    assert result, "Handler returned empty list"
+    assert result[0].type == "text"
+    assert "coroutine" not in result[0].text, (
+        "Unawaited coroutine detected in recall response — regression reintroduced.\n"
+        + result[0].text[:300]
+    )
+    assert "Traceback" not in result[0].text
+
+
+async def test_rate_does_not_return_coroutine_string(qa_pool):
+    """_handle_rate must not return 'coroutine' in text (was unawaited before fix).
+
+    Regression guard for Nova's finding: archivist_rate returned
+    'Object of type coroutine is not JSON serializable' because
+    add_rating was called without await.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    from archivist.app.handlers.tools_trajectory import _handle_rate
+
+    with (
+        patch(
+            "archivist.app.handlers.tools_trajectory.add_rating",
+            new_callable=AsyncMock,
+            return_value="rat-regression-01",
+        ),
+        patch("archivist.core.audit.log_memory_event", new_callable=AsyncMock),
+        patch(
+            "archivist.app.handlers.tools_trajectory.get_rating_summary",
+            return_value={"average_rating": 1.0, "count": 1},
+        ),
+    ):
+        result = await _handle_rate(
+            {
+                "memory_id": "00000000-0000-0000-0000-000000000099",
+                "agent_id": "agent-regression",
+                "rating": 1,
+                "context": "Helpful.",
+            }
+        )
+
+    assert result, "Handler returned empty list"
+    assert "coroutine" not in result[0].text, (
+        "Unawaited coroutine detected in rate response — regression reintroduced.\n"
+        + result[0].text[:300]
+    )
+    assert "Traceback" not in result[0].text

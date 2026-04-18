@@ -465,13 +465,13 @@ async def _handle_recall(arguments: dict) -> list[TextContent]:
         if denied:
             return [TextContent(type="text", text=denied)]
 
-    entities = search_entities(entity_name, namespace=namespace)
+    entities = await search_entities(entity_name, namespace=namespace)
     if not entities:
         return error_response({"error": "entity_not_found", "entity": entity_name})
 
     eid = entities[0]["id"]
-    facts = get_entity_facts(eid, as_of=as_of)
-    rels = get_entity_relationships(eid)
+    facts = await get_entity_facts(eid, as_of=as_of)
+    rels = await get_entity_relationships(eid)
 
     facts, rels = _filter_facts_rels_for_caller(caller, facts, rels)
 
@@ -482,10 +482,10 @@ async def _handle_recall(arguments: dict) -> list[TextContent]:
     }
 
     if related_name:
-        rel_entities = search_entities(related_name, namespace=namespace)
+        rel_entities = await search_entities(related_name, namespace=namespace)
         if rel_entities:
             rel_eid = rel_entities[0]["id"]
-            rel_facts = get_entity_facts(rel_eid, as_of=as_of)
+            rel_facts = await get_entity_facts(rel_eid, as_of=as_of)
             rel_facts, _ = _filter_facts_rels_for_caller(caller, rel_facts, [])
             result["related_entity"] = rel_entities[0]
             result["related_facts"] = rel_facts[:10]
@@ -691,7 +691,7 @@ async def _handle_contradictions(arguments: dict) -> list[TextContent]:
     entity_name = arguments["entity"]
     namespace = arguments.get("namespace", "")
 
-    entities = search_entities(entity_name, limit=1, namespace=namespace)
+    entities = await search_entities(entity_name, limit=1, namespace=namespace)
     if not entities:
         return success_response(
             {
@@ -702,7 +702,7 @@ async def _handle_contradictions(arguments: dict) -> list[TextContent]:
         )
 
     eid = entities[0]["id"]
-    contradictions = detect_contradictions(eid)
+    contradictions = await detect_contradictions(eid)
 
     return success_response(
         {
@@ -723,7 +723,7 @@ async def _handle_entity_brief(arguments: dict) -> list[TextContent]:
 
     caller = resolve_caller(arguments)
 
-    entities = search_entities(entity_name, limit=1, namespace=namespace)
+    entities = await search_entities(entity_name, limit=1, namespace=namespace)
     if not entities:
         return error_response(
             {
@@ -735,9 +735,9 @@ async def _handle_entity_brief(arguments: dict) -> list[TextContent]:
     eid = entities[0]["id"]
 
     if alias:
-        add_entity_alias(eid, alias)
+        await add_entity_alias(eid, alias)
 
-    brief = get_entity_brief(eid, as_of=as_of)
+    brief = await get_entity_brief(eid, as_of=as_of)
     if not brief:
         return error_response({"error": "Failed to build entity brief"})
 

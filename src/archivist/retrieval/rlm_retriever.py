@@ -1064,7 +1064,7 @@ async def recursive_retrieve(
 
         # Graph entity facts: inject as additional candidates (not score modifiers)
         if GRAPH_RETRIEVAL_ENABLED and detected_entities:
-            entity_facts = build_entity_fact_results(detected_entities, min_score=0.0)
+            entity_facts = await build_entity_fact_results(detected_entities, min_score=0.0)
             for ef in entity_facts:
                 efid = str(ef.get("id", ""))
                 if efid and efid not in candidate_pool:
@@ -1246,7 +1246,7 @@ async def recursive_retrieve(
         # Stage 2a: Entity fact injection (v1.7) — guaranteed recall for known entities
         n_entity_facts_injected = 0
         if GRAPH_RETRIEVAL_ENABLED and detected_entities:
-            entity_facts = build_entity_fact_results(
+            entity_facts = await build_entity_fact_results(
                 detected_entities,
                 min_score=effective_threshold + 0.05,
                 as_of=date_from,

@@ -276,8 +276,10 @@ def test_source_trace_with_parent_for_reverse_hyde():
 # ── Graph retrieval confidence filtering ──────────────────────────────────────
 
 
-def test_build_entity_fact_results_filters_low_confidence(monkeypatch):
+async def test_build_entity_fact_results_filters_low_confidence(monkeypatch):
     """Facts below MIN_FACT_CONFIDENCE should be excluded from results."""
+    from unittest.mock import AsyncMock
+
     import graph_retrieval as gr
 
     monkeypatch.setattr(gr, "MIN_FACT_CONFIDENCE", 0.5)
@@ -308,11 +310,11 @@ def test_build_entity_fact_results_filters_low_confidence(monkeypatch):
     monkeypatch.setattr(
         gr,
         "get_entity_facts_bulk",
-        lambda eids, as_of="": {1: [high_conf_fact, low_conf_fact]},
+        AsyncMock(return_value={1: [high_conf_fact, low_conf_fact]}),
     )
 
     entities = [{"id": 1, "name": "Bob", "retention_class": "standard"}]
-    results = gr.build_entity_fact_results(entities, min_score=0.7)
+    results = await gr.build_entity_fact_results(entities, min_score=0.7)
 
     assert len(results) == 1
     assert "manages" in results[0]["text"]
