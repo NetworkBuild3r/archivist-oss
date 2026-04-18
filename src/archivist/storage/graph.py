@@ -507,9 +507,7 @@ async def init_schema_async() -> None:
             "Postgres schema applied from %s", schema_path.name
         )
     except Exception as exc:
-        logging.getLogger("archivist.graph").error(
-            "Postgres schema init failed: %s", exc
-        )
+        logging.getLogger("archivist.graph").error("Postgres schema init failed: %s", exc)
         health.register("fts5", healthy=False, detail=str(exc))
         raise
 

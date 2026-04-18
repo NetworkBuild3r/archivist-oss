@@ -115,9 +115,7 @@ class AsyncpgConnection:
         translated = _translate_sql(sql)
         return await self._conn.execute(translated, *params)
 
-    async def executemany(
-        self, sql: str, params: list[tuple[Any, ...]] | list[list[Any]]
-    ) -> None:
+    async def executemany(self, sql: str, params: list[tuple[Any, ...]] | list[list[Any]]) -> None:
         """Execute *sql* once per row in *params*.
 
         Args:
@@ -127,9 +125,7 @@ class AsyncpgConnection:
         translated = _translate_sql(sql)
         await self._conn.executemany(translated, params)
 
-    async def fetchall(
-        self, sql: str, params: tuple[Any, ...] | list[Any] = ()
-    ) -> list[Any]:
+    async def fetchall(self, sql: str, params: tuple[Any, ...] | list[Any] = ()) -> list[Any]:
         """Execute *sql* and return all rows as a list of ``asyncpg.Record`` objects.
 
         Args:
@@ -142,9 +138,7 @@ class AsyncpgConnection:
         translated = _translate_sql(sql)
         return await self._conn.fetch(translated, *params)
 
-    async def fetchone(
-        self, sql: str, params: tuple[Any, ...] | list[Any] = ()
-    ) -> Any | None:
+    async def fetchone(self, sql: str, params: tuple[Any, ...] | list[Any] = ()) -> Any | None:
         """Execute *sql* and return the first row, or ``None``.
 
         Args:
@@ -275,9 +269,7 @@ class AsyncpgGraphBackend:
             RuntimeError: If ``initialize()`` was not called first.
         """
         if self._pool is None:
-            raise RuntimeError(
-                "AsyncpgGraphBackend is not initialized — call initialize() first"
-            )
+            raise RuntimeError("AsyncpgGraphBackend is not initialized — call initialize() first")
         async with self._pool.acquire() as conn:
             async with conn.transaction():
                 yield AsyncpgConnection(conn)
@@ -293,9 +285,7 @@ class AsyncpgGraphBackend:
             RuntimeError: If ``initialize()`` was not called first.
         """
         if self._pool is None:
-            raise RuntimeError(
-                "AsyncpgGraphBackend is not initialized — call initialize() first"
-            )
+            raise RuntimeError("AsyncpgGraphBackend is not initialized — call initialize() first")
         async with self._pool.acquire() as conn:
             yield AsyncpgConnection(conn)
 

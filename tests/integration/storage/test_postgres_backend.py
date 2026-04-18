@@ -124,9 +124,7 @@ async def test_executemany(pg_backend):
         )
 
     async with pg_backend.read() as conn:
-        rows = await conn.fetchall(
-            "SELECT name FROM _test_entities ORDER BY name"
-        )
+        rows = await conn.fetchall("SELECT name FROM _test_entities ORDER BY name")
 
     names = [r["name"] for r in rows]
     assert "Bob" in names
@@ -171,8 +169,7 @@ async def test_concurrent_writes_no_lock_contention(pg_backend):
     async def _write_entity(name: str) -> None:
         async with pg_backend.write() as conn:
             await conn.execute(
-                "INSERT INTO _test_entities (name) VALUES (?)"
-                " ON CONFLICT (name) DO NOTHING",
+                "INSERT INTO _test_entities (name) VALUES (?) ON CONFLICT (name) DO NOTHING",
                 (name,),
             )
 
@@ -180,9 +177,7 @@ async def test_concurrent_writes_no_lock_contention(pg_backend):
     await asyncio.gather(*[_write_entity(n) for n in names])
 
     async with pg_backend.read() as conn:
-        rows = await conn.fetchall(
-            "SELECT name FROM _test_entities WHERE name LIKE 'concurrent_%'"
-        )
+        rows = await conn.fetchall("SELECT name FROM _test_entities WHERE name LIKE 'concurrent_%'")
     assert len(rows) == 10
 
 
@@ -202,7 +197,9 @@ async def pg_fts_backend():
     backend = AsyncpgGraphBackend()
     await backend.initialize(POSTGRES_DSN, min_size=2, max_size=5)
 
-    schema_sql = (Path(__file__).parents[3] / "src/archivist/storage/schema_postgres.sql").read_text()
+    schema_sql = (
+        Path(__file__).parents[3] / "src/archivist/storage/schema_postgres.sql"
+    ).read_text()
 
     await backend.execute_ddl(schema_sql)
 
@@ -210,9 +207,7 @@ async def pg_fts_backend():
 
     # Clean up the FTS test rows inserted during the test.
     async with backend.write() as conn:
-        await conn.execute(
-            "DELETE FROM memory_chunks WHERE namespace = 'fts_parity_test'"
-        )
+        await conn.execute("DELETE FROM memory_chunks WHERE namespace = 'fts_parity_test'")
 
     await backend.close()
 
@@ -241,11 +236,13 @@ async def test_fts_tsvector_auto_generated(pg_fts_backend):
 async def test_fts_stemmed_search(pg_fts_backend):
     """fts_vector (english stemmed) matches stemmed variants."""
     async with pg_fts_backend.write() as conn:
-        for i, text in enumerate([
-            "kubernetes pod deployment running",
-            "unrelated content about cats and dogs",
-            "deploy application to kubernetes cluster",
-        ]):
+        for i, text in enumerate(
+            [
+                "kubernetes pod deployment running",
+                "unrelated content about cats and dogs",
+                "deploy application to kubernetes cluster",
+            ]
+        ):
             await conn.execute(
                 "INSERT INTO memory_chunks (qdrant_id, text, file_path, chunk_index, namespace) "
                 "VALUES (?, ?, ?, ?, ?)",
@@ -272,7 +269,13 @@ async def test_fts_simple_exact_search(pg_fts_backend):
         await conn.execute(
             "INSERT INTO memory_chunks (qdrant_id, text, file_path, chunk_index, namespace) "
             "VALUES (?, ?, ?, ?, ?)",
-            ("fts-exact-1", "server at 192.168.1.100 failed health check", "/e1", 0, "fts_parity_test"),
+            (
+                "fts-exact-1",
+                "server at 192.168.1.100 failed health check",
+                "/e1",
+                0,
+                "fts_parity_test",
+            ),
         )
         await conn.execute(
             "INSERT INTO memory_chunks (qdrant_id, text, file_path, chunk_index, namespace) "
@@ -299,7 +302,13 @@ async def test_fts_scoring_in_bm25_range(pg_fts_backend):
         await conn.execute(
             "INSERT INTO memory_chunks (qdrant_id, text, file_path, chunk_index, namespace) "
             "VALUES (?, ?, ?, ?, ?)",
-            ("fts-score-1", "kubernetes kubernetes kubernetes deployment", "/sc1", 0, "fts_parity_test"),
+            (
+                "fts-score-1",
+                "kubernetes kubernetes kubernetes deployment",
+                "/sc1",
+                0,
+                "fts_parity_test",
+            ),
         )
 
     async with pg_fts_backend.read() as conn:

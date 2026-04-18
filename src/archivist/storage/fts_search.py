@@ -160,6 +160,7 @@ def _fts5_phrase_query(raw_query: str) -> str:
 # Postgres tsquery builders (parallel to the FTS5 builders above)
 # ---------------------------------------------------------------------------
 
+
 def _pg_escape_token(t: str) -> str:
     """Escape a single token for use inside a tsquery literal.
 
