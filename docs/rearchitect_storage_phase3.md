@@ -194,6 +194,7 @@ class GraphBackend(Protocol):
 | Re-entrancy | `pool.write()` is not re-entrant → helpers must accept `conn=` param | All write helpers updated; shims enforce correct pattern |
 | Eventual consistency | Qdrant writes lag behind SQLite by up to `OUTBOX_DRAIN_INTERVAL` seconds when `OUTBOX_ENABLED=True` | Acceptable for memory systems; inline fallback available |
 | PostgreSQL migration | `GraphBackend` protocol isolates SQLite calls | Drop-in `PostgresGraphBackend` when ready |
+| **Write serialization** | All SQLite writes are serialized through a single `asyncio.Lock` + single connection. This predates Phase 3 and is a property of the SQLite backend, not of the outbox design. | The `GraphBackend` and `VectorBackend` protocols introduced in this phase make a PostgreSQL swap mechanical. For fleets with >50 concurrent writers, the PostgreSQL backend (v2.2 roadmap) is the correct fix. Adding an async queue in front of SQLite does not help — SQLite's single-writer constraint is fundamental. |
 
 ---
 

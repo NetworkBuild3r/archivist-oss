@@ -228,6 +228,15 @@ def init_schema():
         );
         CREATE INDEX IF NOT EXISTS idx_outbox_status ON outbox(status, created_at);
         CREATE INDEX IF NOT EXISTS idx_outbox_event  ON outbox(event_type, status);
+        -- Covering index for drain loop: WHERE status IN ('pending','processing')
+        -- filters with last_attempt for backoff, ordered by created_at.
+        CREATE INDEX IF NOT EXISTS idx_outbox_drain
+            ON outbox(status, last_attempt, created_at)
+            WHERE status IN ('pending', 'processing');
+        -- Covering index for retention pruning: WHERE status='applied' AND last_attempt < cutoff.
+        CREATE INDEX IF NOT EXISTS idx_outbox_prune
+            ON outbox(status, last_attempt)
+            WHERE status = 'applied';
 
         -- Needle registry for O(1) structured-token lookup (v2.0).
         -- Also initialised lazily by _ensure_needle_registry; including it here

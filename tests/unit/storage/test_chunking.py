@@ -80,8 +80,8 @@ class TestReverseHydeCacheKey:
         text_a = shared_prefix + " specific fact about server alpha"
         text_b = shared_prefix + " specific fact about server beta"
 
-        key_a = hashlib.md5(text_a.encode()).hexdigest()  # noqa: S324
-        key_b = hashlib.md5(text_b.encode()).hexdigest()  # noqa: S324
+        key_a = hashlib.md5(text_a.encode()).hexdigest()
+        key_b = hashlib.md5(text_b.encode()).hexdigest()
 
         assert key_a != key_b
 
@@ -92,8 +92,8 @@ class TestReverseHydeCacheKey:
 
         assert text_a[:200] == text_b[:200]
         assert (
-            hashlib.md5(text_a.encode()).hexdigest()  # noqa: S324
-            != hashlib.md5(text_b.encode()).hexdigest()  # noqa: S324
+            hashlib.md5(text_a.encode()).hexdigest()
+            != hashlib.md5(text_b.encode()).hexdigest()
         )
 
 

@@ -730,7 +730,7 @@ Graceful degradation throughout. Vector search, BM25, graph lookup, and caching 
 <details>
 <summary><strong>How do I scale beyond a single instance?</strong></summary>
 
-Qdrant can be run as a cluster (see Qdrant docs). SQLite is the current bottleneck for horizontal scaling — the roadmap includes a PostgreSQL option. For most agent fleets (dozens of agents, millions of memories), a single Archivist instance handles the load comfortably.
+Qdrant can be run as a cluster (see Qdrant docs). SQLite is the current bottleneck for horizontal scaling — all writes are serialized through a single `asyncio.Lock` and a single connection. This is a fundamental property of the SQLite backend (not a Phase 3 regression) and is fine for single-instance deployments with dozens of concurrent agents. For fleets exceeding ~50 concurrent writers, the upcoming PostgreSQL `GraphBackend` (v2.2 roadmap) eliminates this constraint via connection pooling and row-level locks. The `GraphBackend` and `VectorBackend` protocols introduced in Phase 3 make that swap mechanical.
 </details>
 
 <details>

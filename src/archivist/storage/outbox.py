@@ -319,8 +319,9 @@ class OutboxProcessor:
         method recovers those rows by resetting them after
         ``OUTBOX_ORPHAN_TIMEOUT_SECONDS`` have elapsed since ``last_attempt``.
 
-        The ``retry_count`` is preserved so that an event that crashed many
-        times still eventually reaches the dead-letter limit.
+        Each recovery increments ``retry_count`` so that events that repeatedly
+        become stuck (e.g. persistent Qdrant failures after requeue) still
+        advance toward ``OUTBOX_MAX_RETRIES`` and can be dead-lettered.
 
         Returns:
             Number of orphaned events reset to 'pending'.
@@ -352,6 +353,7 @@ class OutboxProcessor:
                 f"""
                 UPDATE outbox
                 SET status = 'pending',
+                    retry_count = retry_count + 1,
                     last_attempt = ?,
                     error = 'recovered by orphan sweep'
                 WHERE id IN ({placeholders})

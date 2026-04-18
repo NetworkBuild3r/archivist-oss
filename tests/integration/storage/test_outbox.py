@@ -459,11 +459,12 @@ async def test_sweep_orphaned_processing_recovers_stuck_events(outbox_pool, monk
     recovered = await processor._sweep_orphaned_processing()
     assert recovered == 1
 
-    # After sweep, the row must be 'pending'
+    # After sweep, the row must be 'pending' with retry_count bumped (counts as a failure cycle).
     async with outbox_pool.read() as c:
-        cur = await c.execute("SELECT status FROM outbox WHERE id='orphan-1'")
+        cur = await c.execute("SELECT status, retry_count FROM outbox WHERE id='orphan-1'")
         row = await cur.fetchone()
     assert row[0] == "pending"
+    assert row[1] == 1
 
     # A subsequent drain must now apply it
     n = await processor.drain()

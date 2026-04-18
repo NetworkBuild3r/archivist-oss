@@ -387,6 +387,18 @@ def _log_feature_flags() -> None:
             "disabled_count": len(disabled),
         },
     )
+    logger.info(
+        "config.outbox",
+        extra={
+            "OUTBOX_ENABLED": OUTBOX_ENABLED,
+            "OUTBOX_DRAIN_INTERVAL": OUTBOX_DRAIN_INTERVAL,
+            "OUTBOX_BATCH_SIZE": OUTBOX_BATCH_SIZE,
+            "OUTBOX_MAX_RETRIES": OUTBOX_MAX_RETRIES,
+            "OUTBOX_ORPHAN_TIMEOUT_SECONDS": OUTBOX_ORPHAN_TIMEOUT_SECONDS,
+            "OUTBOX_ORPHAN_SWEEP_EVERY_N": OUTBOX_ORPHAN_SWEEP_EVERY_N,
+            "OUTBOX_RETENTION_DAYS": OUTBOX_RETENTION_DAYS,
+        },
+    )
     if CURATOR_LLM_MODEL:
         logger.info(
             "config.curator_llm_override",
