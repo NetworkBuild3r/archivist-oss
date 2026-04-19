@@ -8,6 +8,7 @@ real SQLite operations and the full handler logic.
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from tests.integration.conftest import skip_on_postgres
 
 pytestmark = [pytest.mark.integration, pytest.mark.mcp]
 
@@ -157,6 +158,7 @@ async def test_store_provenance_defaults(async_pool, monkeypatch):
 # ── Integration: SQLite provenance columns ────────────────────────────────────
 
 
+@skip_on_postgres
 async def test_store_propagates_to_sqlite(async_pool, monkeypatch):
     """Verify provenance reaches SQLite tables (facts, memory_chunks)."""
     monkeypatch.setattr("config.REVERSE_HYDE_ENABLED", False)

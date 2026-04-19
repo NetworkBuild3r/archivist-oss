@@ -1,4 +1,5 @@
 import pytest
+from tests.integration.conftest import skip_on_postgres
 
 pytestmark = [pytest.mark.integration, pytest.mark.storage]
 """Tests for graph.py — entity, fact, relationship CRUD and FTS5 with real SQLite."""
@@ -131,6 +132,7 @@ class TestCuratorState:
         assert await get_curator_state("nonexistent") is None
 
 
+@skip_on_postgres
 class TestFTS5:
     async def test_upsert_and_search(self, async_pool):
         from graph import search_fts, upsert_fts_chunk

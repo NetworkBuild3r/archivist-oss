@@ -4,6 +4,8 @@ Provides:
 - ``integration_pool`` — async SQLitePool with full schema for integration tests
 - ``mock_vector_backend`` — VectorBackend-protocol mock
 - ``memory_factory`` — deterministic memory payload generator
+- ``skip_on_postgres`` — pytest mark that skips tests incompatible with the
+  Postgres backend (e.g. SQLite FTS5-only tests)
 
 Root-level fixtures (``_isolate_env``, ``graph_db``, ``async_pool``,
 ``rbac_config``, ``mock_llm``) are inherited from the project root conftest.py.
@@ -11,10 +13,33 @@ Root-level fixtures (``_isolate_env``, ``graph_db``, ``async_pool``,
 
 from __future__ import annotations
 
+import os
+
 import pytest
 from tests.fixtures.factories import MemoryFactory
 from tests.fixtures.mocks import make_vector_backend_mock
 from tests.fixtures.schema import build_schema
+
+# ---------------------------------------------------------------------------
+# Backend detection helpers
+# ---------------------------------------------------------------------------
+
+_IS_POSTGRES = os.environ.get("GRAPH_BACKEND", "sqlite").strip().lower() == "postgres"
+
+#: Decorator that skips a test when the Postgres backend is active.
+#:
+#: Use on tests that rely on SQLite FTS5 virtual tables (``memory_fts``,
+#: ``memory_fts_exact``) or ``graph.get_db()`` — neither of which exists or
+#: behaves the same on the asyncpg backend.
+#:
+#: Example::
+#:
+#:     @skip_on_postgres
+#:     async def test_sqlite_fts_specific(async_pool): ...
+skip_on_postgres = pytest.mark.skipif(
+    _IS_POSTGRES,
+    reason="SQLite FTS5 virtual tables are not present on the Postgres backend",
+)
 
 
 @pytest.fixture

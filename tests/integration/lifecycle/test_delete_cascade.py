@@ -21,6 +21,7 @@ from datetime import UTC
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from tests.integration.conftest import skip_on_postgres
 
 pytestmark = [pytest.mark.integration, pytest.mark.lifecycle]
 
@@ -1701,6 +1702,7 @@ class TestNeedleTokenRegistration:
 # ===========================================================================
 
 
+@skip_on_postgres
 class TestNeedleHaystackIsolation:
     """Needle is findable among generic chunks, then disappears when archived.
 
@@ -1923,6 +1925,7 @@ class TestNeedleHaystackIsolation:
         )
 
 
+@skip_on_postgres
 class TestFTSExcludedFilter:
     """search_fts and search_fts_exact skip rows with is_excluded=1."""
 

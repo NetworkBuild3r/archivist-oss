@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import pytest
 from tests.fixtures.mocks import count_outbox, count_table
+from tests.integration.conftest import skip_on_postgres
 
 pytestmark = [pytest.mark.integration, pytest.mark.storage]
 
@@ -30,6 +31,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.storage]
 # ---------------------------------------------------------------------------
 
 
+@skip_on_postgres
 async def test_commit_writes_all_artifact_tables(qa_pool, memory_factory):
     """Clean transaction exit commits FTS5, needle, memory_points, and outbox atomically."""
     # Arrange

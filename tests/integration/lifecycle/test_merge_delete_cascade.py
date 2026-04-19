@@ -30,6 +30,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from tests.fixtures.mocks import count_outbox, count_table
+from tests.integration.conftest import skip_on_postgres
 
 pytestmark = [pytest.mark.integration, pytest.mark.lifecycle]
 
@@ -184,6 +185,7 @@ async def test_delete_result_has_memory_id_set(qa_pool, memory_factory):
 # ---------------------------------------------------------------------------
 
 
+@skip_on_postgres
 async def test_upsert_fts_chunk_shim_writes_to_fts_chunks(qa_pool, memory_factory):
     """txn.upsert_fts_chunk writes a row to memory_chunks via the conn shim."""
     from archivist.storage.transaction import MemoryTransaction
