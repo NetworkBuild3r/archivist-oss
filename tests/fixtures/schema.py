@@ -21,7 +21,7 @@ PRAGMA foreign_keys=ON;
 
 CREATE TABLE IF NOT EXISTS entities (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    name TEXT NOT NULL UNIQUE,
     entity_type TEXT NOT NULL DEFAULT 'unknown',
     first_seen TEXT NOT NULL,
     last_seen TEXT NOT NULL,
@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS entities (
     actor_id TEXT NOT NULL DEFAULT '',
     actor_type TEXT NOT NULL DEFAULT ''
 );
-CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(name COLLATE NOCASE);
+CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(name);
 CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(entity_type);
 CREATE INDEX IF NOT EXISTS idx_entities_namespace ON entities(namespace);
 
