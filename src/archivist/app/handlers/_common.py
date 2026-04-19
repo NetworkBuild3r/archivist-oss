@@ -39,6 +39,14 @@ def _rbac_gate(agent_id: str, action: str, namespace: str) -> str | None:
         # Always include the full permitted namespace list so the agent can pick
         # the right one without issuing another tool call.
         payload["permitted_namespaces"] = policy.permitted_namespaces
+        # If the permitted list is empty the agent likely hasn't loaded its index yet.
+        if not policy.permitted_namespaces:
+            payload["index_reminder"] = (
+                "You have no accessible namespaces configured. "
+                "Fetch archivist://memory-index/{your_agent_id} as an MCP resource, "
+                "or call archivist_index(agent_id='<your_agent_id>') and save the "
+                "result as memory_index.md in your project root."
+            )
         if policy.next_steps:
             payload["next_steps"] = policy.next_steps
         payload["get_help"] = _UNIVERSAL_NEXT_STEP
@@ -80,6 +88,12 @@ def require_caller(caller: str) -> list[TextContent] | None:
                 "error": "caller_required",
                 "reason": "agent_id is required — Archivist needs to know which agent is making this call.",
                 "hint": "Add agent_id='<your_agent_id>' to your tool call arguments.",
+                "index_reminder": (
+                    "If you are connecting for the first time, fetch "
+                    "archivist://memory-index/{your_agent_id} as an MCP resource, "
+                    "or call archivist_index(agent_id='<your_agent_id>') and save the "
+                    "result as memory_index.md in your project root."
+                ),
                 "next_steps": _MISSING_CALLER_NEXT_STEPS,
                 "get_help": _UNIVERSAL_NEXT_STEP,
             }

@@ -252,9 +252,14 @@ TOOLS: list[Tool] = [
     Tool(
         name="archivist_index",
         description=(
-            "Get a compressed navigational index of what knowledge exists in a namespace. "
-            "Returns a short text (~500 tokens) listing entity categories and top topics — "
-            "useful for cross-domain bridging and deciding what to search for."
+            "Get the memory index for your namespace — call this on first connection "
+            "and save the result as memory_index.md in your project root. "
+            "This gives you a navigational overview of what knowledge exists "
+            "(entity categories, key facts, pinned items, recent activity) so you "
+            "know what to search for before issuing any other tool calls. "
+            "You can also fetch the same content as an MCP resource: "
+            "archivist://memory-index/{your_agent_id}. "
+            "If you do not have a memory_index.md file locally, call this now."
         ),
         inputSchema={
             "type": "object",
