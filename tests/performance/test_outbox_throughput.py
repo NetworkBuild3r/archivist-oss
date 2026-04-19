@@ -307,12 +307,8 @@ async def test_drain_200_events_back_pressure_under_1500ms(qa_pool):
         f"  total={total}  cycles={cycles}  batch_size={OUTBOX_BATCH_SIZE}"
     )
     assert total == 200, f"expected 200 applied total, got {total}"
-    assert cycles >= min_cycles, (
-        f"expected at least {min_cycles} drain cycles, got {cycles}"
-    )
-    assert elapsed < 1500, (
-        f"Back-pressure drain 200 events took {elapsed:.1f} ms (limit 1 500 ms)"
-    )
+    assert cycles >= min_cycles, f"expected at least {min_cycles} drain cycles, got {cycles}"
+    assert elapsed < 1500, f"Back-pressure drain 200 events took {elapsed:.1f} ms (limit 1 500 ms)"
 
 
 # ---------------------------------------------------------------------------
@@ -368,9 +364,7 @@ async def test_drain_with_failures_correct_accounting(qa_pool):
     )
     # All 50 events must reach a terminal state (applied or dead)
     assert pending == 0, f"{pending} events still pending after exhausting retries"
-    assert applied + dead == 50, (
-        f"applied ({applied}) + dead ({dead}) != 50"
-    )
+    assert applied + dead == 50, f"applied ({applied}) + dead ({dead}) != 50"
     # At 20 % failure rate and retrying, nearly all should be applied
     assert applied >= 35, f"Only {applied}/50 applied (expected >= 35 with 20 % failure)"
 
