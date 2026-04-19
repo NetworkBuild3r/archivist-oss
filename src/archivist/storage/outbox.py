@@ -550,9 +550,10 @@ class OutboxProcessor:
                 df_id = str(uuid.uuid4())
                 await conn.execute(
                     """
-                    INSERT OR IGNORE INTO delete_failures
+                    INSERT INTO delete_failures
                         (id, memory_id, qdrant_ids, error, created_at)
                     VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT (id) DO NOTHING
                     """,
                     (
                         df_id,

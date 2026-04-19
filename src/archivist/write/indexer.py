@@ -348,9 +348,10 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
                         actor_type=meta.get("actor_type", ""),
                     )
                 await txn.executemany(
-                    """INSERT OR IGNORE INTO memory_points
+                    """INSERT INTO memory_points
                            (memory_id, qdrant_id, point_type, created_at)
-                       VALUES (?, ?, ?, ?)""",
+                       VALUES (?, ?, ?, ?)
+                       ON CONFLICT (memory_id, qdrant_id) DO NOTHING""",
                     [
                         (r["memory_id"], r["qdrant_id"], r["point_type"], _now_iso)
                         for r in _mp_records
@@ -472,9 +473,10 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
                     try:
                         async with MemoryTransaction() as txn:
                             await txn.executemany(
-                                """INSERT OR IGNORE INTO memory_points
+                                """INSERT INTO memory_points
                                        (memory_id, qdrant_id, point_type, created_at)
-                                   VALUES (?, ?, ?, ?)""",
+                                   VALUES (?, ?, ?, ?)
+                                   ON CONFLICT (memory_id, qdrant_id) DO NOTHING""",
                                 [
                                     (
                                         r["memory_id"],
@@ -550,9 +552,10 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
                     try:
                         async with MemoryTransaction() as txn:
                             await txn.executemany(
-                                """INSERT OR IGNORE INTO memory_points
+                                """INSERT INTO memory_points
                                        (memory_id, qdrant_id, point_type, created_at)
-                                   VALUES (?, ?, ?, ?)""",
+                                   VALUES (?, ?, ?, ?)
+                                   ON CONFLICT (memory_id, qdrant_id) DO NOTHING""",
                                 [
                                     (
                                         r["memory_id"],

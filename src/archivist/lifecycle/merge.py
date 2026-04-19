@@ -98,8 +98,9 @@ async def merge_memories(
     # cannot produce a Qdrant-orphan merged point (failure mode D from plan).
     async with MemoryTransaction() as txn:
         await txn.execute(
-            """INSERT OR IGNORE INTO memory_points (memory_id, qdrant_id, point_type, created_at)
-               VALUES (?, ?, 'primary', ?)""",
+            """INSERT INTO memory_points (memory_id, qdrant_id, point_type, created_at)
+               VALUES (?, ?, 'primary', ?)
+               ON CONFLICT (memory_id, qdrant_id) DO NOTHING""",
             (merged_id, merged_id, _now_iso),
         )
         await txn.upsert_fts_chunk(

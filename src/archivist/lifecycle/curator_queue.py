@@ -248,8 +248,11 @@ async def _apply_hotness(payload: dict):
     async with pool.write() as conn:
         for memory_id, score in scores.items():
             await conn.execute(
-                "INSERT OR REPLACE INTO memory_hotness (memory_id, score, retrieval_count, last_accessed, updated_at) "
-                "VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO memory_hotness (memory_id, score, retrieval_count, last_accessed, updated_at) "
+                "VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT (memory_id) DO UPDATE SET "
+                "score=EXCLUDED.score, retrieval_count=EXCLUDED.retrieval_count, "
+                "last_accessed=EXCLUDED.last_accessed, updated_at=EXCLUDED.updated_at",
                 (
                     memory_id,
                     score,

@@ -619,15 +619,17 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
                 actor_type=actor_type,
             )
         await txn.execute(
-            """INSERT OR IGNORE INTO memory_points (memory_id, qdrant_id, point_type, created_at)
-               VALUES (?, ?, 'primary', ?)""",
+            """INSERT INTO memory_points (memory_id, qdrant_id, point_type, created_at)
+               VALUES (?, ?, 'primary', ?)
+               ON CONFLICT (memory_id, qdrant_id) DO NOTHING""",
             (pid, pid, _now_iso),
         )
         if _micro_points:
             await txn.executemany(
-                """INSERT OR IGNORE INTO memory_points
+                """INSERT INTO memory_points
                        (memory_id, qdrant_id, point_type, created_at)
-                   VALUES (?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT (memory_id, qdrant_id) DO NOTHING""",
                 [(pid, str(mp.id), "micro_chunk", _now_iso) for mp in _micro_points],
             )
         txn.enqueue_qdrant_upsert(_coll, [_primary_point], memory_id=pid)
@@ -700,9 +702,10 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
 
                     async with MemoryTransaction() as txn:
                         await txn.executemany(
-                            """INSERT OR IGNORE INTO memory_points
+                            """INSERT INTO memory_points
                                    (memory_id, qdrant_id, point_type, created_at)
-                               VALUES (?, ?, ?, ?)""",
+                               VALUES (?, ?, ?, ?)
+                               ON CONFLICT (memory_id, qdrant_id) DO NOTHING""",
                             [
                                 (
                                     r["memory_id"],
@@ -782,9 +785,10 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
 
                     async with MemoryTransaction() as txn:
                         await txn.executemany(
-                            """INSERT OR IGNORE INTO memory_points
+                            """INSERT INTO memory_points
                                    (memory_id, qdrant_id, point_type, created_at)
-                               VALUES (?, ?, ?, ?)""",
+                               VALUES (?, ?, ?, ?)
+                               ON CONFLICT (memory_id, qdrant_id) DO NOTHING""",
                             [
                                 (
                                     r["memory_id"],
@@ -1046,7 +1050,7 @@ async def _handle_pin(arguments: dict) -> list[TextContent]:
 
         async with pool.write() as conn:
             cur = await conn.execute(
-                "SELECT id FROM entities WHERE name = ? COLLATE NOCASE AND namespace = ?",
+                "SELECT id FROM entities WHERE name = ? AND namespace = ?",
                 (entity_name, namespace or "global"),
             )
             row = await cur.fetchone()
@@ -1122,7 +1126,7 @@ async def _handle_unpin(arguments: dict) -> list[TextContent]:
 
         async with pool.write() as conn:
             cur = await conn.execute(
-                "SELECT id FROM entities WHERE name = ? COLLATE NOCASE", (entity_name,)
+                "SELECT id FROM entities WHERE name = ?", (entity_name,)
             )
             row = await cur.fetchone()
             if row:

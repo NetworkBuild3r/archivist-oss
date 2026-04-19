@@ -130,7 +130,7 @@ def init_schema():
         conn.executescript("""
         CREATE TABLE IF NOT EXISTS entities (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+            name TEXT NOT NULL UNIQUE,
             entity_type TEXT NOT NULL DEFAULT 'unknown',
             first_seen TEXT NOT NULL,
             last_seen TEXT NOT NULL,
@@ -139,7 +139,7 @@ def init_schema():
             retention_class TEXT NOT NULL DEFAULT 'standard',
             aliases TEXT NOT NULL DEFAULT '[]'
         );
-        CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(name COLLATE NOCASE);
+        CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(name);
         CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(entity_type);
 
         CREATE TABLE IF NOT EXISTS relationships (
@@ -392,7 +392,7 @@ def _migrate_entity_unique_constraint():
             conn.execute("""
                 CREATE TABLE entities_new (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT NOT NULL COLLATE NOCASE,
+                    name TEXT NOT NULL,
                     entity_type TEXT NOT NULL DEFAULT 'unknown',
                     first_seen TEXT NOT NULL,
                     last_seen TEXT NOT NULL,
@@ -414,7 +414,7 @@ def _migrate_entity_unique_constraint():
             conn.execute("DROP TABLE entities")
             conn.execute("ALTER TABLE entities_new RENAME TO entities")
             conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(name COLLATE NOCASE)"
+                "CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(name)"
             )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(entity_type)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_entities_namespace ON entities(namespace)")
@@ -1170,7 +1170,7 @@ async def upsert_entity(
 
     async def _run(c: aiosqlite.Connection) -> int:
         cur = await c.execute(
-            "SELECT id, mention_count, retention_class FROM entities WHERE name = ? COLLATE NOCASE AND namespace = ?",
+            "SELECT id, mention_count, retention_class FROM entities WHERE name = ? AND namespace = ?",
             (name, namespace),
         )
         row = await cur.fetchone()
@@ -1188,10 +1188,11 @@ async def upsert_entity(
             return row["id"]
         cur2 = await c.execute(
             "INSERT INTO entities (name, entity_type, first_seen, last_seen, retention_class, namespace, actor_id, actor_type) "
-            "VALUES (?,?,?,?,?,?,?,?)",
+            "VALUES (?,?,?,?,?,?,?,?) RETURNING id",
             (name, entity_type, now, now, retention_class, namespace, actor_id, actor_type),
         )
-        return cur2.lastrowid
+        row2 = await cur2.fetchone()
+        return row2[0] if row2 else 0
 
     if conn is not None:
         return await _run(conn)
@@ -1268,7 +1269,7 @@ async def add_fact(
         cur = await c.execute(
             "INSERT INTO facts (entity_id, fact_text, source_file, agent_id, created_at, "
             "retention_class, valid_from, valid_until, namespace, memory_id, confidence, provenance, actor_id) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id",
             (
                 entity_id,
                 fact_text,
@@ -1285,7 +1286,8 @@ async def add_fact(
                 actor_id,
             ),
         )
-        fid = cur.lastrowid
+        fid_row = await cur.fetchone()
+        fid = fid_row[0] if fid_row else 0
 
         if new_words:
             old_facts_cur = await c.execute(
@@ -1360,7 +1362,7 @@ async def search_entities(query: str, limit: int = 10, namespace: str = "") -> l
         if namespace:
             cur = await conn.execute(
                 "SELECT * FROM entities "
-                "WHERE (name LIKE ? COLLATE NOCASE OR aliases LIKE ? COLLATE NOCASE) "
+                "WHERE (name LIKE ? OR aliases LIKE ?) "
                 "AND namespace = ? "
                 "ORDER BY mention_count DESC LIMIT ?",
                 (f"%{query}%", f"%{norm_q}%", namespace, limit),
@@ -1368,7 +1370,7 @@ async def search_entities(query: str, limit: int = 10, namespace: str = "") -> l
         else:
             cur = await conn.execute(
                 "SELECT * FROM entities "
-                "WHERE name LIKE ? COLLATE NOCASE OR aliases LIKE ? COLLATE NOCASE "
+                "WHERE name LIKE ? OR aliases LIKE ? "
                 "ORDER BY mention_count DESC LIMIT ?",
                 (f"%{query}%", f"%{norm_q}%", limit),
             )
@@ -1603,9 +1605,11 @@ async def register_needle_tokens(
     async def _run(c: _aiosqlite.Connection) -> None:
         for tok in tokens:
             await c.execute(
-                "INSERT OR REPLACE INTO needle_registry "
+                "INSERT INTO needle_registry "
                 "(token, memory_id, namespace, agent_id, actor_id, actor_type, chunk_text, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT (token, memory_id) DO UPDATE SET "
+                "chunk_text=EXCLUDED.chunk_text, created_at=EXCLUDED.created_at",
                 (tok, memory_id, namespace, agent_id, actor_id, actor_type, snippet, now),
             )
 
@@ -1833,9 +1837,10 @@ async def register_memory_points_batch(
             for i in range(0, len(points), _BATCH_CHUNK):
                 chunk = points[i : i + _BATCH_CHUNK]
                 await conn.executemany(
-                    "INSERT OR IGNORE INTO memory_points "
+                    "INSERT INTO memory_points "
                     "(memory_id, qdrant_id, point_type, created_at) "
-                    "VALUES (?, ?, ?, ?)",
+                    "VALUES (?, ?, ?, ?) "
+                    "ON CONFLICT (memory_id, qdrant_id) DO NOTHING",
                     [
                         (p["memory_id"], p["qdrant_id"], p.get("point_type", "primary"), now)
                         for p in chunk
