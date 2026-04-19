@@ -21,11 +21,13 @@ def _rbac_gate(agent_id: str, action: str, namespace: str) -> str | None:
     """Return error JSON string if access denied, None if allowed.
 
     The JSON payload includes:
-    - ``hint``              — one-line actionable message
-    - ``similar_namespaces`` — fuzzy-matched alternative namespace names
-    - ``next_steps``        — ordered list of tool calls the agent should make
-                              to diagnose and fix the problem
-    - ``get_help``          — always points to archivist_get_reference_docs
+    - ``hint``                — one-line actionable message
+    - ``similar_namespaces``  — fuzzy-matched alternative namespace names
+    - ``permitted_namespaces`` — every namespace the agent *can* access (with
+                                 read/write flags), so the agent can self-correct
+                                 immediately without a follow-up call
+    - ``next_steps``          — ordered list of tool calls with agent_id filled in
+    - ``get_help``            — always points to archivist_get_reference_docs
     """
     policy = check_access(agent_id, action, namespace)
     if not policy.allowed:
@@ -34,6 +36,9 @@ def _rbac_gate(agent_id: str, action: str, namespace: str) -> str | None:
             payload["hint"] = policy.hint
         if policy.similar_namespaces:
             payload["similar_namespaces"] = policy.similar_namespaces
+        # Always include the full permitted namespace list so the agent can pick
+        # the right one without issuing another tool call.
+        payload["permitted_namespaces"] = policy.permitted_namespaces
         if policy.next_steps:
             payload["next_steps"] = policy.next_steps
         payload["get_help"] = _UNIVERSAL_NEXT_STEP
@@ -85,6 +90,8 @@ def require_caller(caller: str) -> list[TextContent] | None:
 _MISSING_CALLER_NEXT_STEPS = [
     "Re-issue the call with agent_id='<your_agent_id>' set to your unique agent identifier.",
     "Call archivist_get_reference_docs() to see required parameters for every tool.",
+    "Call archivist_namespaces(agent_id='<your_agent_id>') once you add your agent_id "
+    "to discover which namespaces you can access.",
 ]
 
 

@@ -60,7 +60,24 @@ async def dispatch_tool(name: str, arguments: dict) -> list[TextContent]:
     """Look up a handler by tool name and call it, with top-level error handling."""
     handler = TOOL_REGISTRY.get(name)
     if not handler:
-        return error_response({"error": f"Unknown tool: {name}"})
+        available = sorted(TOOL_REGISTRY.keys())
+        return error_response(
+            {
+                "error": "unknown_tool",
+                "tool": name,
+                "hint": (
+                    f"'{name}' is not a registered Archivist tool. "
+                    "Check the spelling or call archivist_get_reference_docs() "
+                    "for the complete tool list with parameter schemas."
+                ),
+                "available_tools": available,
+                "next_steps": [
+                    "Call archivist_get_reference_docs() to read the full tool reference.",
+                    "Call archivist_get_reference_docs(section='<topic>') for a focused "
+                    "section (e.g. 'storage', 'search', 'admin', 'trajectory', 'skills').",
+                ],
+            }
+        )
 
     rid = get_request_id()
     caller = (arguments.get("caller_agent_id") or arguments.get("agent_id") or "")[:64]
@@ -93,4 +110,21 @@ async def dispatch_tool(name: str, arguments: dict) -> list[TextContent]:
         )
         m.inc(m.TOOL_ERRORS, {"tool": name})
         m.observe(m.TOOL_DURATION, dur, {"tool": name})
-        return error_response({"error": str(e)})
+        return error_response(
+            {
+                "error": "tool_error",
+                "tool": name,
+                "detail": str(e),
+                "hint": (
+                    f"An unexpected error occurred in '{name}'. "
+                    "Check your parameters and try again. "
+                    "Call archivist_get_reference_docs(section='<topic>') "
+                    "for the correct parameter schema."
+                ),
+                "next_steps": [
+                    f"Call archivist_get_reference_docs() and search for '{name}' "
+                    "to review required parameters.",
+                    "Verify all required fields are present and have the correct types.",
+                ],
+            }
+        )

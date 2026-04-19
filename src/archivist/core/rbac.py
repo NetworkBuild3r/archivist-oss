@@ -35,6 +35,8 @@ class AccessPolicy:
     hint: str | None = None
     next_steps: list[str] = field(default_factory=list)
     similar_namespaces: list[str] = field(default_factory=list)
+    #: Namespaces the requesting agent can actually access (always populated on denial).
+    permitted_namespaces: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -144,50 +146,27 @@ def _similar_namespaces(candidate: str, known: list[str], top_n: int = 3) -> lis
     return [ns for ratio, ns in scored if ratio >= 0.4][:top_n]
 
 
-# Standard next-step recommendations appended to every denial response.
-# Agents that follow these will self-correct without human intervention.
-_NEXT_STEPS_UNKNOWN_NS = [
-    "Call archivist_index(agent_id='<your_agent_id>') to list all namespaces "
-    "and memories you currently have access to.",
-    "Call archivist_namespaces(agent_id='<your_agent_id>') for a quick namespace "
-    "access summary without full memory listing.",
-    "Call archivist_get_reference_docs(section='storage') for the complete "
-    "archivist_store parameter reference including valid namespace formats.",
-]
-
-_NEXT_STEPS_NO_PERMISSION = [
-    "Call archivist_namespaces(agent_id='<your_agent_id>') to see which "
-    "namespaces you can read and write.",
-    "Call archivist_index(agent_id='<your_agent_id>') to browse your accessible "
-    "namespaces and their current memory counts.",
-    "Call archivist_get_reference_docs(section='admin') for namespace access "
-    "configuration guidance.",
-]
-
-_NEXT_STEPS_MISSING_CALLER = [
-    "Re-issue the call with agent_id='<your_agent_id>' (your unique identifier).",
-    "Call archivist_get_reference_docs() to see the full parameter reference for "
-    "every tool including required fields.",
-]
-
-
 def check_access(agent_id: str, action: str, namespace: str) -> AccessPolicy:
     """Check if agent_id has permission for action (read/write/delete) on namespace.
 
     Returns an AccessPolicy with ``allowed=False``, a human-readable ``reason``,
     a short ``hint``, ``next_steps`` (ordered list of actionable calls the agent
-    should make to self-correct), and ``similar_namespaces`` (fuzzy matches to
-    the requested namespace) on every denial.
+    should make to self-correct), ``similar_namespaces`` (fuzzy matches to the
+    requested namespace), and ``permitted_namespaces`` (every namespace the agent
+    can actually access, with read/write flags) on every denial.
     """
     if _permissive_fallback:
         return AccessPolicy(allowed=True, reason="permissive fallback — config not loaded")
 
     cfg = get_config()
     ns = cfg.namespaces.get(namespace)
+
+    # Always compute accessible namespaces so denials are self-contained.
+    accessible = list_accessible_namespaces(agent_id)
+
     if ns is None:
         all_ns = list(cfg.namespaces.keys())
         similar = _similar_namespaces(namespace, all_ns)
-        accessible = list_accessible_namespaces(agent_id)
         accessible_names = [entry["namespace"] for entry in accessible]
 
         _MAX_HINT_NS = 6
@@ -203,12 +182,22 @@ def check_access(agent_id: str, action: str, namespace: str) -> AccessPolicy:
             hint_parts.append(f"Did you mean: {', '.join(similar)}?")
         hint_parts.append(f"Namespaces accessible to '{agent_id}': {ns_list}.")
 
+        # Build agent-specific next_steps so the agent can copy-paste them.
+        _aid = agent_id or "<your_agent_id>"
+        next_steps = [
+            f"Call archivist_namespaces(agent_id='{_aid}') to see your accessible namespaces.",
+            f"Call archivist_index(agent_id='{_aid}') to browse namespaces and memory counts.",
+            "Call archivist_get_reference_docs(section='storage') for the complete "
+            "archivist_store parameter reference including valid namespace formats.",
+        ]
+
         return AccessPolicy(
             allowed=False,
             reason=f"Unknown namespace: {namespace}",
             hint=" ".join(hint_parts),
-            next_steps=_NEXT_STEPS_UNKNOWN_NS,
+            next_steps=next_steps,
             similar_namespaces=similar,
+            permitted_namespaces=accessible,
         )
 
     if action in ("write", "delete"):
@@ -223,17 +212,23 @@ def check_access(agent_id: str, action: str, namespace: str) -> AccessPolicy:
         return AccessPolicy(allowed=True)
 
     action_label = "write to" if action in ("write", "delete") else "read from"
+    _aid = agent_id or "<your_agent_id>"
     return AccessPolicy(
         allowed=False,
         reason=f"Agent '{agent_id}' lacks {action} permission for namespace '{namespace}'",
         hint=(
             f"You do not have permission to {action_label} '{namespace}'. "
-            f"Call archivist_namespaces(agent_id='{agent_id}') to see your "
-            f"accessible namespaces, or archivist_index(agent_id='{agent_id}') "
-            f"for a full inventory."
+            f"Your permitted namespaces are listed in permitted_namespaces below."
         ),
-        next_steps=_NEXT_STEPS_NO_PERMISSION,
+        next_steps=[
+            f"Call archivist_namespaces(agent_id='{_aid}') to see your accessible namespaces.",
+            f"Call archivist_index(agent_id='{_aid}') to browse your accessible namespaces "
+            "and their current memory counts.",
+            "Call archivist_get_reference_docs(section='admin') for namespace access "
+            "configuration guidance.",
+        ],
         similar_namespaces=[],
+        permitted_namespaces=accessible,
     )
 
 

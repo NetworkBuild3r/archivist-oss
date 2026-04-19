@@ -148,7 +148,16 @@ class TestCheckAccessPermissionDenied:
 
         policy = check_access("nova", "write", "athena-identity")
         assert policy.hint is not None
-        assert "archivist_namespaces" in policy.hint
+        # The hint now directs the agent to the inline permitted_namespaces field;
+        # the actual archivist_namespaces call appears in next_steps instead.
+        assert "permitted_namespaces" in policy.hint
+
+    def test_denied_permitted_namespaces_populated(self):
+        from archivist.core.rbac import check_access
+
+        policy = check_access("nova", "write", "athena-identity")
+        # permitted_namespaces must be a list (may be empty if nova has no access)
+        assert isinstance(policy.permitted_namespaces, list)
 
     def test_denied_next_steps_populated(self):
         from archivist.core.rbac import check_access
