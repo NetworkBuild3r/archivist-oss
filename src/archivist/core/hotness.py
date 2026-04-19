@@ -119,7 +119,8 @@ def batch_update_hotness() -> int:
             ORDER BY created_at DESC
             LIMIT 5000
         """).fetchall()
-    except Exception:
+    except Exception as e:
+        logger.debug("hotness.batch_update: retrieval_logs query failed: %s", e)
         log_rows = []
 
     conn.close()
@@ -129,7 +130,8 @@ def batch_update_hotness() -> int:
     for row in log_rows:
         try:
             ids = _json.loads(row["result_ids"] or "[]")
-        except Exception:
+        except Exception as e:
+            logger.debug("hotness.batch_update: JSON parse failed for row: %s", e)
             continue
         if not isinstance(ids, list):
             continue
@@ -148,7 +150,8 @@ def batch_update_hotness() -> int:
             last_str = memory_last_access.get(mid, now_iso)
             try:
                 last_dt = datetime.fromisoformat(last_str.replace("Z", "+00:00"))
-            except Exception:
+            except Exception as e:
+                logger.debug("hotness.batch_update: ISO parse failed for '%s': %s", last_str, e)
                 last_dt = now
             days = max((now - last_dt).total_seconds() / 86400, 0.0)
             score = compute_hotness(count, days)

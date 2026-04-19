@@ -134,6 +134,7 @@ def _qdrant_stats() -> dict:
             "status": str(info.status),
         }
     except Exception as e:
+        logger.warning("dashboard._qdrant_stats failed: %s", e, exc_info=True)
         return {"error": str(e)}
 
 
@@ -161,6 +162,7 @@ def _stale_estimate() -> dict:
             "stale_pct": round(stale_count / total * 100, 1),
         }
     except Exception as e:
+        logger.warning("dashboard._stale_estimate failed: %s", e, exc_info=True)
         return {"error": str(e), "stale_pct": 0}
 
 
@@ -184,7 +186,8 @@ def _audit_stats(conn, window_days: int) -> dict:
             "annotations": counts.get("annotate", 0),
             "ratings": counts.get("rate", 0),
         }
-    except Exception:
+    except Exception as e:
+        logger.warning("dashboard._audit_stats failed: %s", e, exc_info=True)
         return {"total_writes": 0, "conflicts": 0, "conflict_rate": 0}
 
 
@@ -206,7 +209,8 @@ def _retrieval_stats(conn, window_days: int) -> dict:
         if row.get("avg_duration_ms"):
             row["avg_duration_ms"] = round(row["avg_duration_ms"], 1)
         return row
-    except Exception:
+    except Exception as e:
+        logger.warning("dashboard._retrieval_stats failed: %s", e, exc_info=True)
         return {"total": 0, "cache_hits": 0, "cache_hit_rate": None, "avg_duration_ms": None}
 
 
@@ -236,7 +240,8 @@ def _skill_overview(conn, window_days: int) -> dict:
             "events_in_window": total_events,
             "skill_success_rate": success_rate,
         }
-    except Exception:
+    except Exception as e:
+        logger.warning("dashboard._skill_overview failed: %s", e, exc_info=True)
         return {
             "total_skills": 0,
             "degraded_count": 0,

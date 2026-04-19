@@ -56,26 +56,35 @@ async def log_retrieval(
     log_id = str(uuid.uuid4())
     now = datetime.now(UTC).isoformat()
 
-    async with pool.write() as conn:
-        await conn.execute(
-            """INSERT INTO retrieval_logs
-               (id, agent_id, query, namespace, tier, memory_type,
-                retrieval_trace, result_count, cache_hit, duration_ms, created_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-            (
-                log_id,
-                agent_id,
-                query,
-                namespace,
-                tier,
-                memory_type,
-                json.dumps(retrieval_trace),
-                result_count,
-                1 if cache_hit else 0,
-                duration_ms,
-                now,
-            ),
+    try:
+        async with pool.write() as conn:
+            await conn.execute(
+                """INSERT INTO retrieval_logs
+                   (id, agent_id, query, namespace, tier, memory_type,
+                    retrieval_trace, result_count, cache_hit, duration_ms, created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    log_id,
+                    agent_id,
+                    query,
+                    namespace,
+                    tier,
+                    memory_type,
+                    json.dumps(retrieval_trace),
+                    result_count,
+                    1 if cache_hit else 0,
+                    duration_ms,
+                    now,
+                ),
+            )
+    except Exception as e:
+        logger.warning(
+            "retrieval_log.log_retrieval failed (agent=%s): %s",
+            agent_id,
+            e,
+            extra={"agent_id": agent_id, "duration_ms": duration_ms},
         )
+        return ""
 
     return log_id
 
@@ -113,8 +122,12 @@ def get_retrieval_logs(
         d = dict(r)
         try:
             d["retrieval_trace"] = json.loads(d["retrieval_trace"])
-        except (json.JSONDecodeError, TypeError):
-            pass
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.debug(
+                "retrieval_log.get_retrieval_logs: trace JSON parse failed for id=%s: %s",
+                d.get("id"),
+                e,
+            )
         d["cache_hit"] = bool(d.get("cache_hit"))
         rows.append(d)
     conn.close()

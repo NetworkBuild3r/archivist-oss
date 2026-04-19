@@ -16,13 +16,22 @@ _lock = threading.Lock()
 _status: dict[str, dict] = {}
 
 
-def register(name: str, healthy: bool = True, detail: str = ""):
-    """Record (or update) the health of a named subsystem."""
+def register(name: str, healthy: bool = True, detail: str = "", latency_ms: float = 0.0):
+    """Record (or update) the health of a named subsystem.
+
+    Args:
+        name: Subsystem identifier (e.g. ``"postgres"``, ``"qdrant"``).
+        healthy: ``True`` if the subsystem is operational.
+        detail: Optional human-readable context appended to the log message.
+        latency_ms: Optional initialisation / probe latency in milliseconds,
+            stored in the registry entry for use by the ``/health`` endpoint.
+    """
     with _lock:
         _status[name] = {
             "healthy": healthy,
             "detail": detail,
             "since": datetime.now(UTC).isoformat(),
+            "latency_ms": latency_ms,
         }
     level = logging.INFO if healthy else logging.ERROR
     logger.log(

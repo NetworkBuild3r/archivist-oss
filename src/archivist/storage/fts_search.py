@@ -6,8 +6,10 @@ v1.11: Non-stemmed exact table for identifier/IP token matching.
 
 import logging
 import re
+import time
 
 import archivist.core.health as health
+import archivist.core.metrics as m
 from archivist.core.config import BM25_ENABLED, BM25_WEIGHT
 from archivist.retrieval.rank_fusion import rrf_merge
 from archivist.storage.graph import search_fts, search_fts_exact
@@ -273,6 +275,7 @@ async def search_bm25(
     if not BM25_ENABLED or not health.is_healthy("fts5"):
         return []
 
+    _t0 = time.monotonic()
     rankings: list[list[dict]] = []
 
     or_hits: list[dict] = []
@@ -310,8 +313,8 @@ async def search_bm25(
                 )
                 if and_hits:
                     rankings.append(and_hits)
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.warning("BM25 AND-mode search failed: %s", _e)
 
         phrase_q = _fts5_phrase_query(query)
         if phrase_q and phrase_q != and_q:
@@ -328,8 +331,8 @@ async def search_bm25(
                 )
                 if phrase_hits:
                     rankings.append(phrase_hits)
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.warning("BM25 phrase-mode search failed: %s", _e)
 
         if _EXACT_TOKEN_RE.search(query):
             exact_q = _fts5_safe_query(query)
@@ -346,8 +349,8 @@ async def search_bm25(
                     )
                     if exact_hits:
                         rankings.append(exact_hits)
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.warning("BM25 exact search (large-index path) failed: %s", _e)
     else:
         # Always run exact-token search even on small indices (needle recall)
         if _EXACT_TOKEN_RE.search(query):
@@ -365,8 +368,8 @@ async def search_bm25(
                     )
                     if exact_hits:
                         rankings.append(exact_hits)
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.warning("BM25 exact search (small-index path) failed: %s", _e)
 
     if not rankings:
         return []
@@ -375,6 +378,8 @@ async def search_bm25(
     for r in merged:
         if "bm25_score" not in r:
             r["bm25_score"] = r.get("rrf_score", 0)
+
+    m.observe(m.FTS_SEARCH_DURATION_MS, (time.monotonic() - _t0) * 1000.0, {"backend": "bm25"})
     return merged
 
 

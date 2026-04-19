@@ -179,7 +179,20 @@ async def file_watcher():
 
 
 async def handle_health(_request):
-    return JSONResponse({"status": "ok", "service": "archivist", "version": "2.0.1"})
+    statuses = health.all_status()
+    overall = "healthy"
+    if any(not v.get("healthy", True) for v in statuses.values()):
+        overall = "degraded"
+    return JSONResponse(
+        {
+            "status": overall,
+            "service": "archivist",
+            "version": "2.0.1",
+            "subsystems": statuses,
+            "timestamp": datetime.now(UTC).isoformat(),
+        },
+        status_code=200 if overall == "healthy" else 503,
+    )
 
 
 async def handle_invalidate(_request):
@@ -489,6 +502,39 @@ async def handle_metrics(_request):
     return PlainTextResponse(render(), media_type="text/plain; version=0.0.4; charset=utf-8")
 
 
+async def handle_debug_config(_request):
+    """Runtime config snapshot — non-secret feature flags and operational settings.
+
+    Requires API key authentication (not auth-exempt). Returns a curated
+    view of active configuration for runtime inspection without exposing
+    secrets such as ``ARCHIVIST_API_KEY`` or ``DATABASE_URL``.
+    """
+    from archivist.core.config import (
+        BM25_ENABLED,
+        CURATOR_INTERVAL_MINUTES,
+        GRAPH_BACKEND,
+        METRICS_ENABLED,
+        OUTBOX_ENABLED,
+        QDRANT_COLLECTION,
+        RERANKER_ENABLED,
+        VECTOR_DIM,
+    )
+
+    return JSONResponse(
+        {
+            "graph_backend": GRAPH_BACKEND or "sqlite",
+            "metrics_enabled": METRICS_ENABLED,
+            "bm25_enabled": BM25_ENABLED,
+            "outbox_enabled": OUTBOX_ENABLED,
+            "reranker_enabled": RERANKER_ENABLED,
+            "curator_interval_minutes": CURATOR_INTERVAL_MINUTES,
+            "qdrant_collection": QDRANT_COLLECTION,
+            "vector_dim": VECTOR_DIM,
+            "timestamp": datetime.now(UTC).isoformat(),
+        }
+    )
+
+
 async def handle_dashboard(request):
     """Health dashboard JSON."""
     from archivist.app.dashboard import batch_heuristic, build_dashboard
@@ -640,6 +686,7 @@ app = Starlette(
     routes=[
         Route("/health", handle_health),
         Route("/metrics", handle_metrics),
+        Route("/debug/config", handle_debug_config),
         Route("/admin/invalidate", handle_invalidate, methods=["POST", "GET"]),
         Route("/admin/retrieval-logs", handle_retrieval_export),
         Route("/admin/dashboard", handle_dashboard),
