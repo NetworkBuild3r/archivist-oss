@@ -304,10 +304,19 @@ class AsyncpgGraphBackend:
 
     @asynccontextmanager
     async def write(self) -> AsyncIterator[AsyncpgConnection]:
-        """Acquire a connection and open a SERIALIZABLE transaction.
+        """Acquire a connection and open a READ COMMITTED transaction.
 
         Auto-commits on clean exit; rolls back on any exception and re-raises.
         No global lock is needed — Postgres MVCC provides isolation.
+
+        ``READ COMMITTED`` (the Postgres default) is used instead of
+        ``SERIALIZABLE`` because:
+        - DDL statements crash asyncpg ≥ 0.29 under SERIALIZABLE isolation with
+          ``AttributeError: 'NoneType' object has no attribute 'decode'`` (the
+          driver tries to decode a NULL OID descriptor for the DDL result).
+        - Archivist's write patterns are single-writer with no cross-transaction
+          read-modify-write races that would require SERIALIZABLE.
+        - DDL should be executed via ``execute_ddl()``, never through ``write()``.
 
         Yields:
             An ``AsyncpgConnection`` wrapper that translates ``?`` to ``$N``.
@@ -321,7 +330,7 @@ class AsyncpgGraphBackend:
         try:
             async with self._pool.acquire() as conn:
                 m.observe(m.PG_POOL_ACQUIRE_MS, (time.monotonic() - _t0) * 1000.0)
-                async with conn.transaction():
+                async with conn.transaction(isolation="read_committed"):
                     yield AsyncpgConnection(conn)
         except Exception:
             m.inc(m.PG_POOL_ERRORS_TOTAL)
@@ -389,15 +398,33 @@ class AsyncpgGraphBackend:
             return await conn.fetchall(sql, params)
 
     async def execute_ddl(self, sql: str) -> None:
-        """Execute a DDL script (CREATE TABLE, CREATE INDEX, etc.).
+        """Execute a DDL script (CREATE TABLE, CREATE INDEX, etc.) in autocommit.
 
-        Splits on ``;`` and runs each statement via a write connection.
+        DDL statements **must not** run inside a transaction.  asyncpg ≥ 0.29
+        crashes with ``AttributeError: 'NoneType' object has no attribute
+        'decode'`` when DDL is executed inside a ``SERIALIZABLE`` (or any
+        explicit) transaction because the driver attempts to decode a NULL OID
+        descriptor for the DDL result set.
+
+        This method acquires a raw connection from the pool and executes each
+        statement outside of any transaction block (autocommit), which is the
+        correct mode for PostgreSQL DDL.
 
         Args:
             sql: One or more DDL statements separated by ``;``.
         """
-        async with self.write() as conn:
-            await conn.executescript(sql)
+        if self._pool is None:
+            raise RuntimeError("AsyncpgGraphBackend is not initialized — call initialize() first")
+        statements = [s.strip() for s in sql.split(";") if s.strip()]
+        _t0 = time.monotonic()
+        try:
+            async with self._pool.acquire() as conn:
+                m.observe(m.PG_POOL_ACQUIRE_MS, (time.monotonic() - _t0) * 1000.0)
+                for stmt in statements:
+                    await conn.execute(stmt)
+        except Exception:
+            m.inc(m.PG_POOL_ERRORS_TOTAL)
+            raise
 
 
 # ---------------------------------------------------------------------------
