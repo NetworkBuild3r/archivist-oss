@@ -13,6 +13,11 @@ aiosqlite>=0.20.0
 # Pydantic Settings v2 (config system — replaces raw os.getenv pattern)
 pydantic-settings>=2.7.0
 
+# ── Optional extras ───────────────────────────────────────────────────────────
+# PostgreSQL backend (GRAPH_BACKEND=postgres) — not installed by default.
+# Install manually or use: pip install -e ".[postgres]"
+# asyncpg>=0.29.0,<1.0
+
 # Dev / test dependencies — see requirements-test.txt (used by CI)
 # pytest-benchmark>=5.1.0
 

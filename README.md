@@ -28,7 +28,7 @@ Hybrid retrieval, knowledge graph, RBAC, active curation — one MCP endpoint.</
 git clone https://github.com/NetworkBuild3r/archivist-oss.git
 cd archivist-oss && cp .env.example .env   # set LLM + embed (see docs/DOCKER.md for xAI + host vLLM)
 docker compose up -d --build               # Archivist :3100 + Qdrant :6333
-curl http://localhost:3100/health          # {"status":"ok"}
+curl http://localhost:3100/health          # {"status":"healthy","service":"archivist","version":"2.1.0",...}
 ```
 
 Full Docker options (host vLLM, persistent volumes, overrides): [`docs/DOCKER.md`](docs/DOCKER.md).
@@ -54,6 +54,12 @@ Point any MCP client at `http://localhost:3100/mcp` — done. Your agents now ha
 ## What's new in v2.1
 
 **Phase 3 + 3.5 storage** — Transactional outbox (`outbox` table), `MemoryTransaction`, `OutboxProcessor`, and `conn=` pass-through on graph helpers so FTS, needle, entities/facts, and queued Qdrant operations do not leave cross-store orphans on the primary write, indexer, merge, and delete paths when the outbox is enabled. Reference: [`docs/rearchitect_storage_phase3.md`](docs/rearchitect_storage_phase3.md), [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). **QA** — [`tests/qa/`](tests/qa/) for atomicity and chaos-style fault injection; guide: [`docs/QA.md`](docs/QA.md).
+
+**PostgreSQL backend** — Set `GRAPH_BACKEND=postgres` and `DATABASE_URL` to replace SQLite graph/FTS storage with PostgreSQL 14+. FTS uses native `tsvector`/`tsquery` (replaces FTS5) with identical retrieval results. Schema initialises automatically on first boot via `schema_postgres.sql`. Install `asyncpg` with `pip install asyncpg` or rebuild the image with `--build-arg EXTRAS=postgres`. A one-command Postgres compose stack is available at [`docker-compose.postgres.yml`](docker-compose.postgres.yml). See [`docs/MIGRATION.md`](docs/MIGRATION.md) for the upgrade path.
+
+**Pydantic Settings v2** — All configuration is now validated by a frozen `ArchivistSettings` model (`core/config.py`) with field-level validators and a model validator enforcing constraint combinations. The UPPER_CASE module-level re-exports (`LLM_URL`, `GRAPH_BACKEND`, etc.) are preserved as a compatibility layer — no changes needed in existing deployments or integrations.
+
+**Production-grade observability** — The `/health` endpoint now returns a structured subsystem status map and HTTP 503 when any subsystem is degraded (vs the previous static `{"status":"ok"}`). A new auth-required `/debug/config` endpoint exposes non-secret feature-flag and operational configuration at runtime. 12 new Prometheus metric families cover the Postgres connection pool, FTS pipeline (by backend), curator cycle phases, and per-subsystem health (`archivist_subsystem_healthy`). All previously-silent exception swallows in the write, retrieval, and dashboard paths are now logged.
 
 ## What's New in v2.0
 

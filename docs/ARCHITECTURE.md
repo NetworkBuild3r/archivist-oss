@@ -7,7 +7,8 @@ Archivist is a memory service for multi-agent fleets. It combines:
 | Layer | Technology | Role |
 |-------|------------|------|
 | **Vectors** | Qdrant | Semantic search over hierarchical chunks |
-| **Structured state** | SQLite (aiosqlite pool) | Knowledge graph, FTS5 BM25, needle registry, audit, trajectories, skills, outbox |
+| **Structured state (default)** | SQLite (aiosqlite pool) | Knowledge graph, FTS5 BM25, needle registry, audit, trajectories, skills, outbox |
+| **Structured state (optional)** | PostgreSQL 14+ via `asyncpg` | Drop-in replacement for SQLite graph/FTS when `GRAPH_BACKEND=postgres`; tsvector/tsquery replaces FTS5 |
 | **Durability boundary** | Transactional outbox + `MemoryTransaction` | Atomic commit of SQLite artefacts with queued Qdrant work (Phase 3 + 3.5) |
 | **Source of truth (optional)** | File system | Markdown under `MEMORY_ROOT` for ingestion |
 
@@ -105,12 +106,12 @@ Code lives under `src/archivist/`.
 | Area | Modules |
 |------|---------|
 | **App** | `app/main.py`, `app/mcp_server.py`, `app/handlers/*.py` — MCP tools, REST, startup |
-| **Storage** | `storage/graph.py`, `storage/sqlite_pool.py`, `storage/fts_search.py`, `storage/transaction.py`, `storage/outbox.py`, `storage/backends.py`, `storage/collection_router.py` |
+| **Storage** | `storage/graph.py`, `storage/sqlite_pool.py`, `storage/fts_search.py`, `storage/transaction.py`, `storage/outbox.py`, `storage/backends.py` (protocols), `storage/backend_factory.py` (backend dispatch), `storage/asyncpg_backend.py` (Postgres impl), `storage/collection_router.py` |
 | **Retrieval** | `retrieval/rlm_retriever.py`, `retrieval/graph_retrieval.py`, `retrieval/reranker.py` |
 | **Write** | `write/indexer.py`, `write/chunking.py` |
 | **Lifecycle** | `lifecycle/memory_lifecycle.py`, `lifecycle/merge.py`, `lifecycle/cascade.py`, `lifecycle/curator_queue.py` |
 | **Features** | `features/embeddings.py`, `features/llm.py`, … |
-| **Core** | `core/config.py`, `core/rbac.py`, `core/audit.py`, `core/metrics.py`, … |
+| **Core** | `core/config.py` (`ArchivistSettings`), `core/rbac.py`, `core/audit.py`, `core/metrics.py`, `core/health.py` |
 
 ---
 
@@ -150,11 +151,124 @@ Full table inventory: see the Archivist storage-schema skill (`.cursor/skills/ar
 
 ---
 
+## PostgreSQL backend (v2.1)
+
+Archivist supports a pluggable graph/FTS storage layer. By default it uses SQLite; PostgreSQL 14+ is available as a drop-in replacement for all graph, FTS, and structured-state operations.
+
+### Activation
+
+Set two environment variables:
+
+```bash
+GRAPH_BACKEND=postgres
+DATABASE_URL=postgresql://user:password@host:5432/dbname
+```
+
+No other changes are needed. The MCP tool signatures, retrieval pipeline, and write paths are identical for both backends.
+
+### Schema initialisation
+
+`AsyncpgGraphBackend.initialize()` auto-runs `src/archivist/storage/schema_postgres.sql` on first connection. The schema creates all tables, FTS indexes (`tsvector` columns, GIN indexes), partial indexes, and the `fts_vector_simple` column used by the simple-dictionary search path. This is idempotent — re-running on an existing database is safe.
+
+### SQL compatibility layer
+
+All SQL in the codebase uses SQLite `?` placeholders. `AsyncpgConnection._translate_sql()` converts `?` → `$1, $2, …` at call time, so no SQL strings need to change when switching backends.
+
+### FTS implementation
+
+| Backend | Full-text search | Exact search |
+|---------|-----------------|--------------|
+| SQLite | FTS5 virtual tables, BM25 ranking | `LIKE`-based exact match |
+| PostgreSQL | `tsvector`/`tsquery`, `ts_rank_cd` | `to_tsvector('simple', …) @@ …` |
+
+Both backends produce results in the same format; the retrieval pipeline is unaware of which backend is active.
+
+### Connection pool
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PG_POOL_MIN` | `5` | Minimum pool size |
+| `PG_POOL_MAX` | `20` | Maximum pool size |
+
+Pool metrics are exposed on `GET /metrics`: `archivist_pg_pool_acquire_ms`, `archivist_pg_pool_query_ms`, `archivist_pg_pool_errors_total`, `archivist_pg_pool_size`.
+
+### Health registration
+
+On successful `initialize()`, the `"postgres"` subsystem is registered in `archivist.core.health` as healthy with its initialisation latency. `GET /health` will include it in the `subsystems` map. On `close()`, it is marked unhealthy.
+
+---
+
+## Observability (v2.1)
+
+### `/health` endpoint
+
+`GET /health` returns a structured JSON document aggregating the live status of all registered subsystems:
+
+```json
+{
+  "status": "healthy",
+  "service": "archivist",
+  "version": "2.1.0",
+  "timestamp": "2026-04-18T20:00:00+00:00",
+  "subsystems": {
+    "postgres": { "healthy": true, "detail": "", "since": "…", "latency_ms": 42.3 },
+    "qdrant":   { "healthy": true, "detail": "", "since": "…", "latency_ms": 0.0 }
+  }
+}
+```
+
+- **HTTP 200** — all subsystems healthy (or none registered).
+- **HTTP 503** — one or more subsystems unhealthy. The container is alive and serving; 503 is a *degraded* state, not a crash. Kubernetes liveness probes should tolerate 503 (set `failureThreshold ≥ 3`).
+
+`GET /health` is always auth-exempt.
+
+### `/debug/config` endpoint
+
+`GET /debug/config` (auth required) returns a read-only snapshot of non-secret configuration and feature-flag states:
+
+```json
+{
+  "graph_backend": "postgres",
+  "metrics_enabled": true,
+  "bm25_enabled": true,
+  "outbox_enabled": false,
+  "reranker_enabled": false,
+  "curator_interval_minutes": 30,
+  "qdrant_collection": "archivist_memories",
+  "vector_dim": 1024,
+  "timestamp": "…"
+}
+```
+
+### Prometheus metrics (`GET /metrics`)
+
+All metric names use the `archivist_` prefix. New in v2.1:
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `archivist_pg_pool_acquire_ms` | histogram | — | Pool connection acquire latency |
+| `archivist_pg_pool_query_ms` | histogram | — | Per-query execution latency |
+| `archivist_pg_pool_errors_total` | counter | — | Pool + query errors |
+| `archivist_pg_pool_size` | gauge | — | Current pool size |
+| `archivist_fts_search_duration_ms` | histogram | `backend` | FTS search duration (`sqlite`, `postgres`, `bm25`) |
+| `archivist_fts_search_total` | counter | `backend` | FTS search call count |
+| `archivist_fts_upsert_total` | counter | `backend` | FTS upsert call count |
+| `archivist_fts_upsert_errors_total` | counter | `backend` | FTS upsert failures |
+| `archivist_index_duration_ms` | histogram | — | Full write-pipeline indexing duration |
+| `archivist_curator_extract_duration_ms` | histogram | — | Curator extract phase duration |
+| `archivist_curator_decay_duration_ms` | histogram | — | Curator decay phase duration |
+| `archivist_subsystem_healthy` | gauge | `subsystem` | 1.0 = healthy, 0.0 = unhealthy per subsystem |
+
+Set `METRICS_AUTH_EXEMPT=true` to allow Prometheus to scrape `/metrics` without an API key.
+
+---
+
 ## Further reading
 
 | Document | Content |
 |----------|---------|
 | [`rearchitect_storage_phase3.md`](rearchitect_storage_phase3.md) | Outbox design, failure modes, config, tests |
+| [`MIGRATION.md`](MIGRATION.md) | v2.1 upgrade guide, SQLite→Postgres migration, `/health` 503 behaviour change |
 | [`QA.md`](QA.md) | Test commands including `tests/qa/` |
 | [`ROADMAP.md`](ROADMAP.md) | Product direction |
 

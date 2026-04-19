@@ -1,0 +1,66 @@
+# Archivist — PostgreSQL backend overlay (v2.1)
+#
+# Adds a managed postgres:16-alpine service and reconfigures the archivist
+# service to use GRAPH_BACKEND=postgres.  The base docker-compose.yml is
+# required; this file is an overlay on top of it.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d --build
+#
+# The Postgres data directory is persisted in the named volume "pg-data".
+# To start completely fresh: docker compose ... down -v
+#
+# Credentials (development defaults — change for production):
+#   user:     archivist
+#   password: archivist
+#   database: archivist
+#   dsn:      postgresql://archivist:archivist@postgres:5432/archivist
+#
+# To override credentials, set these in your .env before running:
+#   PG_USER=myuser
+#   PG_PASSWORD=secret
+#   PG_DB=archivist_prod
+# Then reference them as ${PG_USER:-archivist} etc. below if you fork this file.
+
+name: archivist
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${PG_USER:-archivist}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-archivist}
+      POSTGRES_DB: ${PG_DB:-archivist}
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-archivist}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    networks:
+      - archivist-net
+    restart: unless-stopped
+
+  archivist:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # Installs asyncpg into the image for Postgres backend support.
+        EXTRAS: postgres
+    environment:
+      GRAPH_BACKEND: postgres
+      DATABASE_URL: postgresql://${PG_USER:-archivist}:${PG_PASSWORD:-archivist}@postgres:5432/${PG_DB:-archivist}
+      PG_POOL_MIN: ${PG_POOL_MIN:-5}
+      PG_POOL_MAX: ${PG_POOL_MAX:-20}
+      # SQLite is still used for Qdrant outbox + backup manifest storage even
+      # when GRAPH_BACKEND=postgres; this path must remain set.
+      SQLITE_PATH: /data/archivist/graph.db
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pg-data:

@@ -1,3 +1,48 @@
+[build-system]
+requires = ["setuptools>=70", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "archivist-oss"
+version = "2.1.0"
+description = "Production-ready transactional memory for multi-agent fleets"
+requires-python = ">=3.12"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+keywords = ["memory", "agents", "rag", "mcp", "vector-search", "knowledge-graph"]
+dependencies = [
+    "mcp[http]>=1.9.0,<2.0.0",
+    "qdrant-client>=1.13.0,<2.0.0",
+    "httpx>=0.28.0",
+    "watchfiles>=1.0.0",
+    "pyyaml>=6.0",
+    "tqdm>=4.66.0",
+    "uvicorn>=0.30.0",
+    "starlette>=0.38.0",
+    "aiosqlite>=0.20.0",
+    "pydantic-settings>=2.7.0",
+]
+
+[project.optional-dependencies]
+# PostgreSQL graph/FTS backend (GRAPH_BACKEND=postgres).
+# Install: pip install "archivist-oss[postgres]"
+# Docker:  docker build --build-arg EXTRAS=postgres .
+postgres = ["asyncpg>=0.29.0,<1.0"]
+# Cross-encoder reranking (RERANKER_ENABLED=true). See requirements-rerank.txt.
+rerank = [
+    "sentence-transformers>=3.0.0",
+]
+# Development and CI extras.
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-timeout>=2.3.0",
+    "mypy>=1.9.0",
+    "ruff>=0.4.0",
+    "types-PyYAML",
+    "types-tqdm",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]

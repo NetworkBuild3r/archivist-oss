@@ -212,6 +212,68 @@ jobs:
           path: test-results-integration.xml
           retention-days: 14
 
+# ─── Integration Tests (PostgreSQL backend) ───────────────────────────────────
+  integration-postgres:
+    name: Integration Tests (Postgres backend)
+    runs-on: ubuntu-24.04
+    if: |
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request' &&
+        (github.base_ref == 'main' || github.base_ref == 'master'))
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: archivist
+          POSTGRES_PASSWORD: archivist
+          POSTGRES_DB: archivist
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+        ports:
+          - 5432:5432
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies (with asyncpg)
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-test.txt asyncpg pytest-timeout
+
+      - name: Run integration + system tests (Postgres backend)
+        # Runs the same integration/system suite as the SQLite job but with
+        # GRAPH_BACKEND=postgres, ensuring parity between both backends.
+        run: |
+          python -m pytest \
+            tests/integration/ tests/system/ \
+            -m "integration or system" \
+            --tb=short \
+            --timeout=120 \
+            --junitxml=test-results-integration-postgres.xml \
+            -q
+        env:
+          SQLITE_PATH: "/tmp/archivist-test-pg.db"
+          GRAPH_BACKEND: postgres
+          DATABASE_URL: postgresql://archivist:archivist@localhost:5432/archivist
+          QDRANT_URL: ""
+
+      - name: Upload integration-postgres test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-integration-postgres
+          path: test-results-integration-postgres.xml
+          retention-days: 14
+
 # ─── Chaos Tests ─────────────────────────────────────────────────────────────
   chaos:
     name: Chaos & Fault-Injection Tests

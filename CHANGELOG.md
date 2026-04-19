@@ -5,25 +5,46 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
-## [2.1.0] - 2026-04-17
+## [2.1.0] - 2026-04-18
 
 ### Added
 
+- **Pluggable `GraphBackend` + PostgreSQL backend (Phase 4)** — `AsyncpgGraphBackend` implements the `GraphBackend` protocol using `asyncpg`. Activated with `GRAPH_BACKEND=postgres` + `DATABASE_URL`. Schema auto-initialises from `schema_postgres.sql` on first boot (idempotent). `AsyncpgConnection._translate_sql()` converts SQLite `?` placeholders to `$N` at runtime so no SQL strings required changes.
+- **PostgreSQL FTS parity** — `tsvector`/`tsquery` with `ts_rank_cd` scoring replaces SQLite FTS5 when `GRAPH_BACKEND=postgres`. All four search paths (`_search_fts_postgres`, `_search_fts_exact_postgres`) produce results in the same format as their SQLite equivalents.
+- **`backend_factory.py`** — `create_graph_backend()` dispatches to `AsyncpgGraphBackend` or `SQLiteGraphBackend` based on `GRAPH_BACKEND` config; `PG_POOL_MIN` / `PG_POOL_MAX` control pool sizing (defaults: 5 / 20).
+- **Pydantic Settings v2** — `ArchivistSettings` frozen `BaseSettings` model replaces the 438-line `os.getenv` config system. Field validators enforce `EMBED_URL`/`EMBED_API_KEY` fallback, CSV webhook event parsing, and a model validator enforcing `chunk_overlap < chunk_size` and related constraints. `_build_settings()` helper for test-time fresh instance construction. All 130+ UPPER_CASE module-level re-exports preserved as a Phase A backward-compatibility layer.
+- **Production-grade observability**:
+  - 12 new Prometheus metric constants in `core/metrics.py`: `archivist_pg_pool_acquire_ms`, `archivist_pg_pool_query_ms`, `archivist_pg_pool_errors_total`, `archivist_pg_pool_size`, `archivist_fts_search_duration_ms`, `archivist_fts_search_total`, `archivist_fts_upsert_total`, `archivist_fts_upsert_errors_total`, `archivist_index_duration_ms`, `archivist_curator_extract_duration_ms`, `archivist_curator_decay_duration_ms`, `archivist_subsystem_healthy`.
+  - `collect_storage_gauges_tick` emits `SUBSYSTEM_HEALTHY` gauge per registered subsystem and `PG_POOL_SIZE` when Postgres is active.
+  - `asyncpg_backend.py` fully instrumented: pool-acquire and per-query latency histograms, error counter increments, `health.register("postgres", latency_ms=...)` on `initialize()` / `close()`.
+  - `GET /health` enriched: returns `{"status": "healthy"|"degraded", "service", "version", "subsystems": {...}, "timestamp"}` with HTTP 503 when any subsystem is unhealthy.
+  - `GET /debug/config` (auth-required) — runtime snapshot of non-secret config and feature flags.
+  - FTS instrumented in `graph.py` (`_search_fts_*`, `upsert_fts_chunk`) and `fts_search.py` (`search_bm25`) with duration histograms and call counters labeled by backend.
+  - Structured logging: replaced silent `except: pass` blocks in `dashboard.py` (5 sites), `hotness.py` (3 sites), `retrieval_log.py` (1 site), `graph.py` FTS shadow-row ops (4 sites).
+- **`health.register()` gains optional `latency_ms: float = 0.0` kwarg** — stored in the status dict; surfaced in `/health` response and Prometheus gauge. Fully backward-compatible.
+- **`postgres` packaging extra** — `pip install "archivist-oss[postgres]"` (or `pip install asyncpg`) installs `asyncpg>=0.29.0`. `pyproject.toml` now has a complete `[project]` table and `[project.optional-dependencies]`.
+- **`docker-compose.postgres.yml`** — Compose overlay adding a `postgres:16-alpine` service and configuring the `archivist` service for `GRAPH_BACKEND=postgres`. Usage: `docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d --build`.
+- **`docs/MIGRATION.md`** — v2.1 upgrade guide covering SQLite drop-in upgrade, new Postgres deployment, SQLite→Postgres data migration options, and `/health` 503 behaviour change.
+- **`docs/RELEASE_NOTES_v2.1.md`** — Formal v2.1 release notes.
 - **Transactional outbox** — SQLite `outbox` table plus background `OutboxProcessor` to apply Qdrant operations idempotently after an atomic local commit. Config: `OUTBOX_ENABLED`, `OUTBOX_DRAIN_INTERVAL`, `OUTBOX_BATCH_SIZE`, `OUTBOX_MAX_RETRIES`, `OUTBOX_RETENTION_DAYS` (see `.env.example`).
 - **`MemoryTransaction`** — `async with MemoryTransaction()` wraps one `pool.write()` transaction; `enqueue_qdrant_*` methods flush outbox rows in the same commit as SQLite artefacts.
-- **`VectorBackend` / `QdrantVectorBackend`** — Thin protocols in `src/archivist/storage/backends.py` for testability and a future non-Qdrant vector store.
+- **`VectorBackend` / `QdrantVectorBackend`** — Thin protocols in `storage/backends.py` for testability and a future non-Qdrant vector store.
 - **Connection-passing shims** — `upsert_fts_chunk`, `register_needle_tokens`, `upsert_entity`, and `add_fact` accept optional `conn=` so graph writes join an open transaction without re-entering the async write lock (deadlock-safe).
 - **`tests/test_outbox.py`** — Unit, integration, and chaos coverage for the outbox and transaction path.
 - **`tests/qa/`** — Dedicated QA package: `test_storage_transactional.py` (atomicity) and `test_chaos_fault_injection.py` (fault injection). Documented in [`tests/qa/README.md`](tests/qa/README.md) and [`docs/QA.md`](docs/QA.md).
+- **`tests/unit/core/test_metrics.py`** and **`tests/unit/app/test_health_endpoint.py`** — 20 new unit tests for observability changes.
 - **[`docs/rearchitect_storage_phase3.md`](docs/rearchitect_storage_phase3.md)** — Reference architecture for Phase 3 + 3.5 storage work.
 
 ### Changed
 
-- **Write paths** — `archivist_store` (`tools_storage._handle_store`), `index_file`, `merge_memories`, and `delete_memory_complete` (when `OUTBOX_ENABLED=true`) commit FTS5, needle registry, `memory_points`, entity/facts (where applicable), and outbox events in a single transaction where documented.
+- **`GET /health`** — now returns structured JSON with `status`, `service`, `version`, `subsystems`, `timestamp`; HTTP 503 when any subsystem is unhealthy (was always `{"status": "ok"}` with HTTP 200).
+- **`__version__`** — bumped to `2.1.0`.
+- **Write paths** — `archivist_store`, `index_file`, `merge_memories`, and `delete_memory_complete` (when `OUTBOX_ENABLED=true`) commit FTS5, needle registry, `memory_points`, entity/facts, and outbox events in a single transaction.
 - **BM25** — `search_bm25` is `async def` and correctly awaits async FTS helpers; `rlm_retriever` updated accordingly.
 - **`archivist_delete`** — `_rbac_gate` now receives the `action` argument (write path).
+- **`Dockerfile`** — added `EXTRAS` build arg for optional `asyncpg` install; HEALTHCHECK updated to accept HTTP 503 as a valid "alive" state; `start_period` extended to 30s.
 
-### Fixed
+### Fixed (included from post-2.0.1 patches)
 
 - **Cross-store orphan classes** — Eliminates the prior window where Qdrant could succeed while SQLite artefacts failed (or vice versa) on primary store, indexer, merge, and delete paths when the outbox path is enabled.
 
