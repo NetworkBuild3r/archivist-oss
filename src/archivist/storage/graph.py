@@ -7,6 +7,7 @@ import os
 import re
 import sqlite3
 import threading
+import time
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -14,8 +15,11 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import aiosqlite
 
+import archivist.core.metrics as m
 from archivist.core.config import SQLITE_PATH
 from archivist.utils.chunking import NEEDLE_PATTERNS
+
+logger = logging.getLogger("archivist.graph")
 
 # ---------------------------------------------------------------------------
 # Backward-compatibility shim: keep the old threading.Lock name so any
@@ -554,6 +558,7 @@ async def upsert_fts_chunk(
             actor_id=actor_id,
             actor_type=actor_type,
         )
+        m.inc(m.FTS_UPSERT_TOTAL, {"backend": "postgres"})
         return
 
     await _upsert_fts_chunk_sqlite(
@@ -569,6 +574,7 @@ async def upsert_fts_chunk(
         actor_type=actor_type,
         conn=conn,
     )
+    m.inc(m.FTS_UPSERT_TOTAL, {"backend": "sqlite"})
 
 
 async def _upsert_fts_chunk_postgres(
@@ -617,6 +623,7 @@ async def _upsert_fts_chunk_postgres(
                 ),
             )
     except Exception as e:
+        m.inc(m.FTS_UPSERT_ERRORS_TOTAL, {"backend": "postgres"})
         logging.getLogger("archivist.graph").warning(
             "Postgres FTS upsert failed for %s: %s", qdrant_id, e
         )
@@ -656,8 +663,10 @@ async def _upsert_fts_chunk_sqlite(
                     "INSERT INTO memory_fts_exact(memory_fts_exact, rowid, text) VALUES('delete', ?, ?)",
                     (old["rowid"], old["text"]),
                 )
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug(
+                    "FTS shadow-row delete (exact) failed for rowid %s: %s", old["rowid"], _e
+                )
             await c.execute("DELETE FROM memory_chunks WHERE qdrant_id = ?", (qdrant_id,))
 
         await c.execute(
@@ -689,8 +698,8 @@ async def _upsert_fts_chunk_sqlite(
                 "INSERT INTO memory_fts_exact (rowid, text) VALUES (?, ?)",
                 (rowid, text),
             )
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug("FTS shadow-row insert (exact) failed for rowid %s: %s", rowid, _e)
 
     try:
         if conn is not None:
@@ -723,16 +732,18 @@ async def _delete_fts_rows_async(conn, rows):
                 "(SELECT text FROM memory_chunks WHERE rowid = ?))",
                 (row["rowid"], row["rowid"]),
             )
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug(
+                "FTS shadow-row delete (stemmed) failed for rowid %s: %s", row["rowid"], _e
+            )
         try:
             await conn.execute(
                 "INSERT INTO memory_fts_exact (memory_fts_exact, rowid, text) VALUES ('delete', ?, "
                 "(SELECT text FROM memory_chunks WHERE rowid = ?))",
                 (row["rowid"], row["rowid"]),
             )
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug("FTS shadow-row delete (exact) failed for rowid %s: %s", row["rowid"], _e)
 
 
 async def delete_fts_chunks_by_file(file_path: str):
@@ -830,6 +841,7 @@ async def _search_fts_sqlite(
     """SQLite FTS5 BM25 search implementation (stemmed / ``memory_fts``)."""
     from archivist.storage.sqlite_pool import pool
 
+    _t0 = time.monotonic()
     try:
         async with pool.read() as conn:
             where_clauses = ["mc.is_excluded = 0"]
@@ -869,7 +881,11 @@ async def _search_fts_sqlite(
                 r = dict(row)
                 r["bm25_score"] = -r.pop("bm25_rank", 0)
                 results.append(r)
-            return results
+        m.observe(
+            m.FTS_SEARCH_DURATION_MS, (time.monotonic() - _t0) * 1000.0, {"backend": "sqlite"}
+        )
+        m.inc(m.FTS_SEARCH_TOTAL, {"backend": "sqlite"})
+        return results
     except Exception as e:
         logging.getLogger("archivist.graph").warning("FTS search failed: %s", e)
         return []
@@ -898,6 +914,7 @@ async def _search_fts_postgres(
     if not tsquery_expr:
         return []
 
+    _t0 = time.monotonic()
     try:
         async with pool.read() as conn:
             where_clauses = ["mc.is_excluded = 0"]
@@ -939,7 +956,11 @@ async def _search_fts_postgres(
                 r = dict(row)
                 r["bm25_score"] = r.pop("bm25_rank", 0)
                 results.append(r)
-            return results
+        m.observe(
+            m.FTS_SEARCH_DURATION_MS, (time.monotonic() - _t0) * 1000.0, {"backend": "postgres"}
+        )
+        m.inc(m.FTS_SEARCH_TOTAL, {"backend": "postgres"})
+        return results
     except Exception as e:
         logging.getLogger("archivist.graph").warning("FTS Postgres search failed: %s", e)
         return []
@@ -1004,6 +1025,7 @@ async def _search_fts_exact_sqlite(
     """SQLite FTS5 exact (non-stemmed) BM25 search via ``memory_fts_exact``."""
     from archivist.storage.sqlite_pool import pool
 
+    _t0 = time.monotonic()
     try:
         async with pool.read() as conn:
             where_clauses = ["mc.is_excluded = 0"]
@@ -1043,7 +1065,11 @@ async def _search_fts_exact_sqlite(
                 r = dict(row)
                 r["bm25_score"] = -r.pop("bm25_rank", 0)
                 results.append(r)
-            return results
+        m.observe(
+            m.FTS_SEARCH_DURATION_MS, (time.monotonic() - _t0) * 1000.0, {"backend": "sqlite"}
+        )
+        m.inc(m.FTS_SEARCH_TOTAL, {"backend": "sqlite"})
+        return results
     except Exception as e:
         logging.getLogger("archivist.graph").warning("FTS exact search failed: %s", e)
         return []
@@ -1069,6 +1095,7 @@ async def _search_fts_exact_postgres(
     if not tsquery_expr:
         return []
 
+    _t0 = time.monotonic()
     try:
         async with pool.read() as conn:
             where_clauses = ["mc.is_excluded = 0"]
@@ -1107,7 +1134,11 @@ async def _search_fts_exact_postgres(
                 r = dict(row)
                 r["bm25_score"] = r.pop("bm25_rank", 0)
                 results.append(r)
-            return results
+        m.observe(
+            m.FTS_SEARCH_DURATION_MS, (time.monotonic() - _t0) * 1000.0, {"backend": "postgres"}
+        )
+        m.inc(m.FTS_SEARCH_TOTAL, {"backend": "postgres"})
+        return results
     except Exception as e:
         logging.getLogger("archivist.graph").warning("FTS exact Postgres search failed: %s", e)
         return []

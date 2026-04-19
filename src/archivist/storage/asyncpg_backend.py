@@ -34,9 +34,12 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
+
+import archivist.core.metrics as m
 
 if TYPE_CHECKING:
     import asyncpg as asyncpg_module
@@ -113,7 +116,14 @@ class AsyncpgConnection:
             The asyncpg command status string (e.g. ``"INSERT 0 1"``).
         """
         translated = _translate_sql(sql)
-        return await self._conn.execute(translated, *params)
+        _t0 = time.monotonic()
+        try:
+            result = await self._conn.execute(translated, *params)
+        except Exception:
+            m.inc(m.PG_POOL_ERRORS_TOTAL)
+            raise
+        m.observe(m.PG_POOL_QUERY_MS, (time.monotonic() - _t0) * 1000.0)
+        return result
 
     async def executemany(self, sql: str, params: list[tuple[Any, ...]] | list[list[Any]]) -> None:
         """Execute *sql* once per row in *params*.
@@ -123,7 +133,13 @@ class AsyncpgConnection:
             params: Sequence of parameter rows.
         """
         translated = _translate_sql(sql)
-        await self._conn.executemany(translated, params)
+        _t0 = time.monotonic()
+        try:
+            await self._conn.executemany(translated, params)
+        except Exception:
+            m.inc(m.PG_POOL_ERRORS_TOTAL)
+            raise
+        m.observe(m.PG_POOL_QUERY_MS, (time.monotonic() - _t0) * 1000.0)
 
     async def fetchall(self, sql: str, params: tuple[Any, ...] | list[Any] = ()) -> list[Any]:
         """Execute *sql* and return all rows as a list of ``asyncpg.Record`` objects.
@@ -136,7 +152,14 @@ class AsyncpgConnection:
             List of ``asyncpg.Record`` objects (empty list if no rows).
         """
         translated = _translate_sql(sql)
-        return await self._conn.fetch(translated, *params)
+        _t0 = time.monotonic()
+        try:
+            result = await self._conn.fetch(translated, *params)
+        except Exception:
+            m.inc(m.PG_POOL_ERRORS_TOTAL)
+            raise
+        m.observe(m.PG_POOL_QUERY_MS, (time.monotonic() - _t0) * 1000.0)
+        return result
 
     async def fetchone(self, sql: str, params: tuple[Any, ...] | list[Any] = ()) -> Any | None:
         """Execute *sql* and return the first row, or ``None``.
@@ -149,7 +172,14 @@ class AsyncpgConnection:
             First ``asyncpg.Record``, or ``None`` if no rows match.
         """
         translated = _translate_sql(sql)
-        return await self._conn.fetchrow(translated, *params)
+        _t0 = time.monotonic()
+        try:
+            result = await self._conn.fetchrow(translated, *params)
+        except Exception:
+            m.inc(m.PG_POOL_ERRORS_TOTAL)
+            raise
+        m.observe(m.PG_POOL_QUERY_MS, (time.monotonic() - _t0) * 1000.0)
+        return result
 
     async def executescript(self, script: str) -> None:
         """Execute a multi-statement SQL script (DDL).
@@ -233,15 +263,29 @@ class AsyncpgGraphBackend:
                 "Install it with: pip install asyncpg"
             ) from exc
 
-        self._pool = await asyncpg.create_pool(
-            dsn,
-            min_size=min_size,
-            max_size=max_size,
-        )
+        _t0 = time.monotonic()
+        try:
+            self._pool = await asyncpg.create_pool(
+                dsn,
+                min_size=min_size,
+                max_size=max_size,
+            )
+        except Exception:
+            m.inc(m.PG_POOL_ERRORS_TOTAL)
+            import archivist.core.health as health
+
+            health.register("postgres", healthy=False)
+            raise
+
+        _elapsed_ms = (time.monotonic() - _t0) * 1000.0
+        import archivist.core.health as health
+
+        health.register("postgres", healthy=True, latency_ms=_elapsed_ms)
         logger.info(
-            "AsyncpgGraphBackend pool initialized (min=%d max=%d): %s",
+            "AsyncpgGraphBackend pool initialized (min=%d max=%d init_ms=%.1f): %s",
             min_size,
             max_size,
+            _elapsed_ms,
             _redact_dsn(dsn),
         )
 
@@ -253,6 +297,9 @@ class AsyncpgGraphBackend:
         if self._pool is not None:
             await self._pool.close()
             self._pool = None
+            import archivist.core.health as health
+
+            health.register("postgres", healthy=False)
             logger.info("AsyncpgGraphBackend pool closed")
 
     @asynccontextmanager
@@ -270,9 +317,15 @@ class AsyncpgGraphBackend:
         """
         if self._pool is None:
             raise RuntimeError("AsyncpgGraphBackend is not initialized — call initialize() first")
-        async with self._pool.acquire() as conn:
-            async with conn.transaction():
-                yield AsyncpgConnection(conn)
+        _t0 = time.monotonic()
+        try:
+            async with self._pool.acquire() as conn:
+                m.observe(m.PG_POOL_ACQUIRE_MS, (time.monotonic() - _t0) * 1000.0)
+                async with conn.transaction():
+                    yield AsyncpgConnection(conn)
+        except Exception:
+            m.inc(m.PG_POOL_ERRORS_TOTAL)
+            raise
 
     @asynccontextmanager
     async def read(self) -> AsyncIterator[AsyncpgConnection]:
@@ -286,8 +339,14 @@ class AsyncpgGraphBackend:
         """
         if self._pool is None:
             raise RuntimeError("AsyncpgGraphBackend is not initialized — call initialize() first")
-        async with self._pool.acquire() as conn:
-            yield AsyncpgConnection(conn)
+        _t0 = time.monotonic()
+        try:
+            async with self._pool.acquire() as conn:
+                m.observe(m.PG_POOL_ACQUIRE_MS, (time.monotonic() - _t0) * 1000.0)
+                yield AsyncpgConnection(conn)
+        except Exception:
+            m.inc(m.PG_POOL_ERRORS_TOTAL)
+            raise
 
     # ------------------------------------------------------------------
     # GraphBackend Protocol convenience methods

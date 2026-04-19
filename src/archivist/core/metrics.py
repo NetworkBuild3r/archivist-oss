@@ -260,6 +260,34 @@ def collect_storage_gauges_tick() -> None:
     except Exception as e:
         logger.debug("metrics outbox gauges: %s", e)
 
+    # Subsystem health: emit SUBSYSTEM_HEALTHY gauge for every registered subsystem.
+    try:
+        import archivist.core.health as _health
+
+        for _name, _entry in _health.all_status().items():
+            gauge_set(
+                SUBSYSTEM_HEALTHY, 1.0 if _entry.get("healthy") else 0.0, {"subsystem": _name}
+            )
+    except Exception as e:
+        logger.debug("metrics subsystem health gauges: %s", e)
+
+    # Postgres pool size — only when GRAPH_BACKEND=postgres.
+    try:
+        from archivist.core.config import GRAPH_BACKEND
+
+        if (GRAPH_BACKEND or "sqlite").lower() == "postgres":
+            from archivist.storage import sqlite_pool as _pool_mod
+
+            _backend = _pool_mod.pool
+            _pg_pool = getattr(_backend, "_pool", None)
+            if _pg_pool is not None:
+                try:
+                    gauge_set(PG_POOL_SIZE, float(_pg_pool.get_size()))
+                except Exception:
+                    pass
+    except Exception as e:
+        logger.debug("metrics pg pool size: %s", e)
+
 
 async def run_storage_gauges_loop(interval_seconds: float) -> None:
     """Background task: refresh storage gauges periodically (first tick runs immediately)."""
@@ -359,3 +387,37 @@ OUTBOX_RECOVERY_COUNT = "archivist_outbox_recovery_total"
 """Counter: cumulative 'processing' events recovered by the orphan sweep."""
 OUTBOX_PRUNED_TOTAL = "archivist_outbox_pruned_total"
 """Counter: cumulative 'applied' rows deleted by retention pruning."""
+
+# ── PostgreSQL backend pool observability (Phase 5) ───────────────────────────
+PG_POOL_ACQUIRE_MS = "archivist_pg_pool_acquire_ms"
+"""Histogram: time to acquire a connection from the asyncpg pool (ms)."""
+PG_POOL_QUERY_MS = "archivist_pg_pool_query_ms"
+"""Histogram: per-query execution time inside the asyncpg pool (ms)."""
+PG_POOL_ERRORS_TOTAL = "archivist_pg_pool_errors_total"
+"""Counter: cumulative connection/query errors from the asyncpg pool."""
+PG_POOL_SIZE = "archivist_pg_pool_size"
+"""Gauge: current total size of the asyncpg connection pool."""
+
+# ── FTS subsystem observability (Phase 5, backend-labelled) ───────────────────
+FTS_SEARCH_DURATION_MS = "archivist_fts_search_duration_ms"
+"""Histogram: FTS search latency in ms, label backend=sqlite|postgres."""
+FTS_SEARCH_TOTAL = "archivist_fts_search_total"
+"""Counter: FTS search calls, label backend=sqlite|postgres."""
+FTS_UPSERT_TOTAL = "archivist_fts_upsert_total"
+"""Counter: FTS chunk upsert calls, label backend=sqlite|postgres."""
+FTS_UPSERT_ERRORS_TOTAL = "archivist_fts_upsert_errors_total"
+"""Counter: FTS chunk upsert failures, label backend=sqlite|postgres."""
+
+# ── Write pipeline observability ──────────────────────────────────────────────
+INDEX_DURATION_MS = "archivist_index_duration_ms"
+"""Histogram: wall-clock time per full file indexing call (ms)."""
+
+# ── Curator per-phase observability ───────────────────────────────────────────
+CURATOR_EXTRACT_MS = "archivist_curator_extract_duration_ms"
+"""Histogram: time spent in the knowledge-extraction phase of each curator cycle (ms)."""
+CURATOR_DECAY_MS = "archivist_curator_decay_duration_ms"
+"""Histogram: time spent in the fact-decay phase of each curator cycle (ms)."""
+
+# ── Subsystem health as a Prometheus gauge ────────────────────────────────────
+SUBSYSTEM_HEALTHY = "archivist_subsystem_healthy"
+"""Gauge: 1.0 if the named subsystem is healthy, 0.0 otherwise. Label: subsystem."""
