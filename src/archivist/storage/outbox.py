@@ -231,6 +231,10 @@ class OutboxProcessor:
 
         applied = 0
         dead_count = 0
+        # Accumulate successfully-applied IDs so we can batch-mark them in a
+        # single write transaction at the end of the loop, instead of one
+        # pool.write() call per event (N separate fsync round-trips).
+        applied_ids: list[str] = []
         for row in rows:
             event_id = row[0]
             retry_count = row[3] or 0
@@ -240,7 +244,7 @@ class OutboxProcessor:
                     event_type=EventType(row[1]),
                     payload=json.loads(row[2]),
                 )
-                await self._mark_applied(event_id)
+                applied_ids.append(event_id)
                 applied += 1
                 m.inc(m.OUTBOX_APPLIED_TOTAL)
             except Exception as exc:
@@ -268,6 +272,10 @@ class OutboxProcessor:
                         datetime.now(UTC).timestamp() + backoff, tz=UTC
                     ).isoformat()
                     await self._mark_failed(event_id, str(exc), new_retry, next_attempt)
+
+        # Batch-mark all applied events in one write transaction.
+        if applied_ids:
+            await self._mark_applied_batch(applied_ids)
 
         elapsed_ms = (time.monotonic() - t0) * 1000
         m.observe(m.OUTBOX_DRAIN_DURATION, elapsed_ms)
@@ -463,13 +471,23 @@ class OutboxProcessor:
         logger.debug("outbox._apply_event: %s %s applied", event_type, event_id)
 
     async def _mark_applied(self, event_id: str) -> None:
-        """Set status='applied' for *event_id*."""
+        """Set status='applied' for a single *event_id*.
+
+        Prefer ``_mark_applied_batch`` when draining multiple events to avoid
+        one write-transaction per event.
+        """
+        await self._mark_applied_batch([event_id])
+
+    async def _mark_applied_batch(self, event_ids: list[str]) -> None:
+        """Set status='applied' for all *event_ids* in a single write transaction."""
         from archivist.storage.sqlite_pool import pool
 
+        now_iso = datetime.now(UTC).isoformat()
+        placeholders = ",".join("?" * len(event_ids))
         async with pool.write() as conn:
             await conn.execute(
-                "UPDATE outbox SET status='applied', last_attempt=? WHERE id=?",
-                (datetime.now(UTC).isoformat(), event_id),
+                f"UPDATE outbox SET status='applied', last_attempt=? WHERE id IN ({placeholders})",
+                [now_iso, *event_ids],
             )
 
     async def _mark_failed(

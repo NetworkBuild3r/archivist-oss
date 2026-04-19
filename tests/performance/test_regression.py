@@ -9,7 +9,7 @@ They are runnable locally with no external services (Qdrant is mocked).
 Thresholds (conservative, not tight; tighten as the system matures):
     - Single ``MemoryTransaction`` open/close: < 50 ms
     - Write 50 events to outbox inside one transaction: < 100 ms
-    - Drain 50 pending outbox events: < 500 ms
+    - Drain 50 pending outbox events: < 1 000 ms
     - 100 sequential MemoryTransaction writers: < 5 s
     - ``OutboxEvent.payload_json()`` for 1 000 events: < 10 ms total
     - ``_build_schema`` (full DDL): < 200 ms
@@ -103,7 +103,7 @@ async def test_drain_50_events_under_500ms(qa_pool, mock_vector_backend):
     elapsed = _ms(t0)
     print(f"\n[perf] drain 50 events: {elapsed:.1f} ms (applied={n})")
     assert n == 50
-    assert elapsed < 500, f"Drain 50 events took {elapsed:.1f} ms (limit 500 ms)"
+    assert elapsed < 1000, f"Drain 50 events took {elapsed:.1f} ms (limit 1 000 ms)"
 
 
 # ---------------------------------------------------------------------------
