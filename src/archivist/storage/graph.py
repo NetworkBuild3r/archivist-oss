@@ -28,6 +28,10 @@ logger = logging.getLogger("archivist.graph")
 # ---------------------------------------------------------------------------
 GRAPH_WRITE_LOCK = threading.Lock()
 
+# Emitted once per process so log files don't fill up with thousands of
+# identical lines when GRAPH_BACKEND=postgres is set.
+_get_db_postgres_warned: bool = False
+
 
 def _ensure_dir():
     os.makedirs(os.path.dirname(SQLITE_PATH), exist_ok=True)
@@ -45,19 +49,22 @@ def get_db() -> sqlite3.Connection:
     -----------
     This function will be removed in the follow-up PR that migrates all callers
     to ``await pool.read()`` / ``await pool.write()``.  When
-    ``GRAPH_BACKEND=postgres`` is set this function logs a ``WARNING`` and
-    returns a direct synchronous connection to the SQLite path for schema init
-    only — callers that perform real data reads/writes against PostgreSQL must
-    use the async pool instead.
+    ``GRAPH_BACKEND=postgres`` is set this function logs a ``WARNING`` once
+    per process (not on every call) and returns a direct synchronous connection
+    to the SQLite path for schema init only — callers that perform real
+    data reads/writes against PostgreSQL must use the async pool instead.
     """
+    global _get_db_postgres_warned
     from archivist.core.config import GRAPH_BACKEND
 
-    if (GRAPH_BACKEND or "sqlite").lower() == "postgres":
+    if (GRAPH_BACKEND or "sqlite").lower() == "postgres" and not _get_db_postgres_warned:
+        _get_db_postgres_warned = True
         logging.getLogger("archivist.graph").warning(
             "get_db() is not supported with GRAPH_BACKEND=postgres. "
             "Returning a temporary SQLite connection for schema init only. "
             "Migrate all callers to 'async with pool.read()' or 'async with pool.write()'. "
-            "get_db() will be removed in a future release."
+            "get_db() will be removed in a future release. "
+            "(This warning is emitted once per process.)"
         )
     _ensure_dir()
     conn = sqlite3.connect(SQLITE_PATH, check_same_thread=False)

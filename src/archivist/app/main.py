@@ -186,9 +186,23 @@ async def file_watcher():
 
 async def handle_health(_request):
     statuses = health.all_status()
-    overall = "healthy"
-    if any(not v.get("healthy", True) for v in statuses.values()):
-        overall = "degraded"
+    any_unhealthy = any(not v.get("healthy", True) for v in statuses.values())
+
+    if not health.is_startup_complete():
+        # Pod is still in its init sequence — return 200 so the liveness
+        # probe does not kill the pod before startup finishes.
+        return JSONResponse(
+            {
+                "status": "starting",
+                "service": "archivist",
+                "version": "2.1.0",
+                "subsystems": statuses,
+                "timestamp": datetime.now(UTC).isoformat(),
+            },
+            status_code=200,
+        )
+
+    overall = "degraded" if any_unhealthy else "healthy"
     return JSONResponse(
         {
             "status": overall,
@@ -349,6 +363,7 @@ async def _startup():
         sg.add_done_callback(_log_task_exception)
         _background_tasks.append(sg)
     logger.info("Background tasks started: %s", [t.get_name() for t in _background_tasks])
+    health.mark_startup_complete()
 
 
 @asynccontextmanager
@@ -402,9 +417,80 @@ sse_transport = SseServerTransport("/mcp/messages/") if MCP_SSE_ENABLED else Non
 streamable_http_session_manager: StreamableHTTPSessionManager | None = None
 
 
+def _extract_session_id(scope) -> str:
+    """Return the raw mcp-session-id header value from an ASGI scope, or '<none>'."""
+    for k, v in scope.get("headers", []):
+        if k.lower() == b"mcp-session-id":
+            return v.decode("utf-8", errors="replace")
+    return "<none>"
+
+
+class ResumableSessionManager(StreamableHTTPSessionManager):
+    """Promotes stale-session 404s to fresh sessions transparently.
+
+    When Archivist restarts, ``_server_instances`` (in-memory) is cleared.
+    OpenClaw and other persistent clients still send their old
+    ``mcp-session-id`` header, receive a 404 "Session not found", and stay
+    broken until they are restarted themselves.
+
+    This subclass intercepts the SDK's 404 response, strips the now-unknown
+    session ID from the ASGI scope headers, and re-dispatches the request
+    through the parent manager so it is treated as a fresh initialisation
+    (no session ID → new session).  The new ``mcp-session-id`` value is
+    returned to the client in the response and the client transparently
+    re-registers without any operator intervention.
+
+    Behaviour summary
+    -----------------
+    - Stale-session 404 → promote to fresh session, log WARNING, inc metric.
+    - Any other 404 (e.g. wrong path) → pass through unchanged.
+    - All non-404 paths → zero overhead (captured events replayed directly).
+    """
+
+    async def handle_request(self, scope, receive, send) -> None:
+        import archivist.core.metrics as m
+
+        captured: list[dict] = []
+
+        async def _capturing_send(event: dict) -> None:
+            captured.append(event)
+
+        await super().handle_request(scope, receive, _capturing_send)
+
+        # Detect stale-session 404 issued by the SDK
+        start = next((e for e in captured if e["type"] == "http.response.start"), None)
+        if start is not None and start["status"] == 404:
+            body_event = next(
+                (e for e in captured if e["type"] == "http.response.body"), None
+            )
+            body = body_event.get("body", b"") if body_event else b""
+            if b"Session not found" in body:
+                stale_id = _extract_session_id(scope)
+                logger.warning(
+                    "Stale mcp-session-id %r — promoting to a fresh session "
+                    "(client survived an Archivist pod restart)",
+                    stale_id,
+                )
+                m.inc(m.MCP_SESSION_RESUMED)
+                # Strip the stale header; the SDK will treat the request as a
+                # new initialisation and hand back a fresh session ID.
+                clean_headers = [
+                    (k, v)
+                    for k, v in scope.get("headers", [])
+                    if k.lower() != b"mcp-session-id"
+                ]
+                fresh_scope = {**scope, "headers": clean_headers}
+                await super().handle_request(fresh_scope, receive, send)
+                return
+
+        # Not a stale-session 404 — replay the captured response as-is.
+        for event in captured:
+            await send(event)
+
+
 def _create_streamable_http_session_manager() -> StreamableHTTPSessionManager:
     """Create a fresh Streamable HTTP session manager for each app lifespan."""
-    return StreamableHTTPSessionManager(server, json_response=True)
+    return ResumableSessionManager(server, json_response=True)
 
 
 class SseASGIApp:

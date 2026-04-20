@@ -336,6 +336,8 @@ CURATOR_DRAIN_DURATION = "archivist_curator_drain_duration_ms"
 # ── MCP tool observability (v1.10) ───────────────────────────────────────────
 TOOL_DURATION = "archivist_mcp_tool_duration_ms"
 TOOL_ERRORS = "archivist_mcp_tool_errors_total"
+MCP_SESSION_RESUMED = "archivist_mcp_session_resumed_total"
+"""Counter: stale mcp-session-id headers that were promoted to fresh sessions after a pod restart."""
 EMBED_DURATION = "archivist_embed_duration_ms"
 QDRANT_QUERY_DURATION = "archivist_qdrant_query_duration_ms"
 INVALIDATE_DURATION = "archivist_invalidate_duration_ms"

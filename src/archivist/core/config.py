@@ -70,6 +70,12 @@ class ArchivistSettings(BaseSettings):
     embed_model: str = "text-embedding-v3"
     embed_url: str = ""
     embed_api_key: str = ""
+    # When True, skip OpenAI batch embedding (array `input`) and use parallel single-text
+    # requests only. Some vLLM embed servers return 422 for array input.
+    embed_disable_batch: bool = False
+    # Max strings per /v1/embeddings POST. Indexing can send 100+ chunks; vLLM often caps
+    # batch size or total tokens — huge arrays return 422. Sub-batch below this limit.
+    embed_max_batch_inputs: int = Field(default=32, ge=1)
 
     # ── LLM (OpenAI-compatible chat/completions API) ─────────────────────────
     llm_url: str = "http://localhost:4000"
@@ -586,6 +592,8 @@ VECTOR_DIM = _settings.vector_dim
 EMBED_MODEL = _settings.embed_model
 EMBED_URL = _settings.embed_url
 EMBED_API_KEY = _settings.embed_api_key
+EMBED_DISABLE_BATCH = _settings.embed_disable_batch
+EMBED_MAX_BATCH_INPUTS = _settings.embed_max_batch_inputs
 
 LLM_URL = _settings.llm_url
 LLM_MODEL = _settings.llm_model
