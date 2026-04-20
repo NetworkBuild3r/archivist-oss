@@ -50,7 +50,7 @@ class TestMergeCacheInvalidation:
                 return_value=mock_merge_result,
             ),
             patch("archivist.retrieval.hot_cache.invalidate_namespace", invalidate_hot),
-            patch("archivist.storage.compressed_index.invalidate_index_cache", invalidate_index),
+            patch("archivist.app.handlers.tools_storage.invalidate_index_cache", invalidate_index),
         ):
             from archivist.app.handlers.tools_storage import _handle_merge
 
@@ -98,7 +98,7 @@ class TestCompressCacheInvalidation:
             ),
             patch("archivist.lifecycle.curator_queue.enqueue", MagicMock()),
             patch("archivist.retrieval.hot_cache.invalidate_namespace", invalidate_hot),
-            patch("archivist.storage.compressed_index.invalidate_index_cache", invalidate_index),
+            patch("archivist.app.handlers.tools_storage.invalidate_index_cache", invalidate_index),
             patch("archivist.app.handlers.tools_storage._rbac_gate", return_value=None),
         ):
             from archivist.app.handlers.tools_storage import _handle_compress
@@ -137,7 +137,7 @@ class TestPinCacheInvalidation:
             patch("archivist.app.handlers.tools_storage.collection_for", return_value="col-test"),
             patch("archivist.core.audit.log_memory_event", new_callable=AsyncMock),
             patch("archivist.retrieval.hot_cache.invalidate_namespace", invalidate_hot),
-            patch("archivist.storage.compressed_index.invalidate_index_cache", invalidate_index),
+            patch("archivist.app.handlers.tools_storage.invalidate_index_cache", invalidate_index),
             patch("archivist.app.handlers.tools_storage._rbac_gate", return_value=None),
         ):
             from archivist.app.handlers.tools_storage import _handle_pin
@@ -174,7 +174,7 @@ class TestUnpinCacheInvalidation:
             patch("archivist.app.handlers.tools_storage.qdrant_client", return_value=mock_client),
             patch("archivist.app.handlers.tools_storage.collection_for", return_value="col-test"),
             patch("archivist.retrieval.hot_cache.invalidate_namespace", invalidate_hot),
-            patch("archivist.storage.compressed_index.invalidate_index_cache", invalidate_index),
+            patch("archivist.app.handlers.tools_storage.invalidate_index_cache", invalidate_index),
             patch("archivist.app.handlers.tools_storage._rbac_gate", return_value=None),
         ):
             from archivist.app.handlers.tools_storage import _handle_unpin
@@ -211,7 +211,7 @@ class TestDeleteCacheInvalidation:
             ),
             patch("archivist.core.rbac.get_namespace_for_agent", return_value="test-ns"),
             patch("archivist.retrieval.hot_cache.invalidate_namespace", invalidate_hot),
-            patch("archivist.storage.compressed_index.invalidate_index_cache", invalidate_index),
+            patch("archivist.app.handlers.tools_storage.invalidate_index_cache", invalidate_index),
             patch("archivist.app.handlers.tools_storage._rbac_gate", return_value=None),
         ):
             from archivist.app.handlers.tools_storage import _handle_delete
