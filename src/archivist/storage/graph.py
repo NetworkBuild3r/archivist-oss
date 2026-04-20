@@ -1183,6 +1183,11 @@ async def upsert_entity(
     import archivist.core.metrics as _m
     from archivist.storage.sqlite_pool import pool
 
+    # Normalise to lowercase to preserve case-insensitive identity: "Brian"
+    # and "brian" are the same entity.  The old SELECT-then-INSERT code used
+    # LOWER(name) for the lookup; we bake the same normalisation into the
+    # stored value so ON CONFLICT(name, namespace) fires correctly.
+    name = name.strip().lower()
     now = datetime.now(UTC).isoformat()
 
     async def _run(c: aiosqlite.Connection) -> int:
