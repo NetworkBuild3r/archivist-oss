@@ -35,6 +35,16 @@ Usage::
 
 from __future__ import annotations
 
+import os
+import sys
+
+# Allow running as `python -m benchmarks.enterprise.scenarios.*` from the repo
+# root without installing the package.  Mirrors the same pattern used in
+# benchmarks/pipeline/evaluate.py.
+_src = os.path.join(os.path.dirname(__file__), "..", "..", "src")
+if os.path.isdir(_src):
+    sys.path.insert(0, os.path.abspath(_src))
+
 import asyncio
 import bisect
 import json

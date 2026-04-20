@@ -1168,7 +1168,7 @@ async def upsert_entity(
 
     async def _run(c: aiosqlite.Connection) -> int:
         cur = await c.execute(
-            "SELECT id, mention_count, retention_class FROM entities WHERE name = ? AND namespace = ?",
+            "SELECT id, mention_count, retention_class FROM entities WHERE LOWER(name) = LOWER(?) AND namespace = ?",
             (name, namespace),
         )
         row = await cur.fetchone()

@@ -33,6 +33,15 @@ CLI usage::
 
 from __future__ import annotations
 
+import os as _os
+import sys as _sys
+
+# Allow running as `python -m benchmarks.enterprise.scenarios.smoke` from the
+# repo root without installing the package.  Mirrors evaluate.py.
+_src = _os.path.join(_os.path.dirname(__file__), "..", "..", "..", "src")
+if _os.path.isdir(_src):
+    _sys.path.insert(0, _os.path.abspath(_src))
+
 import argparse
 import asyncio
 import logging
