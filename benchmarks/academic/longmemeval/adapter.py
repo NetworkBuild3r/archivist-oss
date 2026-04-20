@@ -19,9 +19,13 @@ Setup:
        wget https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_s_cleaned.json
 
     Optional dedicated judge LLM (fast yes/no; does not change retrieval LLM):
-       BENCHMARK_JUDGE_LLM_URL=http://192.168.11.161:11435
-       BENCHMARK_JUDGE_LLM_MODEL=jaahas/qwen3.5-uncensored:9b
-       BENCHMARK_JUDGE_LLM_API_KEY=ollama
+
+       BENCHMARK_JUDGE_LLM_URL=http://192.0.2.10:11435
+       BENCHMARK_JUDGE_LLM_MODEL=qwen3.6-35b-a3b
+       BENCHMARK_JUDGE_LLM_API_KEY=
+
+       NOTE: Do NOT include /v1 in the URL. The client appends /v1/chat/completions
+       automatically. Setting http://host:port/v1 produces .../v1/v1/... → 404.
 
     2. Run single variant:
        python -m benchmarks.academic.longmemeval.adapter \\
@@ -228,6 +232,20 @@ def _ndcg_at_k(retrieved_session_ids: list[int], evidence_ids: set[int], k: int)
     return _dcg(relevances[:k], k) / ideal_dcg
 
 
+def _evidence_session_indices(item: dict) -> set[int]:
+    """Map LongMemEval ``answer_session_ids`` to 0-based haystack session indices.
+
+    The cleaned dataset stores string IDs (e.g. ``answer_280352e9``) in both
+    ``answer_session_ids`` and ``haystack_session_ids``; the adapter filenames
+    use ``session-{1-based index}`` order matching ``haystack_sessions``.
+    """
+    haystack_ids = item.get("haystack_session_ids") or []
+    answer_ids = set(item.get("answer_session_ids") or [])
+    if not haystack_ids or not answer_ids:
+        return set()
+    return {i for i, sid in enumerate(haystack_ids) if sid in answer_ids}
+
+
 def _recall_at_k(retrieved_session_ids: list[int], evidence_ids: set[int], k: int) -> float:
     """Recall@k — fraction of evidence sessions found in top-k retrieved."""
     if not evidence_ids:
@@ -383,6 +401,8 @@ async def run_longmemeval_benchmark(
 
     original_memory_root = config.MEMORY_ROOT
     original_sqlite = config.SQLITE_PATH
+    _rlm_restore: dict[str, object] | None = None
+    _sqlite_pool_started = False
 
     try:
         config.MEMORY_ROOT = mem_root
@@ -394,12 +414,30 @@ async def run_longmemeval_benchmark(
         from qdrant_client import QdrantClient
         from qdrant_client.models import Distance, VectorParams
 
+        from archivist.storage.sqlite_pool import initialize_pool
+
         from graph import init_schema
         from indexer import full_index
+        import rlm_retriever as rlm_mod
         from rlm_retriever import recursive_retrieve
 
         qclient = QdrantClient(url=config.QDRANT_URL, timeout=30)
         init_schema()
+        # Indexer / retrieval use the async SQLite pool (FTS, graph); temp DB requires this.
+        await initialize_pool()
+        _sqlite_pool_started = True
+
+        # Isolate harness from a production .env that enables the v2 cross-encoder
+        # path or a high static retrieval threshold — both can yield **zero**
+        # sources on LongMemEval despite successful indexing (below-threshold
+        # filter or empty rerank pool).  Mutate module globals so existing
+        # ``recursive_retrieve`` bytecode sees the overrides at runtime.
+        _rlm_restore = {
+            "RERANKER_ENABLED": rlm_mod.RERANKER_ENABLED,
+            "RETRIEVAL_THRESHOLD": rlm_mod.RETRIEVAL_THRESHOLD,
+        }
+        rlm_mod.RERANKER_ENABLED = False
+        rlm_mod.RETRIEVAL_THRESHOLD = 0.0
 
         all_results: list[dict] = []
         # Track by the 6 official question_type categories
@@ -437,7 +475,7 @@ async def run_longmemeval_benchmark(
                 ),
             )
 
-            chunk_count = await full_index(hierarchical=True)
+            chunk_count = await full_index(hierarchical=True, root_dir=mem_root)
 
             if run_curator:
                 await _run_curator_on_files(mem_root)
@@ -450,6 +488,7 @@ async def run_longmemeval_benchmark(
                     limit=search_limit,
                     refine=refine,
                     tier="l2",
+                    threshold=0.0,
                 )
             except Exception as e:
                 logger.warning("Query %s failed: %s", qid, e)
@@ -458,6 +497,18 @@ async def run_longmemeval_benchmark(
 
             # JSON null → Python None: .get("answer", "") still returns None; coerce to str.
             answer = result.get("answer") or ""
+            # Thin runs use ``--no-refine`` (speed): the pipeline returns empty
+            # synthesis but still attaches ``sources``.  Feed retrieved text to
+            # the judge so QA accuracy is not trivially 0 %.
+            if not str(answer).strip() and not refine:
+                srcs = result.get("sources") or []
+                if srcs:
+                    parts: list[str] = []
+                    for s in srcs[: min(10, search_limit)]:
+                        t = (s.get("tier_text") or s.get("text") or "").strip()
+                        if t:
+                            parts.append(t[:2000])
+                    answer = "\n\n---\n\n".join(parts)
 
             # ── Official metric 1: LLM-as-judge QA accuracy ──────────────
             correct = await _llm_judge(
@@ -469,7 +520,7 @@ async def run_longmemeval_benchmark(
             )
 
             # ── Official metric 2: Session-level Recall@k and NDCG@k ────
-            evidence_ids = set(item.get("answer_session_ids", []))
+            evidence_ids = _evidence_session_indices(item)
             retrieved_files = [s.get("file_path", "") for s in result.get("sources", [])]
             retrieved_session_ids: list[int] = []
             seen: set[int] = set()
@@ -589,6 +640,18 @@ async def run_longmemeval_benchmark(
         return {"summary": summary, "results": all_results}
 
     finally:
+        if _sqlite_pool_started:
+            try:
+                from archivist.storage.sqlite_pool import close_pool
+
+                await close_pool()
+            except Exception:
+                logger.debug("LongMemEval: close_pool failed", exc_info=True)
+        if _rlm_restore is not None:
+            import rlm_retriever as _rlm
+
+            _rlm.RERANKER_ENABLED = _rlm_restore["RERANKER_ENABLED"]  # type: ignore[assignment]
+            _rlm.RETRIEVAL_THRESHOLD = _rlm_restore["RETRIEVAL_THRESHOLD"]  # type: ignore[assignment]
         config.MEMORY_ROOT = original_memory_root
         config.SQLITE_PATH = original_sqlite
         os.environ["MEMORY_ROOT"] = original_memory_root

@@ -56,6 +56,8 @@ class DeleteResult:
     registry_tokens: int = 0
     entity_facts: int = 0
     memory_hotness: int = 0
+    relationship_rows: int = 0
+    version_rows: int = 0
     failed_steps: list[str] = field(default_factory=list)
 
     @property
@@ -68,6 +70,8 @@ class DeleteResult:
             + self.registry_tokens
             + self.entity_facts
             + self.memory_hotness
+            + self.relationship_rows
+            + self.version_rows
         )
 
 
@@ -241,11 +245,17 @@ async def _delete_sqlite_artifacts(
     return fts_count, needle_count, facts_count
 
 
-async def _delete_best_effort_rows(memory_id: str) -> int:
-    """Delete memory_hotness and memory_points rows (best-effort, logged at DEBUG on miss).
+async def _delete_best_effort_rows(memory_id: str) -> tuple[int, int, int]:
+    """Delete memory_hotness, memory_points, and memory_versions rows.
 
-    Returns count from memory_hotness deletion (0 if the row was absent).
+    Also removes any entity relationships that have become fully orphaned
+    (source or target entity has zero remaining active facts across all memories).
+
+    All steps are best-effort — failures are logged at DEBUG since these rows
+    do not affect Qdrant visibility.  Returns (hotness_count, relationship_rows, version_rows).
     """
+    from archivist.storage.sqlite_pool import pool
+
     hotness_count = 0
     try:
         hotness_count = await delete_hotness(memory_id)
@@ -257,7 +267,35 @@ async def _delete_best_effort_rows(memory_id: str) -> int:
     except Exception as e:
         logger.debug("cascade.memory_points cleanup skipped for %s: %s", memory_id, e)
 
-    return hotness_count
+    version_rows = 0
+    try:
+        async with pool.write() as conn:
+            cur = await conn.execute(
+                "DELETE FROM memory_versions WHERE memory_id = ?",
+                (memory_id,),
+            )
+            version_rows = cur.rowcount
+    except Exception as e:
+        logger.debug("cascade.memory_versions skipped for %s: %s", memory_id, e)
+
+    # Remove relationship rows whose source or target entity now has no active
+    # facts left (orphaned after deactivation of this memory's entity facts).
+    relationship_rows = 0
+    try:
+        async with pool.write() as conn:
+            cur = await conn.execute(
+                """DELETE FROM relationships
+                   WHERE source_entity_id NOT IN (
+                       SELECT DISTINCT entity_id FROM facts WHERE is_active = 1
+                   ) OR target_entity_id NOT IN (
+                       SELECT DISTINCT entity_id FROM facts WHERE is_active = 1
+                   )""",
+            )
+            relationship_rows = cur.rowcount
+    except Exception as e:
+        logger.debug("cascade.relationships skipped for %s: %s", memory_id, e)
+
+    return hotness_count, relationship_rows, version_rows
 
 
 async def _finalize_delete(
@@ -548,7 +586,9 @@ async def delete_memory_complete(
             result.entity_facts,
         ) = await _delete_sqlite_artifacts(memory_id, all_ids, result.failed_steps)
 
-    result.memory_hotness = await _delete_best_effort_rows(memory_id)
+    result.memory_hotness, result.relationship_rows, result.version_rows = (
+        await _delete_best_effort_rows(memory_id)
+    )
 
     await _finalize_delete(result, namespace, col)
     return result

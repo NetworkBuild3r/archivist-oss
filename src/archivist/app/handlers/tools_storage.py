@@ -32,6 +32,7 @@ from archivist.storage.collection_router import (
 from archivist.storage.graph import (
     add_fact,
     register_memory_points_batch,
+    resolve_entity_id,
     upsert_entity,
 )
 from archivist.storage.qdrant import qdrant_client
@@ -420,30 +421,59 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
                 actor_id=actor_id,
                 actor_type=actor_type,
             )
-        except sqlite3.IntegrityError:
-            # Defense-in-depth: upsert_entity is already idempotent via
-            # ON CONFLICT DO UPDATE, but a simultaneous schema migration or
-            # legacy code path could still surface an IntegrityError.
-            # Treat it as a resolved conflict and proceed rather than
-            # propagating an error that would trigger agent retry loops.
+        except Exception as exc:
+            # Regression guard: upsert_entity uses ON CONFLICT DO UPDATE and
+            # should never raise a unique-constraint error in normal operation.
+            # If it does (e.g. concurrent DDL migration, Postgres asyncpg
+            # UniqueViolationError, or a misconfigured schema), we MUST NOT
+            # return here — doing so aborts the entire store pipeline and
+            # skips embedding/Qdrant/FTS/audit for all remaining entities.
+            # Instead: resolve the existing row's ID and continue the loop.
+            _err_str = str(exc).lower()
+            if "unique" not in _err_str and "integrity" not in _err_str:
+                raise
             m.inc(m.ENTITY_UPSERT_CONFLICTS, {"namespace": namespace or "global"})
-            logger.info(
-                "entity_upsert.conflict_resolved",
-                extra={"entity_name": ename, "namespace": namespace},
+            logger.warning(
+                "entity_upsert.integrity_fallback",
+                extra={
+                    "entity_name": ename,
+                    "namespace": namespace,
+                    "error": str(exc),
+                    "note": "ON CONFLICT was bypassed; resolving via SELECT",
+                },
             )
-            return conflict_resolved_response(0, ename.strip(), namespace or "global")
+            eid = await resolve_entity_id(ename.strip(), namespace or "global")
+            if not eid:
+                continue
         await add_fact(eid, text[:200], f"explicit/{agent_id}", agent_id, **_fact_kw)
 
     if not entity_names:
-        eid = await upsert_entity(
-            agent_id,
-            "agent",
-            retention_class=retention,
-            namespace=namespace or "global",
-            actor_id=actor_id,
-            actor_type=actor_type,
-        )
-        await add_fact(eid, text[:200], f"explicit/{agent_id}", agent_id, **_fact_kw)
+        try:
+            eid = await upsert_entity(
+                agent_id,
+                "agent",
+                retention_class=retention,
+                namespace=namespace or "global",
+                actor_id=actor_id,
+                actor_type=actor_type,
+            )
+        except Exception as exc:
+            _err_str = str(exc).lower()
+            if "unique" not in _err_str and "integrity" not in _err_str:
+                raise
+            m.inc(m.ENTITY_UPSERT_CONFLICTS, {"namespace": namespace or "global"})
+            logger.warning(
+                "entity_upsert.integrity_fallback",
+                extra={
+                    "entity_name": agent_id,
+                    "namespace": namespace,
+                    "error": str(exc),
+                    "note": "agent self-entity; resolving via SELECT",
+                },
+            )
+            eid = await resolve_entity_id(agent_id, namespace or "global")
+        if eid:
+            await add_fact(eid, text[:200], f"explicit/{agent_id}", agent_id, **_fact_kw)
 
         _auto_hints = pre_extract(text)
         _auto_entities = _auto_hints.get("entities", [])
@@ -456,14 +486,32 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
             ename = ent["name"].strip()
             if ename and ename != agent_id:
                 etype = ent.get("type", "unknown")
-                _eid = await upsert_entity(
-                    ename,
-                    etype,
-                    retention_class=retention,
-                    namespace=namespace or "global",
-                    actor_id=actor_id,
-                    actor_type=actor_type,
-                )
+                try:
+                    _eid = await upsert_entity(
+                        ename,
+                        etype,
+                        retention_class=retention,
+                        namespace=namespace or "global",
+                        actor_id=actor_id,
+                        actor_type=actor_type,
+                    )
+                except Exception as exc:
+                    _err_str = str(exc).lower()
+                    if "unique" not in _err_str and "integrity" not in _err_str:
+                        raise
+                    m.inc(m.ENTITY_UPSERT_CONFLICTS, {"namespace": namespace or "global"})
+                    logger.warning(
+                        "entity_upsert.integrity_fallback",
+                        extra={
+                            "entity_name": ename,
+                            "namespace": namespace,
+                            "error": str(exc),
+                            "note": "auto-extract entity; resolving via SELECT",
+                        },
+                    )
+                    _eid = await resolve_entity_id(ename, namespace or "global")
+                    if not _eid:
+                        continue
                 await add_fact(
                     _eid, text[:200], f"explicit/{agent_id}", agent_id, **_extracted_fact_kw
                 )
@@ -916,6 +964,12 @@ async def _handle_merge(arguments: dict) -> list[TextContent]:
     from archivist.lifecycle.merge import merge_memories
 
     result = await merge_memories(memory_ids, strategy, agent_id, namespace)
+
+    hot_cache.invalidate_namespace(namespace)
+    from archivist.storage.compressed_index import invalidate_index_cache
+
+    invalidate_index_cache(namespace)
+
     return success_response(result, default=str)
 
 
@@ -1018,6 +1072,9 @@ async def _handle_compress(arguments: dict) -> list[TextContent]:
     )
 
     hot_cache.invalidate_namespace(namespace)
+    from archivist.storage.compressed_index import invalidate_index_cache
+
+    invalidate_index_cache(namespace)
 
     result = {
         "compressed": True,
@@ -1104,6 +1161,9 @@ async def _handle_pin(arguments: dict) -> list[TextContent]:
     )
 
     hot_cache.invalidate_namespace(namespace)
+    from archivist.storage.compressed_index import invalidate_index_cache
+
+    invalidate_index_cache(namespace)
 
     return success_response(
         {
@@ -1160,6 +1220,9 @@ async def _handle_unpin(arguments: dict) -> list[TextContent]:
                 unpinned.append({"type": "entity", "name": entity_name, "id": row["id"]})
 
     hot_cache.invalidate_namespace(namespace)
+    from archivist.storage.compressed_index import invalidate_index_cache
+
+    invalidate_index_cache(namespace)
 
     return success_response(
         {
@@ -1207,6 +1270,9 @@ async def _handle_delete(arguments: dict) -> list[TextContent]:
         return error_response({"error": str(e)})
 
     hot_cache.invalidate_namespace(namespace)
+    from archivist.storage.compressed_index import invalidate_index_cache
+
+    invalidate_index_cache(namespace)
 
     return success_response(
         {

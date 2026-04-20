@@ -53,14 +53,14 @@ _DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
 # ── Metadata extraction ───────────────────────────────────────────────────────
 
 
-def _extract_metadata(filepath: str) -> dict:
+def _extract_metadata(filepath: str, root_dir: str | None = None) -> dict:
     """Extract metadata from file path: agent_id, date, file_type, team, namespace."""
     agent_id = ""
     file_type = "unknown"
     date_str = ""
     team = "unknown"
 
-    rel = os.path.relpath(filepath, MEMORY_ROOT)
+    rel = os.path.relpath(filepath, root_dir if root_dir is not None else MEMORY_ROOT)
     rel_parts = Path(rel).parts
 
     agent_id = extract_agent_id_from_path(rel)
@@ -122,13 +122,15 @@ def compute_ttl(namespace: str, importance: float = 0.5) -> int | None:
 # ── Indexing ──────────────────────────────────────────────────────────────────
 
 
-async def index_file(filepath: str, hierarchical: bool = True) -> int:
+async def index_file(filepath: str, hierarchical: bool = True, root_dir: str | None = None) -> int:
     """Index a single .md file into Qdrant. Returns number of points upserted.
 
     Args:
         filepath: Path to the markdown file.
         hierarchical: If True (default), use parent-child chunking (Phase 1).
                       If False, use flat chunking.
+        root_dir: Override the base directory for relative-path computation.
+                  Defaults to the module-level MEMORY_ROOT.
     """
     try:
         with open(filepath, encoding="utf-8", errors="replace") as f:
@@ -142,7 +144,7 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
 
     await delete_file_points(filepath)
 
-    meta = _extract_metadata(filepath)
+    meta = _extract_metadata(filepath, root_dir=root_dir)
     from archivist.core.provenance import SourceTrace, default_confidence
 
     _indexer_confidence = default_confidence("system")
@@ -359,7 +361,11 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
                 )
                 txn.enqueue_qdrant_upsert(_coll, points, memory_id=meta.get("file_path", ""))
         except Exception as _e:
-            logger.debug("indexer.register_memory_points failed: %s", _e)
+            logger.error(
+                "indexer.register_memory_points_failed",
+                extra={"file_path": meta.get("file_path", ""), "error": str(_e)},
+            )
+            return len(points)
 
         # When the outbox is disabled, apply the Qdrant write inline (legacy).
         if not OUTBOX_ENABLED:
@@ -615,8 +621,11 @@ async def delete_file_points(filepath: str):
                         _coll,
                         _filt.model_dump(mode="json"),
                     )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(
+                    "delete_file_points.outbox_enqueue_failed",
+                    extra={"file": rel, "collection": _coll, "error": str(e)},
+                )
         else:
             try:
                 client.delete(
@@ -625,8 +634,11 @@ async def delete_file_points(filepath: str):
                         must=[FieldCondition(key="file_path", match=MatchValue(value=rel))]
                     ),
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(
+                    "delete_file_points.qdrant_delete_failed",
+                    extra={"file": rel, "collection": _coll, "error": str(e)},
+                )
     if BM25_ENABLED:
         await delete_fts_chunks_by_file(rel)
 
@@ -634,17 +646,18 @@ async def delete_file_points(filepath: str):
 _SKIP_DIRS = {"node_modules", ".git", ".cache", "__pycache__", ".pnpm", "dist", "build"}
 
 
-async def full_index(hierarchical: bool = True) -> int:
-    """Walk all .md files under MEMORY_ROOT and index them."""
+async def full_index(hierarchical: bool = True, root_dir: str | None = None) -> int:
+    """Walk all .md files under MEMORY_ROOT (or root_dir if given) and index them."""
+    walk_root = root_dir if root_dir is not None else MEMORY_ROOT
     total = 0
-    for root, dirs, files in os.walk(MEMORY_ROOT):
+    for root, dirs, files in os.walk(walk_root):
         dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]
         for fname in files:
             if not fname.endswith(".md"):
                 continue
             filepath = os.path.join(root, fname)
             try:
-                count = await index_file(filepath, hierarchical=hierarchical)
+                count = await index_file(filepath, hierarchical=hierarchical, root_dir=walk_root)
                 total += count
             except Exception as e:
                 logger.error("Failed to index %s: %s", filepath, e)

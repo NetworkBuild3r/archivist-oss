@@ -1,5 +1,6 @@
 """MCP tool handlers — skill registry, events, lessons, health, relations."""
 
+import asyncio
 import logging
 
 from mcp.types import TextContent, Tool
@@ -275,7 +276,8 @@ async def _handle_register_skill(arguments: dict) -> list[TextContent]:
     changelog = arguments.get("changelog", "")
     breaking_changes = arguments.get("breaking_changes", "")
 
-    result = register_skill(
+    result = await asyncio.to_thread(
+        register_skill,
         name=name,
         provider=arguments.get("provider", ""),
         mcp_endpoint=arguments.get("mcp_endpoint", ""),
@@ -285,7 +287,8 @@ async def _handle_register_skill(arguments: dict) -> list[TextContent]:
     )
 
     if changelog or breaking_changes:
-        record_version(
+        await asyncio.to_thread(
+            record_version,
             skill_id=result["skill_id"],
             version=version,
             changelog=changelog,
@@ -297,7 +300,9 @@ async def _handle_register_skill(arguments: dict) -> list[TextContent]:
 
 
 async def _handle_skill_event(arguments: dict) -> list[TextContent]:
-    skill = _resolve_skill(arguments["skill_name"], arguments.get("provider", ""))
+    skill = await asyncio.to_thread(
+        _resolve_skill, arguments["skill_name"], arguments.get("provider", "")
+    )
     if not skill:
         return error_response(
             {
@@ -307,7 +312,8 @@ async def _handle_skill_event(arguments: dict) -> list[TextContent]:
             }
         )
 
-    event_id = log_skill_event(
+    event_id = await asyncio.to_thread(
+        log_skill_event,
         skill_id=skill["id"],
         agent_id=arguments["agent_id"],
         outcome=arguments["outcome"],
@@ -338,7 +344,9 @@ async def _handle_skill_event(arguments: dict) -> list[TextContent]:
 
 
 async def _handle_skill_lesson(arguments: dict) -> list[TextContent]:
-    skill = _resolve_skill(arguments["skill_name"], arguments.get("provider", ""))
+    skill = await asyncio.to_thread(
+        _resolve_skill, arguments["skill_name"], arguments.get("provider", "")
+    )
     if not skill:
         return error_response(
             {
@@ -348,7 +356,8 @@ async def _handle_skill_lesson(arguments: dict) -> list[TextContent]:
             }
         )
 
-    lesson_id = add_lesson(
+    lesson_id = await asyncio.to_thread(
+        add_lesson,
         skill_id=skill["id"],
         title=arguments["title"],
         content=arguments["content"],
@@ -368,7 +377,9 @@ async def _handle_skill_lesson(arguments: dict) -> list[TextContent]:
 
 
 async def _handle_skill_health(arguments: dict) -> list[TextContent]:
-    skill = _resolve_skill(arguments["skill_name"], arguments.get("provider", ""))
+    skill = await asyncio.to_thread(
+        _resolve_skill, arguments["skill_name"], arguments.get("provider", "")
+    )
     if not skill:
         return error_response(
             {
@@ -377,17 +388,18 @@ async def _handle_skill_health(arguments: dict) -> list[TextContent]:
             }
         )
 
-    health = get_skill_health(
+    health = await asyncio.to_thread(
+        get_skill_health,
         skill_id=skill["id"],
         window_days=arguments.get("window_days", 30),
     )
 
     if arguments.get("include_lessons", True):
-        health["recent_lessons"] = get_lessons(skill["id"], limit=10)
+        health["recent_lessons"] = await asyncio.to_thread(get_lessons, skill["id"], limit=10)
 
     health["related_skills"] = [
         {"name": s["name"], "relation": s["relation_type"], "confidence": s["confidence"]}
-        for s in get_skill_substitutes(skill["id"])
+        for s in await asyncio.to_thread(get_skill_substitutes, skill["id"])
     ]
 
     return success_response(health)
@@ -395,8 +407,12 @@ async def _handle_skill_health(arguments: dict) -> list[TextContent]:
 
 async def _handle_skill_relate(arguments: dict) -> list[TextContent]:
     """Create or update a relation between two skills."""
-    skill_a = _resolve_skill(arguments["skill_a"], arguments.get("provider_a", ""))
-    skill_b = _resolve_skill(arguments["skill_b"], arguments.get("provider_b", ""))
+    skill_a = await asyncio.to_thread(
+        _resolve_skill, arguments["skill_a"], arguments.get("provider_a", "")
+    )
+    skill_b = await asyncio.to_thread(
+        _resolve_skill, arguments["skill_b"], arguments.get("provider_b", "")
+    )
 
     if not skill_a:
         return error_response(
@@ -415,7 +431,8 @@ async def _handle_skill_relate(arguments: dict) -> list[TextContent]:
             }
         )
 
-    rel_id = add_skill_relation(
+    rel_id = await asyncio.to_thread(
+        add_skill_relation,
         skill_a_id=skill_a["id"],
         skill_b_id=skill_b["id"],
         relation_type=arguments["relation_type"],
@@ -436,7 +453,9 @@ async def _handle_skill_relate(arguments: dict) -> list[TextContent]:
 
 async def _handle_skill_dependencies(arguments: dict) -> list[TextContent]:
     """Return the dependency/relation graph for a skill."""
-    skill = _resolve_skill(arguments["skill_name"], arguments.get("provider", ""))
+    skill = await asyncio.to_thread(
+        _resolve_skill, arguments["skill_name"], arguments.get("provider", "")
+    )
     if not skill:
         return error_response(
             {
@@ -447,8 +466,8 @@ async def _handle_skill_dependencies(arguments: dict) -> list[TextContent]:
         )
 
     depth = arguments.get("depth", 1)
-    relations = get_skill_relations(skill["id"], depth=depth)
-    substitutes = get_skill_substitutes(skill["id"])
+    relations = await asyncio.to_thread(get_skill_relations, skill["id"], depth=depth)
+    substitutes = await asyncio.to_thread(get_skill_substitutes, skill["id"])
 
     return success_response(
         {

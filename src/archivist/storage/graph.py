@@ -1230,6 +1230,27 @@ async def upsert_entity(
         return await _run(c)
 
 
+async def resolve_entity_id(name: str, namespace: str = "global") -> int:
+    """Return the integer ID of an existing entity by name and namespace.
+
+    Used as a fallback inside the store pipeline when a unique-constraint error
+    escapes ``upsert_entity`` (e.g. concurrent DDL migration).  The COLLATE
+    NOCASE lookup matches the ``name TEXT NOT NULL COLLATE NOCASE`` column
+    definition so case variants resolve to the same row.
+
+    Returns 0 if no matching entity is found.
+    """
+    from archivist.storage.sqlite_pool import pool
+
+    async with pool.read() as conn:
+        cur = await conn.execute(
+            "SELECT id FROM entities WHERE name = ? AND namespace = ?",
+            (name, namespace),
+        )
+        row = await cur.fetchone()
+        return row[0] if row else 0
+
+
 async def add_relationship(
     source_id: int,
     target_id: int,

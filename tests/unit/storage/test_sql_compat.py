@@ -226,3 +226,49 @@ def test_clean_sql_is_not_flagged(safe_sql: str) -> None:
         assert not pattern.search(safe_sql), (
             f"Pattern {name!r} incorrectly flagged clean SQL: {safe_sql!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Handler get_db() guardrail
+# ---------------------------------------------------------------------------
+
+
+def test_no_get_db_in_handler_files() -> None:
+    """Handler files must never call the deprecated synchronous get_db().
+
+    Handler functions run inside the async event loop. Calling get_db()
+    (which opens a new synchronous sqlite3 connection) from a handler blocks
+    the entire event loop and is incompatible with the Postgres backend.
+
+    All handler-level DB access must go through ``pool.read()`` / ``pool.write()``
+    or be dispatched via ``asyncio.to_thread()``.
+
+    If you have a legitimate need to call a sync function from a handler,
+    wrap it in ``asyncio.to_thread()`` — do NOT add the file to any allowlist.
+    """
+    _handlers_dir = _SRC_ROOT / "app" / "handlers"
+    violations: list[tuple[str, int, str]] = []
+
+    for py_file in sorted(_handlers_dir.glob("*.py")):
+        if py_file.name.startswith("_") and py_file.name not in (
+            "_common.py",
+            "_registry.py",
+            "_schema_dump.py",
+        ):
+            # Skip private helpers only if they are not dispatch/registry files
+            pass
+        source = py_file.read_text(encoding="utf-8")
+        for lineno, line in enumerate(source.splitlines(), start=1):
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue
+            if "get_db(" in line:
+                violations.append((py_file.name, lineno, line.rstrip()))
+
+    if violations:
+        msgs = ["", "get_db() used in handler files (blocks event loop):", ""]
+        for fname, lineno, line in violations:
+            msgs.append(f"  app/handlers/{fname}:{lineno}")
+            msgs.append(f"    {line.strip()}")
+            msgs.append("")
+        pytest.fail(textwrap.dedent("\n".join(msgs)))

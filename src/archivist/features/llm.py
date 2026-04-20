@@ -52,6 +52,19 @@ def _message_text(data: dict) -> str:
     return out
 
 
+def _openai_base(url: str) -> str:
+    """Normalise a base URL so the client can safely append /v1/chat/completions.
+
+    Strips a trailing slash, then removes a trailing ``/v1`` if present, so
+    operators who copy a routing-table entry like ``http://host:port/v1`` still
+    get the correct ``http://host:port/v1/chat/completions`` instead of 404.
+    """
+    url = url.rstrip("/")
+    if url.endswith("/v1"):
+        url = url[:-3]
+    return url
+
+
 def _get_llm_client() -> httpx.AsyncClient:
     global _llm_client
     if _llm_client is None or _llm_client.is_closed:
@@ -96,7 +109,7 @@ async def llm_query(
     if json_mode:
         body["response_format"] = {"type": "json_object"}
 
-    effective_url = url or LLM_URL
+    effective_url = _openai_base(url or LLM_URL)
     effective_key = LLM_API_KEY if api_key is None else api_key
 
     m.inc(m.LLM_CALL)

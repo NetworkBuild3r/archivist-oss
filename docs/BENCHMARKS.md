@@ -166,9 +166,9 @@ JSON output includes `benchmark_meta.hypotheses` (H1–H3) for pre-registered cl
 Point `.env` at the machine running Qdrant and embedding/LLM services, for example:
 
 ```bash
-QDRANT_URL=http://192.168.11.142:6333
-EMBED_URL=http://192.168.11.142:8000
-LLM_URL=http://192.168.11.142:7878
+QDRANT_URL=http://192.0.2.10:6333
+EMBED_URL=http://192.0.2.10:8000
+LLM_URL=http://192.0.2.10:7878
 ```
 
 Run the evaluate module from a checkout of this repo with that `.env`; `MEMORY_ROOT` is overridden per run to the chosen corpus directory.

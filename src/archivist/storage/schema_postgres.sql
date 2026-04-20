@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS entities (
     namespace        TEXT NOT NULL DEFAULT 'global',
     actor_id         TEXT NOT NULL DEFAULT '',
     actor_type       TEXT NOT NULL DEFAULT '',
-    CONSTRAINT entities_name_unique UNIQUE (name)
+    CONSTRAINT entities_name_ns_unique UNIQUE (name, namespace)
 );
 
 CREATE INDEX IF NOT EXISTS idx_entities_name       ON entities (name);
