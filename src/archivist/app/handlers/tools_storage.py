@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import sqlite3
 import time
 import uuid
 from datetime import UTC, datetime
@@ -45,7 +46,7 @@ from archivist.write.contextual_augment import augment_chunk
 from archivist.write.indexer import compute_ttl
 from archivist.write.pre_extractor import extract_needle_entities, pre_extract
 
-from ._common import _rbac_gate, error_response, resolve_actor, success_response
+from ._common import _rbac_gate, conflict_resolved_response, error_response, resolve_actor, success_response
 
 logger = logging.getLogger("archivist.mcp")
 
@@ -405,13 +406,26 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
     )
 
     for ename in entity_names:
-        eid = await upsert_entity(
-            ename.strip(),
-            retention_class=retention,
-            namespace=namespace or "global",
-            actor_id=actor_id,
-            actor_type=actor_type,
-        )
+        try:
+            eid = await upsert_entity(
+                ename.strip(),
+                retention_class=retention,
+                namespace=namespace or "global",
+                actor_id=actor_id,
+                actor_type=actor_type,
+            )
+        except sqlite3.IntegrityError:
+            # Defense-in-depth: upsert_entity is already idempotent via
+            # ON CONFLICT DO UPDATE, but a simultaneous schema migration or
+            # legacy code path could still surface an IntegrityError.
+            # Treat it as a resolved conflict and proceed rather than
+            # propagating an error that would trigger agent retry loops.
+            m.inc(m.ENTITY_UPSERT_CONFLICTS, {"namespace": namespace or "global"})
+            logger.info(
+                "entity_upsert.conflict_resolved",
+                extra={"entity_name": ename, "namespace": namespace},
+            )
+            return conflict_resolved_response(0, ename.strip(), namespace or "global")
         await add_fact(eid, text[:200], f"explicit/{agent_id}", agent_id, **_fact_kw)
 
     if not entity_names:

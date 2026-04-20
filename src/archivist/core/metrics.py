@@ -412,6 +412,12 @@ FTS_UPSERT_ERRORS_TOTAL = "archivist_fts_upsert_errors_total"
 INDEX_DURATION_MS = "archivist_index_duration_ms"
 """Histogram: wall-clock time per full file indexing call (ms)."""
 
+# ── Entity upsert observability (v1.12 idempotency fix) ───────────────────────
+ENTITY_UPSERT_TOTAL = "archivist_entity_upsert_total"
+"""Counter: cumulative entity upsert calls (inserts + conflict-resolved updates), label: namespace."""
+ENTITY_UPSERT_CONFLICTS = "archivist_entity_upsert_conflicts_total"
+"""Counter: entity upserts resolved idempotently (entity already existed), label: namespace."""
+
 # ── Curator per-phase observability ───────────────────────────────────────────
 CURATOR_EXTRACT_MS = "archivist_curator_extract_duration_ms"
 """Histogram: time spent in the knowledge-extraction phase of each curator cycle (ms)."""

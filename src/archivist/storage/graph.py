@@ -1157,40 +1157,67 @@ async def upsert_entity(
 ) -> int:
     """Insert or update an entity, returning its integer ID.
 
+    Idempotent by design: concurrent calls with the same ``(name, namespace)``
+    pair never raise ``IntegrityError``.  Uses a single-statement
+    ``INSERT … ON CONFLICT DO UPDATE`` which is atomic on both SQLite (3.24+)
+    and Postgres — there is no race window between a SELECT and a separate
+    INSERT the way a check-then-act pattern would have.
+
+    When the row already exists the ``mention_count`` is incremented and
+    ``retention_class`` is escalated to the higher rank if the incoming class
+    outranks the stored one.
+
     Args:
         conn: Optional open ``aiosqlite.Connection``.  When provided the write
             joins the caller's transaction; when ``None`` a fresh
             ``pool.write()`` lock is acquired.
+
+    Returns:
+        The integer primary-key ID of the entity (new or existing).
     """
+    import archivist.core.metrics as _m
     from archivist.storage.sqlite_pool import pool
 
     now = datetime.now(UTC).isoformat()
 
     async def _run(c: aiosqlite.Connection) -> int:
+        # Single atomic UPSERT — no SELECT-then-INSERT race window.
+        # ON CONFLICT targets the (name, namespace) composite unique constraint.
+        # retention_class comparison uses the _RETENTION_RANK mapping: a string
+        # compare would be alphabetical and incorrect, so we embed a CASE
+        # expression that mirrors the Python rank dict ordering.
+        sql = """
+            INSERT INTO entities (
+                name, entity_type, first_seen, last_seen,
+                retention_class, namespace, actor_id, actor_type,
+                mention_count
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+            ON CONFLICT(name, namespace) DO UPDATE SET
+                last_seen       = excluded.last_seen,
+                mention_count   = entities.mention_count + 1,
+                retention_class = CASE
+                    WHEN excluded.retention_class = 'permanent'
+                         AND entities.retention_class != 'permanent'            THEN 'permanent'
+                    WHEN excluded.retention_class = 'durable'
+                         AND entities.retention_class NOT IN ('permanent','durable')
+                                                                                THEN 'durable'
+                    WHEN excluded.retention_class = 'standard'
+                         AND entities.retention_class = 'ephemeral'             THEN 'standard'
+                    ELSE entities.retention_class
+                END
+            RETURNING id
+        """
         cur = await c.execute(
-            "SELECT id, mention_count, retention_class FROM entities WHERE LOWER(name) = LOWER(?) AND namespace = ?",
-            (name, namespace),
-        )
-        row = await cur.fetchone()
-        if row:
-            existing_rc = row["retention_class"] if "retention_class" in row.keys() else "standard"
-            new_rc = (
-                retention_class
-                if _RETENTION_RANK.get(retention_class, 1) > _RETENTION_RANK.get(existing_rc, 1)
-                else existing_rc
-            )
-            await c.execute(
-                "UPDATE entities SET last_seen=?, mention_count=mention_count+1, retention_class=? WHERE id=?",
-                (now, new_rc, row["id"]),
-            )
-            return row["id"]
-        cur2 = await c.execute(
-            "INSERT INTO entities (name, entity_type, first_seen, last_seen, retention_class, namespace, actor_id, actor_type) "
-            "VALUES (?,?,?,?,?,?,?,?) RETURNING id",
+            sql,
             (name, entity_type, now, now, retention_class, namespace, actor_id, actor_type),
         )
-        row2 = await cur2.fetchone()
-        return row2[0] if row2 else 0
+        row = await cur.fetchone()
+        entity_id: int = row[0] if row else 0
+
+        if entity_id:
+            _m.inc(_m.ENTITY_UPSERT_TOTAL, {"namespace": namespace})
+
+        return entity_id
 
     if conn is not None:
         return await _run(conn)

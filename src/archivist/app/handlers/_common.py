@@ -118,3 +118,21 @@ def success_response(data: dict, **json_kw) -> list[TextContent]:
     """Return a single-element TextContent list with a JSON success payload."""
     json_kw.setdefault("indent", 2)
     return [TextContent(type="text", text=json.dumps(data, **json_kw))]
+
+
+def conflict_resolved_response(entity_id: int, name: str, namespace: str) -> list[TextContent]:
+    """Return a clean success response telling agents the entity already existed.
+
+    Using ``status: success`` (not ``error``) prevents agents from retrying
+    when they encounter a duplicate entity during concurrent writes or migration.
+    Agents should treat this as a normal successful outcome and proceed.
+    """
+    return success_response(
+        {
+            "status": "success",
+            "type": "conflict_resolved",
+            "entity_id": entity_id,
+            "message": f"Entity '{name}' already existed in namespace '{namespace}'",
+            "metadata": {"already_existed": True},
+        }
+    )

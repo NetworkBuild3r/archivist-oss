@@ -175,3 +175,72 @@ class TestFTS5:
         assert "id1" not in ids
         assert "id2" not in ids
         assert "id3" in ids
+
+
+class TestEntityUpsertIdempotency:
+    """Regression tests for the SELECT-then-INSERT race condition (v1.12 fix)."""
+
+    @pytest.mark.integration
+    async def test_concurrent_entity_upsert_no_integrity_error(self, async_pool):
+        """10 concurrent upserts of the exact same entity must all succeed with the same ID.
+
+        This is the canonical regression test for the duplicate key race condition
+        that caused 'UNIQUE constraint failed: entities.name' IntegrityErrors during
+        memory migration when multiple agents upserted the same entity simultaneously.
+        """
+        import asyncio
+
+        from graph import upsert_entity
+
+        async def upsert_brian():
+            return await upsert_entity(
+                name="brian",
+                entity_type="person",
+                namespace="test-concurrent",
+            )
+
+        results = await asyncio.gather(*[upsert_brian() for _ in range(10)], return_exceptions=True)
+
+        exceptions = [r for r in results if isinstance(r, Exception)]
+        assert not exceptions, f"Got unexpected exceptions: {exceptions}"
+
+        ids = [r for r in results if isinstance(r, int)]
+        assert len(ids) == 10, f"Expected 10 results, got {len(ids)}"
+        assert len(set(ids)) == 1, f"Expected all same ID, got distinct IDs: {set(ids)}"
+        assert all(i > 0 for i in ids), f"All IDs must be positive integers, got: {ids}"
+
+    @pytest.mark.integration
+    async def test_concurrent_upsert_across_namespaces(self, async_pool):
+        """Same entity name in different namespaces must produce different IDs."""
+        import asyncio
+
+        from graph import upsert_entity
+
+        ns_a_id, ns_b_id = await asyncio.gather(
+            upsert_entity("shared-entity", "system", namespace="ns-alpha"),
+            upsert_entity("shared-entity", "system", namespace="ns-beta"),
+        )
+        assert ns_a_id > 0
+        assert ns_b_id > 0
+        assert ns_a_id != ns_b_id, "Same name in different namespaces must be separate entities"
+
+    @pytest.mark.integration
+    async def test_upsert_retention_class_escalation(self, async_pool):
+        """Higher retention class must win on conflict, lower must not downgrade."""
+        from graph import get_db, upsert_entity
+
+        eid = await upsert_entity("raven", "agent", retention_class="ephemeral", namespace="rc-test")
+        await upsert_entity("raven", "agent", retention_class="permanent", namespace="rc-test")
+        await upsert_entity("raven", "agent", retention_class="standard", namespace="rc-test")
+
+        conn = get_db()
+        row = conn.execute(
+            "SELECT retention_class, mention_count FROM entities WHERE name=? AND namespace=?",
+            ("raven", "rc-test"),
+        ).fetchone()
+        conn.close()
+
+        assert row["retention_class"] == "permanent", (
+            f"permanent should have won, got: {row['retention_class']}"
+        )
+        assert row["mention_count"] == 3, f"Expected 3 mentions, got {row['mention_count']}"
