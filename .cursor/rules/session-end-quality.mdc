@@ -1,0 +1,20 @@
+---
+description: Before wrapping up a coding session, run project lint and pre-commit hooks and fix failures
+alwaysApply: true
+---
+
+# Session end — lint and pre-commit
+
+Before **ending** a task or session that changed code (or before pushing a branch), run these from the repo root and fix anything that fails:
+
+```bash
+cd /opt/appdata/archivist-oss
+ruff check .
+ruff format --check .   # or: ruff format .  to apply
+pre-commit run --all-files
+```
+
+- If `ruff format` would change files, run `ruff format .` and include the edits in the same change set.
+- Do not leave unstaged formatting-only fixes from pre-commit hooks.
+
+This matches CI and `.pre-commit-config.yaml` (ruff, ruff-format, trailing whitespace, etc.).

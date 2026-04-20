@@ -460,9 +460,7 @@ class ResumableSessionManager(StreamableHTTPSessionManager):
         # Detect stale-session 404 issued by the SDK
         start = next((e for e in captured if e["type"] == "http.response.start"), None)
         if start is not None and start["status"] == 404:
-            body_event = next(
-                (e for e in captured if e["type"] == "http.response.body"), None
-            )
+            body_event = next((e for e in captured if e["type"] == "http.response.body"), None)
             body = body_event.get("body", b"") if body_event else b""
             if b"Session not found" in body:
                 stale_id = _extract_session_id(scope)
@@ -475,9 +473,7 @@ class ResumableSessionManager(StreamableHTTPSessionManager):
                 # Strip the stale header; the SDK will treat the request as a
                 # new initialisation and hand back a fresh session ID.
                 clean_headers = [
-                    (k, v)
-                    for k, v in scope.get("headers", [])
-                    if k.lower() != b"mcp-session-id"
+                    (k, v) for k, v in scope.get("headers", []) if k.lower() != b"mcp-session-id"
                 ]
                 fresh_scope = {**scope, "headers": clean_headers}
                 await super().handle_request(fresh_scope, receive, send)

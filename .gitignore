@@ -14,7 +14,10 @@ venv/
 # IDE
 .vscode/
 .idea/
-.cursor/
+# Ignore local Cursor state but version shared rules (see .cursor/rules/)
+.cursor/*
+!.cursor/rules/
+!.cursor/rules/**
 *.swp
 *.swo
 

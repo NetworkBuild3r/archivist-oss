@@ -88,7 +88,9 @@ def _get_embed_client() -> httpx.AsyncClient:
     return _embed_client
 
 
-async def _post_embedding_array(client: httpx.AsyncClient, texts: list[str], model: str) -> list[list[float]]:
+async def _post_embedding_array(
+    client: httpx.AsyncClient, texts: list[str], model: str
+) -> list[list[float]]:
     """One OpenAI-style POST with ``input`` = array of strings."""
     if not texts:
         return []
