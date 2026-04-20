@@ -5,6 +5,11 @@ Covers both transport layers:
   - Legacy SSE       GET  /mcp/sse    (backward-compat for OpenClaw ≤v2026.4.8)
 
 Also covers the auth middleware OpenClaw placeholder acceptance.
+
+Auth middleware tests use the pure-ASGI interface (scope/receive/send) because
+ArchivistAuthMiddleware is no longer a BaseHTTPMiddleware subclass — using
+BaseHTTPMiddleware was the root cause of the "Session not found" bug (MCP SDK
+issue #883).
 """
 
 from contextlib import asynccontextmanager
@@ -19,7 +24,7 @@ def test_app_registers_streamable_http_route():
     import main
 
     route = next(
-        (route for route in main.app.routes if isinstance(route, Route) and route.path == "/mcp"),
+        (r for r in main._inner_app.routes if isinstance(r, Route) and r.path == "/mcp"),
         None,
     )
 
@@ -112,7 +117,7 @@ async def test_lifespan_initializes_and_clears_session_manager(monkeypatch):
 
     assert main.streamable_http_session_manager is None
 
-    async with main.lifespan(main.app):
+    async with main.lifespan(main._inner_app):
         events.append("inside")
         assert main.streamable_http_session_manager is fake_manager
 
@@ -128,7 +133,7 @@ def test_app_registers_sse_get_route():
     import main
 
     route = next(
-        (r for r in main.app.routes if isinstance(r, Route) and r.path == "/mcp/sse"),
+        (r for r in main._inner_app.routes if isinstance(r, Route) and r.path == "/mcp/sse"),
         None,
     )
     assert route is not None, "/mcp/sse route not found — MCP_SSE_ENABLED may be false"
@@ -141,7 +146,7 @@ def test_app_registers_sse_messages_mount():
     import main
 
     mount = next(
-        (r for r in main.app.routes if isinstance(r, Mount) and r.path == "/mcp/messages"),
+        (r for r in main._inner_app.routes if isinstance(r, Mount) and r.path == "/mcp/messages"),
         None,
     )
     assert mount is not None, "/mcp/messages/ mount not found — MCP_SSE_ENABLED may be false"
@@ -156,25 +161,28 @@ def test_sse_transport_is_not_none_when_enabled():
     )
 
 
+# ── Auth middleware — pure ASGI interface ─────────────────────────────────────
+# The middleware uses raw ASGI (scope/receive/send) rather than BaseHTTPMiddleware
+# so tests call __call__ directly, capturing sends via a mock send callable.
+
+
 async def test_auth_middleware_accepts_actual_key(monkeypatch):
     """Standard Bearer token with the actual key must be accepted."""
+    import main as main_mod_local
 
-    import main
+    monkeypatch.setattr(main_mod_local, "ARCHIVIST_API_KEY", "correct-key", raising=False)
 
-    monkeypatch.setattr(main, "ARCHIVIST_API_KEY", "correct-key", raising=False)
-    monkeypatch.setattr("main.ARCHIVIST_API_KEY", "correct-key", raising=False)
+    downstream_called = False
 
-    middleware = main.ArchivistAuthMiddleware(app=None)
+    async def downstream(scope, receive, send):
+        nonlocal downstream_called
+        downstream_called = True
 
-    accepted = {}
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
 
-    async def call_next(req):
-        accepted["called"] = True
-        from starlette.responses import JSONResponse
-
-        return JSONResponse({"ok": True})
-
-    from starlette.requests import Request
+    async def send(msg):
+        pass
 
     scope = {
         "type": "http",
@@ -183,32 +191,27 @@ async def test_auth_middleware_accepts_actual_key(monkeypatch):
         "query_string": b"",
         "headers": [(b"authorization", b"Bearer correct-key")],
     }
+    await main_mod_local.ArchivistAuthMiddleware(app=downstream)(scope, receive, send)
+    assert downstream_called, "downstream was not called — valid Bearer token was rejected"
+
+
+async def test_auth_middleware_accepts_openclaw_placeholder(monkeypatch):
+    """OpenClaw compat: literal 'Bearer ${ARCHIVIST_API_KEY}' must be accepted with a warning."""
+    import main as main_mod_local
+
+    monkeypatch.setattr(main_mod_local, "ARCHIVIST_API_KEY", "some-secret-key", raising=False)
+
+    downstream_called = False
+
+    async def downstream(scope, receive, send):
+        nonlocal downstream_called
+        downstream_called = True
 
     async def receive():
         return {"type": "http.request", "body": b"", "more_body": False}
 
-    request = Request(scope, receive)
-    response = await middleware.dispatch(request, call_next)
-    assert accepted.get("called"), "call_next was not invoked — valid Bearer token was rejected"
-
-
-async def test_auth_middleware_accepts_openclaw_placeholder(monkeypatch):
-    """OpenClaw compatibility: literal 'Bearer ${ARCHIVIST_API_KEY}' must be accepted with a warning."""
-
-    import main
-
-    monkeypatch.setattr(main, "ARCHIVIST_API_KEY", "some-secret-key", raising=False)
-
-    middleware = main.ArchivistAuthMiddleware(app=None)
-    accepted = {}
-
-    async def call_next(req):
-        accepted["called"] = True
-        from starlette.responses import JSONResponse
-
-        return JSONResponse({"ok": True})
-
-    from starlette.requests import Request
+    async def send(msg):
+        pass
 
     scope = {
         "type": "http",
@@ -217,35 +220,30 @@ async def test_auth_middleware_accepts_openclaw_placeholder(monkeypatch):
         "query_string": b"",
         "headers": [(b"authorization", b"Bearer ${ARCHIVIST_API_KEY}")],
     }
-
-    async def receive():
-        return {"type": "http.request", "body": b"", "more_body": False}
-
-    request = Request(scope, receive)
-    # Warning is emitted via logger.warning(), not Python warnings.warn() —
-    # just dispatch and assert call_next was invoked (no 401).
-    response = await middleware.dispatch(request, call_next)
-    assert accepted.get("called"), (
-        "call_next was not invoked — OpenClaw literal placeholder '${ARCHIVIST_API_KEY}' was rejected"
+    await main_mod_local.ArchivistAuthMiddleware(app=downstream)(scope, receive, send)
+    assert downstream_called, (
+        "downstream was not called — OpenClaw literal '${ARCHIVIST_API_KEY}' placeholder was rejected"
     )
 
 
 async def test_auth_middleware_rejects_unknown_token(monkeypatch):
-    """An unrecognized Bearer token must still return 401."""
-    import main
+    """An unrecognized Bearer token must return 401 without calling downstream."""
+    import main as main_mod_local
 
-    monkeypatch.setattr(main, "ARCHIVIST_API_KEY", "real-secret", raising=False)
+    monkeypatch.setattr(main_mod_local, "ARCHIVIST_API_KEY", "real-secret", raising=False)
 
-    middleware = main.ArchivistAuthMiddleware(app=None)
-    rejected = {}
+    downstream_called = False
+    sent_messages: list = []
 
-    async def call_next(req):
-        rejected["called"] = True
-        from starlette.responses import JSONResponse
+    async def downstream(scope, receive, send):
+        nonlocal downstream_called
+        downstream_called = True
 
-        return JSONResponse({"ok": True})
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
 
-    from starlette.requests import Request
+    async def send(msg):
+        sent_messages.append(msg)
 
     scope = {
         "type": "http",
@@ -254,11 +252,169 @@ async def test_auth_middleware_rejects_unknown_token(monkeypatch):
         "query_string": b"",
         "headers": [(b"authorization", b"Bearer wrong-key")],
     }
+    await main_mod_local.ArchivistAuthMiddleware(app=downstream)(scope, receive, send)
+    assert not downstream_called, "downstream was called despite an invalid Bearer token"
+
+    status = next(
+        (m["status"] for m in sent_messages if m.get("type") == "http.response.start"), None
+    )
+    assert status == 401, f"expected 401, got {status}"
+
+
+# ── Session persistence regression test ──────────────────────────────────────
+
+
+async def test_session_id_survives_initialize_then_tool_call(monkeypatch):
+    """Verify that the mcp-session-id header returned by initialize is accepted
+    on a subsequent request — i.e. the session is not dropped between calls.
+
+    This is the core regression test for MCP SDK issue #883: when
+    BaseHTTPMiddleware wraps the ASGI stack the session is cleaned up after
+    the first request, so the second call returns "Session not found".
+    With a pure ASGI middleware the session must survive across calls.
+    """
+    import main
+
+    SESSION_ID = "test-session-abc123"
+
+    # Track which session IDs the fake manager has seen
+    sessions: dict[str, bool] = {}
+    initialized_session: list[str] = []
+
+    class FakeSessionManager:
+        async def handle_request(self, scope, receive, send):
+            headers = dict(scope.get("headers", []))
+            incoming_session = headers.get(b"mcp-session-id", b"").decode()
+
+            if not incoming_session:
+                # Simulate initialize: create a new session and return its ID
+                sessions[SESSION_ID] = True
+                initialized_session.append(SESSION_ID)
+                await send(
+                    {
+                        "type": "http.response.start",
+                        "status": 200,
+                        "headers": [
+                            (b"mcp-session-id", SESSION_ID.encode()),
+                            (b"content-type", b"application/json"),
+                        ],
+                    }
+                )
+                await send({"type": "http.response.body", "body": b"{}", "more_body": False})
+            elif incoming_session in sessions:
+                # Session known: serve the tool call
+                await send(
+                    {
+                        "type": "http.response.start",
+                        "status": 200,
+                        "headers": [(b"content-type", b"application/json")],
+                    }
+                )
+                await send(
+                    {
+                        "type": "http.response.body",
+                        "body": b'{"result": "ok"}',
+                        "more_body": False,
+                    }
+                )
+            else:
+                # Session not found — this is the bug we're guarding against
+                await send(
+                    {
+                        "type": "http.response.start",
+                        "status": 404,
+                        "headers": [(b"content-type", b"application/json")],
+                    }
+                )
+                await send(
+                    {
+                        "type": "http.response.body",
+                        "body": b'{"error": "Session not found"}',
+                        "more_body": False,
+                    }
+                )
+
+    monkeypatch.setattr(main, "streamable_http_session_manager", FakeSessionManager())
+    # Disable API key auth so we can test the transport layer in isolation
+    monkeypatch.setattr(main, "ARCHIVIST_API_KEY", "", raising=False)
 
     async def receive():
         return {"type": "http.request", "body": b"", "more_body": False}
 
-    request = Request(scope, receive)
-    response = await middleware.dispatch(request, call_next)
-    assert not rejected.get("called"), "call_next was invoked for an invalid Bearer token"
-    assert response.status_code == 401
+    init_statuses: list[int] = []
+    tool_statuses: list[int] = []
+
+    async def init_send(msg):
+        if msg.get("type") == "http.response.start":
+            init_statuses.append(msg["status"])
+
+    async def tool_send(msg):
+        if msg.get("type") == "http.response.start":
+            tool_statuses.append(msg["status"])
+
+    # Request 1: initialize (no session ID)
+    init_scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/mcp",
+        "query_string": b"",
+        "headers": [(b"content-type", b"application/json")],
+    }
+    await main.app(init_scope, receive, init_send)
+    assert init_statuses == [200], f"initialize returned unexpected status: {init_statuses}"
+    assert initialized_session, "no session was created by initialize"
+
+    # Request 2: tool call with the session ID returned by initialize
+    tool_scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/mcp",
+        "query_string": b"",
+        "headers": [
+            (b"content-type", b"application/json"),
+            (b"mcp-session-id", SESSION_ID.encode()),
+        ],
+    }
+    await main.app(tool_scope, receive, tool_send)
+    assert tool_statuses == [200], (
+        f"tool call returned {tool_statuses} — session was lost between requests "
+        f"(BaseHTTPMiddleware regression, MCP SDK issue #883)"
+    )
+
+
+# ── Guard against re-introducing BaseHTTPMiddleware ──────────────────────────
+
+
+def test_base_http_middleware_not_imported_in_main():
+    """Ensure BaseHTTPMiddleware is never re-introduced into main.py.
+
+    BaseHTTPMiddleware is incompatible with the MCP SDK's Streamable HTTP
+    transport and causes every MCP tool call to return "Session not found"
+    (MCP SDK issue #883).  If this test fails, the regression has been
+    re-introduced.
+    """
+    import importlib
+    import sys
+
+    # Remove any cached module so we read the source fresh
+    mod_name = "main"
+    if mod_name in sys.modules:
+        del sys.modules[mod_name]
+
+    # Read the source directly instead of importing to avoid side-effects
+    import ast
+    import importlib.util
+
+    spec = importlib.util.find_spec(mod_name)
+    assert spec is not None and spec.origin is not None, "cannot locate main module"
+
+    source = open(spec.origin).read()  # noqa: SIM115
+    tree = ast.parse(source)
+
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            node_src = ast.get_source_segment(source, node) or ""
+            assert "BaseHTTPMiddleware" not in node_src, (
+                "main.py imports BaseHTTPMiddleware — this breaks MCP session management "
+                "(MCP SDK issue #883).  Use a pure ASGI middleware instead."
+            )

@@ -12,10 +12,9 @@ from datetime import UTC, datetime
 from mcp.server.sse import SseServerTransport
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from starlette.applications import Starlette
-from starlette.middleware import Middleware
-from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse, PlainTextResponse, Response
 from starlette.routing import Mount, Route
+from starlette.types import ASGIApp, Receive, Scope, Send
 from watchfiles import Change, awatch
 
 import archivist.core.health as health
@@ -440,33 +439,58 @@ sse_app = SseASGIApp()
 streamable_http_app = StreamableHTTPASGIApp()
 
 
-class ArchivistAuthMiddleware(BaseHTTPMiddleware):
-    """Optional API key on all routes except GET /health (for probes).
+class ArchivistAuthMiddleware:
+    """Pure ASGI middleware for optional API-key authentication.
 
-    GET /health is always open. GET /metrics is open when METRICS_AUTH_EXEMPT is true
-    so in-cluster Prometheus can scrape without the MCP API key.
+    Uses raw ASGI instead of ``BaseHTTPMiddleware`` to avoid the response-
+    wrapping that breaks the MCP SDK's ``StreamableHTTPSessionManager``.
+    ``BaseHTTPMiddleware`` runs the downstream app in a separate task group
+    with wrapped ``receive``/``send`` callables; this disrupts the session
+    handshake and causes every MCP tool call to return ``"Session not found"``
+    (MCP SDK issue #883).
+
+    GET /health is always open (liveness/readiness probes).
+    GET /metrics is open when ``METRICS_AUTH_EXEMPT`` is true so Prometheus
+    can scrape without the MCP API key.
 
     Auth precedence (first match wins):
       1. Authorization: Bearer <actual-key>
       2. X-API-Key: <actual-key>
       3. Authorization: Bearer ${ARCHIVIST_API_KEY}  (literal — OpenClaw ≤v2026.4.8
-         does not interpolate env vars inside the headers config object; we accept the
-         known placeholder string and log a warning so operators can track the issue).
+         does not interpolate env vars inside the headers config object; we accept
+         the known placeholder string and log a warning so operators can track it).
     """
 
-    # Literal un-interpolated placeholder sent by OpenClaw when env-var
-    # substitution is not applied to the mcp.servers headers object.
     _OPENCLAW_PLACEHOLDER = "Bearer ${ARCHIVIST_API_KEY}"
 
-    async def dispatch(self, request, call_next):
-        if request.url.path == "/health":
-            return await call_next(request)
-        if METRICS_AUTH_EXEMPT and request.url.path == "/metrics":
-            return await call_next(request)
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """ASGI entry-point — passes scope/receive/send through unmodified."""
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        path: str = scope.get("path", "")
+
+        if path == "/health":
+            await self.app(scope, receive, send)
+            return
+        if METRICS_AUTH_EXEMPT and path == "/metrics":
+            await self.app(scope, receive, send)
+            return
         if not ARCHIVIST_API_KEY:
-            return await call_next(request)
-        auth = request.headers.get("authorization", "")
-        xkey = request.headers.get("x-api-key", "")
+            await self.app(scope, receive, send)
+            return
+
+        headers = {
+            k.decode("latin-1").lower(): v.decode("latin-1")
+            for k, v in scope.get("headers", [])
+        }
+        auth = headers.get("authorization", "")
+        xkey = headers.get("x-api-key", "")
+
         ok = auth == f"Bearer {ARCHIVIST_API_KEY}" or xkey == ARCHIVIST_API_KEY
         if not ok and auth == self._OPENCLAW_PLACEHOLDER:
             ok = True
@@ -474,11 +498,13 @@ class ArchivistAuthMiddleware(BaseHTTPMiddleware):
                 "auth.uninterpolated_placeholder: client sent literal "
                 "'Bearer ${ARCHIVIST_API_KEY}' instead of the resolved key — "
                 "fix client env-var interpolation or switch to X-API-Key header",
-                extra={"client": str(getattr(request.client, "host", "unknown"))},
             )
         if not ok:
-            return JSONResponse({"error": "unauthorized"}, status_code=401)
-        return await call_next(request)
+            response = JSONResponse({"error": "unauthorized"}, status_code=401)
+            await response(scope, receive, send)
+            return
+
+        await self.app(scope, receive, send)
 
 
 async def handle_retrieval_export(request):
@@ -689,7 +715,7 @@ _sse_routes = (
     else []
 )
 
-app = Starlette(
+_inner_app = Starlette(
     routes=[
         Route("/health", handle_health),
         Route("/metrics", handle_metrics),
@@ -707,9 +733,9 @@ app = Starlette(
         Route("/mcp", endpoint=streamable_http_app, methods=["GET", "POST", "DELETE"]),
         *_sse_routes,
     ],
-    middleware=[Middleware(ArchivistAuthMiddleware)],
     lifespan=lifespan,
 )
+app = ArchivistAuthMiddleware(_inner_app)
 
 
 if __name__ == "__main__":
