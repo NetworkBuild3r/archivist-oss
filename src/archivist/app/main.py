@@ -51,11 +51,18 @@ logging.basicConfig(
 logger = logging.getLogger("archivist")
 
 
-def ensure_qdrant_collection():
+async def ensure_qdrant_collection() -> None:
     """Create or migrate the Qdrant collection to the target vector dimension.
 
     Retries until Qdrant accepts connections (Docker Compose may start archivist
     before qdrant is listening; avoids brittle image-specific healthchecks).
+
+    This must be ``async`` so that the ``await asyncio.sleep()`` between retries
+    yields control back to the event loop.  Using ``time.sleep()`` here would
+    block the entire event loop thread, starving the
+    ``StreamableHTTPSessionManager`` task group and preventing the MCP session
+    handshake from completing — causing every subsequent tool call to return
+    ``"Session not found"``.
     """
     from qdrant_client import QdrantClient
     from qdrant_client.models import Distance, HnswConfigDiff, PayloadSchemaType, VectorParams
@@ -72,7 +79,7 @@ def ensure_qdrant_collection():
         except Exception as e:
             last_err = e
             logger.warning("Waiting for Qdrant at %s: %s — retrying in 2s", QDRANT_URL, e)
-            time.sleep(2)
+            await asyncio.sleep(2)
     else:
         health.register(
             "qdrant", healthy=False, detail=f"Qdrant not reachable after 120s: {last_err}"
@@ -304,7 +311,7 @@ async def _startup():
     load_rbac_config()
     logger.info("RBAC config loaded")
 
-    ensure_qdrant_collection()
+    await ensure_qdrant_collection()
 
     # Initialise the OutboxProcessor singleton and register it globally so that
     # MemoryTransaction can locate it (optional — the transaction does not call
