@@ -120,7 +120,7 @@ class ArchivistSettings(BaseSettings):
     graph_retrieval_enabled: bool = True
     graph_retrieval_weight: float = 0.3
     multi_hop_depth: int = Field(default=2, ge=1)
-    temporal_decay_halflife_days: int = Field(default=30, ge=1)
+    temporal_decay_halflife_days: int = Field(default=30, ge=0)  # 0 = decay disabled
 
     # ── Trajectory & feedback (v0.6) ─────────────────────────────────────────
     outcome_retrieval_boost: float = 0.15
