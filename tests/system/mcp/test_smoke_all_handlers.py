@@ -136,7 +136,7 @@ class TestDocsHandler:
     async def test_get_reference_docs_falls_back_gracefully_when_files_missing(
         self, tmp_path, monkeypatch
     ) -> None:
-        """Handler must return a JSON error dict (not crash) when both doc files are absent."""
+        """Handler must return the built-in stub (not crash) when both doc files are absent."""
         from archivist.app.handlers import tools_docs
 
         monkeypatch.setattr(tools_docs, "_SKILL_DOC", tmp_path / "missing1.md")
@@ -144,9 +144,9 @@ class TestDocsHandler:
 
         result = await tools_docs._handle_get_reference_docs({})
         assert isinstance(result, list) and result
-        data = json.loads(result[0].text)
-        assert data.get("error") == "reference_docs_not_found"
-        assert "tried" in data
+        # Returns the built-in stub markdown, not a JSON error dict
+        assert "Archivist MCP" in result[0].text
+        assert "archivist_store" in result[0].text
 
     async def test_get_reference_docs_section_filter(self) -> None:
         from archivist.app.handlers.tools_docs import _handle_get_reference_docs

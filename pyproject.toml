@@ -65,6 +65,7 @@ markers = [
     # Utility markers
     "slow: tests taking more than 2 seconds (deselect during development)",
     "benchmark: performance benchmarks (run with 'pytest benchmarks/')",
+    "enterprise_benchmark: enterprise benchmark suite (run with 'python -m benchmarks.enterprise.scenarios.smoke')",
 ]
 addopts = ["--strict-markers", "--tb=short", "-q"]
 
@@ -194,3 +195,9 @@ fail_under = 46  # baseline 51.4% (2026-04-17) — raise by 2-5 pts each quarter
 disable_gc = true
 warmup = true
 min_rounds = 5
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"archivist.docs" = ["*.md"]

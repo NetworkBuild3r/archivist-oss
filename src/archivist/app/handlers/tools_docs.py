@@ -24,6 +24,31 @@ def _doc_path() -> Path:
     return _SKILL_DOC if _SKILL_DOC.exists() else _FALLBACK_DOC
 
 
+# Minimal built-in stub returned when neither packaged doc file is present.
+# This should only occur in highly stripped or misconfigured deployments; the
+# normal fix is to rebuild the image so src/archivist/docs/ is included.
+_FALLBACK_STUB = """\
+# Archivist MCP — Built-in Reference Stub
+
+**The full reference file (docs/CURSOR_SKILL.md) was not found in this deployment.**
+Rebuild or reinstall the `archivist-oss` package to restore the complete guide.
+
+## Available tools (summary)
+
+- archivist_store          — persist a memory
+- archivist_search         — semantic + keyword retrieval
+- archivist_delete         — delete a memory by ID
+- archivist_timeline       — time-ordered memory feed
+- archivist_namespaces     — list registered namespaces
+- archivist_index          — return the agent memory index file
+- archivist_health_dashboard — subsystem health snapshot
+- archivist_get_reference_docs — return this reference (you are reading it)
+
+Call `archivist_get_reference_docs()` again after a redeploy to retrieve the
+full 400-line guide with parameters, examples, and usage tips.
+"""
+
+
 # ---------------------------------------------------------------------------
 # Tool definitions
 # ---------------------------------------------------------------------------
@@ -89,18 +114,7 @@ async def _handle_get_reference_docs(arguments: dict) -> list[TextContent]:
     """Return the agent skill reference, optionally filtered to one section."""
     doc = _doc_path()
     if not doc.exists():
-        return [
-            TextContent(
-                type="text",
-                text=json.dumps(
-                    {
-                        "error": "reference_docs_not_found",
-                        "tried": [str(_SKILL_DOC), str(_FALLBACK_DOC)],
-                        "hint": "Neither docs/CURSOR_SKILL.md nor docs/REFERENCE.md was found in the deployment.",
-                    }
-                ),
-            )
-        ]
+        return [TextContent(type="text", text=_FALLBACK_STUB)]
 
     try:
         text = doc.read_text(encoding="utf-8")
