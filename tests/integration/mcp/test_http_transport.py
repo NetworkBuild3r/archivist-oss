@@ -412,7 +412,7 @@ def test_base_http_middleware_not_imported_in_main():
     tree = ast.parse(source)
 
     for node in ast.walk(tree):
-        if isinstance(node, (ast.Import, ast.ImportFrom)):
+        if isinstance(node, ast.Import | ast.ImportFrom):
             node_src = ast.get_source_segment(source, node) or ""
             assert "BaseHTTPMiddleware" not in node_src, (
                 "main.py imports BaseHTTPMiddleware — this breaks MCP session management "

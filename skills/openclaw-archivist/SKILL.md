@@ -513,7 +513,7 @@ User: "We've decided to use Redis for session caching, not in-memory maps."
    → check for conflicting prior decision
 
 2. archivist_store(
-     text="2026-04-19: Decided to use Redis for session caching (not in-memory maps). 
+     text="2026-04-19: Decided to use Redis for session caching (not in-memory maps).
            Rationale: horizontal scalability across pods.",
      agent_id="my-agent",
      namespace="engineering",
