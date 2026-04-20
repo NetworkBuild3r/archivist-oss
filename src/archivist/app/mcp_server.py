@@ -127,7 +127,9 @@ async def read_resource(uri: AnyUrl) -> list[TextResourceContents]:
         from archivist.storage.compressed_index import build_namespace_index
 
         namespace = get_namespace_for_agent(agent_id) if agent_id else ""
-        index_text = await build_namespace_index(namespace, agent_ids=[agent_id] if agent_id else None)
+        index_text = await build_namespace_index(
+            namespace, agent_ids=[agent_id] if agent_id else None
+        )
 
         # Prepend a save-as hint so the agent knows what to do with this content.
         header = (

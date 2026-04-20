@@ -23,8 +23,8 @@ import time
 from collections import defaultdict
 
 import archivist.core.metrics as m
-from archivist.storage.graph import get_curator_state, set_curator_state
 import archivist.storage.sqlite_pool as _sqlite_pool
+from archivist.storage.graph import get_curator_state, set_curator_state
 
 logger = logging.getLogger("archivist.compressed_index")
 
@@ -334,9 +334,7 @@ async def build_wake_up_context(namespace: str, agent_id: str = "") -> dict:
                 agent_ids,
             )
         else:
-            activity_cursor = await conn.execute(
-                "SELECT MAX(last_seen) AS ls FROM entities"
-            )
+            activity_cursor = await conn.execute("SELECT MAX(last_seen) AS ls FROM entities")
         activity_row = await activity_cursor.fetchone()
         last_activity = (activity_row["ls"] or "")[:10] if activity_row else ""
 

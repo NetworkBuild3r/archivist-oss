@@ -19,10 +19,9 @@ The tests here verify:
 
 from __future__ import annotations
 
-import asyncio
 import sqlite3
 from contextlib import asynccontextmanager
-from unittest.mock import AsyncMock, MagicMock, patch, call
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -52,6 +51,18 @@ def _make_standard_patches(monkeypatch):
     }
 
 
+def _make_mock_txn():
+    """Return an AsyncMock that satisfies the MemoryTransaction async-context-manager protocol."""
+    txn = AsyncMock()
+    txn.__aenter__ = AsyncMock(return_value=txn)
+    txn.__aexit__ = AsyncMock(return_value=False)
+    txn.upsert_fts_chunk = AsyncMock()
+    txn.register_needle_tokens = AsyncMock()
+    txn.executemany = AsyncMock()
+    txn.enqueue_qdrant_upsert = MagicMock()
+    return txn
+
+
 # ---------------------------------------------------------------------------
 # Test 1: IntegrityError on explicit entity continues the store pipeline
 # ---------------------------------------------------------------------------
@@ -66,16 +77,9 @@ class TestExplicitEntityIntegrityErrorContinues:
     """
 
     @pytest.mark.asyncio
-    async def test_store_returns_stored_true_despite_integrity_error(
-        self, monkeypatch
-    ):
+    async def test_store_returns_stored_true_despite_integrity_error(self, monkeypatch):
         """Even when the first upsert_entity raises IntegrityError, the store
         completes successfully and returns a response with stored=True."""
-        monkeypatch.setattr(
-            "archivist.app.handlers.tools_search.is_permissive_mode", lambda: True
-        )
-        monkeypatch.setattr("archivist.core.config.RBAC_PERMISSIVE_MODE", True)
-
         existing_id = 42
 
         upsert_call_count = 0
@@ -86,7 +90,9 @@ class TestExplicitEntityIntegrityErrorContinues:
             if upsert_call_count == 1:
                 # First call raises IntegrityError; the fix must catch it and
                 # continue instead of returning.
-                raise sqlite3.IntegrityError("UNIQUE constraint failed: entities.name, entities.namespace")
+                raise sqlite3.IntegrityError(
+                    "UNIQUE constraint failed: entities.name, entities.namespace"
+                )
             return existing_id + upsert_call_count
 
         async def mock_resolve(name, namespace="global"):
@@ -128,6 +134,7 @@ class TestExplicitEntityIntegrityErrorContinues:
             patch("handlers.tools_storage.get_namespace_config", return_value=None),
             patch("handlers.tools_storage._rbac_gate", return_value=None),
             patch("handlers.tools_storage.invalidate_index_cache", MagicMock()),
+            patch("archivist.storage.transaction.MemoryTransaction", return_value=_make_mock_txn()),
             patch("webhooks.fire_background"),
         ):
             mock_qc.return_value = MagicMock(upsert=MagicMock())
@@ -151,6 +158,7 @@ class TestExplicitEntityIntegrityErrorContinues:
         assert result is not None
         content = result[0].text if hasattr(result[0], "text") else str(result)
         import json as _json
+
         parsed = _json.loads(content)
         # The old bug returned {"status": "conflict_resolved", "entity_id": 0}
         assert parsed.get("status") != "conflict_resolved", (
@@ -161,7 +169,6 @@ class TestExplicitEntityIntegrityErrorContinues:
     @pytest.mark.asyncio
     async def test_integrity_error_increments_metric(self, monkeypatch):
         """ENTITY_UPSERT_CONFLICTS metric is incremented when IntegrityError fires."""
-        monkeypatch.setattr("archivist.core.config.RBAC_PERMISSIVE_MODE", True)
 
         async def raising_upsert(name, *args, **kwargs):
             raise sqlite3.IntegrityError("UNIQUE constraint failed")
@@ -171,9 +178,7 @@ class TestExplicitEntityIntegrityErrorContinues:
 
         import archivist.core.metrics as m
 
-        before = m._counters.get(
-            'archivist_entity_upsert_conflicts_total{namespace="test-ns"}', 0
-        )
+        before = m._counters.get('archivist_entity_upsert_conflicts_total{namespace="test-ns"}', 0)
 
         with (
             patch("handlers.tools_storage.upsert_entity", side_effect=raising_upsert),
@@ -211,6 +216,7 @@ class TestExplicitEntityIntegrityErrorContinues:
             patch("handlers.tools_storage.get_namespace_config", return_value=None),
             patch("handlers.tools_storage._rbac_gate", return_value=None),
             patch("handlers.tools_storage.invalidate_index_cache", MagicMock()),
+            patch("archivist.storage.transaction.MemoryTransaction", return_value=_make_mock_txn()),
             patch("webhooks.fire_background"),
         ):
             mock_qc.return_value = MagicMock(upsert=MagicMock())
@@ -229,15 +235,12 @@ class TestExplicitEntityIntegrityErrorContinues:
                 }
             )
 
-        after = m._counters.get(
-            'archivist_entity_upsert_conflicts_total{namespace="test-ns"}', 0
-        )
+        after = m._counters.get('archivist_entity_upsert_conflicts_total{namespace="test-ns"}', 0)
         assert after > before, "ENTITY_UPSERT_CONFLICTS must be incremented on IntegrityError"
 
     @pytest.mark.asyncio
     async def test_non_unique_exception_reraises(self, monkeypatch):
         """Exceptions that are NOT unique-constraint errors must propagate normally."""
-        monkeypatch.setattr("archivist.core.config.RBAC_PERMISSIVE_MODE", True)
 
         async def breaking_upsert(name, *args, **kwargs):
             raise RuntimeError("unexpected database crash")
@@ -275,6 +278,7 @@ class TestExplicitEntityIntegrityErrorContinues:
             patch("handlers.tools_storage.get_namespace_for_agent", return_value=None),
             patch("handlers.tools_storage.get_namespace_config", return_value=None),
             patch("handlers.tools_storage._rbac_gate", return_value=None),
+            patch("archivist.storage.transaction.MemoryTransaction", return_value=_make_mock_txn()),
             patch("webhooks.fire_background"),
         ):
             mock_qc.return_value = MagicMock(upsert=MagicMock())
@@ -400,7 +404,6 @@ class TestAsyncpgUniqueViolationCaught:
     @pytest.mark.asyncio
     async def test_asyncpg_style_exception_is_caught(self, monkeypatch):
         """An Exception whose message contains 'unique' is treated as a conflict."""
-        monkeypatch.setattr("archivist.core.config.RBAC_PERMISSIVE_MODE", True)
 
         class FakeUniqueViolationError(Exception):
             """Simulates asyncpg.exceptions.UniqueViolationError."""
@@ -452,6 +455,7 @@ class TestAsyncpgUniqueViolationCaught:
             patch("handlers.tools_storage.get_namespace_config", return_value=None),
             patch("handlers.tools_storage._rbac_gate", return_value=None),
             patch("handlers.tools_storage.invalidate_index_cache", MagicMock()),
+            patch("archivist.storage.transaction.MemoryTransaction", return_value=_make_mock_txn()),
             patch("webhooks.fire_background"),
         ):
             mock_qc.return_value = MagicMock(upsert=MagicMock())
@@ -493,18 +497,12 @@ class TestPostgresSchemaConstraint:
         from pathlib import Path
 
         schema_path = (
-            Path(__file__).parents[3]
-            / "src"
-            / "archivist"
-            / "storage"
-            / "schema_postgres.sql"
+            Path(__file__).parents[3] / "src" / "archivist" / "storage" / "schema_postgres.sql"
         )
         content = schema_path.read_text()
 
         # Must contain UNIQUE (name, namespace) or UNIQUE(name, namespace)
-        assert re.search(
-            r"UNIQUE\s*\(\s*name\s*,\s*namespace\s*\)", content
-        ), (
+        assert re.search(r"UNIQUE\s*\(\s*name\s*,\s*namespace\s*\)", content), (
             "schema_postgres.sql must define UNIQUE(name, namespace) on the "
             "entities table so ON CONFLICT(name, namespace) in upsert_entity "
             "works correctly.  The old UNIQUE(name) caused cross-namespace "
@@ -516,19 +514,13 @@ class TestPostgresSchemaConstraint:
         from pathlib import Path
 
         schema_path = (
-            Path(__file__).parents[3]
-            / "src"
-            / "archivist"
-            / "storage"
-            / "schema_postgres.sql"
+            Path(__file__).parents[3] / "src" / "archivist" / "storage" / "schema_postgres.sql"
         )
         content = schema_path.read_text()
 
         # Must NOT contain the old broken constraint (UNIQUE with only name
         # and no namespace as the second column).
-        bad_match = re.search(
-            r"entities_name_unique\s+UNIQUE\s*\(\s*name\s*\)", content
-        )
+        bad_match = re.search(r"entities_name_unique\s+UNIQUE\s*\(\s*name\s*\)", content)
         assert not bad_match, (
             "REGRESSION: schema_postgres.sql still has the old "
             "entities_name_unique UNIQUE(name) constraint that caused "

@@ -131,9 +131,7 @@ class TestCascadeDeleteVersionRows:
 class TestCascadeDeleteRelationshipRows:
     """delete_memory_complete removes orphaned relationships (fix for H3)."""
 
-    async def test_orphaned_relationships_deleted_after_fact_deactivation(
-        self, integration_pool
-    ):
+    async def test_orphaned_relationships_deleted_after_fact_deactivation(self, integration_pool):
         memory_id = "mem-rel-test-001"
 
         async with integration_pool.write() as conn:
@@ -178,9 +176,7 @@ class TestCascadeDeleteRelationshipRows:
             row = await cur.fetchone()
             assert row[0] == 0, "Entity A still has active facts after cascade"
 
-            cur2 = await conn.execute(
-                "SELECT COUNT(*) FROM relationships WHERE id = ?", (rel_id,)
-            )
+            cur2 = await conn.execute("SELECT COUNT(*) FROM relationships WHERE id = ?", (rel_id,))
             row2 = await cur2.fetchone()
             assert row2[0] == 0, "Orphaned relationship A->B was not deleted"
 

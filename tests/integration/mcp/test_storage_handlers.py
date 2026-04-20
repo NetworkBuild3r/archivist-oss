@@ -262,6 +262,14 @@ class TestIndexerParallelReverseHyde:
 
         monkeypatch.setattr(indexer, "MEMORY_ROOT", str(tmp_path / "memories"))
 
+        mock_txn = AsyncMock()
+        mock_txn.__aenter__ = AsyncMock(return_value=mock_txn)
+        mock_txn.__aexit__ = AsyncMock(return_value=False)
+        mock_txn.upsert_fts_chunk = AsyncMock()
+        mock_txn.register_needle_tokens = AsyncMock()
+        mock_txn.executemany = AsyncMock()
+        mock_txn.enqueue_qdrant_upsert = MagicMock()
+
         with (
             patch("indexer.embed_batch", new_callable=AsyncMock, return_value=[[0.1] * 1024] * 50),
             patch("indexer.qdrant_client") as mock_qc,
@@ -269,6 +277,9 @@ class TestIndexerParallelReverseHyde:
             patch("indexer.delete_file_points", new_callable=AsyncMock),
             patch("indexer.get_namespace_for_agent", return_value="test-ns"),
             patch("indexer.get_namespace_config", return_value=None),
+            patch("indexer.upsert_entity", new_callable=AsyncMock, return_value=1),
+            patch("indexer.add_fact", new_callable=AsyncMock),
+            patch("archivist.storage.transaction.MemoryTransaction", return_value=mock_txn),
             patch("hyde.generate_reverse_hyde_questions", side_effect=tracked_hyde),
         ):
             mock_client = MagicMock()

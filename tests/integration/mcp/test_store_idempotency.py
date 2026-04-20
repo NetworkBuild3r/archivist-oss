@@ -13,7 +13,6 @@ even when the same entities are stored repeatedly.
 
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -111,9 +110,7 @@ class TestUpsertEntityIdempotency:
         )
 
     @pytest.mark.asyncio
-    async def test_same_name_different_namespace_gets_different_id(
-        self, integration_pool
-    ):
+    async def test_same_name_different_namespace_gets_different_id(self, integration_pool):
         """Entities with the same name in different namespaces must be distinct rows.
 
         Regression guard for the Postgres schema bug where UNIQUE(name) (without
@@ -209,9 +206,7 @@ class TestMigrationReStoreScenario:
     """
 
     @pytest.mark.asyncio
-    async def test_migration_restore_all_succeed(
-        self, integration_pool, monkeypatch
-    ):
+    async def test_migration_restore_all_succeed(self, integration_pool, monkeypatch):
         """Storing entities twice must never cause a pipeline abort.
 
         Regression guard: the old code ``return``ed ``conflict_resolved_response``

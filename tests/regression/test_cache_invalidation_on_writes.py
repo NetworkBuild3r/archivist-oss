@@ -8,7 +8,7 @@ _handle_delete each call both:
 Also verifies that _handle_store (the reference implementation) still does both.
 """
 
-from unittest.mock import AsyncMock, MagicMock, call, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -50,9 +50,7 @@ class TestMergeCacheInvalidation:
                 return_value=mock_merge_result,
             ),
             patch("archivist.retrieval.hot_cache.invalidate_namespace", invalidate_hot),
-            patch(
-                "archivist.storage.compressed_index.invalidate_index_cache", invalidate_index
-            ),
+            patch("archivist.storage.compressed_index.invalidate_index_cache", invalidate_index),
         ):
             from archivist.app.handlers.tools_storage import _handle_merge
 
@@ -100,9 +98,7 @@ class TestCompressCacheInvalidation:
             ),
             patch("archivist.lifecycle.curator_queue.enqueue", MagicMock()),
             patch("archivist.retrieval.hot_cache.invalidate_namespace", invalidate_hot),
-            patch(
-                "archivist.storage.compressed_index.invalidate_index_cache", invalidate_index
-            ),
+            patch("archivist.storage.compressed_index.invalidate_index_cache", invalidate_index),
             patch("archivist.app.handlers.tools_storage._rbac_gate", return_value=None),
         ):
             from archivist.app.handlers.tools_storage import _handle_compress
@@ -141,9 +137,7 @@ class TestPinCacheInvalidation:
             patch("archivist.app.handlers.tools_storage.collection_for", return_value="col-test"),
             patch("archivist.core.audit.log_memory_event", new_callable=AsyncMock),
             patch("archivist.retrieval.hot_cache.invalidate_namespace", invalidate_hot),
-            patch(
-                "archivist.storage.compressed_index.invalidate_index_cache", invalidate_index
-            ),
+            patch("archivist.storage.compressed_index.invalidate_index_cache", invalidate_index),
             patch("archivist.app.handlers.tools_storage._rbac_gate", return_value=None),
         ):
             from archivist.app.handlers.tools_storage import _handle_pin
@@ -180,9 +174,7 @@ class TestUnpinCacheInvalidation:
             patch("archivist.app.handlers.tools_storage.qdrant_client", return_value=mock_client),
             patch("archivist.app.handlers.tools_storage.collection_for", return_value="col-test"),
             patch("archivist.retrieval.hot_cache.invalidate_namespace", invalidate_hot),
-            patch(
-                "archivist.storage.compressed_index.invalidate_index_cache", invalidate_index
-            ),
+            patch("archivist.storage.compressed_index.invalidate_index_cache", invalidate_index),
             patch("archivist.app.handlers.tools_storage._rbac_gate", return_value=None),
         ):
             from archivist.app.handlers.tools_storage import _handle_unpin
@@ -219,9 +211,7 @@ class TestDeleteCacheInvalidation:
             ),
             patch("archivist.core.rbac.get_namespace_for_agent", return_value="test-ns"),
             patch("archivist.retrieval.hot_cache.invalidate_namespace", invalidate_hot),
-            patch(
-                "archivist.storage.compressed_index.invalidate_index_cache", invalidate_index
-            ),
+            patch("archivist.storage.compressed_index.invalidate_index_cache", invalidate_index),
             patch("archivist.app.handlers.tools_storage._rbac_gate", return_value=None),
         ):
             from archivist.app.handlers.tools_storage import _handle_delete
@@ -248,12 +238,11 @@ class TestStoreCacheInvalidation:
 
     async def test_store_still_invalidates_both_caches(self, async_pool):
         """Ensure invalidate_index_cache is called from _handle_store."""
-        import importlib
-        import sys
 
         # Use a simpler approach: inspect the source to confirm the call is present
-        import archivist.app.handlers.tools_storage as ts_mod
         import inspect
+
+        import archivist.app.handlers.tools_storage as ts_mod
 
         source = inspect.getsource(ts_mod._handle_store)
         assert "invalidate_index_cache" in source, (

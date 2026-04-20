@@ -1,8 +1,6 @@
 """Unit tests for tiering, temporal decay, contradiction detection, and compressed index."""
 
 import asyncio
-import sqlite3
-from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
@@ -155,11 +153,11 @@ class TestCompressedIndex:
     @pytest.mark.asyncio
     async def test_compressed_index_empty_namespace(self, monkeypatch):
         """Empty pool returns the 'No indexed knowledge' sentinel string."""
-        import archivist.storage.sqlite_pool as _sp
-        from compressed_index import build_namespace_index, _index_cache
-
         # Build a minimal in-memory pool with an empty entities table
         import aiosqlite
+
+        import archivist.storage.sqlite_pool as _sp
+        from compressed_index import _index_cache, build_namespace_index
 
         async with aiosqlite.connect(":memory:") as db:
             db.row_factory = aiosqlite.Row

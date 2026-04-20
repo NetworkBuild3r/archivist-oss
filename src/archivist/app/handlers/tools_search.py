@@ -3,9 +3,9 @@
 import logging
 from datetime import UTC
 
-import archivist.core.metrics as m
 from mcp.types import TextContent, Tool
 
+import archivist.core.metrics as m
 from archivist.core.archivist_uri import memory_uri
 from archivist.core.rbac import (
     can_read_agent_memory,
@@ -692,7 +692,9 @@ async def _handle_index(arguments: dict) -> list[TextContent]:
             return [TextContent(type="text", text=denied)]
 
     try:
-        index_text = await build_namespace_index(namespace, agent_ids=[agent_id] if agent_id else None)
+        index_text = await build_namespace_index(
+            namespace, agent_ids=[agent_id] if agent_id else None
+        )
     except Exception as exc:
         logger.error(
             "archivist_index.build_failed",

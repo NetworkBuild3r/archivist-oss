@@ -58,6 +58,7 @@ if [[ -n "${BENCHMARK_JUDGE_LLM_URL:-}" ]]; then
 else
   echo "  Judge LLM:         (same as LLM_URL / LLM_MODEL — BENCHMARK_JUDGE_LLM_URL empty)"
 fi
+echo "  Embeddings:       ${EMBED_URL:-<unset>}  model=${EMBED_MODEL:-<unset>}  VECTOR_DIM=${VECTOR_DIM:-<unset>}"
 if [[ "${SKIP_BEIR:-0}" == "1" ]]; then
   echo "  BEIR:              skipped (SKIP_BEIR=1)"
 fi

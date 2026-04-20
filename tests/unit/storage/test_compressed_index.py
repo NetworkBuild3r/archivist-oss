@@ -62,7 +62,10 @@ def _make_conn(entities_rows=None, facts_rows=None):
     async def _execute(sql, params=None):
         cursor = AsyncMock()
         sql_lower = sql.strip().lower()
-        if "from facts" in sql_lower and "join entities" not in sql_lower[:sql_lower.index("from facts")]:
+        if (
+            "from facts" in sql_lower
+            and "join entities" not in sql_lower[: sql_lower.index("from facts")]
+        ):
             cursor.fetchall = AsyncMock(return_value=facts_rows)
         elif "from entities" in sql_lower or "distinct e." in sql_lower:
             cursor.fetchall = AsyncMock(return_value=entities_rows)
@@ -317,7 +320,6 @@ class TestIndexCacheHit:
 
     @pytest.mark.asyncio
     async def test_second_call_is_cache_hit(self, monkeypatch):
-        import archivist.core.metrics as m
         from archivist.storage import compressed_index as ci
 
         call_count = 0
@@ -382,9 +384,7 @@ class TestIndexCacheInvalidation:
         ci.invalidate_index_cache("inv_ns")
 
         await ci.build_namespace_index("inv_ns")
-        assert call_count == 2, (
-            "After invalidation, build_namespace_index must re-query the DB"
-        )
+        assert call_count == 2, "After invalidation, build_namespace_index must re-query the DB"
 
     def test_invalidation_only_affects_target_namespace(self):
         from archivist.storage import compressed_index as ci

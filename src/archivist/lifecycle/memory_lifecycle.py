@@ -586,9 +586,11 @@ async def delete_memory_complete(
             result.entity_facts,
         ) = await _delete_sqlite_artifacts(memory_id, all_ids, result.failed_steps)
 
-    result.memory_hotness, result.relationship_rows, result.version_rows = (
-        await _delete_best_effort_rows(memory_id)
-    )
+    (
+        result.memory_hotness,
+        result.relationship_rows,
+        result.version_rows,
+    ) = await _delete_best_effort_rows(memory_id)
 
     await _finalize_delete(result, namespace, col)
     return result

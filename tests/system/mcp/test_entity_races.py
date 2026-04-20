@@ -122,9 +122,7 @@ def _mock_externals(monkeypatch):
 
 @pytest.mark.system
 @pytest.mark.parametrize("concurrency", [1, 5, 20])
-async def test_concurrent_store_same_entity_no_handler_abort(
-    qa_pool, _mock_externals, concurrency
-):
+async def test_concurrent_store_same_entity_no_handler_abort(qa_pool, _mock_externals, concurrency):
     """N concurrent archivist_store calls with the same entity must all succeed.
 
     Regression guard for the handler-level abort bug:
@@ -148,9 +146,7 @@ async def test_concurrent_store_same_entity_no_handler_abort(
             }
         )
 
-    results = await asyncio.gather(
-        *[store(i) for i in range(concurrency)], return_exceptions=True
-    )
+    results = await asyncio.gather(*[store(i) for i in range(concurrency)], return_exceptions=True)
 
     exceptions = [r for r in results if isinstance(r, Exception)]
     assert not exceptions, (

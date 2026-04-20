@@ -3,7 +3,6 @@
 import asyncio
 import json
 import logging
-import sqlite3
 import time
 import uuid
 from datetime import UTC, datetime
@@ -29,6 +28,7 @@ from archivist.storage.collection_router import (
     collections_for_query,
     ensure_collection,
 )
+from archivist.storage.compressed_index import invalidate_index_cache
 from archivist.storage.graph import (
     add_fact,
     register_memory_points_batch,
@@ -49,7 +49,6 @@ from archivist.write.pre_extractor import extract_needle_entities, pre_extract
 
 from ._common import (
     _rbac_gate,
-    conflict_resolved_response,
     error_response,
     resolve_actor,
     success_response,
@@ -907,7 +906,6 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
     )
 
     hot_cache.invalidate_namespace(namespace)
-    from archivist.storage.compressed_index import invalidate_index_cache
     invalidate_index_cache(namespace)
 
     m.inc(m.STORE_TOTAL, {"namespace": namespace})
@@ -966,7 +964,6 @@ async def _handle_merge(arguments: dict) -> list[TextContent]:
     result = await merge_memories(memory_ids, strategy, agent_id, namespace)
 
     hot_cache.invalidate_namespace(namespace)
-    from archivist.storage.compressed_index import invalidate_index_cache
 
     invalidate_index_cache(namespace)
 
@@ -1072,7 +1069,6 @@ async def _handle_compress(arguments: dict) -> list[TextContent]:
     )
 
     hot_cache.invalidate_namespace(namespace)
-    from archivist.storage.compressed_index import invalidate_index_cache
 
     invalidate_index_cache(namespace)
 
@@ -1161,7 +1157,6 @@ async def _handle_pin(arguments: dict) -> list[TextContent]:
     )
 
     hot_cache.invalidate_namespace(namespace)
-    from archivist.storage.compressed_index import invalidate_index_cache
 
     invalidate_index_cache(namespace)
 
@@ -1220,7 +1215,6 @@ async def _handle_unpin(arguments: dict) -> list[TextContent]:
                 unpinned.append({"type": "entity", "name": entity_name, "id": row["id"]})
 
     hot_cache.invalidate_namespace(namespace)
-    from archivist.storage.compressed_index import invalidate_index_cache
 
     invalidate_index_cache(namespace)
 
@@ -1270,7 +1264,6 @@ async def _handle_delete(arguments: dict) -> list[TextContent]:
         return error_response({"error": str(e)})
 
     hot_cache.invalidate_namespace(namespace)
-    from archivist.storage.compressed_index import invalidate_index_cache
 
     invalidate_index_cache(namespace)
 

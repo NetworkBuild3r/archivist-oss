@@ -25,7 +25,7 @@ class TestBuildNamespaceIndexIntegration:
 
     @pytest.mark.asyncio
     async def test_empty_namespace_returns_sentinel(self, integration_pool):
-        from archivist.storage.compressed_index import build_namespace_index, _index_cache
+        from archivist.storage.compressed_index import _index_cache, build_namespace_index
 
         _index_cache.clear()
         result = await build_namespace_index("integration_empty")
@@ -35,7 +35,7 @@ class TestBuildNamespaceIndexIntegration:
     async def test_populated_namespace_returns_index(self, integration_pool):
         """Insert an entity + fact then verify they appear in the index text."""
         from archivist.storage import sqlite_pool as _sp
-        from archivist.storage.compressed_index import build_namespace_index, _index_cache
+        from archivist.storage.compressed_index import _index_cache, build_namespace_index
 
         _index_cache.clear()
 
@@ -68,7 +68,7 @@ class TestBuildNamespaceIndexIntegration:
     async def test_agent_scoped_query(self, integration_pool):
         """Scoping by agent_id filters entities correctly."""
         from archivist.storage import sqlite_pool as _sp
-        from archivist.storage.compressed_index import build_namespace_index, _index_cache
+        from archivist.storage.compressed_index import _index_cache, build_namespace_index
 
         _index_cache.clear()
 
