@@ -413,9 +413,7 @@ def _migrate_entity_unique_constraint():
             """)
             conn.execute("DROP TABLE entities")
             conn.execute("ALTER TABLE entities_new RENAME TO entities")
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(name)"
-            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(name)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(entity_type)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_entities_namespace ON entities(namespace)")
             conn.commit()

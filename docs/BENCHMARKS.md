@@ -12,6 +12,24 @@ For **CI-style test commands** (unit suite, `tests/qa/`, lint, mypy), see [`QA.m
 **Run:** `scale=small`, **2 variants** (`clean_reranker`, `vector_plus_synth`), **108 queries** each.
 **Artifacts:** Full JSON is written locally to `.benchmarks/phase5_semantic_chunking.json` when you reproduce the run (directory is gitignored; summary tables below are canonical for the release).
 
+**Reproduce (copy-paste from repo root):**
+
+```bash
+cp -n .env.example .env   # set LLM_URL, EMBED_URL, VECTOR_DIM, QDRANT_URL
+docker compose up -d qdrant
+python -m pip install -r requirements.txt
+python -m pip install -r requirements-rerank.txt
+
+mkdir -p .benchmarks
+python -m benchmarks.pipeline.evaluate \
+  --memory-scale small \
+  --variants clean_reranker,vector_plus_synth \
+  --no-refine --print-slices \
+  --output .benchmarks/phase5_semantic_chunking.json
+```
+
+The full multi-command suite (Phase 5 + README ship-it + thin reference + optional sweep + micro-benchmarks + `organize.sh`) lives in `.cursor/skills/archivist-benchmarking/SKILL.md` under **Copy-paste: canonical runs**.
+
 **Session log (excerpt):**
 
 ```text

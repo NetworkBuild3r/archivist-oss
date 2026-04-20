@@ -1125,9 +1125,7 @@ async def _handle_unpin(arguments: dict) -> list[TextContent]:
         from archivist.storage.sqlite_pool import pool
 
         async with pool.write() as conn:
-            cur = await conn.execute(
-                "SELECT id FROM entities WHERE name = ?", (entity_name,)
-            )
+            cur = await conn.execute("SELECT id FROM entities WHERE name = ?", (entity_name,))
             row = await cur.fetchone()
             if row:
                 await conn.execute(

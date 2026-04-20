@@ -319,6 +319,53 @@ jobs:
           path: test-results-chaos.xml
           retention-days: 14
 
+# ─── Enterprise Benchmark Smoke ──────────────────────────────────────────────
+  benchmark-smoke:
+    name: Enterprise Benchmark Smoke (store + search)
+    runs-on: ubuntu-24.04
+    if: |
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request' &&
+        (github.base_ref == 'main' || github.base_ref == 'master'))
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-test.txt
+
+      - name: Run enterprise benchmark smoke
+        # store×20 + search×20 against SQLite with mocked Qdrant/embed.
+        # No external services required.
+        # Fails if any p99 exceeds 2× the baseline stored in baselines.json.
+        timeout-minutes: 3
+        run: |
+          python -m benchmarks.enterprise.scenarios.smoke \
+            --store-n 20 \
+            --search-n 20 \
+            --concurrency 2 \
+            --output smoke-results.json \
+            --check-baselines
+        env:
+          SQLITE_PATH: "/tmp/archivist-bench-smoke.db"
+          QDRANT_URL: ""
+          DRY_RUN: "0"
+
+      - name: Upload smoke results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-results
+          path: smoke-results.json
+          retention-days: 14
+
 # ─── Performance Regression Tests ────────────────────────────────────────────
   performance:
     name: Performance Regression Tests

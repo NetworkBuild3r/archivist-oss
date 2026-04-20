@@ -15,6 +15,7 @@ Requires: ``asyncpg`` installed (``pip install asyncpg``).
 from __future__ import annotations
 
 import os
+from datetime import UTC
 
 import pytest
 
@@ -219,9 +220,7 @@ async def test_execute_ddl_runs_in_autocommit(pg_backend) -> None:
 
     # Verify the table actually exists by inserting a row.
     async with pg_backend.write() as conn:
-        await conn.execute(
-            "INSERT INTO _ddl_test_sentinel (label) VALUES (?)", ("ok",)
-        )
+        await conn.execute("INSERT INTO _ddl_test_sentinel (label) VALUES (?)", ("ok",))
 
     async with pg_backend.read() as conn:
         row = await conn.fetchone("SELECT label FROM _ddl_test_sentinel")
@@ -292,8 +291,7 @@ async def test_insert_returning_id(pg_backend) -> None:
     """
     async with pg_backend.write() as conn:
         row = await conn.fetchone(
-            "INSERT INTO _test_entities (name, entity_type) "
-            "VALUES (?, ?) RETURNING id",
+            "INSERT INTO _test_entities (name, entity_type) VALUES (?, ?) RETURNING id",
             ("returning_test", "service"),
         )
 
@@ -329,8 +327,7 @@ async def test_execute_ddl_multiple_statements(pg_backend) -> None:
     assert len(b) == 1
 
     await pg_backend.execute_ddl(
-        "DROP TABLE IF EXISTS _ddl_multi_a;"
-        "DROP TABLE IF EXISTS _ddl_multi_b;"
+        "DROP TABLE IF EXISTS _ddl_multi_a;DROP TABLE IF EXISTS _ddl_multi_b;"
     )
 
 
@@ -514,12 +511,8 @@ async def pg_graph_backend():
 
     # Clean up rows created by these tests only.
     async with backend.write() as conn:
-        await conn.execute(
-            "DELETE FROM entities WHERE namespace = 'pg_graph_test'"
-        )
-        await conn.execute(
-            "DELETE FROM needle_registry WHERE namespace = 'pg_graph_test'"
-        )
+        await conn.execute("DELETE FROM entities WHERE namespace = 'pg_graph_test'")
+        await conn.execute("DELETE FROM needle_registry WHERE namespace = 'pg_graph_test'")
 
     await backend.close()
 
@@ -532,9 +525,9 @@ async def test_upsert_entity_returning_id(pg_graph_backend) -> None:
     inserted. The fix replaces ``lastrowid`` with ``RETURNING id`` +
     ``fetchone()[0]``.
     """
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
 
     async with pg_graph_backend.write() as conn:
         row = await conn.fetchone(
@@ -552,9 +545,9 @@ async def test_upsert_entity_returning_id(pg_graph_backend) -> None:
 
 async def test_upsert_entity_idempotent(pg_graph_backend) -> None:
     """upsert_entity must return the same id on the second call (UPDATE path)."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
 
     # First insert — exercises the RETURNING id path.
     async with pg_graph_backend.write() as conn:
@@ -591,9 +584,9 @@ async def test_needle_registry_on_conflict_do_update(pg_graph_backend) -> None:
     used, producing a PostgreSQL syntax error. The fix replaces it with
     ``INSERT ... ON CONFLICT (token, memory_id) DO UPDATE SET ...``.
     """
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
 
     async with pg_graph_backend.write() as conn:
         # Initial insert.
@@ -603,7 +596,16 @@ async def test_needle_registry_on_conflict_do_update(pg_graph_backend) -> None:
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (token, memory_id) DO UPDATE SET "
             "chunk_text=EXCLUDED.chunk_text, created_at=EXCLUDED.created_at",
-            ("192.168.1.1", "mem-pg-test-001", "pg_graph_test", "agent1", "", "", "original text", now),
+            (
+                "192.168.1.1",
+                "mem-pg-test-001",
+                "pg_graph_test",
+                "agent1",
+                "",
+                "",
+                "original text",
+                now,
+            ),
         )
         # Upsert — must update chunk_text without raising.
         await conn.execute(
@@ -612,13 +614,21 @@ async def test_needle_registry_on_conflict_do_update(pg_graph_backend) -> None:
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (token, memory_id) DO UPDATE SET "
             "chunk_text=EXCLUDED.chunk_text, created_at=EXCLUDED.created_at",
-            ("192.168.1.1", "mem-pg-test-001", "pg_graph_test", "agent1", "", "", "updated text", now),
+            (
+                "192.168.1.1",
+                "mem-pg-test-001",
+                "pg_graph_test",
+                "agent1",
+                "",
+                "",
+                "updated text",
+                now,
+            ),
         )
 
     async with pg_graph_backend.read() as conn:
         rows = await conn.fetchall(
-            "SELECT token, chunk_text FROM needle_registry "
-            "WHERE memory_id = ? AND namespace = ?",
+            "SELECT token, chunk_text FROM needle_registry WHERE memory_id = ? AND namespace = ?",
             ("mem-pg-test-001", "pg_graph_test"),
         )
 
@@ -633,9 +643,9 @@ async def test_memory_points_on_conflict_do_nothing(pg_graph_backend) -> None:
     across indexer.py, tools_storage.py, and merge.py. Each produced a syntax
     error in PostgreSQL.
     """
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
 
     async with pg_graph_backend.write() as conn:
         await conn.execute(

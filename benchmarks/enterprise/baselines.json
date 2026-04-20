@@ -1,0 +1,17 @@
+{
+  "_comment": "Conservative baseline thresholds for the CI smoke regression gate. Each p99_ms value represents the maximum acceptable p99 latency before a 2x multiplier is applied. Measured on a GitHub Actions ubuntu-24.04 runner with mocked Qdrant and embedding. Update by running `python -m benchmarks.enterprise.scenarios.smoke --no-check-baselines --output .benchmarks/enterprise/smoke_calibration.json` and reviewing the p99 values.",
+  "store": {
+    "p50_ms": 50,
+    "p95_ms": 150,
+    "p99_ms": 500,
+    "ops_per_sec_min": 2.0,
+    "note": "Store path: SQLite pool acquire + FTS upsert + graph entity write + outbox enqueue. Mocked Qdrant/embed."
+  },
+  "search": {
+    "p50_ms": 100,
+    "p95_ms": 300,
+    "p99_ms": 800,
+    "ops_per_sec_min": 1.0,
+    "note": "Search path: SQLite FTS5 query + rank fusion. Mocked Qdrant/embed/LLM."
+  }
+}

@@ -73,8 +73,8 @@ _SRC_ROOT = Path(__file__).parents[4] / "src" / "archivist"
 SQLITE_ONLY_FILES: frozenset[str] = frozenset(
     {
         "features/skills.py",  # uses get_db() throughout; documented as SQLite-only
-        "storage/graph.py",    # the ``INSERT OR IGNORE`` in graph.py is in a *docstring*
-                               # (verified: the actual SQL was fixed to ON CONFLICT)
+        "storage/graph.py",  # the ``INSERT OR IGNORE`` in graph.py is in a *docstring*
+        # (verified: the actual SQL was fixed to ON CONFLICT)
     }
 )
 
@@ -96,10 +96,7 @@ _FORBIDDEN: list[tuple[str, re.Pattern[str], str]] = [
     (
         "INSERT OR IGNORE",
         re.compile(r"INSERT\s+OR\s+IGNORE\s+INTO", re.IGNORECASE),
-        (
-            "SQLite-only upsert syntax. Replace with "
-            "`INSERT INTO ... ON CONFLICT (...) DO NOTHING`."
-        ),
+        ("SQLite-only upsert syntax. Replace with `INSERT INTO ... ON CONFLICT (...) DO NOTHING`."),
     ),
     (
         "INSERT OR REPLACE",
@@ -211,9 +208,7 @@ def test_forbidden_patterns_are_detected(sql: str, pattern_name: str) -> None:
     """Each forbidden-pattern regex correctly matches its target string."""
     pattern_map = {name: pat for name, pat, _ in _FORBIDDEN}
     assert pattern_name in pattern_map, f"Unknown pattern name: {pattern_name!r}"
-    assert pattern_map[pattern_name].search(sql), (
-        f"Pattern {pattern_name!r} did not match: {sql!r}"
-    )
+    assert pattern_map[pattern_name].search(sql), f"Pattern {pattern_name!r} did not match: {sql!r}"
 
 
 @pytest.mark.parametrize(
