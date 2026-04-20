@@ -21,7 +21,7 @@ PRAGMA foreign_keys=ON;
 
 CREATE TABLE IF NOT EXISTS entities (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
+    name TEXT NOT NULL COLLATE NOCASE,
     entity_type TEXT NOT NULL DEFAULT 'unknown',
     first_seen TEXT NOT NULL,
     last_seen TEXT NOT NULL,

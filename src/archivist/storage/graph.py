@@ -130,7 +130,7 @@ def init_schema():
         conn.executescript("""
         CREATE TABLE IF NOT EXISTS entities (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
+            name TEXT NOT NULL COLLATE NOCASE,
             entity_type TEXT NOT NULL DEFAULT 'unknown',
             first_seen TEXT NOT NULL,
             last_seen TEXT NOT NULL,
@@ -397,7 +397,7 @@ def _migrate_entity_unique_constraint():
             conn.execute("""
                 CREATE TABLE entities_new (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT NOT NULL,
+                    name TEXT NOT NULL COLLATE NOCASE,
                     entity_type TEXT NOT NULL DEFAULT 'unknown',
                     first_seen TEXT NOT NULL,
                     last_seen TEXT NOT NULL,
@@ -1183,11 +1183,6 @@ async def upsert_entity(
     import archivist.core.metrics as _m
     from archivist.storage.sqlite_pool import pool
 
-    # Normalise to lowercase to preserve case-insensitive identity: "Brian"
-    # and "brian" are the same entity.  The old SELECT-then-INSERT code used
-    # LOWER(name) for the lookup; we bake the same normalisation into the
-    # stored value so ON CONFLICT(name, namespace) fires correctly.
-    name = name.strip().lower()
     now = datetime.now(UTC).isoformat()
 
     async def _run(c: aiosqlite.Connection) -> int:

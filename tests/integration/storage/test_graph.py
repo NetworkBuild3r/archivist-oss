@@ -14,7 +14,7 @@ class TestEntityOperations:
 
         results = await search_entities("kubernetes")
         assert len(results) >= 1
-        assert results[0]["name"] == "kubernetes"
+        assert results[0]["name"] == "Kubernetes"
 
     async def test_upsert_entity_increments_mention_count(self, async_pool):
         from graph import get_db, upsert_entity
