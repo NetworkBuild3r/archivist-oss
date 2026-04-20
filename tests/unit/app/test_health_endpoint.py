@@ -31,6 +31,15 @@ def _make_request(path: str = "/health", api_key: str = "") -> MagicMock:
 class TestHandleHealth:
     """handle_health() returns correct status and HTTP code."""
 
+    @pytest.fixture(autouse=True)
+    def _post_startup(self, monkeypatch):
+        # Production marks startup complete at end of _startup(); tests only
+        # patch subsystem status — simulate post-startup so /health is not stuck
+        # on {"status": "starting"} with HTTP 200.
+        import archivist.core.health as health
+
+        monkeypatch.setattr(health, "_startup_complete", True)
+
     @pytest.mark.asyncio
     async def test_healthy_returns_200(self, monkeypatch):
         import archivist.core.health as health
@@ -121,6 +130,25 @@ class TestHandleHealth:
         assert resp.status_code == 503
         body = json.loads(resp.body)
         assert body["status"] == "degraded"
+
+    @pytest.mark.asyncio
+    async def test_during_startup_returns_200_starting_even_if_degraded(self, monkeypatch):
+        """Before mark_startup_complete, liveness must not get 503 from degraded subsystems."""
+        import archivist.core.health as health
+        from archivist.app.main import handle_health
+
+        monkeypatch.setattr(health, "_startup_complete", False)
+        monkeypatch.setattr(
+            health,
+            "_status",
+            {
+                "qdrant": {"healthy": False, "detail": "not yet", "since": "t", "latency_ms": 0.0},
+            },
+        )
+        resp = await handle_health(_make_request())
+        assert resp.status_code == 200
+        body = json.loads(resp.body)
+        assert body["status"] == "starting"
 
 
 # ---------------------------------------------------------------------------
