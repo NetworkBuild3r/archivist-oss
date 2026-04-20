@@ -414,11 +414,10 @@ async def run_longmemeval_benchmark(
         from qdrant_client import QdrantClient
         from qdrant_client.models import Distance, VectorParams
 
+        import rlm_retriever as rlm_mod
         from archivist.storage.sqlite_pool import initialize_pool
-
         from graph import init_schema
         from indexer import full_index
-        import rlm_retriever as rlm_mod
         from rlm_retriever import recursive_retrieve
 
         qclient = QdrantClient(url=config.QDRANT_URL, timeout=30)
