@@ -48,7 +48,9 @@ async def test_entity_upsert_during_migration_simulation(qa_pool):
     exceptions = [r for r in all_results if isinstance(r, Exception)]
     assert not exceptions, f"Migration workers raised unexpected exceptions: {exceptions}"
 
-    worker_results: list[list[tuple[str, int]]] = [r for r in all_results if not isinstance(r, Exception)]  # type: ignore[assignment]
+    worker_results: list[list[tuple[str, int]]] = [
+        r for r in all_results if not isinstance(r, Exception)
+    ]  # type: ignore[assignment]
     assert len(worker_results) == 20
 
     for entity_idx, name in enumerate(entity_names):
@@ -87,7 +89,9 @@ async def test_entity_upsert_high_cardinality_concurrent(qa_pool):
     assert not exceptions, f"Workers raised: {exceptions}"
 
     for entity_idx in range(entity_count):
-        ids_for_entity = {result[entity_idx] for result in all_results if not isinstance(result, Exception)}  # type: ignore[index]
+        ids_for_entity = {
+            result[entity_idx] for result in all_results if not isinstance(result, Exception)
+        }  # type: ignore[index]
         assert len(ids_for_entity) == 1, (
             f"entity-{entity_idx:04d} has multiple IDs: {ids_for_entity}"
         )
@@ -102,9 +106,7 @@ async def test_entity_upsert_namespace_isolation_under_concurrency(qa_pool):
 
     # Each namespace upserted 5 times concurrently
     tasks = [
-        upsert_entity(entity_name, "agent", namespace=ns)
-        for ns in namespaces
-        for _ in range(5)
+        upsert_entity(entity_name, "agent", namespace=ns) for ns in namespaces for _ in range(5)
     ]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -138,9 +140,13 @@ async def test_retention_class_converges_under_concurrent_escalation(qa_pool, me
     retention_classes = ["ephemeral", "standard", "durable", "permanent", "standard", "ephemeral"]
 
     async def escalate(rc: str) -> int:
-        return await upsert_entity("lifecycle-entity", "agent", retention_class=rc, namespace="rc-chaos")
+        return await upsert_entity(
+            "lifecycle-entity", "agent", retention_class=rc, namespace="rc-chaos"
+        )
 
-    results = await asyncio.gather(*[escalate(rc) for rc in retention_classes], return_exceptions=True)
+    results = await asyncio.gather(
+        *[escalate(rc) for rc in retention_classes], return_exceptions=True
+    )
 
     exceptions = [r for r in results if isinstance(r, Exception)]
     assert not exceptions, f"Retention escalation raised: {exceptions}"
@@ -153,6 +159,4 @@ async def test_retention_class_converges_under_concurrent_escalation(qa_pool, me
         row = await cur.fetchone()
 
     assert row is not None, "Entity must exist after concurrent upserts"
-    assert row[0] == "permanent", (
-        f"Expected 'permanent' (highest rank) to win, got: {row[0]}"
-    )
+    assert row[0] == "permanent", f"Expected 'permanent' (highest rank) to win, got: {row[0]}"

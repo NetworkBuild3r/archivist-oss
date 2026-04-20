@@ -15,8 +15,9 @@ Run with::
 
 from __future__ import annotations
 
+import asyncio
 import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -35,11 +36,10 @@ def _parse_response(result) -> dict:
 
 
 def _assert_no_error(data: dict, context: str = "") -> None:
-    assert "error" not in data, (
-        f"{'[' + context + '] ' if context else ''}Handler returned error: {data}"
-    )
+    prefix = f"[{context}] " if context else ""
+    assert "error" not in data, f"{prefix}Handler returned error: {data}"
     assert data.get("stored") is True or data.get("status") == "success", (
-        f"{'[' + context + '] ' if context else ''}Expected stored=True or status=success, got: {data}"
+        f"{prefix}Expected stored=True or status=success, got: {data}"
     )
 
 
@@ -50,13 +50,19 @@ def _assert_no_error(data: dict, context: str = "") -> None:
 
 @pytest.fixture
 def _mock_qdrant_and_embed(monkeypatch):
-    """Patch all external I/O so storage tests run without Qdrant or LLM."""
+    """Patch all external I/O so storage tests run without Qdrant, LLM, or RBAC."""
     import numpy as np
 
     mock_client = MagicMock()
     mock_client.upsert = MagicMock(return_value=None)
     mock_client.get_collection = MagicMock(return_value=MagicMock(points_count=0))
 
+    # RBAC: bypass namespace access checks — these tests focus on entity
+    # idempotency, not RBAC policy.  All other system tests do the same.
+    monkeypatch.setattr(
+        "archivist.app.handlers.tools_storage._rbac_gate",
+        lambda *_a, **_kw: None,
+    )
     monkeypatch.setattr(
         "archivist.app.handlers.tools_storage.qdrant_client",
         MagicMock(return_value=mock_client),
@@ -93,9 +99,7 @@ def _mock_qdrant_and_embed(monkeypatch):
 
 
 @pytest.mark.system
-async def test_archivist_store_handles_duplicate_entity_gracefully(
-    qa_pool, _mock_qdrant_and_embed
-):
+async def test_archivist_store_handles_duplicate_entity_gracefully(qa_pool, _mock_qdrant_and_embed):
     """archivist_store called twice with the same explicit entity returns success both times.
 
     Regression test: before the ON CONFLICT DO UPDATE fix, the second call
@@ -127,16 +131,12 @@ async def test_archivist_store_handles_duplicate_entity_gracefully(
 
 
 @pytest.mark.system
-async def test_archivist_store_concurrent_same_entity_all_succeed(
-    qa_pool, _mock_qdrant_and_embed
-):
+async def test_archivist_store_concurrent_same_entity_all_succeed(qa_pool, _mock_qdrant_and_embed):
     """Five concurrent archivist_store calls with the same entity must all return success.
 
     This is the agent-fleet migration scenario: multiple agents simultaneously
     store facts referencing the same entity.
     """
-    import asyncio
-
     from archivist.app.handlers.tools_storage import _handle_store
 
     async def store(agent_idx: int):

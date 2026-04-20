@@ -46,7 +46,13 @@ from archivist.write.contextual_augment import augment_chunk
 from archivist.write.indexer import compute_ttl
 from archivist.write.pre_extractor import extract_needle_entities, pre_extract
 
-from ._common import _rbac_gate, conflict_resolved_response, error_response, resolve_actor, success_response
+from ._common import (
+    _rbac_gate,
+    conflict_resolved_response,
+    error_response,
+    resolve_actor,
+    success_response,
+)
 
 logger = logging.getLogger("archivist.mcp")
 

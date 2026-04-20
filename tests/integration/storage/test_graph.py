@@ -229,7 +229,9 @@ class TestEntityUpsertIdempotency:
         """Higher retention class must win on conflict, lower must not downgrade."""
         from graph import get_db, upsert_entity
 
-        eid = await upsert_entity("raven", "agent", retention_class="ephemeral", namespace="rc-test")
+        eid = await upsert_entity(
+            "raven", "agent", retention_class="ephemeral", namespace="rc-test"
+        )
         await upsert_entity("raven", "agent", retention_class="permanent", namespace="rc-test")
         await upsert_entity("raven", "agent", retention_class="standard", namespace="rc-test")
 
