@@ -1,7 +1,9 @@
 """MCP tool handlers — core search and retrieval."""
 
+import logging
 from datetime import UTC
 
+import archivist.core.metrics as m
 from mcp.types import TextContent, Tool
 
 from archivist.core.archivist_uri import memory_uri
@@ -27,6 +29,8 @@ from archivist.storage.graph import (
 from archivist.storage.graph_retrieval import detect_contradictions, get_entity_brief
 
 from ._common import _rbac_gate, error_response, require_caller, resolve_caller, success_response
+
+logger = logging.getLogger("archivist.tools_search")
 
 # ---------------------------------------------------------------------------
 # Tool definitions
@@ -687,7 +691,27 @@ async def _handle_index(arguments: dict) -> list[TextContent]:
         if denied:
             return [TextContent(type="text", text=denied)]
 
-    index_text = build_namespace_index(namespace, agent_ids=[agent_id] if agent_id else None)
+    try:
+        index_text = await build_namespace_index(namespace, agent_ids=[agent_id] if agent_id else None)
+    except Exception as exc:
+        logger.error(
+            "archivist_index.build_failed",
+            extra={"namespace": namespace, "agent_id": agent_id, "error": str(exc)},
+        )
+        m.inc(m.TOOL_ERRORS, {"tool": "archivist_index"})
+        return error_response(
+            {
+                "error": "index_unavailable",
+                "tool": "archivist_index",
+                "detail": str(exc),
+                "next_steps": [
+                    "Retry archivist_index — a transient lock or init race may have occurred.",
+                    "Use archivist_search with an open-ended query to discover memories.",
+                    "Check /health to confirm the database subsystem is available.",
+                ],
+                "hint": "If this persists, the namespace may be empty or the database may not be initialized yet.",
+            }
+        )
     return [TextContent(type="text", text=index_text)]
 
 
@@ -768,9 +792,29 @@ async def _handle_wake_up(arguments: dict) -> list[TextContent]:
         if denied:
             return [TextContent(type="text", text=denied)]
 
-    ctx = await get_cached_wake_up(namespace, agent_id=agent_id)
-    if not ctx:
-        ctx = await cache_wake_up(namespace, agent_id=agent_id)
+    try:
+        ctx = await get_cached_wake_up(namespace, agent_id=agent_id)
+        if not ctx:
+            ctx = await cache_wake_up(namespace, agent_id=agent_id)
+    except Exception as exc:
+        logger.error(
+            "archivist_wake_up.build_failed",
+            extra={"namespace": namespace, "agent_id": agent_id, "error": str(exc)},
+        )
+        m.inc(m.TOOL_ERRORS, {"tool": "archivist_wake_up"})
+        return error_response(
+            {
+                "error": "wake_up_unavailable",
+                "tool": "archivist_wake_up",
+                "detail": str(exc),
+                "next_steps": [
+                    "Retry archivist_wake_up — a transient lock or init race may have occurred.",
+                    "Use archivist_search to explore available memories directly.",
+                    "Check /health to confirm the database subsystem is available.",
+                ],
+                "hint": "If this persists, the namespace may be empty or the database may not be initialized yet.",
+            }
+        )
 
     return [TextContent(type="text", text=format_wake_up_text(ctx, agent_id=agent_id))]
 

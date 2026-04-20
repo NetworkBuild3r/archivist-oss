@@ -412,6 +412,14 @@ FTS_UPSERT_ERRORS_TOTAL = "archivist_fts_upsert_errors_total"
 INDEX_DURATION_MS = "archivist_index_duration_ms"
 """Histogram: wall-clock time per full file indexing call (ms)."""
 
+# ── Namespace index observability ─────────────────────────────────────────────
+INDEX_BUILD_DURATION = "archivist_index_build_duration_ms"
+"""Histogram: wall-clock time to build the compressed namespace index (ms)."""
+INDEX_CACHE_HIT = "archivist_index_cache_hit_total"
+"""Counter: compressed namespace index served from in-memory TTL cache."""
+INDEX_CACHE_MISS = "archivist_index_cache_miss_total"
+"""Counter: compressed namespace index required a full DB build (cache miss)."""
+
 # ── Entity upsert observability (v1.12 idempotency fix) ───────────────────────
 ENTITY_UPSERT_TOTAL = "archivist_entity_upsert_total"
 """Counter: cumulative entity upsert calls (inserts + conflict-resolved updates), label: namespace."""

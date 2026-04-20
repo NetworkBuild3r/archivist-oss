@@ -6,13 +6,25 @@ without relying solely on vector similarity.
 
 Also produces compact wake-up payloads (~200 tokens) for session start,
 compiling identity, critical facts, and namespace overview into a single payload.
+
+Cache
+-----
+``build_namespace_index`` results are stored in a module-level TTL cache keyed by
+``(namespace, agent_ids_tuple)``.  The cache is invalidated by
+``invalidate_index_cache(namespace)`` which is called from ``_handle_store`` after
+every successful write.  TTL defaults to 60 s and is configurable via
+``INDEX_CACHE_TTL_SECONDS`` in the environment.
 """
 
 import json
 import logging
+import os
+import time
 from collections import defaultdict
 
-from archivist.storage.graph import get_curator_state, get_db, set_curator_state
+import archivist.core.metrics as m
+from archivist.storage.graph import get_curator_state, set_curator_state
+import archivist.storage.sqlite_pool as _sqlite_pool
 
 logger = logging.getLogger("archivist.compressed_index")
 
@@ -21,12 +33,56 @@ _WAKE_UP_PRIMARY_TOOLS = (
     " archivist_timeline, archivist_namespaces"
 )
 
+# ---------------------------------------------------------------------------
+# In-memory TTL cache for namespace index
+# ---------------------------------------------------------------------------
 
-def _query_entities(conn, agent_ids: list[str] | None, limit: int = 100) -> list[dict]:
+_INDEX_CACHE_TTL: float = float(os.environ.get("INDEX_CACHE_TTL_SECONDS", "60"))
+
+# (namespace, agent_ids_tuple) → (timestamp, index_text)
+_index_cache: dict[tuple, tuple[float, str]] = {}
+
+
+def _index_cache_key(namespace: str, agent_ids: list[str] | None) -> tuple:
+    return (namespace, tuple(sorted(agent_ids)) if agent_ids else ())
+
+
+def _index_cache_get(key: tuple) -> str | None:
+    entry = _index_cache.get(key)
+    if entry is None:
+        return None
+    ts, text = entry
+    if time.monotonic() - ts > _INDEX_CACHE_TTL:
+        del _index_cache[key]
+        return None
+    return text
+
+
+def _index_cache_set(key: tuple, text: str) -> None:
+    _index_cache[key] = (time.monotonic(), text)
+
+
+def invalidate_index_cache(namespace: str) -> None:
+    """Evict all cache entries for *namespace*.
+
+    Called from ``_handle_store`` after every successful write so that the
+    next ``archivist_index`` call sees fresh data.
+    """
+    keys_to_remove = [k for k in _index_cache if k[0] == namespace]
+    for k in keys_to_remove:
+        del _index_cache[k]
+
+
+# ---------------------------------------------------------------------------
+# Async DB helpers — operate on an aiosqlite connection yielded by _sqlite_pool.pool.read()
+# ---------------------------------------------------------------------------
+
+
+async def _query_entities(conn, agent_ids: list[str] | None, limit: int = 100) -> list[dict]:
     """Fetch top entities, optionally scoped by agent_ids."""
     if agent_ids:
         placeholders = ",".join("?" for _ in agent_ids)
-        cur = conn.execute(
+        cursor = await conn.execute(
             f"""SELECT DISTINCT e.id, e.name, e.entity_type, e.mention_count,
                        e.retention_class, e.last_seen
                 FROM entities e
@@ -37,7 +93,7 @@ def _query_entities(conn, agent_ids: list[str] | None, limit: int = 100) -> list
             agent_ids + [limit],
         )
     else:
-        cur = conn.execute(
+        cursor = await conn.execute(
             """SELECT id, name, entity_type, mention_count, retention_class, last_seen
                FROM entities
                WHERE mention_count >= 2
@@ -45,15 +101,18 @@ def _query_entities(conn, agent_ids: list[str] | None, limit: int = 100) -> list
                LIMIT ?""",
             (limit,),
         )
-    return [dict(r) for r in cur.fetchall()]
+    rows = await cursor.fetchall()
+    return [dict(r) for r in rows]
 
 
-def _query_key_facts(conn, entity_ids: list[int], per_entity: int = 2) -> dict[int, list[str]]:
+async def _query_key_facts(
+    conn, entity_ids: list[int], per_entity: int = 2
+) -> dict[int, list[str]]:
     """Fetch the most recent active facts for a set of entities."""
     if not entity_ids:
         return {}
     placeholders = ",".join("?" for _ in entity_ids)
-    cur = conn.execute(
+    cursor = await conn.execute(
         f"""SELECT entity_id, fact_text, retention_class
             FROM facts
             WHERE entity_id IN ({placeholders}) AND is_active = 1 AND superseded_by IS NULL
@@ -62,8 +121,9 @@ def _query_key_facts(conn, entity_ids: list[int], per_entity: int = 2) -> dict[i
                 created_at DESC""",
         entity_ids,
     )
+    rows = await cursor.fetchall()
     result: dict[int, list[str]] = defaultdict(list)
-    for row in cur.fetchall():
+    for row in rows:
         eid = row["entity_id"]
         if len(result[eid]) < per_entity:
             prefix = "[pinned] " if row["retention_class"] == "permanent" else ""
@@ -71,23 +131,42 @@ def _query_key_facts(conn, entity_ids: list[int], per_entity: int = 2) -> dict[i
     return dict(result)
 
 
-def build_namespace_index(namespace: str, agent_ids: list[str] | None = None) -> str:
-    """Build a compressed index for a namespace from graph entities and Qdrant metadata.
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+
+async def build_namespace_index(namespace: str, agent_ids: list[str] | None = None) -> str:
+    """Build a compressed index for a namespace from graph entities.
 
     Returns a compact text string suitable for injection into agent context.
     Includes entity categories, key facts for top entities, pinned items,
     and recent changes.
-    """
-    conn = get_db()
 
-    try:
-        entities = _query_entities(conn, agent_ids)
+    Results are cached in-memory for ``INDEX_CACHE_TTL_SECONDS`` (default 60s)
+    and invalidated on writes via :func:`invalidate_index_cache`.
+    """
+    cache_key = _index_cache_key(namespace, agent_ids)
+    cached = _index_cache_get(cache_key)
+    if cached is not None:
+        m.inc(m.INDEX_CACHE_HIT)
+        return cached
+
+    m.inc(m.INDEX_CACHE_MISS)
+    t0 = time.monotonic()
+
+    async with _sqlite_pool.pool.read() as conn:
+        entities = await _query_entities(conn, agent_ids)
 
         if not entities:
-            return f"[Namespace: {namespace}] No indexed knowledge yet."
+            result = f"[Namespace: {namespace}] No indexed knowledge yet."
+            _index_cache_set(cache_key, result)
+            elapsed_ms = (time.monotonic() - t0) * 1000
+            m.observe(m.INDEX_BUILD_DURATION, elapsed_ms)
+            return result
 
         top_ids = [e["id"] for e in entities[:15]]
-        key_facts = _query_key_facts(conn, top_ids, per_entity=2)
+        key_facts = await _query_key_facts(conn, top_ids, per_entity=2)
 
         pinned = [e for e in entities if e.get("retention_class") in ("durable", "permanent")]
         recent = sorted(
@@ -95,8 +174,6 @@ def build_namespace_index(namespace: str, agent_ids: list[str] | None = None) ->
             key=lambda x: x.get("last_seen", ""),
             reverse=True,
         )[:5]
-    finally:
-        conn.close()
 
     by_type: dict[str, list[str]] = defaultdict(list)
     for e in entities:
@@ -127,7 +204,13 @@ def build_namespace_index(namespace: str, agent_ids: list[str] | None = None) ->
     topic_line = ", ".join(e["name"] for e in entities[:20])
     lines.append(f"\nTop topics: {topic_line}")
 
-    return "\n".join(lines)
+    result = "\n".join(lines)
+    _index_cache_set(cache_key, result)
+
+    elapsed_ms = (time.monotonic() - t0) * 1000
+    m.observe(m.INDEX_BUILD_DURATION, elapsed_ms)
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -137,7 +220,7 @@ def build_namespace_index(namespace: str, agent_ids: list[str] | None = None) ->
 _WAKE_UP_CACHE_PREFIX = "wake_up:"
 
 
-def build_wake_up_context(namespace: str, agent_id: str = "") -> dict:
+async def build_wake_up_context(namespace: str, agent_id: str = "") -> dict:
     """Build a compact wake-up payload for session start.
 
     Pulls identity from permanent/durable entities (L0), critical facts from
@@ -145,14 +228,13 @@ def build_wake_up_context(namespace: str, agent_id: str = "") -> dict:
 
     Target: L0+L1 combined under ~200 tokens.
     """
-    conn = get_db()
-    try:
-        agent_ids = [agent_id] if agent_id else None
+    agent_ids = [agent_id] if agent_id else None
 
+    async with _sqlite_pool.pool.read() as conn:
         # L0: permanent/durable entities for identity
         if agent_ids:
             placeholders = ",".join("?" for _ in agent_ids)
-            cur = conn.execute(
+            cursor = await conn.execute(
                 f"""SELECT DISTINCT e.name, e.entity_type, e.retention_class
                     FROM entities e
                     JOIN facts f ON f.entity_id = e.id AND f.is_active = 1
@@ -163,14 +245,14 @@ def build_wake_up_context(namespace: str, agent_id: str = "") -> dict:
                 agent_ids,
             )
         else:
-            cur = conn.execute(
+            cursor = await conn.execute(
                 """SELECT name, entity_type, retention_class
                    FROM entities
                    WHERE retention_class IN ('permanent', 'durable')
                    ORDER BY mention_count DESC
                    LIMIT 10"""
             )
-        identity_entities = [dict(r) for r in cur.fetchall()]
+        identity_entities = [dict(r) for r in await cursor.fetchall()]
 
         l0_parts = []
         if namespace:
@@ -183,11 +265,11 @@ def build_wake_up_context(namespace: str, agent_id: str = "") -> dict:
         l0_identity = "; ".join(l0_parts) if l0_parts else "No identity data yet."
 
         # L1: pinned/permanent facts + most recent active facts
-        entity_ids = [e["name"] for e in identity_entities]
+        entity_names = [e["name"] for e in identity_entities]
         pinned_facts: list[str] = []
-        if entity_ids:
-            name_placeholders = ",".join("?" for _ in entity_ids)
-            cur = conn.execute(
+        if entity_names:
+            name_placeholders = ",".join("?" for _ in entity_names)
+            cursor = await conn.execute(
                 f"""SELECT e.name, f.fact_text
                     FROM facts f
                     JOIN entities e ON f.entity_id = e.id
@@ -196,15 +278,15 @@ def build_wake_up_context(namespace: str, agent_id: str = "") -> dict:
                       AND f.retention_class = 'permanent'
                     ORDER BY f.created_at DESC
                     LIMIT 5""",
-                entity_ids,
+                entity_names,
             )
-            for row in cur.fetchall():
+            for row in await cursor.fetchall():
                 pinned_facts.append(f"[{row['name']}] {row['fact_text'][:100]}")
 
         recent_facts: list[str] = []
         if agent_ids:
             placeholders = ",".join("?" for _ in agent_ids)
-            cur = conn.execute(
+            cursor = await conn.execute(
                 f"""SELECT e.name, f.fact_text
                     FROM facts f
                     JOIN entities e ON f.entity_id = e.id
@@ -215,7 +297,7 @@ def build_wake_up_context(namespace: str, agent_id: str = "") -> dict:
                 agent_ids,
             )
         else:
-            cur = conn.execute(
+            cursor = await conn.execute(
                 """SELECT e.name, f.fact_text
                    FROM facts f
                    JOIN entities e ON f.entity_id = e.id
@@ -223,7 +305,7 @@ def build_wake_up_context(namespace: str, agent_id: str = "") -> dict:
                    ORDER BY f.created_at DESC
                    LIMIT 5"""
             )
-        for row in cur.fetchall():
+        for row in await cursor.fetchall():
             line = f"[{row['name']}] {row['fact_text'][:100]}"
             if line not in pinned_facts:
                 recent_facts.append(line)
@@ -231,46 +313,47 @@ def build_wake_up_context(namespace: str, agent_id: str = "") -> dict:
         l1_lines = pinned_facts + recent_facts[: max(0, 5 - len(pinned_facts))]
         l1_critical = "\n".join(l1_lines) if l1_lines else "No facts recorded yet."
 
-        # Counts
+        # Memory count
         if namespace:
-            row = conn.execute(
+            count_cursor = await conn.execute(
                 "SELECT COUNT(*) AS c FROM memory_chunks WHERE namespace = ?",
                 (namespace,),
-            ).fetchone()
+            )
         else:
-            row = conn.execute("SELECT COUNT(*) AS c FROM memory_chunks").fetchone()
-        total_memories = row["c"] if row else 0
+            count_cursor = await conn.execute("SELECT COUNT(*) AS c FROM memory_chunks")
+        count_row = await count_cursor.fetchone()
+        total_memories = count_row["c"] if count_row else 0
 
         # Last activity
         if agent_ids:
             placeholders = ",".join("?" for _ in agent_ids)
-            row = conn.execute(
+            activity_cursor = await conn.execute(
                 f"SELECT MAX(last_seen) AS ls FROM entities "
                 f"WHERE name IN (SELECT DISTINCT e.name FROM entities e "
                 f"JOIN facts f ON f.entity_id = e.id WHERE f.agent_id IN ({placeholders}))",
                 agent_ids,
-            ).fetchone()
+            )
         else:
-            row = conn.execute("SELECT MAX(last_seen) AS ls FROM entities").fetchone()
-        last_activity = (row["ls"] or "")[:10] if row else ""
+            activity_cursor = await conn.execute(
+                "SELECT MAX(last_seen) AS ls FROM entities"
+            )
+        activity_row = await activity_cursor.fetchone()
+        last_activity = (activity_row["ls"] or "")[:10] if activity_row else ""
+
+        # Fleet tips (optional — failure is non-fatal)
+        fleet_tips: list[str] = []
+        try:
+            tips_cursor = await conn.execute(
+                "SELECT tip_text FROM tips WHERE agent_id = 'fleet' AND archived = 0 "
+                "ORDER BY usage_count DESC LIMIT 3"
+            )
+            fleet_tips = [r["tip_text"][:150] for r in await tips_cursor.fetchall()]
+        except Exception:
+            pass
 
         top_entities = [e["name"] for e in identity_entities[:10]]
-    finally:
-        conn.close()
 
-    namespace_toc = build_namespace_index(namespace, agent_ids=agent_ids)
-
-    fleet_tips: list[str] = []
-    try:
-        _tips_conn = get_db()
-        _tips_cur = _tips_conn.execute(
-            "SELECT tip_text FROM tips WHERE agent_id = 'fleet' AND archived = 0 "
-            "ORDER BY usage_count DESC LIMIT 3"
-        )
-        fleet_tips = [r["tip_text"][:150] for r in _tips_cur.fetchall()]
-        _tips_conn.close()
-    except Exception:
-        pass
+    namespace_toc = await build_namespace_index(namespace, agent_ids=agent_ids)
 
     return {
         "l0_identity": l0_identity,
@@ -297,7 +380,7 @@ async def get_cached_wake_up(namespace: str, agent_id: str = "") -> dict | None:
 
 async def cache_wake_up(namespace: str, agent_id: str = "") -> dict:
     """Build wake-up context and persist it in curator_state for fast retrieval."""
-    ctx = build_wake_up_context(namespace, agent_id=agent_id)
+    ctx = await build_wake_up_context(namespace, agent_id=agent_id)
     key = f"{_WAKE_UP_CACHE_PREFIX}{namespace}:{agent_id}"
     await set_curator_state(key, json.dumps(ctx))
     return ctx

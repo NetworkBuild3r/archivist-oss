@@ -859,6 +859,8 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
     )
 
     hot_cache.invalidate_namespace(namespace)
+    from archivist.storage.compressed_index import invalidate_index_cache
+    invalidate_index_cache(namespace)
 
     m.inc(m.STORE_TOTAL, {"namespace": namespace})
     webhooks.fire_background(
