@@ -646,7 +646,7 @@ async def soft_delete_memory(memory_id: str, namespace: str) -> dict:
         logger.warning("soft_delete.fts_excluded failed for %s: %s", memory_id, e)
 
     # 3. Enqueue the background hard-cascade.
-    op_id = curator_queue.enqueue(
+    op_id = await curator_queue.enqueue(
         "delete_memory",
         {"memory_ids": [memory_id], "namespace": namespace},
     )

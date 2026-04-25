@@ -369,7 +369,7 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
                 }
             )
         if dedup and dedup.action == "merge":
-            curator_queue.enqueue(
+            await curator_queue.enqueue(
                 "merge_memory",
                 {
                     "new_text": text,
@@ -382,7 +382,7 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
         if dedup and dedup.action == "delete_old":
             for d in dedup.decisions:
                 if d.get("decision") == "delete":
-                    curator_queue.enqueue(
+                    await curator_queue.enqueue(
                         "archive_memory",
                         {
                             "memory_ids": [d.get("existing_id", "")],
@@ -982,7 +982,7 @@ async def _handle_compress(arguments: dict) -> list[TextContent]:
             }
         )
 
-    curator_queue.enqueue(
+    await curator_queue.enqueue(
         "archive_memory",
         {
             "memory_ids": memory_ids,

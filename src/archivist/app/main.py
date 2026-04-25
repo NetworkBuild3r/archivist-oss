@@ -542,8 +542,8 @@ async def handle_dashboard(request):
     params = request.query_params
     window = int(params.get("window_days", "7"))
     if params.get("batch") == "true":
-        return JSONResponse(batch_heuristic(window))
-    return JSONResponse(build_dashboard(window))
+        return JSONResponse(await batch_heuristic(window))
+    return JSONResponse(await build_dashboard(window))
 
 
 async def handle_namespace_index(request):
@@ -559,7 +559,7 @@ async def handle_namespace_index(request):
     from archivist.storage.compressed_index import build_namespace_index
 
     namespace = get_namespace_for_agent(agent_id)
-    text = build_namespace_index(namespace, agent_ids=[agent_id])
+    text = await build_namespace_index(namespace, agent_ids=[agent_id])
     return PlainTextResponse(text, media_type="text/markdown; charset=utf-8")
 
 

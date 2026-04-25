@@ -12,38 +12,28 @@ from datetime import UTC, datetime
 
 import archivist.core.health as health
 from archivist.core.config import QDRANT_COLLECTION
-from archivist.storage.graph import get_db
 from archivist.storage.qdrant import qdrant_client
+from archivist.storage.sqlite_pool import pool
 
 logger = logging.getLogger("archivist.dashboard")
 
 
-def build_dashboard(window_days: int = 7) -> dict:
+async def build_dashboard(window_days: int = 7) -> dict:
     """Aggregate health metrics across all subsystems."""
-    conn = get_db()
     now_iso = datetime.now(UTC).isoformat()
 
-    # Memory counts from Qdrant
     qdrant_stats = _qdrant_stats()
 
-    # Conflict rate (from audit)
-    audit_stats = _audit_stats(conn, window_days)
+    async with pool.read() as conn:
+        audit_stats = await _audit_stats(conn, window_days)
+        retrieval = await _retrieval_stats(conn, window_days)
+        skill_overview = await _skill_overview(conn, window_days)
 
-    # Retrieval stats
-    retrieval = _retrieval_stats(conn, window_days)
-
-    # Skill health overview
-    skill_overview = _skill_overview(conn, window_days)
-
-    # Stale memory estimate (TTL-based)
     stale = _stale_estimate()
 
-    # Cache stats
     import archivist.retrieval.hot_cache as hot_cache
 
     cache = hot_cache.stats()
-
-    conn.close()
 
     return {
         "generated_at": now_iso,
@@ -58,18 +48,17 @@ def build_dashboard(window_days: int = 7) -> dict:
             "total_entries": cache.get("total_entries"),
             "agents": cache.get("agents"),
         },
-        # fts5, qdrant, embeddings, llm — all registered via health.register from init and runtime paths
         "subsystems": health.all_status(),
     }
 
 
-def batch_heuristic(window_days: int = 7) -> dict:
+async def batch_heuristic(window_days: int = 7) -> dict:
     """Recommend batch size based on memory health signals.
 
     Returns a recommendation dict with suggested_batch_size (1=tiny/careful,
     5=normal, 10=large/confident) and the signals used.
     """
-    dashboard = build_dashboard(window_days)
+    dashboard = await build_dashboard(window_days)
 
     score = 5.0
     signals = []
@@ -166,15 +155,22 @@ def _stale_estimate() -> dict:
         return {"error": str(e), "stale_pct": 0}
 
 
-def _audit_stats(conn, window_days: int) -> dict:
+async def _audit_stats(conn, window_days: int) -> dict:
     try:
-        cur = conn.execute(
-            """SELECT action, COUNT(*) as cnt FROM audit_log
-               WHERE timestamp >= datetime('now', ?)
-               GROUP BY action""",
-            (f"-{window_days} days",),
+        from archivist.core.config import GRAPH_BACKEND
+
+        if (GRAPH_BACKEND or "sqlite").lower() == "postgres":
+            cutoff = f"timestamp >= NOW() - INTERVAL '{window_days} days'"
+            params: list = []
+        else:
+            cutoff = "timestamp >= datetime('now', ?)"
+            params = [f"-{window_days} days"]
+
+        rows = await conn.fetchall(
+            f"SELECT action, COUNT(*) as cnt FROM audit_log WHERE {cutoff} GROUP BY action",
+            params,
         )
-        counts = {row["action"]: row["cnt"] for row in cur.fetchall()}
+        counts = {row["action"]: row["cnt"] for row in rows}
         total_writes = counts.get("create", 0) + counts.get("merge", 0) + counts.get("update", 0)
         conflicts = counts.get("conflict_detected", 0)
         conflict_rate = conflicts / total_writes if total_writes > 0 else 0
@@ -191,43 +187,62 @@ def _audit_stats(conn, window_days: int) -> dict:
         return {"total_writes": 0, "conflicts": 0, "conflict_rate": 0}
 
 
-def _retrieval_stats(conn, window_days: int) -> dict:
+async def _retrieval_stats(conn, window_days: int) -> dict:
     try:
-        cur = conn.execute(
-            """SELECT
+        from archivist.core.config import GRAPH_BACKEND
+
+        if (GRAPH_BACKEND or "sqlite").lower() == "postgres":
+            cutoff = f"created_at >= NOW() - INTERVAL '{window_days} days'"
+            params: list = []
+        else:
+            cutoff = "created_at >= datetime('now', ?)"
+            params = [f"-{window_days} days"]
+
+        row = await conn.fetchone(
+            f"""SELECT
                    COUNT(*) as total,
                    SUM(cache_hit) as cache_hits,
                    AVG(duration_ms) as avg_duration_ms
                FROM retrieval_logs
-               WHERE created_at >= datetime('now', ?)""",
-            (f"-{window_days} days",),
+               WHERE {cutoff}""",
+            params,
         )
-        row = dict(cur.fetchone())
-        total = row.get("total", 0) or 0
-        hits = row.get("cache_hits", 0) or 0
-        row["cache_hit_rate"] = round(hits / total, 3) if total > 0 else None
-        if row.get("avg_duration_ms"):
-            row["avg_duration_ms"] = round(row["avg_duration_ms"], 1)
-        return row
+        result = dict(row) if row else {}
+        total = result.get("total", 0) or 0
+        hits = result.get("cache_hits", 0) or 0
+        result["cache_hit_rate"] = round(hits / total, 3) if total > 0 else None
+        if result.get("avg_duration_ms"):
+            result["avg_duration_ms"] = round(result["avg_duration_ms"], 1)
+        return result
     except Exception as e:
         logger.warning("dashboard._retrieval_stats failed: %s", e, exc_info=True)
         return {"total": 0, "cache_hits": 0, "cache_hit_rate": None, "avg_duration_ms": None}
 
 
-def _skill_overview(conn, window_days: int) -> dict:
+async def _skill_overview(conn, window_days: int) -> dict:
     try:
-        cur = conn.execute("SELECT status, COUNT(*) as cnt FROM skills GROUP BY status")
-        status_counts = {row["status"]: row["cnt"] for row in cur.fetchall()}
+        from archivist.core.config import GRAPH_BACKEND
+
+        if (GRAPH_BACKEND or "sqlite").lower() == "postgres":
+            cutoff = f"created_at >= NOW() - INTERVAL '{window_days} days'"
+            params: list = []
+        else:
+            cutoff = "created_at >= datetime('now', ?)"
+            params = [f"-{window_days} days"]
+
+        status_rows = await conn.fetchall(
+            "SELECT status, COUNT(*) as cnt FROM skills GROUP BY status"
+        )
+        status_counts = {row["status"]: row["cnt"] for row in status_rows}
 
         total_skills = sum(status_counts.values())
         degraded = status_counts.get("broken", 0) + status_counts.get("deprecated", 0)
 
-        cur2 = conn.execute(
-            """SELECT outcome, COUNT(*) as cnt FROM skill_events
-               WHERE created_at >= datetime('now', ?) GROUP BY outcome""",
-            (f"-{window_days} days",),
+        event_rows = await conn.fetchall(
+            f"SELECT outcome, COUNT(*) as cnt FROM skill_events WHERE {cutoff} GROUP BY outcome",
+            params,
         )
-        event_counts = {row["outcome"]: row["cnt"] for row in cur2.fetchall()}
+        event_counts = {row["outcome"]: row["cnt"] for row in event_rows}
         total_events = sum(event_counts.values())
         success_rate = (
             round(event_counts.get("success", 0) / total_events, 3) if total_events > 0 else None

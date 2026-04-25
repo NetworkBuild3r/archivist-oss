@@ -419,15 +419,12 @@ async def _refresh_wake_up_caches() -> int:
 
     Returns the number of namespace/agent pairs refreshed.
     """
-    from archivist.storage.graph import get_db
+    from archivist.storage.sqlite_pool import pool
 
-    conn = get_db()
-    try:
-        rows = conn.execute(
+    async with pool.read() as conn:
+        rows = await conn.fetchall(
             "SELECT DISTINCT namespace, agent_id FROM memory_chunks WHERE namespace != '' LIMIT 500"
-        ).fetchall()
-    finally:
-        conn.close()
+        )
 
     refreshed = 0
     seen: set[str] = set()
@@ -468,7 +465,7 @@ async def curator_loop():
 
             n_hot = 0
             try:
-                n_hot = batch_update_hotness()
+                n_hot = await batch_update_hotness()
                 if n_hot:
                     logger.info("Hotness update: %d memories scored", n_hot)
             except Exception as e:

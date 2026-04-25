@@ -370,10 +370,10 @@ async def _handle_resolve_uri(arguments: dict) -> list[TextContent]:
         )
 
     if uri.is_skill:
-        skill = find_skill(uri.resource_id)
+        skill = await find_skill(uri.resource_id)
         if skill:
-            health = get_skill_health(skill["id"])
-            health["recent_lessons"] = get_lessons(skill["id"], limit=5)
+            health = await get_skill_health(skill["id"])
+            health["recent_lessons"] = await get_lessons(skill["id"], limit=5)
             return success_response(health)
         return error_response({"error": "skill_not_found", "name": uri.resource_id})
 
@@ -399,13 +399,13 @@ async def _handle_retrieval_logs(arguments: dict) -> list[TextContent]:
 
 async def _handle_health_dashboard(arguments: dict) -> list[TextContent]:
     """Comprehensive health dashboard across all subsystems."""
-    result = build_dashboard(window_days=arguments.get("window_days", 7))
+    result = await build_dashboard(window_days=arguments.get("window_days", 7))
     return success_response(result, default=str)
 
 
 async def _handle_batch_heuristic(arguments: dict) -> list[TextContent]:
     """Recommend batch size from memory health signals."""
-    result = batch_heuristic(window_days=arguments.get("window_days", 7))
+    result = await batch_heuristic(window_days=arguments.get("window_days", 7))
     return success_response(result)
 
 

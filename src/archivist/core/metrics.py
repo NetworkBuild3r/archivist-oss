@@ -156,59 +156,65 @@ def render() -> str:
 def collect_storage_gauges_tick() -> None:
     """Update storage and availability gauges (blocking; run via asyncio.to_thread).
 
-    Called from ``run_storage_gauges_loop`` so sync Qdrant/SQLite work never blocks the event loop.
+    Called from ``run_storage_gauges_loop`` so sync Qdrant/file-I/O work never blocks
+    the event loop.  When ``GRAPH_BACKEND=postgres`` the SQLite file-size and outbox
+    gauges are skipped here; they are collected asynchronously by
+    ``_collect_db_gauges_async`` on the same loop iteration.
     """
     if not _metrics_enabled():
         return
 
     import os
 
-    from archivist.core.config import SQLITE_PATH
+    from archivist.core.config import GRAPH_BACKEND, SQLITE_PATH
 
-    # SQLite: file size, SELECT 1 liveness, and per-namespace “live” memory count from audit_log.
-    try:
-        if os.path.isfile(SQLITE_PATH):
-            gauge_set(SQLITE_SIZE_BYTES, float(os.path.getsize(SQLITE_PATH)))
-    except OSError:
-        pass
+    _is_postgres = (GRAPH_BACKEND or "sqlite").lower() == "postgres"
 
-    try:
-        from archivist.storage.graph import get_db
-
-        conn = get_db()
+    # SQLite: file size, SELECT 1 liveness, and per-namespace live memory count.
+    # Skipped when Postgres is active (no local file, pool is async).
+    if not _is_postgres:
         try:
-            conn.execute("SELECT 1").fetchone()
-            gauge_set(SQLITE_AVAILABLE, 1.0)
-            try:
-                # Latest audit row per memory_id; count rows whose latest action is not delete.
-                cur = conn.execute(
-                    """
-                    WITH ranked AS (
-                      SELECT memory_id, namespace, action,
-                        ROW_NUMBER() OVER (PARTITION BY memory_id ORDER BY timestamp DESC) AS rn
-                      FROM audit_log
-                      WHERE memory_id IS NOT NULL AND TRIM(memory_id) != ''
-                    )
-                    SELECT COALESCE(NULLIF(TRIM(namespace), ''), '_default') AS ns, COUNT(*) AS cnt
-                    FROM ranked
-                    WHERE rn = 1 AND action != 'delete'
-                    GROUP BY ns
-                    """
-                )
-                for row in cur.fetchall():
-                    ns = str(row[0] or "_default")
-                    gauge_set(TOTAL_MEMORIES, float(row[1]), {"namespace": ns})
-            except sqlite3.OperationalError as e:
-                if "no such table" not in str(e).lower():
-                    logger.debug("metrics audit_log query: %s", e)
-        finally:
-            conn.close()
-    except Exception as e:
-        logger.debug("metrics sqlite gauges: %s", e)
-        gauge_set(SQLITE_AVAILABLE, 0.0)
+            if os.path.isfile(SQLITE_PATH):
+                gauge_set(SQLITE_SIZE_BYTES, float(os.path.getsize(SQLITE_PATH)))
+        except OSError:
+            pass
 
-    # Qdrant: points_count per collection; availability from health.register("qdrant") if present,
-    # else infer 1 after a successful list collections (startup may not have registered yet).
+        try:
+            from archivist.storage.graph import get_db
+
+            conn = get_db()
+            try:
+                conn.execute("SELECT 1").fetchone()
+                gauge_set(SQLITE_AVAILABLE, 1.0)
+                try:
+                    cur = conn.execute(
+                        """
+                        WITH ranked AS (
+                          SELECT memory_id, namespace, action,
+                            ROW_NUMBER() OVER (PARTITION BY memory_id ORDER BY timestamp DESC) AS rn
+                          FROM audit_log
+                          WHERE memory_id IS NOT NULL AND TRIM(memory_id) != ''
+                        )
+                        SELECT COALESCE(NULLIF(TRIM(namespace), ''), '_default') AS ns,
+                               COUNT(*) AS cnt
+                        FROM ranked
+                        WHERE rn = 1 AND action != 'delete'
+                        GROUP BY ns
+                        """
+                    )
+                    for row in cur.fetchall():
+                        ns = str(row[0] or "_default")
+                        gauge_set(TOTAL_MEMORIES, float(row[1]), {"namespace": ns})
+                except sqlite3.OperationalError as e:
+                    if "no such table" not in str(e).lower():
+                        logger.debug("metrics audit_log query: %s", e)
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.debug("metrics sqlite gauges: %s", e)
+            gauge_set(SQLITE_AVAILABLE, 0.0)
+
+    # Qdrant: points_count per collection.
     try:
         import archivist.core.health as health
         from archivist.storage.qdrant import qdrant_client
@@ -231,35 +237,6 @@ def collect_storage_gauges_tick() -> None:
     except Exception:
         gauge_set(QDRANT_AVAILABLE, 0.0)
 
-    # Outbox: pending count, dead count, and lag of oldest pending row.
-    try:
-        from archivist.storage.graph import get_db
-
-        conn = get_db()
-        try:
-            cur = conn.execute("SELECT status, COUNT(*) FROM outbox GROUP BY status")
-            status_counts: dict[str, int] = {r[0]: r[1] for r in cur.fetchall()}
-            gauge_set(OUTBOX_PENDING, float(status_counts.get("pending", 0)))
-            gauge_set(OUTBOX_DEAD, float(status_counts.get("dead", 0)))
-
-            cur2 = conn.execute("SELECT MIN(created_at) FROM outbox WHERE status = 'pending'")
-            oldest_row = cur2.fetchone()
-            if oldest_row and oldest_row[0]:
-                try:
-                    oldest_dt = datetime.fromisoformat(oldest_row[0])
-                    if oldest_dt.tzinfo is None:
-                        oldest_dt = oldest_dt.replace(tzinfo=UTC)
-                    lag = (datetime.now(UTC) - oldest_dt).total_seconds()
-                    gauge_set(OUTBOX_LAG_SECONDS, max(0.0, lag))
-                except ValueError:
-                    pass
-            else:
-                gauge_set(OUTBOX_LAG_SECONDS, 0.0)
-        finally:
-            conn.close()
-    except Exception as e:
-        logger.debug("metrics outbox gauges: %s", e)
-
     # Subsystem health: emit SUBSYSTEM_HEALTHY gauge for every registered subsystem.
     try:
         import archivist.core.health as _health
@@ -273,9 +250,7 @@ def collect_storage_gauges_tick() -> None:
 
     # Postgres pool size — only when GRAPH_BACKEND=postgres.
     try:
-        from archivist.core.config import GRAPH_BACKEND
-
-        if (GRAPH_BACKEND or "sqlite").lower() == "postgres":
+        if _is_postgres:
             from archivist.storage import sqlite_pool as _pool_mod
 
             _backend = _pool_mod.pool
@@ -289,6 +264,75 @@ def collect_storage_gauges_tick() -> None:
         logger.debug("metrics pg pool size: %s", e)
 
 
+async def _collect_db_gauges_async() -> None:
+    """Collect outbox and memory-count gauges via the async pool.
+
+    Works for both SQLite and Postgres backends; called from ``run_storage_gauges_loop``
+    in the same loop iteration as ``collect_storage_gauges_tick``.
+    """
+    if not _metrics_enabled():
+        return
+
+    try:
+        from archivist.core.config import GRAPH_BACKEND
+        from archivist.storage.sqlite_pool import pool
+
+        async with pool.read() as conn:
+            # Outbox pending/dead counts and oldest-pending lag.
+            try:
+                rows = await conn.fetchall(
+                    "SELECT status, COUNT(*) as cnt FROM outbox GROUP BY status"
+                )
+                status_counts: dict[str, int] = {r["status"]: r["cnt"] for r in rows}
+                gauge_set(OUTBOX_PENDING, float(status_counts.get("pending", 0)))
+                gauge_set(OUTBOX_DEAD, float(status_counts.get("dead", 0)))
+
+                oldest_row = await conn.fetchone(
+                    "SELECT MIN(created_at) as ts FROM outbox WHERE status = 'pending'"
+                )
+                if oldest_row and oldest_row["ts"]:
+                    try:
+                        oldest_dt = datetime.fromisoformat(str(oldest_row["ts"]))
+                        if oldest_dt.tzinfo is None:
+                            oldest_dt = oldest_dt.replace(tzinfo=UTC)
+                        lag = (datetime.now(UTC) - oldest_dt).total_seconds()
+                        gauge_set(OUTBOX_LAG_SECONDS, max(0.0, lag))
+                    except ValueError:
+                        pass
+                else:
+                    gauge_set(OUTBOX_LAG_SECONDS, 0.0)
+            except Exception as e:
+                logger.debug("metrics outbox gauges (async): %s", e)
+
+            # Per-namespace live memory count — Postgres path only
+            # (SQLite path is handled synchronously in collect_storage_gauges_tick).
+            if (GRAPH_BACKEND or "sqlite").lower() == "postgres":
+                try:
+                    rows2 = await conn.fetchall(
+                        """
+                        WITH ranked AS (
+                          SELECT memory_id, namespace, action,
+                            ROW_NUMBER() OVER (PARTITION BY memory_id ORDER BY timestamp DESC) AS rn
+                          FROM audit_log
+                          WHERE memory_id IS NOT NULL AND TRIM(memory_id) != ''
+                        )
+                        SELECT COALESCE(NULLIF(TRIM(namespace), ''), '_default') AS ns,
+                               COUNT(*) AS cnt
+                        FROM ranked
+                        WHERE rn = 1 AND action != 'delete'
+                        GROUP BY ns
+                        """
+                    )
+                    for row in rows2:
+                        ns = str(row["ns"] or "_default")
+                        gauge_set(TOTAL_MEMORIES, float(row["cnt"]), {"namespace": ns})
+                    gauge_set(SQLITE_AVAILABLE, 1.0)
+                except Exception as e:
+                    logger.debug("metrics pg memory-count gauges: %s", e)
+    except Exception as e:
+        logger.debug("metrics _collect_db_gauges_async: %s", e)
+
+
 async def run_storage_gauges_loop(interval_seconds: float) -> None:
     """Background task: refresh storage gauges periodically (first tick runs immediately)."""
     from archivist.core.config import METRICS_ENABLED
@@ -298,7 +342,11 @@ async def run_storage_gauges_loop(interval_seconds: float) -> None:
     while True:
         if METRICS_ENABLED:
             try:
-                await asyncio.to_thread(collect_storage_gauges_tick)
+                await asyncio.gather(
+                    asyncio.to_thread(collect_storage_gauges_tick),
+                    _collect_db_gauges_async(),
+                    return_exceptions=True,
+                )
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -307,8 +355,6 @@ async def run_storage_gauges_loop(interval_seconds: float) -> None:
             await asyncio.sleep(interval)
         except asyncio.CancelledError:
             raise
-
-
 # ── Convenience metric names ─────────────────────────────────────────────────
 
 SEARCH_TOTAL = "archivist_search_total"

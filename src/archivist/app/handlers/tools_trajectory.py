@@ -241,7 +241,7 @@ async def _handle_annotate(arguments: dict) -> list[TextContent]:
         {
             "annotation_id": ann_id,
             "memory_id": arguments["memory_id"],
-            "annotations": get_annotations(arguments["memory_id"]),
+            "annotations": await get_annotations(arguments["memory_id"]),
         },
         default=str,
     )
@@ -267,13 +267,13 @@ async def _handle_rate(arguments: dict) -> list[TextContent]:
         metadata={"rating_id": rating_id, "rating": arguments["rating"]},
     )
 
-    summary = get_rating_summary(arguments["memory_id"])
+    summary = await get_rating_summary(arguments["memory_id"])
     return success_response({"rating_id": rating_id, **summary})
 
 
 async def _handle_tips(arguments: dict) -> list[TextContent]:
     """Retrieve tips from past trajectories."""
-    tips = search_tips(
+    tips = await search_tips(
         agent_id=arguments["agent_id"],
         category=arguments.get("category", ""),
         limit=arguments.get("limit", 10),

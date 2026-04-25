@@ -653,7 +653,7 @@ async def recursive_retrieve(
 
     if QUERY_CLASSIFICATION_ENABLED and not memory_type:
         if namespace:
-            stage0_inventory = get_inventory(namespace)
+            stage0_inventory = await get_inventory(namespace)
         auto_type, auto_subcategory = await classify_query_full(
             query,
             inventory=stage0_inventory,
@@ -760,12 +760,12 @@ async def recursive_retrieve(
         if agent_ids:
             _seen_mem = set()
             for aid in agent_ids:
-                for rh in lookup_needle_tokens(query, namespace=namespace, agent_id=aid):
+                for rh in await lookup_needle_tokens(query, namespace=namespace, agent_id=aid):
                     if rh["memory_id"] not in _seen_mem:
                         _seen_mem.add(rh["memory_id"])
                         _raw_registry.append(rh)
         else:
-            _raw_registry = lookup_needle_tokens(query, namespace=namespace, agent_id=agent_id)
+            _raw_registry = await lookup_needle_tokens(query, namespace=namespace, agent_id=agent_id)
 
         if _raw_registry:
             m.inc(m.NEEDLE_REGISTRY_HITS, {"namespace": namespace}, value=len(_raw_registry))
@@ -1165,7 +1165,7 @@ async def recursive_retrieve(
             coarse = ltr_rank_results(coarse)
             _ltr_used = True
         else:
-            coarse = apply_hotness_to_results(coarse)
+            coarse = await apply_hotness_to_results(coarse)
             coarse = apply_importance_to_results(coarse)
 
         # Stage 2: Threshold filter (Phase 1, dynamic v1.10)
@@ -1202,7 +1202,7 @@ async def recursive_retrieve(
                         TEMPORAL_DECAY_HALFLIFE_DAYS,
                         temporal_intent=temporal_intent,
                     )
-                wider_coarse = apply_hotness_to_results(wider_coarse)
+                wider_coarse = await apply_hotness_to_results(wider_coarse)
                 wider_coarse = apply_importance_to_results(wider_coarse)
                 wider_filtered = apply_retrieval_threshold(wider_coarse, effective_threshold)
                 filtered, _ = _merge_into_results(filtered, wider_filtered)
@@ -1295,7 +1295,7 @@ async def recursive_retrieve(
         filtered_ids = [str(r.get("id", "")) for r in filtered if r.get("id")]
         if filtered_ids:
             try:
-                adjustments = get_outcome_adjustments(filtered_ids)
+                adjustments = await get_outcome_adjustments(filtered_ids)
                 for r in filtered:
                     adj = adjustments.get(str(r.get("id", "")), 0.0)
                     if adj != 0.0:
