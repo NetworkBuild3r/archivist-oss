@@ -28,6 +28,8 @@ from archivist.core.config import (
     ADAPTIVE_VECTOR_LIMIT_ENABLED,
     ADAPTIVE_VECTOR_LIMIT_MULTIPLIER,
     ADAPTIVE_VECTOR_MIN_RESULTS,
+    AUTO_COMPRESS_ENABLED,
+    AUTO_COMPRESS_THRESHOLD,
     BM25_ENABLED,
     BM25_RESCUE_ENABLED,
     BM25_RESCUE_MAX_SLOTS,
@@ -1403,6 +1405,61 @@ async def recursive_retrieve(
         )
         enriched = _packed_ctx.sources
 
+    # Auto-compress hook (Phase 3): when over-budget AND enabled, compact the
+    # dropped content into a synthetic L1-tier result and inject it into enriched.
+    _compress_savings: int = 0
+    if (
+        AUTO_COMPRESS_ENABLED
+        and _packed_ctx is not None
+        and _packed_ctx.over_budget
+        and _packed_ctx.dropped_count > 0
+    ):
+        _budget_pct = (
+            round(_packed_ctx.total_tokens / _packed_ctx.budget_tokens * 100, 1)
+            if _packed_ctx.budget_tokens
+            else 0.0
+        )
+        if _budget_pct >= AUTO_COMPRESS_THRESHOLD * 100:
+            try:
+                from archivist.write.compaction import compact_flat
+
+                _overflow = enriched[_packed_ctx.dropped_count :]  # trailing dropped items
+                if not _overflow:
+                    # Fallback: compress the last N packed items when drop list is empty
+                    _n_compress = max(1, len(enriched) // 3)
+                    _overflow = enriched[-_n_compress:]
+
+                _overflow_pairs = [
+                    (str(r.get("id", r.get("qdrant_id", ""))), r.get("tier_text") or r.get("text", ""))
+                    for r in _overflow
+                    if r.get("tier_text") or r.get("text")
+                ]
+                if _overflow_pairs:
+                    _compressed_text = await compact_flat(_overflow_pairs)
+                    _compress_savings = sum(
+                        len(p[1].split()) for p in _overflow_pairs
+                    ) - len(_compressed_text.split())
+                    _synthetic = {
+                        "id": "compressed_overflow",
+                        "score": 0.0,
+                        "text": _compressed_text,
+                        "tier_text": _compressed_text,
+                        "_packed_tier": "l1",
+                        "file_path": "compressed",
+                        "date": "",
+                        "agent_id": "",
+                        "memory_type": "compressed_summary",
+                        "_is_synthetic_compress": True,
+                    }
+                    enriched.append(_synthetic)
+                    logger.debug(
+                        "auto_compress: injected synthetic L1 from %d overflow items, ~%d tokens saved",
+                        len(_overflow_pairs),
+                        _compress_savings,
+                    )
+            except Exception as _ce:
+                logger.warning("auto_compress hook failed: %s", _ce)
+
     n_refine = len(enriched)
 
     _micro_hits = sum(1 for r in enriched if r.get("parent_id") and not r.get("is_parent"))
@@ -1437,6 +1494,8 @@ async def recursive_retrieve(
         "token_savings_pct": _token_savings_pct,
         "dropped_count": _dropped_count,
         "pack_policy": CONTEXT_PACK_POLICY if _packed_ctx is not None else "none",
+        "auto_compressed": _compress_savings > 0,
+        "compress_savings_approx": _compress_savings,
         "hint": "compress" if budget_tokens and budget_used_pct > 80 else "ok",
     }
 

@@ -289,6 +289,18 @@ class ArchivistSettings(BaseSettings):
     # Always include at least this many results at their best available tier.
     context_min_full_results: int = Field(default=3, ge=1)
 
+    # ── Auto-compress + ephemeral session store (Phase 3 — answer-finder) ────
+    # When AUTO_COMPRESS_ENABLED=True and retrieval is over-budget, the pipeline
+    # compacts overflow results via compact_flat() and injects a synthetic L1
+    # result instead of silently dropping content.  Opt-in; default False.
+    auto_compress_enabled: bool = False
+    # Fraction of budget_used_pct above which auto-compress fires (0.85 = 85%).
+    auto_compress_threshold: float = 0.85
+    # Max in-memory entries across ALL sessions in SessionStore.
+    session_store_max_entries: int = Field(default=512, ge=1)
+    # Seconds before a SessionStore entry is considered stale and evicted on read.
+    session_store_ttl_seconds: int = Field(default=3600, ge=1)
+
     # ── Journal exports (v1.5) ────────────────────────────────────────────────
     journal_enabled: bool = False
     journal_dir: str = "/data/archivist/journal"
@@ -763,6 +775,11 @@ DEFAULT_CONTEXT_BUDGET = _settings.default_context_budget
 CONTEXT_PACK_POLICY = _settings.context_pack_policy
 CONTEXT_L0_BUDGET_SHARE = _settings.context_l0_budget_share
 CONTEXT_MIN_FULL_RESULTS = _settings.context_min_full_results
+
+AUTO_COMPRESS_ENABLED = _settings.auto_compress_enabled
+AUTO_COMPRESS_THRESHOLD = _settings.auto_compress_threshold
+SESSION_STORE_MAX_ENTRIES = _settings.session_store_max_entries
+SESSION_STORE_TTL_SECONDS = _settings.session_store_ttl_seconds
 
 JOURNAL_ENABLED = _settings.journal_enabled
 JOURNAL_DIR = _settings.journal_dir
