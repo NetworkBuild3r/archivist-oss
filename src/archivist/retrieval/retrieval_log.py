@@ -89,17 +89,16 @@ async def log_retrieval(
     return log_id
 
 
-def get_retrieval_logs(
+async def get_retrieval_logs(
     agent_id: str = "",
     limit: int = 50,
     offset: int = 0,
     since: str = "",
 ) -> list[dict]:
     """Retrieve recent retrieval logs for debugging/export."""
-    from archivist.storage.graph import get_db
+    from archivist.storage.sqlite_pool import pool
 
     _ensure_schema()
-    conn = get_db()
 
     conditions = []
     params: list = []
@@ -113,12 +112,13 @@ def get_retrieval_logs(
     where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
     params.extend([limit, offset])
 
-    cur = conn.execute(
-        f"SELECT * FROM retrieval_logs{where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
-        params,
-    )
+    async with pool.read() as conn:
+        raw_rows = await conn.fetchall(
+            f"SELECT * FROM retrieval_logs{where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            params,
+        )
     rows = []
-    for r in cur.fetchall():
+    for r in raw_rows:
         d = dict(r)
         try:
             d["retrieval_trace"] = json.loads(d["retrieval_trace"])
@@ -130,51 +130,62 @@ def get_retrieval_logs(
             )
         d["cache_hit"] = bool(d.get("cache_hit"))
         rows.append(d)
-    conn.close()
     return rows
 
 
-def get_retrieval_stats(agent_id: str = "", window_days: int = 7) -> dict:
+async def get_retrieval_stats(agent_id: str = "", window_days: int = 7) -> dict:
     """Aggregate retrieval statistics for monitoring."""
-    from archivist.storage.graph import get_db
+    from archivist.storage.graph import _is_postgres
+    from archivist.storage.sqlite_pool import pool
 
     _ensure_schema()
-    conn = get_db()
 
     agent_filter = ""
-    params: list = [f"-{window_days} days"]
     if agent_id:
         agent_filter = " AND agent_id = ?"
-        params.append(agent_id)
 
-    cur = conn.execute(
-        f"""SELECT
-                COUNT(*) as total,
-                SUM(cache_hit) as cache_hits,
-                AVG(duration_ms) as avg_duration_ms,
-                AVG(result_count) as avg_results,
-                MIN(duration_ms) as min_duration_ms,
-                MAX(duration_ms) as max_duration_ms
-            FROM retrieval_logs
-            WHERE created_at >= datetime('now', ?){agent_filter}""",
-        params,
-    )
-    row = cur.fetchone()
-    result = dict(row) if row else {}
+    if _is_postgres():
+        date_expr = f"NOW() - INTERVAL '{window_days} days'"
+        params_main: list = []
+        params_agents: list = []
+        if agent_id:
+            params_main.append(agent_id)
+            params_agents.append(agent_id)
+    else:
+        date_expr = "datetime('now', ?)"
+        params_main = [f"-{window_days} days"]
+        params_agents = [f"-{window_days} days"]
+        if agent_id:
+            params_main.append(agent_id)
+            params_agents.append(agent_id)
 
-    for key in ("avg_duration_ms", "avg_results"):
-        if result.get(key) is not None:
-            result[key] = round(result[key], 1)
+    async with pool.read() as conn:
+        row = await conn.fetchone(
+            f"""SELECT
+                    COUNT(*) as total,
+                    SUM(cache_hit) as cache_hits,
+                    AVG(duration_ms) as avg_duration_ms,
+                    AVG(result_count) as avg_results,
+                    MIN(duration_ms) as min_duration_ms,
+                    MAX(duration_ms) as max_duration_ms
+                FROM retrieval_logs
+                WHERE created_at >= {date_expr}{agent_filter}""",
+            params_main,
+        )
+        result = dict(row) if row else {}
 
-    cur2 = conn.execute(
-        f"""SELECT agent_id, COUNT(*) as cnt
-            FROM retrieval_logs
-            WHERE created_at >= datetime('now', ?){agent_filter}
-            GROUP BY agent_id ORDER BY cnt DESC LIMIT 10""",
-        params,
-    )
-    result["top_agents"] = [dict(r) for r in cur2.fetchall()]
-    conn.close()
+        for key in ("avg_duration_ms", "avg_results"):
+            if result.get(key) is not None:
+                result[key] = round(result[key], 1)
+
+        top_rows = await conn.fetchall(
+            f"""SELECT agent_id, COUNT(*) as cnt
+                FROM retrieval_logs
+                WHERE created_at >= {date_expr}{agent_filter}
+                GROUP BY agent_id ORDER BY cnt DESC LIMIT 10""",
+            params_agents,
+        )
+        result["top_agents"] = [dict(r) for r in top_rows]
 
     result["window_days"] = window_days
     result["cache_hit_rate"] = (

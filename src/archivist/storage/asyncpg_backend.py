@@ -125,6 +125,7 @@ def _translate_sql(sql: str) -> str:
                 "memory_points": ["memory_id", "qdrant_id", "point_type"],
                 "delete_failures": ["memory_id"],
                 "outbox": ["id"],
+                "skill_relations": ["skill_a", "skill_b", "relation_type"],
             }
             conflict_cols = _conflict_targets.get(table_name)
             pk_set = set(conflict_cols) if conflict_cols else {"id", "rowid"}
@@ -165,23 +166,41 @@ class _PgCursorProxy:
     asyncpg's ``connection.execute()`` returns a status string, not a cursor.
     This proxy allows the cursor pattern to work transparently on Postgres.
 
+    For DML statements (INSERT/UPDATE/DELETE) the ``rowcount`` property
+    returns the number of rows affected, parsed from the asyncpg status string
+    (e.g. ``"DELETE 5"`` → 5, ``"INSERT 0 1"`` → 1).  SELECT proxies return
+    -1 for ``rowcount``, matching the DB-API 2.0 convention for un-executed
+    queries.
+
     Args:
         conn: The underlying asyncpg connection.
         sql: Translated SQL statement (``$N`` placeholders).
         params: Positional parameters.
+        _rowcount: Pre-parsed affected-row count for DML proxies.
     """
 
-    __slots__ = ("_conn", "_params", "_sql")
+    __slots__ = ("_conn", "_params", "_rowcount", "_sql")
 
     def __init__(
         self,
         conn: asyncpg_module.Connection[Any],
         sql: str,
         params: tuple[Any, ...] | list[Any],
+        _rowcount: int = -1,
     ) -> None:
         self._conn = conn
         self._sql = sql
         self._params = params
+        self._rowcount = _rowcount
+
+    @property
+    def rowcount(self) -> int:
+        """Number of rows affected by the last DML statement.
+
+        Matches ``aiosqlite.Cursor.rowcount`` behaviour: returns the count for
+        INSERT/UPDATE/DELETE, and -1 for SELECT proxies (query not yet run).
+        """
+        return self._rowcount
 
     async def fetchone(self) -> Any | None:
         """Fetch the first row, or ``None`` if the result set is empty."""
@@ -232,10 +251,15 @@ class AsyncpgConnection:
         try:
             stripped = translated.lstrip().upper()
             if not stripped.startswith("SELECT") and not stripped.startswith("WITH"):
-                # Non-SELECT: run immediately for side-effect, return empty proxy.
-                await self._conn.execute(translated, *params)
+                # Non-SELECT: run immediately for side-effect, return DML proxy with rowcount.
+                # asyncpg returns a status string like "DELETE 5" / "UPDATE 3" / "INSERT 0 1".
+                status = await self._conn.execute(translated, *params)
                 m.observe(m.PG_POOL_QUERY_MS, (time.monotonic() - _t0) * 1000.0)
-                return _PgCursorProxy(self._conn, "SELECT 1 WHERE FALSE", ())
+                try:
+                    _rc = int(str(status).rsplit(" ", 1)[-1])
+                except (ValueError, AttributeError):
+                    _rc = 0
+                return _PgCursorProxy(self._conn, "SELECT 1 WHERE FALSE", (), _rowcount=_rc)
             m.observe(m.PG_POOL_QUERY_MS, (time.monotonic() - _t0) * 1000.0)
         except Exception:
             m.inc(m.PG_POOL_ERRORS_TOTAL)

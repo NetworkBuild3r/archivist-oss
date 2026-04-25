@@ -301,11 +301,11 @@ async def _handle_audit_trail(arguments: dict) -> list[TextContent]:
     limit = arguments.get("limit", 50)
 
     if memory_id:
-        entries = get_audit_trail(memory_id, limit=limit)
+        entries = await get_audit_trail(memory_id, limit=limit)
     elif target_agent:
-        entries = get_agent_activity(target_agent, limit=limit)
+        entries = await get_agent_activity(target_agent, limit=limit)
     else:
-        entries = get_agent_activity("", limit=limit)
+        entries = await get_agent_activity("", limit=limit)
 
     return success_response({"entries": entries}, default=str)
 
@@ -383,13 +383,13 @@ async def _handle_resolve_uri(arguments: dict) -> list[TextContent]:
 async def _handle_retrieval_logs(arguments: dict) -> list[TextContent]:
     """Export retrieval logs or aggregate stats."""
     if arguments.get("stats_only"):
-        stats = get_retrieval_stats(
+        stats = await get_retrieval_stats(
             agent_id=arguments.get("agent_id", ""),
             window_days=arguments.get("window_days", 7),
         )
         return success_response(stats)
 
-    logs = get_retrieval_logs(
+    logs = await get_retrieval_logs(
         agent_id=arguments.get("agent_id", ""),
         limit=arguments.get("limit", 20),
         since=arguments.get("since", ""),

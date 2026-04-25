@@ -480,12 +480,12 @@ async def handle_retrieval_export(request):
 
     params = request.query_params
     if params.get("stats") == "true":
-        stats = get_retrieval_stats(
+        stats = await get_retrieval_stats(
             agent_id=params.get("agent_id", ""),
             window_days=int(params.get("window_days", "7")),
         )
         return JSONResponse(stats)
-    logs = get_retrieval_logs(
+    logs = await get_retrieval_logs(
         agent_id=params.get("agent_id", ""),
         limit=int(params.get("limit", "50")),
         since=params.get("since", ""),

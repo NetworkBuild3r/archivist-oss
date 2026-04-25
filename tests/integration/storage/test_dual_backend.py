@@ -285,3 +285,142 @@ async def test_dual_fetchval_returns_scalar(dual_pool):
             )
         assert new_id is not None, f"[{backend_name}] fetchval returned None"
         assert isinstance(new_id, int), f"[{backend_name}] fetchval not int: {type(new_id)}"
+
+
+# ---------------------------------------------------------------------------
+# DML rowcount
+# ---------------------------------------------------------------------------
+
+
+async def test_dual_dml_rowcount(dual_pool):
+    """DML cursor.rowcount returns the number of affected rows on both backends."""
+    pool, backend_name = dual_pool
+
+    async with pool.write() as conn:
+        await conn.execute(
+            "INSERT INTO curator_state (key, value) VALUES (?, ?)",
+            (f"rc_key_{backend_name}", "hello"),
+        )
+        cur = await conn.execute(
+            "UPDATE curator_state SET value = ? WHERE key = ?",
+            ("world", f"rc_key_{backend_name}"),
+        )
+    assert cur.rowcount == 1, f"[{backend_name}] expected rowcount 1, got {cur.rowcount}"
+
+
+async def test_dual_dml_rowcount_zero_on_no_match(dual_pool):
+    """DELETE with no matching rows returns rowcount == 0 on both backends."""
+    pool, backend_name = dual_pool
+
+    async with pool.write() as conn:
+        cur = await conn.execute(
+            "DELETE FROM curator_state WHERE key = ?",
+            (f"no_such_key_{backend_name}_xyz",),
+        )
+    assert cur.rowcount == 0, f"[{backend_name}] expected rowcount 0, got {cur.rowcount}"
+
+
+# ---------------------------------------------------------------------------
+# Audit log
+# ---------------------------------------------------------------------------
+
+
+async def test_dual_audit_log_roundtrip(dual_pool):
+    """log_memory_event() + get_audit_trail() work on both backends."""
+    pool, backend_name = dual_pool
+
+    from archivist.core.audit import get_audit_trail, log_memory_event
+
+    mid = f"mem-audit-{backend_name}"
+    await log_memory_event(
+        agent_id="test-agent",
+        action="create",
+        memory_id=mid,
+        namespace="dual_test",
+        text_hash="abc123",
+        version=1,
+        metadata={"src": "dual_test"},
+    )
+    entries = await get_audit_trail(mid)
+    assert len(entries) == 1, f"[{backend_name}] expected 1 audit entry, got {len(entries)}"
+    assert entries[0]["action"] == "create"
+    assert entries[0]["agent_id"] == "test-agent"
+
+
+# ---------------------------------------------------------------------------
+# Retrieval log
+# ---------------------------------------------------------------------------
+
+
+async def test_dual_retrieval_log_roundtrip(dual_pool):
+    """log_retrieval() + get_retrieval_logs() work on both backends."""
+    import os
+
+    pool, backend_name = dual_pool
+
+    os.environ["TRAJECTORY_EXPORT_ENABLED"] = "1"
+    try:
+        from archivist.retrieval.retrieval_log import get_retrieval_logs, log_retrieval
+
+        lid = await log_retrieval(
+            agent_id=f"agent-{backend_name}",
+            query="dual test query",
+            namespace="dual_test",
+            tier="l2",
+            memory_type="",
+            retrieval_trace={"hits": 5},
+            result_count=5,
+            cache_hit=False,
+            duration_ms=42,
+        )
+        assert lid, f"[{backend_name}] log_retrieval returned empty id"
+
+        logs = await get_retrieval_logs(agent_id=f"agent-{backend_name}", limit=10)
+        assert len(logs) >= 1, f"[{backend_name}] expected at least 1 log, got {len(logs)}"
+        assert logs[0]["query"] == "dual test query"
+        assert logs[0]["duration_ms"] == 42
+        assert logs[0]["cache_hit"] is False
+    finally:
+        os.environ.pop("TRAJECTORY_EXPORT_ENABLED", None)
+
+
+# ---------------------------------------------------------------------------
+# Hotness
+# ---------------------------------------------------------------------------
+
+
+async def test_dual_hotness_batch_update(dual_pool):
+    """batch_update_hotness() runs without error and get_hotness_scores() returns data."""
+    pool, backend_name = dual_pool
+
+    # Insert a retrieval log so batch_update has something to aggregate
+    import os
+
+    from archivist.core.hotness import batch_update_hotness, get_hotness_scores
+
+    os.environ["TRAJECTORY_EXPORT_ENABLED"] = "1"
+    try:
+        from archivist.retrieval.retrieval_log import log_retrieval
+
+        mid = f"hot-mem-{backend_name}"
+        await log_retrieval(
+            agent_id="hotness-agent",
+            query="hotness query",
+            namespace="dual_test",
+            tier="l2",
+            memory_type="",
+            retrieval_trace={"result_ids": [mid]},
+            result_count=1,
+            cache_hit=False,
+            duration_ms=10,
+        )
+    finally:
+        os.environ.pop("TRAJECTORY_EXPORT_ENABLED", None)
+
+    updated = await batch_update_hotness()
+    assert isinstance(updated, int), f"[{backend_name}] batch_update_hotness returned non-int"
+
+    scores = await get_hotness_scores([mid])
+    # Score may be 0 if the memory wasn't logged in time; just verify no crash
+    assert isinstance(scores, dict), f"[{backend_name}] get_hotness_scores returned non-dict"
+

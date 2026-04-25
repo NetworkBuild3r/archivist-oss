@@ -29,6 +29,7 @@ from archivist.storage.collection_router import (
     ensure_collection,
 )
 from archivist.storage.graph import (
+    _is_postgres,
     add_fact,
     register_memory_points_batch,
     upsert_entity,
@@ -1045,8 +1046,9 @@ async def _handle_pin(arguments: dict) -> list[TextContent]:
         from archivist.storage.sqlite_pool import pool
 
         async with pool.write() as conn:
+            _collate = "" if _is_postgres() else " COLLATE NOCASE"
             cur = await conn.execute(
-                "SELECT id FROM entities WHERE name = ? COLLATE NOCASE AND namespace = ?",
+                f"SELECT id FROM entities WHERE name = ?{_collate} AND namespace = ?",
                 (entity_name, namespace or "global"),
             )
             row = await cur.fetchone()
@@ -1121,8 +1123,9 @@ async def _handle_unpin(arguments: dict) -> list[TextContent]:
         from archivist.storage.sqlite_pool import pool
 
         async with pool.write() as conn:
+            _collate = "" if _is_postgres() else " COLLATE NOCASE"
             cur = await conn.execute(
-                "SELECT id FROM entities WHERE name = ? COLLATE NOCASE", (entity_name,)
+                f"SELECT id FROM entities WHERE name = ?{_collate}", (entity_name,)
             )
             row = await cur.fetchone()
             if row:

@@ -472,6 +472,46 @@ class TestAsyncpgConnection:
         # executescript passes the full script as a single call
         raw.execute.assert_called_once_with(script)
 
+    async def test_execute_dml_rowcount_parsed(self):
+        """DML execute() returns a proxy with rowcount parsed from asyncpg status string."""
+        from archivist.storage.asyncpg_backend import AsyncpgConnection
+
+        raw = AsyncMock()
+        raw.execute = AsyncMock(return_value="DELETE 5")
+        conn = AsyncpgConnection(raw)
+        cur = await conn.execute("DELETE FROM t WHERE id = ?", (42,))
+        assert cur.rowcount == 5
+
+    async def test_execute_insert_rowcount_parsed(self):
+        """INSERT status 'INSERT 0 1' → rowcount == 1."""
+        from archivist.storage.asyncpg_backend import AsyncpgConnection
+
+        raw = AsyncMock()
+        raw.execute = AsyncMock(return_value="INSERT 0 1")
+        conn = AsyncpgConnection(raw)
+        cur = await conn.execute("INSERT INTO t (v) VALUES (?)", (1,))
+        assert cur.rowcount == 1
+
+    async def test_execute_select_rowcount_is_minus_one(self):
+        """SELECT proxy has rowcount == -1 (no DML run yet, matches DB-API 2.0)."""
+        from archivist.storage.asyncpg_backend import AsyncpgConnection
+
+        raw = AsyncMock()
+        raw.fetch = AsyncMock(return_value=[])
+        conn = AsyncpgConnection(raw)
+        cur = await conn.execute("SELECT * FROM t")
+        assert cur.rowcount == -1
+
+    async def test_execute_dml_rowcount_zero_on_bad_status(self):
+        """Unparseable status string does not crash; rowcount falls back to 0."""
+        from archivist.storage.asyncpg_backend import AsyncpgConnection
+
+        raw = AsyncMock()
+        raw.execute = AsyncMock(return_value="COMMAND OK")
+        conn = AsyncpgConnection(raw)
+        cur = await conn.execute("UPDATE t SET v=1")
+        assert cur.rowcount == 0
+
     async def test_commit_is_noop(self):
         conn, raw = self._make_conn()
         await conn.commit()  # should not raise

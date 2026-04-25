@@ -154,17 +154,21 @@ CREATE TABLE IF NOT EXISTS needle_registry (
 CREATE INDEX IF NOT EXISTS idx_needle_token ON needle_registry(token);
 
 CREATE TABLE IF NOT EXISTS memory_hotness (
-    memory_id   TEXT PRIMARY KEY,
-    score       REAL NOT NULL DEFAULT 0.0,
-    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    memory_id       TEXT PRIMARY KEY,
+    score           REAL NOT NULL DEFAULT 0.0,
+    retrieval_count INTEGER NOT NULL DEFAULT 0,
+    last_accessed   TEXT,
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS annotations (
-    id          TEXT PRIMARY KEY,
-    memory_id   TEXT NOT NULL,
-    agent_id    TEXT NOT NULL,
-    annotation  TEXT NOT NULL,
-    created_at  TEXT NOT NULL
+    id              TEXT PRIMARY KEY,
+    memory_id       TEXT NOT NULL,
+    agent_id        TEXT NOT NULL,
+    annotation_type TEXT NOT NULL DEFAULT 'note',
+    content         TEXT NOT NULL,
+    quality_score   REAL,
+    created_at      TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_ann_memory ON annotations(memory_id);
 
@@ -173,6 +177,7 @@ CREATE TABLE IF NOT EXISTS ratings (
     memory_id   TEXT NOT NULL,
     agent_id    TEXT NOT NULL,
     rating      INTEGER NOT NULL,
+    context     TEXT,
     created_at  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_rat_memory ON ratings(memory_id);
@@ -264,18 +269,75 @@ CREATE TABLE IF NOT EXISTS trajectories (
 CREATE INDEX IF NOT EXISTS idx_traj_agent ON trajectories(agent_id);
 
 CREATE TABLE IF NOT EXISTS tips (
-    id TEXT PRIMARY KEY,
-    trajectory_id TEXT NOT NULL REFERENCES trajectories(id),
-    agent_id TEXT NOT NULL,
-    category TEXT NOT NULL DEFAULT 'general',
-    tip_text TEXT NOT NULL,
-    archived INTEGER NOT NULL DEFAULT 0,
+    id               TEXT PRIMARY KEY,
+    trajectory_id    TEXT NOT NULL REFERENCES trajectories(id),
+    agent_id         TEXT NOT NULL,
+    category         TEXT NOT NULL DEFAULT 'general',
+    tip_text         TEXT NOT NULL,
+    context          TEXT,
     negative_example TEXT DEFAULT '',
-    created_at TEXT NOT NULL
+    archived         INTEGER NOT NULL DEFAULT 0,
+    created_at       TEXT NOT NULL,
+    usage_count      INTEGER NOT NULL DEFAULT 0,
+    last_used_at     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tips_agent ON tips(agent_id);
 CREATE INDEX IF NOT EXISTS idx_tips_category ON tips(category);
 CREATE INDEX IF NOT EXISTS idx_tips_archived ON tips(archived);
+
+CREATE TABLE IF NOT EXISTS curator_queue (
+    id         TEXT PRIMARY KEY,
+    op_type    TEXT NOT NULL,
+    payload    TEXT NOT NULL DEFAULT '{}',
+    status     TEXT NOT NULL DEFAULT 'pending',
+    created_at TEXT NOT NULL,
+    applied_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_cq_status ON curator_queue(status);
+CREATE INDEX IF NOT EXISTS idx_cq_created ON curator_queue(created_at);
+
+CREATE TABLE IF NOT EXISTS retrieval_logs (
+    id              TEXT PRIMARY KEY,
+    agent_id        TEXT NOT NULL,
+    query           TEXT NOT NULL,
+    namespace       TEXT DEFAULT '',
+    tier            TEXT DEFAULT 'l2',
+    memory_type     TEXT DEFAULT '',
+    retrieval_trace TEXT NOT NULL,
+    result_count    INTEGER DEFAULT 0,
+    cache_hit       INTEGER DEFAULT 0,
+    duration_ms     INTEGER,
+    created_at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_rl_agent ON retrieval_logs(agent_id);
+CREATE INDEX IF NOT EXISTS idx_rl_created ON retrieval_logs(created_at);
+
+CREATE TABLE IF NOT EXISTS audit_log (
+    id        TEXT PRIMARY KEY,
+    timestamp TEXT NOT NULL,
+    agent_id  TEXT NOT NULL,
+    action    TEXT NOT NULL,
+    memory_id TEXT,
+    namespace TEXT,
+    text_hash TEXT,
+    version   INTEGER,
+    metadata  TEXT DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp);
+CREATE INDEX IF NOT EXISTS idx_audit_agent ON audit_log(agent_id);
+CREATE INDEX IF NOT EXISTS idx_audit_memory ON audit_log(memory_id);
+CREATE INDEX IF NOT EXISTS idx_audit_namespace ON audit_log(namespace);
+
+CREATE TABLE IF NOT EXISTS memory_outcomes (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    memory_id     TEXT NOT NULL,
+    trajectory_id TEXT NOT NULL REFERENCES trajectories(id),
+    influence     TEXT NOT NULL DEFAULT 'medium',
+    outcome       TEXT NOT NULL,
+    outcome_score REAL,
+    created_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mo_memory ON memory_outcomes(memory_id);
 """
 
 _FTS5_SQL: list[str] = [

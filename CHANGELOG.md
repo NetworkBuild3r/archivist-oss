@@ -5,6 +5,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.2.1] - 2026-04-25
+
+### Fixed
+
+- **`_PgCursorProxy.rowcount`** — 12 crash sites (`storage/graph.py`, `lifecycle/memory_lifecycle.py`, `lifecycle/curator.py`, `storage/outbox.py`) that called `cur.rowcount` after a DML statement now work correctly. `AsyncpgConnection.execute()` captures the asyncpg status string (e.g. `"DELETE 5"`) and exposes the parsed count via a new `rowcount` property on `_PgCursorProxy`. SELECT proxies return -1 (DB-API 2.0 convention).
+- **`hotness.py` silent Postgres failure** — `get_hotness_scores()`, `batch_update_hotness()`, and `apply_hotness_to_results()` were calling sync `get_db()` which opened a local SQLite file instead of the Postgres pool. All three are now `async def` using `async with pool.read()/write()`. `datetime('now', '-7 days')` replaced with `NOW() - INTERVAL '7 days'` on Postgres; `json_extract(…, '$.result_ids')` replaced with `retrieval_trace::json->>'result_ids'` on Postgres.
+- **`audit.py` Postgres compatibility** — `get_audit_trail()` and `get_agent_activity()` converted to `async def` using the pool; callers in `tools_admin.py` updated with `await`.
+- **`retrieval_log.py` Postgres compatibility** — `get_retrieval_logs()` and `get_retrieval_stats()` converted to `async def` using the pool. `datetime('now', ?)` window queries replaced with `NOW() - INTERVAL 'N days'` on Postgres. Callers in `tools_admin.py` and `main.py` updated with `await`.
+- **`namespace_inventory.py` Postgres compatibility** — `_fetch_inventory()` and `get_inventory()` converted to `async def` using the pool; `_fetch_top_entities()` helper also made async.
+- **`COLLATE NOCASE` in `tools_storage.py`** — Two `SELECT id FROM entities WHERE name = ? COLLATE NOCASE` queries (lines 1049, 1125) are now conditionally guarded: `COLLATE NOCASE` is omitted when `_is_postgres()` since `entities.name` is `CITEXT`.
+- **`skill_relations` conflict target** — Added `"skill_relations": ["skill_a", "skill_b", "relation_type"]` to `_conflict_targets` in `asyncpg_backend.py` for correct `ON CONFLICT DO UPDATE` generation if the table is ever upserted.
+
+### Changed
+
+- **Test fixture schema sync** — `tests/fixtures/schema.py` `_SCHEMA_SQL` updated to match `schema_postgres.sql`: `memory_hotness` gains `retrieval_count`/`last_accessed`; `annotations` renamed `annotation` → `content`, added `annotation_type`/`quality_score`; `ratings` gains `context`; `tips` gains `context`/`usage_count`/`last_used_at`. Added missing tables `curator_queue`, `retrieval_logs`, `audit_log`, `memory_outcomes`.
+- **4 new rowcount unit tests** in `tests/unit/storage/test_backends.py` verifying DML `DELETE`/`INSERT`/`UPDATE` rowcounts and the SELECT proxy default.
+- **5 new dual-backend integration tests** in `tests/integration/storage/test_dual_backend.py` covering DML rowcount, audit log round-trip, retrieval log round-trip, and hotness batch update.
+
 ## [2.2.0] - 2026-04-24
 
 ### Added

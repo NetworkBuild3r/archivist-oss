@@ -29,24 +29,24 @@ class TestNamespaceInventory:
                 "experience",
             )
 
-        inv = ni.get_inventory("ns1")
+        inv = await ni.get_inventory("ns1")
         assert inv.total_memories == 50
         assert inv.by_type.get("skill") == 30
         assert inv.by_type.get("experience") == 20
 
-        inv2 = ni.get_inventory("ns1")
+        inv2 = await ni.get_inventory("ns1")
         assert inv2.total_memories == 50
         assert inv2 is inv
 
         ni.invalidate("ns1")
-        inv3 = ni.get_inventory("ns1")
+        inv3 = await ni.get_inventory("ns1")
         assert inv3.total_memories == 50
 
-    def test_inventory_empty_namespace_string(self):
+    async def test_inventory_empty_namespace_string(self, async_pool):
         import namespace_inventory as ni
 
         ni.invalidate_all()
-        inv = ni.get_inventory("")
+        inv = await ni.get_inventory("")
         assert isinstance(inv.total_memories, int)
 
 
