@@ -418,9 +418,7 @@ async def test_upsert_entity_increments_mention_count(pg_graph):
     await upsert_entity("MentionEnt", "tool", namespace="pg_graph_test")
 
     async with pg_graph.read() as conn:
-        rows = await conn.fetchall(
-            "SELECT mention_count FROM entities WHERE id = ?", (eid,)
-        )
+        rows = await conn.fetchall("SELECT mention_count FROM entities WHERE id = ?", (eid,))
     assert rows[0]["mention_count"] == 2
 
 
@@ -497,8 +495,9 @@ async def test_add_relationship(pg_graph):
     src = await upsert_entity("RelSrc", "service", namespace="pg_graph_test")
     tgt = await upsert_entity("RelTgt", "service", namespace="pg_graph_test")
     # Should not raise
-    await add_relationship(src, tgt, "depends_on", "RelSrc depends on RelTgt",
-                           namespace="pg_graph_test")
+    await add_relationship(
+        src, tgt, "depends_on", "RelSrc depends on RelTgt", namespace="pg_graph_test"
+    )
 
     async with pg_graph.read() as conn:
         rows = await conn.fetchall(
@@ -577,7 +576,13 @@ async def test_insert_or_ignore_via_pool(pg_graph):
             "INSERT INTO entities "
             "(name, entity_type, first_seen, last_seen, namespace) "
             "VALUES (?, ?, ?, ?, ?)",
-            ("IgnoreTestEnt", "tool", "2026-01-01T00:00:00", "2026-01-01T00:00:00", "pg_graph_test"),
+            (
+                "IgnoreTestEnt",
+                "tool",
+                "2026-01-01T00:00:00",
+                "2026-01-01T00:00:00",
+                "pg_graph_test",
+            ),
         )
 
     # Second insert via OR IGNORE — must not raise
@@ -586,7 +591,13 @@ async def test_insert_or_ignore_via_pool(pg_graph):
             "INSERT OR IGNORE INTO entities "
             "(name, entity_type, first_seen, last_seen, namespace) "
             "VALUES (?, ?, ?, ?, ?)",
-            ("IgnoreTestEnt", "tool", "2026-01-01T00:00:00", "2026-01-01T00:00:00", "pg_graph_test"),
+            (
+                "IgnoreTestEnt",
+                "tool",
+                "2026-01-01T00:00:00",
+                "2026-01-01T00:00:00",
+                "pg_graph_test",
+            ),
         )
 
     async with pg_graph.read() as conn:

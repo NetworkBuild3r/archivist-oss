@@ -81,8 +81,8 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101", "S106", "T201", "S105"]
-"benchmarks/**" = ["T201", "S101"]
+"tests/**" = ["S101", "S106", "T201", "S105", "S108"]
+"benchmarks/**" = ["T201", "S101", "S108"]
 "src/archivist/app/main.py" = ["T201"]
 
 [tool.ruff.lint.isort]

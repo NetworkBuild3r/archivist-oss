@@ -283,9 +283,7 @@ def _backup_postgres(snap_dir: Path) -> None:
         timeout=600,  # 10 minutes
     )
     if result.returncode != 0:
-        raise RuntimeError(
-            f"pg_dump failed (exit {result.returncode}):\n{result.stderr}"
-        )
+        raise RuntimeError(f"pg_dump failed (exit {result.returncode}):\n{result.stderr}")
 
     size_bytes = dest_path.stat().st_size
     logger.info("Postgres backup: %.1f MB → %s", size_bytes / (1024 * 1024), dest_path.name)
@@ -330,9 +328,7 @@ def _restore_postgres(backup_path: Path) -> None:
     # pg_restore exits 1 for warnings (e.g. object doesn't exist for --clean);
     # treat exit > 1 as a hard failure.
     if result.returncode > 1:
-        raise RuntimeError(
-            f"pg_restore failed (exit {result.returncode}):\n{result.stderr}"
-        )
+        raise RuntimeError(f"pg_restore failed (exit {result.returncode}):\n{result.stderr}")
     if result.returncode == 1:
         logger.warning("pg_restore completed with warnings:\n%s", result.stderr)
 

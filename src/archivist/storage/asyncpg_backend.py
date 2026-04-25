@@ -54,12 +54,8 @@ _PLACEHOLDER_RE = re.compile(r"\?")
 
 # SQLite-ism patterns translated to standard SQL before $N substitution.
 # Order matters: more specific patterns first.
-_INSERT_OR_IGNORE_RE = re.compile(
-    r"\bINSERT\s+OR\s+IGNORE\s+INTO\b", re.IGNORECASE
-)
-_INSERT_OR_REPLACE_RE = re.compile(
-    r"\bINSERT\s+OR\s+REPLACE\s+INTO\b", re.IGNORECASE
-)
+_INSERT_OR_IGNORE_RE = re.compile(r"\bINSERT\s+OR\s+IGNORE\s+INTO\b", re.IGNORECASE)
+_INSERT_OR_REPLACE_RE = re.compile(r"\bINSERT\s+OR\s+REPLACE\s+INTO\b", re.IGNORECASE)
 _COLLATE_NOCASE_RE = re.compile(r"\s+COLLATE\s+NOCASE\b", re.IGNORECASE)
 
 
@@ -118,9 +114,7 @@ def _translate_sql(sql: str) -> str:
         # target columns (PK / UNIQUE) and the non-PK columns to update.
         # We parse the table name and column list from the INSERT and look up a
         # static per-table conflict-target map derived from schema_postgres.sql.
-        _tbl_match = re.search(
-            r"INSERT\s+INTO\s+(\w+)\s*\(([^)]+)\)", sql2, re.IGNORECASE
-        )
+        _tbl_match = re.search(r"INSERT\s+INTO\s+(\w+)\s*\(([^)]+)\)", sql2, re.IGNORECASE)
         if _tbl_match:
             table_name = _tbl_match.group(1).lower()
             cols = [c.strip() for c in _tbl_match.group(2).split(",")]
@@ -138,7 +132,10 @@ def _translate_sql(sql: str) -> str:
             if conflict_cols and update_cols:
                 target = ", ".join(conflict_cols)
                 set_clause = ", ".join(f"{c}=EXCLUDED.{c}" for c in update_cols)
-                sql2 = sql2.rstrip().rstrip(";") + f" ON CONFLICT ({target}) DO UPDATE SET {set_clause}"
+                sql2 = (
+                    sql2.rstrip().rstrip(";")
+                    + f" ON CONFLICT ({target}) DO UPDATE SET {set_clause}"
+                )
             elif conflict_cols:
                 target = ", ".join(conflict_cols)
                 sql2 = sql2.rstrip().rstrip(";") + f" ON CONFLICT ({target}) DO NOTHING"

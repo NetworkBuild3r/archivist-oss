@@ -152,9 +152,7 @@ async def test_dual_upsert_entity_mention_count(dual_pool):
     await upsert_entity("MentionDual", "tool", namespace="dual_test")
 
     async with pool.read() as conn:
-        rows = await conn.fetchall(
-            "SELECT mention_count FROM entities WHERE id = ?", (eid,)
-        )
+        rows = await conn.fetchall("SELECT mention_count FROM entities WHERE id = ?", (eid,))
     assert rows[0]["mention_count"] == 2, f"[{backend_name}] mention_count wrong"
 
 
@@ -269,8 +267,9 @@ async def test_dual_fetchval_returns_scalar(dual_pool):
     if backend_name == "sqlite":
         # SQLite does not support RETURNING in all versions; use a SELECT scalar instead
         async with pool.write() as conn:
-            await conn.execute("INSERT INTO curator_state (key, value) VALUES (?, ?)",
-                               ("dual_fetchval_key", "42"))
+            await conn.execute(
+                "INSERT INTO curator_state (key, value) VALUES (?, ?)", ("dual_fetchval_key", "42")
+            )
         async with pool.read() as conn:
             val = await conn.fetchval(
                 "SELECT value FROM curator_state WHERE key = ?", ("dual_fetchval_key",)
@@ -282,8 +281,7 @@ async def test_dual_fetchval_returns_scalar(dual_pool):
                 "INSERT INTO entities "
                 "(name, entity_type, first_seen, last_seen, namespace) "
                 "VALUES (?, ?, ?, ?, ?) RETURNING id",
-                ("FetchvalDual", "tool", "2026-01-01T00:00:00",
-                 "2026-01-01T00:00:00", "dual_test"),
+                ("FetchvalDual", "tool", "2026-01-01T00:00:00", "2026-01-01T00:00:00", "dual_test"),
             )
         assert new_id is not None, f"[{backend_name}] fetchval returned None"
         assert isinstance(new_id, int), f"[{backend_name}] fetchval not int: {type(new_id)}"

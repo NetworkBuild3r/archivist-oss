@@ -81,6 +81,7 @@ async def build_namespace_index(namespace: str, agent_ids: list[str] | None = No
     and recent changes.
     """
     from archivist.storage.sqlite_pool import pool as _pool
+
     async with _pool.read() as conn:
         entities = await _query_entities(conn, agent_ids)
 
@@ -147,6 +148,7 @@ async def build_wake_up_context(namespace: str, agent_id: str = "") -> dict:
     agent_ids = [agent_id] if agent_id else None
 
     from archivist.storage.sqlite_pool import pool as _pool
+
     async with _pool.read() as conn:
         # L0: permanent/durable entities for identity
         if agent_ids:

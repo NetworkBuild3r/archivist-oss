@@ -160,8 +160,7 @@ class TestTranslateSqlDialects:
     def test_insert_or_ignore_with_collate_nocase(self):
         """Both transforms apply in the same statement."""
         result = self._t(
-            "INSERT OR IGNORE INTO t (name) "
-            "SELECT name COLLATE NOCASE FROM src WHERE active = ?"
+            "INSERT OR IGNORE INTO t (name) SELECT name COLLATE NOCASE FROM src WHERE active = ?"
         )
         assert "INSERT OR IGNORE" not in result
         assert "COLLATE NOCASE" not in result

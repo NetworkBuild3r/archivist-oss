@@ -152,8 +152,7 @@ def init_schema():
         # init_schema_async().  Calling get_db() on Postgres would return
         # a SQLite connection, which is wrong.
         logging.getLogger("archivist.graph").debug(
-            "init_schema() skipped — Postgres backend active; "
-            "use init_schema_async() instead"
+            "init_schema() skipped — Postgres backend active; use init_schema_async() instead"
         )
         return
     with GRAPH_WRITE_LOCK:

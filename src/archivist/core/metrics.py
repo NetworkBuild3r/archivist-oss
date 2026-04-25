@@ -355,6 +355,8 @@ async def run_storage_gauges_loop(interval_seconds: float) -> None:
             await asyncio.sleep(interval)
         except asyncio.CancelledError:
             raise
+
+
 # ── Convenience metric names ─────────────────────────────────────────────────
 
 SEARCH_TOTAL = "archivist_search_total"

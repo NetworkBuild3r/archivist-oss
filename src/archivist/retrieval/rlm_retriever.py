@@ -765,7 +765,9 @@ async def recursive_retrieve(
                         _seen_mem.add(rh["memory_id"])
                         _raw_registry.append(rh)
         else:
-            _raw_registry = await lookup_needle_tokens(query, namespace=namespace, agent_id=agent_id)
+            _raw_registry = await lookup_needle_tokens(
+                query, namespace=namespace, agent_id=agent_id
+            )
 
         if _raw_registry:
             m.inc(m.NEEDLE_REGISTRY_HITS, {"namespace": namespace}, value=len(_raw_registry))

@@ -110,16 +110,12 @@ class _WrappedSQLiteConn:
     def __getattr__(self, name: str):
         return getattr(object.__getattribute__(self, "_conn"), name)
 
-    async def fetchall(
-        self, sql: str, params: tuple | list = ()
-    ) -> list[aiosqlite.Row]:
+    async def fetchall(self, sql: str, params: tuple | list = ()) -> list[aiosqlite.Row]:
         conn = object.__getattribute__(self, "_conn")
         cur = await conn.execute(sql, params)
         return list(await cur.fetchall())
 
-    async def fetchone(
-        self, sql: str, params: tuple | list = ()
-    ) -> aiosqlite.Row | None:
+    async def fetchone(self, sql: str, params: tuple | list = ()) -> aiosqlite.Row | None:
         conn = object.__getattribute__(self, "_conn")
         cur = await conn.execute(sql, params)
         return await cur.fetchone()

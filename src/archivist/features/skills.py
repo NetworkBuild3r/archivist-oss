@@ -254,9 +254,7 @@ async def log_skill_event(
 
     async with pool.write() as conn:
         if outcome == "failure" and not skill_version:
-            row = await conn.fetchone(
-                "SELECT current_version FROM skills WHERE id=?", (skill_id,)
-            )
+            row = await conn.fetchone("SELECT current_version FROM skills WHERE id=?", (skill_id,))
             if row:
                 skill_version = row["current_version"]
 
