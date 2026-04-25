@@ -114,24 +114,39 @@ def _translate_sql(sql: str) -> str:
     if _mode[0] == "ignore":
         sql2 = sql2.rstrip().rstrip(";") + " ON CONFLICT DO NOTHING"
     elif _mode[0] == "replace":
-        # ON CONFLICT DO UPDATE SET requires knowing the columns being inserted.
-        # We parse the column list from "INSERT INTO table (col1, col2, …) VALUES …"
-        # and build SET col1=EXCLUDED.col1, col2=EXCLUDED.col2, … skipping the PK.
-        _col_match = re.search(
-            r"INSERT\s+INTO\s+\w+\s*\(([^)]+)\)", sql2, re.IGNORECASE
+        # ON CONFLICT (target) DO UPDATE SET requires knowing both the conflict
+        # target columns (PK / UNIQUE) and the non-PK columns to update.
+        # We parse the table name and column list from the INSERT and look up a
+        # static per-table conflict-target map derived from schema_postgres.sql.
+        _tbl_match = re.search(
+            r"INSERT\s+INTO\s+(\w+)\s*\(([^)]+)\)", sql2, re.IGNORECASE
         )
-        if _col_match:
-            cols = [c.strip() for c in _col_match.group(1).split(",")]
-            # Skip common PK / identity columns to avoid "cannot UPDATE generated column"
-            _skip = {"id", "rowid", "memory_id", "token"}
-            update_cols = [c for c in cols if c.lower() not in _skip]
-            if update_cols:
+        if _tbl_match:
+            table_name = _tbl_match.group(1).lower()
+            cols = [c.strip() for c in _tbl_match.group(2).split(",")]
+            # Per-table conflict targets (match PRIMARY KEY / UNIQUE in schema_postgres.sql)
+            _conflict_targets: dict[str, list[str]] = {
+                "needle_registry": ["token", "memory_id"],
+                "memory_hotness": ["memory_id"],
+                "memory_points": ["memory_id", "qdrant_id", "point_type"],
+                "delete_failures": ["memory_id"],
+                "outbox": ["id"],
+            }
+            conflict_cols = _conflict_targets.get(table_name)
+            pk_set = set(conflict_cols) if conflict_cols else {"id", "rowid"}
+            update_cols = [c for c in cols if c.lower() not in pk_set]
+            if conflict_cols and update_cols:
+                target = ", ".join(conflict_cols)
                 set_clause = ", ".join(f"{c}=EXCLUDED.{c}" for c in update_cols)
-                sql2 = sql2.rstrip().rstrip(";") + f" ON CONFLICT DO UPDATE SET {set_clause}"
+                sql2 = sql2.rstrip().rstrip(";") + f" ON CONFLICT ({target}) DO UPDATE SET {set_clause}"
+            elif conflict_cols:
+                target = ", ".join(conflict_cols)
+                sql2 = sql2.rstrip().rstrip(";") + f" ON CONFLICT ({target}) DO NOTHING"
             else:
+                # Unknown table — safe fallback
                 sql2 = sql2.rstrip().rstrip(";") + " ON CONFLICT DO NOTHING"
         else:
-            # Fallback: treat as ignore (idempotent)
+            # No parseable column list — safe fallback
             sql2 = sql2.rstrip().rstrip(";") + " ON CONFLICT DO NOTHING"
 
     return sql2
@@ -140,6 +155,44 @@ def _translate_sql(sql: str) -> str:
 # ---------------------------------------------------------------------------
 # Connection wrapper
 # ---------------------------------------------------------------------------
+
+
+class _PgCursorProxy:
+    """Cursor-like proxy returned by ``AsyncpgConnection.execute()``.
+
+    ``graph.py`` uses the SQLite cursor pattern::
+
+        cur = await conn.execute(sql, params)
+        row = await cur.fetchone()
+
+    asyncpg's ``connection.execute()`` returns a status string, not a cursor.
+    This proxy allows the cursor pattern to work transparently on Postgres.
+
+    Args:
+        conn: The underlying asyncpg connection.
+        sql: Translated SQL statement (``$N`` placeholders).
+        params: Positional parameters.
+    """
+
+    __slots__ = ("_conn", "_params", "_sql")
+
+    def __init__(
+        self,
+        conn: asyncpg_module.Connection[Any],
+        sql: str,
+        params: tuple[Any, ...] | list[Any],
+    ) -> None:
+        self._conn = conn
+        self._sql = sql
+        self._params = params
+
+    async def fetchone(self) -> Any | None:
+        """Fetch the first row, or ``None`` if the result set is empty."""
+        return await self._conn.fetchrow(self._sql, *self._params)
+
+    async def fetchall(self) -> list[Any]:
+        """Fetch all rows."""
+        return await self._conn.fetch(self._sql, *self._params)
 
 
 class AsyncpgConnection:
@@ -162,24 +215,35 @@ class AsyncpgConnection:
     # ------------------------------------------------------------------
 
     async def execute(self, sql: str, params: tuple[Any, ...] | list[Any] = ()) -> Any:
-        """Execute *sql* with *params* and return the status string.
+        """Execute *sql* with *params* and return a cursor-like proxy.
+
+        Returns a ``_PgCursorProxy`` so that callers using the SQLite cursor
+        pattern (``cur = await conn.execute(sql); await cur.fetchone()``) work
+        transparently.  For non-SELECT statements the side-effect runs
+        immediately; callers that ignore the return value are unaffected.
 
         Args:
             sql: SQL statement (``?`` placeholders allowed).
             params: Positional parameters.
 
         Returns:
-            The asyncpg command status string (e.g. ``"INSERT 0 1"``).
+            A ``_PgCursorProxy`` whose ``.fetchone()`` / ``.fetchall()``
+            execute the query against asyncpg.
         """
         translated = _translate_sql(sql)
         _t0 = time.monotonic()
         try:
-            result = await self._conn.execute(translated, *params)
+            stripped = translated.lstrip().upper()
+            if not stripped.startswith("SELECT") and not stripped.startswith("WITH"):
+                # Non-SELECT: run immediately for side-effect, return empty proxy.
+                await self._conn.execute(translated, *params)
+                m.observe(m.PG_POOL_QUERY_MS, (time.monotonic() - _t0) * 1000.0)
+                return _PgCursorProxy(self._conn, "SELECT 1 WHERE FALSE", ())
+            m.observe(m.PG_POOL_QUERY_MS, (time.monotonic() - _t0) * 1000.0)
         except Exception:
             m.inc(m.PG_POOL_ERRORS_TOTAL)
             raise
-        m.observe(m.PG_POOL_QUERY_MS, (time.monotonic() - _t0) * 1000.0)
-        return result
+        return _PgCursorProxy(self._conn, translated, tuple(params))
 
     async def executemany(self, sql: str, params: list[tuple[Any, ...]] | list[list[Any]]) -> None:
         """Execute *sql* once per row in *params*.
@@ -262,15 +326,15 @@ class AsyncpgConnection:
     async def executescript(self, script: str) -> None:
         """Execute a multi-statement SQL script (DDL).
 
-        asyncpg does not have a native ``executescript``.  We split on ``;``
-        and execute each non-empty statement individually.
+        asyncpg supports multi-statement scripts natively when ``execute()``
+        is called without bind parameters.  We pass the entire script as a
+        single call so that ``$$``-quoted PL/pgSQL blocks, ``DO`` statements,
+        and comment sections are handled correctly by the server parser.
 
         Args:
             script: One or more SQL statements separated by ``;``.
         """
-        statements = [s.strip() for s in script.split(";") if s.strip()]
-        for stmt in statements:
-            await self._conn.execute(stmt)
+        await self._conn.execute(script)
 
     # ------------------------------------------------------------------
     # Pass-through helpers used by aiosqlite-style callers

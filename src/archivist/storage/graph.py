@@ -1269,14 +1269,17 @@ async def add_relationship(
     from archivist.storage.sqlite_pool import pool
 
     now = datetime.now(UTC).isoformat()
+    # SQLite uses MIN() as a scalar; Postgres uses LEAST() (MIN is aggregate-only there).
+    # Qualify the table name to avoid column ambiguity in the DO UPDATE context.
+    clamp_fn = "LEAST" if _is_postgres() else "MIN"
     async with pool.write() as conn:
         await conn.execute(
-            """INSERT INTO relationships (source_entity_id, target_entity_id, relation_type,
+            f"""INSERT INTO relationships (source_entity_id, target_entity_id, relation_type,
                evidence, agent_id, created_at, updated_at, provenance, namespace)
                VALUES (?,?,?,?,?,?,?,?,?)
                ON CONFLICT(source_entity_id, target_entity_id, relation_type)
                DO UPDATE SET evidence=excluded.evidence, updated_at=excluded.updated_at,
-               confidence=min(confidence+0.1, 1.0), provenance=excluded.provenance""",
+               confidence={clamp_fn}(relationships.confidence+0.1, 1.0), provenance=excluded.provenance""",
             (source_id, target_id, rel_type, evidence, agent_id, now, now, provenance, namespace),
         )
 

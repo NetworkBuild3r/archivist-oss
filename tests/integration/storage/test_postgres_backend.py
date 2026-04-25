@@ -264,7 +264,11 @@ async def test_fts_stemmed_search(pg_fts_backend):
 
 
 async def test_fts_simple_exact_search(pg_fts_backend):
-    """fts_vector_simple (unstemmed) matches exact tokens like IP addresses."""
+    """fts_vector_simple (unstemmed) matches exact tokens like IP addresses.
+
+    The 'simple' config preserves tokens without stemming. An IP address like
+    192.168.1.100 is stored as a single token; the query must use the full token.
+    """
     async with pg_fts_backend.write() as conn:
         await conn.execute(
             "INSERT INTO memory_chunks (qdrant_id, text, file_path, chunk_index, namespace) "
@@ -287,7 +291,8 @@ async def test_fts_simple_exact_search(pg_fts_backend):
         rows = await conn.fetchall(
             "SELECT mc.qdrant_id "
             "FROM memory_chunks mc "
-            "WHERE fts_vector_simple @@ to_tsquery('simple', '192') "
+            # plainto_tsquery matches the full IP token stored by 'simple' config
+            "WHERE fts_vector_simple @@ plainto_tsquery('simple', '192.168.1.100') "
             "AND namespace = 'fts_parity_test'"
         )
 
@@ -353,6 +358,13 @@ async def pg_graph(monkeypatch):
     ).read_text()
     await backend.execute_ddl(schema_sql)
 
+    # Pre-clean any stale test data from previous runs (FK order: children first)
+    async with backend.write() as conn:
+        await conn.execute("DELETE FROM relationships WHERE namespace = 'pg_graph_test'")
+        await conn.execute("DELETE FROM needle_registry WHERE namespace = 'pg_graph_test'")
+        await conn.execute("DELETE FROM facts WHERE namespace = 'pg_graph_test'")
+        await conn.execute("DELETE FROM entities WHERE namespace = 'pg_graph_test'")
+
     original_pool = _sp.pool
     monkeypatch.setattr(_sp, "pool", backend)
     monkeypatch.setattr("archivist.core.config.GRAPH_BACKEND", "postgres")
@@ -368,8 +380,9 @@ async def pg_graph(monkeypatch):
 
     yield backend
 
-    # Clean up test data from shared test DB
+    # Clean up test data — FK order: children before parents
     async with backend.write() as conn:
+        await conn.execute("DELETE FROM relationships WHERE namespace = 'pg_graph_test'")
         await conn.execute("DELETE FROM needle_registry WHERE namespace = 'pg_graph_test'")
         await conn.execute("DELETE FROM facts WHERE namespace = 'pg_graph_test'")
         await conn.execute("DELETE FROM entities WHERE namespace = 'pg_graph_test'")

@@ -102,8 +102,8 @@ class TestTranslateSqlDialects:
         )
         assert "INSERT OR REPLACE" not in result
         assert "INSERT INTO needle_registry" in result
-        assert "ON CONFLICT DO UPDATE SET" in result
-        # PK columns must NOT appear in SET clause
+        assert "ON CONFLICT (token, memory_id) DO UPDATE SET" in result
+        # Conflict-target columns must NOT appear in SET clause
         assert "token=EXCLUDED" not in result
         assert "memory_id=EXCLUDED" not in result
         # Non-PK columns must appear
@@ -116,7 +116,7 @@ class TestTranslateSqlDialects:
             "(memory_id, score, retrieval_count, last_accessed, updated_at) "
             "VALUES (?, ?, ?, ?, ?)"
         )
-        assert "ON CONFLICT DO UPDATE SET" in result
+        assert "ON CONFLICT (memory_id) DO UPDATE SET" in result
         assert "memory_id=EXCLUDED" not in result
         assert "score=EXCLUDED.score" in result
         assert "updated_at=EXCLUDED.updated_at" in result
@@ -378,9 +378,11 @@ class TestAsyncpgGraphBackendMocked:
         backend = AsyncpgGraphBackend()
         backend._pool = mock_asyncpg_pool
 
-        await backend.execute("SELECT * FROM t WHERE a = ?", ("val",))
+        # For non-SELECT statements execute() calls raw conn.execute directly.
+        await backend.execute("INSERT INTO t (a) VALUES (?)", ("val",))
         raw_conn = mock_asyncpg_pool.acquire().__aenter__.return_value
         call_args = raw_conn.execute.call_args
+        assert call_args is not None
         assert "$1" in call_args[0][0]
         assert "?" not in call_args[0][0]
 
@@ -464,10 +466,12 @@ class TestAsyncpgConnection:
         raw.fetchrow.assert_called_once_with("SELECT * FROM t WHERE id = $1", 7)
         assert result == {"id": 7}
 
-    async def test_executescript_splits_statements(self):
+    async def test_executescript_passes_full_script(self):
         conn, raw = self._make_conn()
-        await conn.executescript("CREATE TABLE a (id INT); CREATE TABLE b (id INT);")
-        assert raw.execute.call_count == 2
+        script = "CREATE TABLE a (id INT); CREATE TABLE b (id INT);"
+        await conn.executescript(script)
+        # executescript passes the full script as a single call
+        raw.execute.assert_called_once_with(script)
 
     async def test_commit_is_noop(self):
         conn, raw = self._make_conn()
