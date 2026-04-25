@@ -1,6 +1,6 @@
 # Archivist MCP tool reference
 
-Quick reference for **37** MCP tools exposed by the Archivist server. For full parameter schemas, defaults, and examples, see [`CURSOR_SKILL.md`](CURSOR_SKILL.md).
+Quick reference for **41** MCP tools exposed by the Archivist server. For full parameter schemas, defaults, and examples, see [`CURSOR_SKILL.md`](CURSOR_SKILL.md).
 
 ## Search & Retrieval (9)
 
@@ -48,6 +48,15 @@ Quick reference for **37** MCP tools exposed by the Archivist server. For full p
 | `archivist_skill_relate` | Create relations between skills (similar_to, depend_on, compose_with, replaced_by) |
 | `archivist_skill_dependencies` | Get skill dependency/relation graph |
 
+## Context Assembly & Handoff (4)
+
+| Tool | Purpose |
+|------|---------|
+| `archivist_get_context` | High-level token-budgeted context assembly — tiers, graph facts, procedural tips in one call. Replaces multi-step search patterns. |
+| `archivist_handoff` | Package a session's summary, goals, tips, hottest memories, and knowledge snapshot into a structured `HandoffPacket`. |
+| `archivist_receive_handoff` | Inject a `HandoffPacket` into the receiving agent's ephemeral `SessionStore`. |
+| `archivist_savings_dashboard` | Token savings stats: avg/min/max savings %, total tokens saved, per-policy breakdown, hotness heatmap (top-N memories). |
+
 ## Admin & Context Management (8)
 
 | Tool | Purpose |
@@ -77,13 +86,16 @@ Quick reference for **37** MCP tools exposed by the Archivist server. For full p
 ## Usage Hints
 
 - `min_score` / `RETRIEVAL_THRESHOLD`: set to `0` to disable score filtering for a single call when debugging recall.
-- Prefer `archivist_search` first; refine with `archivist_recall` when entities are known.
+- Prefer `archivist_get_context` for agent pre-prompt injection — it assembles tiers, graph facts, and tips in one token-budgeted call.
+- Use `archivist_search` for explicit queries; `archivist_recall` when entity names are known.
 - Use `archivist_entity_brief` when you need a structured knowledge card — faster than multiple search/recall calls.
 - Call `archivist_wake_up` once at session start to pre-load critical context in ~200 tokens.
 - Use `archivist_context_check` before reasoning to decide if context compaction is needed.
 - Use `archivist_compress` with `format: structured` for Goal/Progress/Decisions/Next Steps summaries.
 - Log trajectories so future searches benefit from outcome-aware retrieval scoring.
 - Pin critical facts (host IPs, credentials, ownership) with `archivist_pin` so the curator never forgets them.
+- Use `archivist_handoff` + `archivist_receive_handoff` to transfer session context between agents with minimal token overhead.
+- Check `archivist_savings_dashboard` to measure how much token waste the Answer Finder is eliminating.
 
 ## REST Endpoints (non-MCP)
 

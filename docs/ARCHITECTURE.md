@@ -106,7 +106,7 @@ Code lives under `src/archivist/`.
 |------|---------|
 | **App** | `app/main.py`, `app/mcp_server.py`, `app/handlers/*.py` — MCP tools, REST, startup |
 | **Storage** | `storage/graph.py`, `storage/sqlite_pool.py`, `storage/asyncpg_backend.py`, `storage/backend_factory.py`, `storage/fts_search.py`, `storage/transaction.py`, `storage/outbox.py`, `storage/backends.py`, `storage/collection_router.py`, `storage/backup_manager.py` |
-| **Retrieval** | `retrieval/rlm_retriever.py`, `retrieval/graph_retrieval.py`, `retrieval/reranker.py` |
+| **Retrieval** | `retrieval/rlm_retriever.py`, `retrieval/graph_retrieval.py`, `retrieval/reranker.py`, `retrieval/context_packer.py`, `retrieval/context_api.py`, `retrieval/session_store.py`, `retrieval/retrieval_log.py` |
 | **Write** | `write/indexer.py`, `write/chunking.py` |
 | **Lifecycle** | `lifecycle/memory_lifecycle.py`, `lifecycle/merge.py`, `lifecycle/cascade.py`, `lifecycle/curator_queue.py` |
 | **Features** | `features/embeddings.py`, `features/llm.py`, … |
@@ -150,13 +150,62 @@ Full table inventory: see the Archivist storage-schema skill (`.cursor/skills/ar
 
 ---
 
+## Answer Finder (v2.3)
+
+The v2.3 Answer Finder architecture adds precision and token efficiency on top of the base RLM pipeline.
+
+### Tiered memory schema
+
+`memory_chunks` now carries four new columns written at index time:
+
+| Column | Type | Purpose |
+|--------|------|---------|
+| `importance` | REAL (0–1) | Retention priority; influences FTS rank boost |
+| `tier_label` | TEXT | `l0` / `l1` / `l2` / `ephemeral` |
+| `ttl_at` | TEXT | Optional ISO expiry; soft-filtered on retrieval |
+| `decay_rate` | REAL | Per-chunk decay scalar (0 = no decay) |
+
+`memory_hotness` gains `importance_signal` (blended frequency × recency × importance).
+
+### Context packing (`context_packer.py`)
+
+After the RLM pipeline returns results, `pack_context()` applies one of three policies against a `max_tokens` budget:
+
+| Policy | Behaviour |
+|--------|-----------|
+| `adaptive` (default) | L0/L1 summaries fill `CONTEXT_L0_BUDGET_SHARE` of budget; remaining tokens go to L2 full chunks |
+| `l0_first` | Prioritise abstract summaries; fall back to L2 when budget remains |
+| `l2_first` | Full chunks first; L0/L1 fill remainder |
+
+The result is a `PackedContext` dataclass with `total_tokens`, `naive_tokens`, `over_budget`, `tier_distribution`, and `token_savings_pct`.
+
+### High-level API (`context_api.py`)
+
+`get_relevant_context(agent_id, task_description, max_tokens, ...)` is the new canonical entry point for agents. It:
+
+1. Runs the full RLM pipeline with `pack_context`
+2. Merges in top knowledge-graph facts and procedural tips
+3. Returns a `RelevantContext` with structured `ContextChunk` list and provenance
+
+`create_handoff_packet` / `receive_handoff_packet` implement the multi-agent handoff protocol.
+
+### Ephemeral tier (`session_store.py`)
+
+`SessionStore` is an in-process, TTL-scoped store for within-session context. On `archivist_session_end`, promoted entries are persisted to durable memory. Config: `SESSION_STORE_MAX_ENTRIES`, `SESSION_STORE_TTL_SECONDS`.
+
+### Token savings observability
+
+`retrieval_logs` gains four columns (`tokens_returned`, `tokens_naive`, `savings_pct`, `pack_policy`). `_migrate_schema()` adds them to existing SQLite databases on first boot. `archivist_savings_dashboard` exposes aggregate stats and a hotness heatmap.
+
+---
+
 ## Further reading
 
 | Document | Content |
 |----------|---------|
 | [`rearchitect_storage_phase3.md`](rearchitect_storage_phase3.md) | Outbox design, failure modes, config, tests |
-| [`DOCKER.md`](DOCKER.md) | Postgres backend quickstart, schema comparison, backup notes |
-| [`QA.md`](QA.md) | Test commands including `tests/qa/` and Postgres integration tests |
+| [`DOCKER.md`](DOCKER.md) | Postgres backend quickstart, Answer Finder config, benchmark instructions |
+| [`QA.md`](QA.md) | Test commands including `tests/qa/`, Postgres integration, token efficiency benchmarks |
 | [`ROADMAP.md`](ROADMAP.md) | Product direction |
 
 ---
@@ -226,3 +275,14 @@ The following sections record behaviour and operational guidance by release (con
 - **Structured compaction** — `compaction.py` Goal/Progress/Decisions/Next Steps.
 - **`archivist_context_check`** MCP tool.
 - **`archivist_compress`** — `format` flat/structured, `previous_summary`.
+
+### v2.3.0
+
+- **Hierarchical memory schema** — `importance`, `tier_label`, `ttl_at`, `decay_rate` on `memory_chunks`; `importance_signal` on `memory_hotness`.
+- **Context packing** — `context_packer.py` with `adaptive` / `l0_first` / `l2_first` policies; `over_budget` surfaced in RLM output.
+- **Auto-compress** — Overflow content synthesised and re-injected when `AUTO_COMPRESS_ENABLED=true`.
+- **Ephemeral tier** — `SessionStore` (`session_store.py`) with TTL and `archivist_session_end` flush.
+- **High-level API** — `get_relevant_context()` in `context_api.py`; `RelevantContext`, `HandoffPacket`, `ContextChunk` dataclasses.
+- **Multi-agent handoff** — `archivist_handoff` / `archivist_receive_handoff` MCP tools.
+- **Token savings observability** — `retrieval_logs` extended with `tokens_returned`, `tokens_naive`, `savings_pct`, `pack_policy`; `archivist_savings_dashboard` MCP tool; hotness heatmap in dashboard.
+- **Token efficiency benchmark** — `benchmarks/token_efficiency.py` with 49 queries across 3 packing policies.

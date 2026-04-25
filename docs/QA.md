@@ -41,7 +41,7 @@ POSTGRES_TEST_DSN="postgresql://archivist:archivist@localhost:5432/archivist_tes
   pytest tests/integration/storage/test_dual_backend.py -v
 ```
 
-The dual-backend suite validates that `upsert_entity`, `add_fact`, `search_entities`, needle registry, and `fetchval` behave identically on both backends. Unit tests for SQL translation (`_translate_sql`) are always-run in `tests/unit/storage/test_backends.py`.
+The dual-backend suite validates that `upsert_entity`, `add_fact`, `search_entities`, needle registry, `fetchval`, and `retrieval_log` roundtrips (including token savings columns) behave identically on both backends. Unit tests for SQL translation (`_translate_sql`) are always-run in `tests/unit/storage/test_backends.py`.
 
 ### Lint and types (local)
 
@@ -60,11 +60,32 @@ Mypy uses a ratchet in CI; do not increase the error budget without fixing real 
 ## Benchmarks and regression
 
 - **In-repo pipeline** — [`benchmarks/README.md`](../benchmarks/README.md) and [`docs/BENCHMARKS.md`](BENCHMARKS.md): reproduction commands, variant definitions, and recorded snapshots.
+- **Token efficiency benchmark** — `benchmarks/token_efficiency.py`: 49 representative queries across 3 packing policies (`adaptive`, `l0_first`, `l2_first`). Run with:
+  ```bash
+  PYTHONPATH=src python -m benchmarks.token_efficiency --queries 0 --output .benchmarks/token_efficiency_$(date +%Y%m%d).json
+  ```
+  Output includes per-query savings % and a cross-policy comparison table. Results land in `.benchmarks/` (gitignored).
 - **Performance sanity** — See [`QA_CHECKLIST.md`](../QA_CHECKLIST.md) §19; for sustained regression tracking, store harness JSON under `.benchmarks/` (gitignored) and attach paths to release notes.
 
 ## Chaos and resilience
 
 Chaos-oriented tests live in `tests/qa/test_chaos_fault_injection.py` (network blips, stuck `processing` rows, concurrent drains). They complement the outbox unit tests in [`tests/test_outbox.py`](../tests/test_outbox.py).
+
+## Answer Finder tests (v2.3)
+
+The v2.3 Answer Finder ships 75 dedicated unit tests across five files:
+
+```bash
+python -m pytest \
+  tests/unit/retrieval/test_context_packer.py \
+  tests/unit/retrieval/test_context_api.py \
+  tests/unit/retrieval/test_phase5_observability.py \
+  tests/unit/retrieval/test_session_store.py \
+  tests/unit/retrieval/test_auto_compress.py \
+  -v --tb=short
+```
+
+These cover: tier-aware packing policies, `get_relevant_context` + `HandoffPacket` round-trips, `SessionStore` TTL and flush, auto-compress overflow, and the `retrieval_logs` token savings stats pipeline.
 
 ## Storage architecture reference
 
