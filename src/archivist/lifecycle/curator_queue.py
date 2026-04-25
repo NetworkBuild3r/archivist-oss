@@ -39,9 +39,9 @@ _ensure_schema = schema_guard("""
 """)
 
 
-def enqueue(op_type: str, payload: dict) -> str:
+async def enqueue(op_type: str, payload: dict) -> str:
     """Add a curation operation to the queue. Returns the operation ID."""
-    from archivist.storage.graph import get_db
+    from archivist.storage.sqlite_pool import pool
 
     _ensure_schema()
     if op_type not in VALID_OP_TYPES:
@@ -50,15 +50,11 @@ def enqueue(op_type: str, payload: dict) -> str:
     op_id = str(uuid.uuid4())
     now = datetime.now(UTC).isoformat()
 
-    conn = get_db()
-    try:
-        conn.execute(
+    async with pool.write() as conn:
+        await conn.execute(
             "INSERT INTO curator_queue (id, op_type, payload, status, created_at) VALUES (?, ?, ?, 'pending', ?)",
             (op_id, op_type, json.dumps(payload), now),
         )
-        conn.commit()
-    finally:
-        conn.close()
 
     _update_depth_gauge()
     logger.debug("Enqueued %s operation %s", op_type, op_id)
@@ -67,20 +63,17 @@ def enqueue(op_type: str, payload: dict) -> str:
 
 async def drain(limit: int = 50) -> list[dict]:
     """Apply pending operations up to limit. Returns list of applied ops."""
-    from archivist.storage.graph import get_db
+    from archivist.storage.sqlite_pool import pool
 
     _ensure_schema()
     start = time.time()
     applied = []
 
-    conn = get_db()
-    try:
-        rows = conn.execute(
+    async with pool.read() as conn:
+        rows = await conn.fetchall(
             "SELECT id, op_type, payload FROM curator_queue WHERE status = 'pending' ORDER BY created_at ASC LIMIT ?",
             (limit,),
-        ).fetchall()
-    finally:
-        conn.close()
+        )
 
     now = datetime.now(UTC).isoformat()
 
@@ -260,16 +253,17 @@ async def _apply_hotness(payload: dict):
             )
 
 
-def stats() -> dict:
+async def stats() -> dict:
     """Return queue statistics."""
-    from archivist.storage.graph import get_db
+    from archivist.storage.sqlite_pool import pool
 
     _ensure_schema()
-    conn = get_db()
-    rows = conn.execute("SELECT status, COUNT(*) FROM curator_queue GROUP BY status").fetchall()
-    conn.close()
+    async with pool.read() as conn:
+        rows = await conn.fetchall(
+            "SELECT status, COUNT(*) as cnt FROM curator_queue GROUP BY status"
+        )
 
-    counts = {row[0]: row[1] for row in rows}
+    counts = {row["status"]: row["cnt"] for row in rows}
     return {
         "pending": counts.get("pending", 0),
         "applied": counts.get("applied", 0),
@@ -279,9 +273,19 @@ def stats() -> dict:
 
 
 def _update_depth_gauge():
-    """Update the Prometheus gauge for queue depth."""
+    """Update the Prometheus gauge for queue depth (best-effort, non-blocking)."""
+    import asyncio
+
     try:
-        s = stats()
-        m.gauge_set(m.CURATOR_QUEUE_DEPTH, s["pending"])
-    except Exception:
-        pass
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+
+    async def _gauge():
+        try:
+            s = await stats()
+            m.gauge_set(m.CURATOR_QUEUE_DEPTH, s["pending"])
+        except Exception:
+            pass
+
+    loop.create_task(_gauge())  # noqa: RUF006 — fire-and-forget depth gauge update

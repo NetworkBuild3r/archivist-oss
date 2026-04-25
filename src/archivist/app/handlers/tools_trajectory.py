@@ -241,7 +241,7 @@ async def _handle_annotate(arguments: dict) -> list[TextContent]:
         {
             "annotation_id": ann_id,
             "memory_id": arguments["memory_id"],
-            "annotations": get_annotations(arguments["memory_id"]),
+            "annotations": await get_annotations(arguments["memory_id"]),
         },
         default=str,
     )
@@ -267,13 +267,13 @@ async def _handle_rate(arguments: dict) -> list[TextContent]:
         metadata={"rating_id": rating_id, "rating": arguments["rating"]},
     )
 
-    summary = get_rating_summary(arguments["memory_id"])
+    summary = await get_rating_summary(arguments["memory_id"])
     return success_response({"rating_id": rating_id, **summary})
 
 
 async def _handle_tips(arguments: dict) -> list[TextContent]:
     """Retrieve tips from past trajectories."""
-    tips = search_tips(
+    tips = await search_tips(
         agent_id=arguments["agent_id"],
         category=arguments.get("category", ""),
         limit=arguments.get("limit", 10),
@@ -290,9 +290,12 @@ async def _handle_tips(arguments: dict) -> list[TextContent]:
 
 async def _handle_session_end(arguments: dict) -> list[TextContent]:
     """Summarize a session and optionally store as durable memory."""
+    agent_id = arguments["agent_id"]
+    session_id = arguments["session_id"]
+
     result = await session_end_summary(
-        agent_id=arguments["agent_id"],
-        session_id=arguments["session_id"],
+        agent_id=agent_id,
+        session_id=session_id,
     )
 
     if result.get("error"):
@@ -303,8 +306,8 @@ async def _handle_session_end(arguments: dict) -> list[TextContent]:
     if store and result.get("summary"):
         store_result = await _handle_store(
             {
-                "text": f"[Session summary — {arguments['session_id']}]\n{result['summary']}",
-                "agent_id": arguments["agent_id"],
+                "text": f"[Session summary — {session_id}]\n{result['summary']}",
+                "agent_id": agent_id,
                 "importance_score": 0.8,
             }
         )
@@ -314,7 +317,37 @@ async def _handle_session_end(arguments: dict) -> list[TextContent]:
         except Exception:
             pass
 
+    # Flush ephemeral session store: persist promoted entries when store=True
+    flushed_ids: list[str] = []
+    try:
+        from archivist.retrieval.session_store import get_session_store
+
+        _ss = get_session_store()
+        entries = _ss.flush(agent_id, session_id)
+        persist = arguments.get("persist_ephemeral", True)
+        if persist and entries:
+            for entry in entries:
+                if not entry.get("promoted"):
+                    continue
+                ep_result = await _handle_store(
+                    {
+                        "text": f"[Ephemeral session note — {session_id}/{entry['key']}]\n{entry['value']}",
+                        "agent_id": agent_id,
+                        "importance_score": 0.6,
+                    }
+                )
+                try:
+                    ep_data = json.loads(ep_result[0].text)
+                    ep_id = ep_data.get("memory_id")
+                    if ep_id:
+                        flushed_ids.append(ep_id)
+                except Exception:
+                    pass
+    except Exception as _se:
+        logger.warning("session_store flush failed: %s", _se)
+
     result["stored_memory_id"] = stored_id
+    result["flushed_ephemeral_count"] = len(flushed_ids)
     return success_response(result)
 
 

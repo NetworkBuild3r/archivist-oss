@@ -66,37 +66,33 @@ async def log_memory_event(
         logger.error("Failed to write audit log: %s", e)
 
 
-def get_audit_trail(memory_id: str, limit: int = 50) -> list[dict]:
+async def get_audit_trail(memory_id: str, limit: int = 50) -> list[dict]:
     """Query audit log for a specific memory ID."""
-    from archivist.storage.graph import get_db
+    from archivist.storage.sqlite_pool import pool
 
     _ensure_audit_schema()
-    conn = get_db()
-    cur = conn.execute(
-        "SELECT * FROM audit_log WHERE memory_id = ? ORDER BY timestamp DESC LIMIT ?",
-        (memory_id, limit),
-    )
-    rows = [dict(r) for r in cur.fetchall()]
-    conn.close()
-    return rows
+    async with pool.read() as conn:
+        rows = await conn.fetchall(
+            "SELECT * FROM audit_log WHERE memory_id = ? ORDER BY timestamp DESC LIMIT ?",
+            (memory_id, limit),
+        )
+    return [dict(r) for r in rows]
 
 
-def get_agent_activity(agent_id: str, limit: int = 50) -> list[dict]:
+async def get_agent_activity(agent_id: str, limit: int = 50) -> list[dict]:
     """Query audit log for agent activity."""
-    from archivist.storage.graph import get_db
+    from archivist.storage.sqlite_pool import pool
 
     _ensure_audit_schema()
-    conn = get_db()
-    if agent_id:
-        cur = conn.execute(
-            "SELECT * FROM audit_log WHERE agent_id = ? ORDER BY timestamp DESC LIMIT ?",
-            (agent_id, limit),
-        )
-    else:
-        cur = conn.execute(
-            "SELECT * FROM audit_log ORDER BY timestamp DESC LIMIT ?",
-            (limit,),
-        )
-    rows = [dict(r) for r in cur.fetchall()]
-    conn.close()
-    return rows
+    async with pool.read() as conn:
+        if agent_id:
+            rows = await conn.fetchall(
+                "SELECT * FROM audit_log WHERE agent_id = ? ORDER BY timestamp DESC LIMIT ?",
+                (agent_id, limit),
+            )
+        else:
+            rows = await conn.fetchall(
+                "SELECT * FROM audit_log ORDER BY timestamp DESC LIMIT ?",
+                (limit,),
+            )
+    return [dict(r) for r in rows]

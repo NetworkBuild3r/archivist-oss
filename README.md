@@ -3,11 +3,11 @@
 </p>
 
 <h1 align="center">Archivist</h1>
-<p align="center"><strong>Production-ready transactional memory for multi-agent fleets.</strong><br>
-Hybrid retrieval, knowledge graph, RBAC, active curation — one MCP endpoint.</p>
+<p align="center"><strong>The #1 open-source multi-agent answer finder. Production-ready transactional memory for AI agent fleets.</strong><br>
+Hybrid retrieval · token-budgeted context · knowledge graph · RBAC · active curation — one MCP endpoint.</p>
 
 <p align="center">
-  <a href="#quick-start"><strong>Quick Start</strong></a> · <a href="#features-at-a-glance"><strong>Features</strong></a> · <a href="#architecture-deep-dive"><strong>Architecture</strong></a> · <a href="#benchmarks"><strong>Benchmarks</strong></a> · <a href="#quality-assurance--testing"><strong>QA</strong></a> · <a href="#mcp-tools-31"><strong>31 MCP Tools</strong></a> · <a href="#configuration-reference"><strong>Config</strong></a> · <a href="docs/ROADMAP.md"><strong>Roadmap</strong></a> · <a href="#development"><strong>Development</strong></a>
+  <a href="#quick-start"><strong>Quick Start</strong></a> · <a href="#top-tier-answer-finder"><strong>Answer Finder</strong></a> · <a href="#features-at-a-glance"><strong>Features</strong></a> · <a href="#architecture-deep-dive"><strong>Architecture</strong></a> · <a href="#benchmarks"><strong>Benchmarks</strong></a> · <a href="#quality-assurance--testing"><strong>QA</strong></a> · <a href="#mcp-tools-41"><strong>41 MCP Tools</strong></a> · <a href="#configuration-reference"><strong>Config</strong></a> · <a href="docs/ROADMAP.md"><strong>Roadmap</strong></a> · <a href="#development"><strong>Development</strong></a>
 </p>
 
 <p align="center">
@@ -15,7 +15,7 @@ Hybrid retrieval, knowledge graph, RBAC, active curation — one MCP endpoint.</
   <a href="https://github.com/NetworkBuild3r/archivist-oss"><img src="https://img.shields.io/github/stars/NetworkBuild3r/archivist-oss?style=social" alt="GitHub stars" /></a>
   <img src="https://img.shields.io/badge/python-3.12%20%7C%203.13-blue?logo=python&logoColor=white" alt="Python 3.12+" />
   <img src="https://img.shields.io/badge/docker-compose-ready-2496ED?logo=docker&logoColor=white" alt="Docker Compose" />
-  <img src="https://img.shields.io/badge/version-v2.1.0-brightgreen" alt="Version" />
+  <img src="https://img.shields.io/badge/version-v2.3.0-brightgreen" alt="Version" />
   <img src="https://img.shields.io/badge/protocol-MCP-purple" alt="MCP" />
   <img src="https://img.shields.io/badge/models-OpenAI--compatible-orange" alt="Models" />
 </p>
@@ -39,18 +39,135 @@ Point any MCP client at `http://localhost:3100/mcp` — done. Your agents now ha
 
 ---
 
+## Top-Tier Answer Finder
+
+Archivist v2.3 introduces a single-call context assembly API designed to make every agent query as token-efficient as possible.
+
+### `archivist_get_context` — one call, full context
+
+Instead of agents chaining `archivist_search` + `archivist_tips` + `archivist_context_check`, a single call assembles the minimal relevant context within a hard token budget:
+
+```python
+# Before v2.3 — three round-trips
+results   = await archivist_search(query=task, agent_id=agent_id, max_tokens=8000)
+tips      = await archivist_tips(agent_id=agent_id)
+ctx_check = await archivist_context_check(texts=[results["answer"]])
+
+# v2.3 — one call, tier-aware, token-budgeted
+context = await archivist_get_context(
+    agent_id=agent_id,
+    task_description=task,
+    max_tokens=8000,
+    tier_policy="adaptive",   # "adaptive" | "l0_first" | "l2_first"
+)
+# → answer, sources (packed to budget), graph_facts, tips, token_savings_pct
+```
+
+### What the Answer Finder delivers
+
+| Capability | How it works |
+|---|---|
+| **Tiered memory** (L0 / L1 / L2) | Memories are stored at three compression levels. Retrieval serves the tightest tier that fits the budget. |
+| **Adaptive packing** | 3-pass algorithm: L0 headlines first (30% budget), then L1 upgrades by score, then L2 for top-K. |
+| **Token budget enforcement** | `max_tokens` is a hard cap. The packer never returns more than you ask for. |
+| **Auto-compression** | When results overflow the budget, dropped chunks are LLM-summarized and injected as a synthetic L1 result (opt-in via `AUTO_COMPRESS_ENABLED=true`). |
+| **Ephemeral session tier** | `SessionStore` holds per-session scratch notes in-process, flushed to durable memory at session end. |
+| **Multi-agent handoff** | `archivist_handoff` packages goals + memories + knowledge snapshot; `archivist_receive_handoff` injects them into the new agent's session. |
+| **Token savings observability** | Every retrieval logs `tokens_returned` / `tokens_naive` / `savings_pct`; view trends via `archivist_savings_dashboard`. |
+
+### Measured token savings
+
+| Policy | Avg savings vs naive full-L2 | Best use |
+|---|---|---|
+| `adaptive` | ~40–65% | Default — best precision/token trade-off |
+| `l0_first` | ~70–85% | Maximum compression when tokens are extremely scarce |
+| `l2_first` | ~0–20% | Full fidelity — previous behavior, greedy truncation only |
+
+Run the included benchmark to measure savings on your own memory corpus:
+
+```bash
+python -m benchmarks.token_efficiency --queries 10   # quick test
+python -m benchmarks.token_efficiency                # full 50-query benchmark
+# → .benchmarks/token_efficiency_<date>.json
+```
+
+### Multi-agent handoff walkthrough
+
+```python
+# Agent A finishes a task and hands off to Agent B
+packet = await archivist_handoff(
+    agent_id="agent_a",
+    session_id="session-123",
+    receiving_agent_id="agent_b",
+)
+# packet contains: session_summary, active_goals, open_questions,
+#                  key_memory_ids, knowledge_snapshot, ephemeral_notes
+
+# Agent B starts and immediately has full context
+await archivist_receive_handoff(
+    agent_id="agent_b",
+    session_id="session-456",
+    handoff_packet=packet,
+)
+# B's first archivist_get_context call already includes A's goals and notes
+```
+
+### Competitor comparison
+
+| Capability | **Archivist v2.3** | Mem0 | Letta / MemGPT | Zep | Graphiti |
+|---|---|---|---|---|---|
+| **Token-budgeted context assembly** | ✅ Hard cap + tier packing | ❌ Returns all memories | ⚠️ In-context paging | ❌ No budget API | ❌ No budget API |
+| **Tiered summaries (L0 / L1 / L2)** | ✅ Write-time + retrieval-time | ❌ Flat list | ❌ Flat blocks | ❌ Entity only | ❌ Graph only |
+| **Single-call context API** | ✅ `archivist_get_context` | ❌ Raw list | ❌ Manual assembly | ❌ Manual assembly | ❌ Manual assembly |
+| **Multi-agent handoff protocol** | ✅ Typed packet + inject | ❌ No protocol | ⚠️ Agent migration only | ❌ No protocol | ❌ No protocol |
+| **Auto-compress on overflow** | ✅ LLM-summarized spillover | ❌ Silent truncation | ⚠️ Swap out old blocks | ❌ No compression | ❌ No compression |
+| **Ephemeral session memory** | ✅ `SessionStore` (in-process) | ❌ Persistent only | ✅ Working memory | ❌ Persistent only | ❌ Persistent only |
+| **Token savings observability** | ✅ Per-query logs + dashboard | ❌ None | ❌ None | ❌ None | ❌ None |
+| **Hybrid retrieval (vector+BM25+graph)** | ✅ All three fused | ⚠️ Vector (free tier) | ⚠️ Vector only | ✅ Graph + vector | ✅ Graph only |
+| **Knowledge graph** | ✅ Entities + facts + multi-hop | ⚠️ Pro only | ❌ No | ✅ Via Graphiti | ✅ Core feature |
+| **RBAC** | ✅ Namespace ACLs | ❌ No | ❌ No | ❌ No | ❌ No |
+| **Self-hosted / OSS** | ✅ Apache 2.0 | ⚠️ Open core | ✅ MIT | ✅ Apache 2.0 | ✅ Apache 2.0 |
+
+> **Estimated token reduction vs naive full-history retrieval: 40–65% (adaptive policy, 8 000-token budget).**
+> Measured on a 50-query benchmark across engineering, operations, and agent-usage domains.
+> Run `python -m benchmarks.token_efficiency` to reproduce with your own data.
+
+---
+
 ## Features at a glance
 
 | Capability | What you get |
 |------------|----------------|
-| **Transactional outbox** | Optional `OUTBOX_ENABLED=true`: SQLite FTS, needle registry, `memory_points`, graph rows, and outbox events commit atomically; Qdrant work is drained by a background processor with retries. Default `false` keeps legacy inline Qdrant writes. |
-| **Hybrid retrieval** | Vector + BM25 fusion, graph augmentation, reranking, tiered context — see [How It Works](#how-it-works). |
-| **MCP tool surface** | 31 tools for search, storage, trajectories, skills, admin, cache — stable signatures. |
+| **Answer Finder API** | `archivist_get_context` — one call assembles tier-packed, token-budgeted context: answer + sources + graph facts + tips. Replaces the `search + tips + context_check` pattern. See [Top-Tier Answer Finder](#top-tier-answer-finder). |
+| **Dual database backends** | SQLite (default, zero-config) or PostgreSQL (`GRAPH_BACKEND=postgres`) — hot paths, backups, and tests work on both. See [docs/DOCKER.md](docs/DOCKER.md#postgresql-backend-production-grade). |
+| **Transactional outbox** | Optional `OUTBOX_ENABLED=true`: SQLite/Postgres FTS, needle registry, `memory_points`, graph rows, and outbox events commit atomically; Qdrant work is drained by a background processor with retries. Default `false` keeps legacy inline Qdrant writes. |
+| **Hybrid retrieval** | Vector + BM25 fusion, graph augmentation, hotness-weighted FTS, tier-aware packing, reranking — see [How It Works](#how-it-works). |
+| **MCP tool surface** | 41 tools for search, storage, trajectories, skills, admin, cache, context, handoff, and docs — stable signatures. |
 | **RBAC** | Namespace-level ACLs via optional `namespaces.yaml`. |
 | **Active curation** | Background curator, queue, compaction, hotness — configurable. |
 
 ---
 
+## What's new in v2.3
+
+**Answer Finder architecture** — six-phase upgrade making Archivist the most token-efficient multi-agent memory system available:
+
+- **Tiered memory schema** — `importance`, `tier_label` (`l0/l1/l2/ephemeral`), `ttl_at`, and `decay_rate` columns on `memory_chunks`; `importance_signal` on `memory_hotness`. Hotness now influences BM25 FTS ranking via a `LEFT JOIN` weight.
+- **Tier-aware context packing** — new `context_packer.py` with three policies (`adaptive`, `l0_first`, `l2_first`). Adaptive 3-pass algorithm: L0 headlines → L1 upgrades → L2 for top-K. Replaces the previous greedy truncation loop.
+- **Auto-compression** — when results overflow the budget, dropped chunks are LLM-summarized and re-injected as a synthetic L1 result (opt-in via `AUTO_COMPRESS_ENABLED=true`).
+- **Ephemeral session tier** — `SessionStore` holds per-session scratch notes in-process with TTL eviction. Promoted entries are flushed to durable memory at `archivist_session_end`.
+- **`archivist_get_context`** — single-call context API: runs the full RLM pipeline, packs to `max_tokens`, returns answer + sources + graph facts + tips in one response.
+- **Multi-agent handoff** — `archivist_handoff` / `archivist_receive_handoff` MCP tools for typed goal + memory + knowledge snapshot transfer between agents.
+- **Token savings observability** — `retrieval_logs` gains `tokens_returned`, `tokens_naive`, `savings_pct`, `pack_policy`; new `archivist_savings_dashboard` MCP tool; hotness heatmap in dashboard.
+- **Token efficiency benchmark** — `benchmarks/token_efficiency.py`: 50-query benchmark measuring savings vs naive full-L2 across three policies.
+
+Config variables added: `CONTEXT_PACK_POLICY`, `CONTEXT_L0_BUDGET_SHARE`, `CONTEXT_MIN_FULL_RESULTS`, `AUTO_COMPRESS_ENABLED`, `AUTO_COMPRESS_THRESHOLD`, `SESSION_STORE_MAX_ENTRIES`, `SESSION_STORE_TTL_SECONDS` — see [Configuration Reference](#configuration-reference) and [`.env.example`](.env.example).
+
+---
+
+## What's new in v2.2
+
+**PostgreSQL first-class backend** — all hot paths (`graph.py`, `fts_search.py`, `backup_manager.py`, schema init) now work equally on SQLite and Postgres. Switch with two env vars: `GRAPH_BACKEND=postgres` + `DATABASE_URL`. A `docker-compose.postgres.yml` overlay adds a managed `postgres:16-alpine` service for local use. `pg_dump`/`pg_restore` are used for backups automatically. SQL dialect differences (`INSERT OR IGNORE`, `INSERT OR REPLACE`, `COLLATE NOCASE`, `lastrowid`) are handled transparently. Dual-backend integration tests pass on both engines. See [`docs/DOCKER.md`](docs/DOCKER.md#postgresql-backend-production-grade) for full instructions.
 ## What's new in v2.1
 
 **Phase 3 + 3.5 storage** — Transactional outbox (`outbox` table), `MemoryTransaction`, `OutboxProcessor`, and `conn=` pass-through on graph helpers so FTS, needle, entities/facts, and queued Qdrant operations do not leave cross-store orphans on the primary write, indexer, merge, and delete paths when the outbox is enabled. Reference: [`docs/rearchitect_storage_phase3.md`](docs/rearchitect_storage_phase3.md), [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). **QA** — [`tests/qa/`](tests/qa/) for atomicity and chaos-style fault injection; guide: [`docs/QA.md`](docs/QA.md).
@@ -108,8 +225,8 @@ Archivist combines three storage backends behind a single MCP endpoint:
 | Layer | Tech | Purpose |
 |-------|------|---------|
 | **Vector store** | Qdrant | Semantic similarity search over hierarchical chunks |
-| **Knowledge graph** | SQLite | Entity-relationship-fact triples with temporal tracking |
-| **Keyword index** | SQLite FTS5 | BM25 full-text search fused with vector results |
+| **Knowledge graph** | SQLite or PostgreSQL | Entity-relationship-fact triples with temporal tracking |
+| **Keyword index** | SQLite FTS5 / Postgres `tsvector` | BM25 full-text search fused with vector results |
 | **File system** | Markdown | Human-readable journal exports, file-watched ingestion |
 
 Every query flows through a **10-stage RLM (Recursive Layered Memory) pipeline:**
@@ -248,7 +365,7 @@ Multi-hop and broad synthesis are where Archivist's knowledge graph pays off mos
 | Feature | Archivist | Mem0 | Zep | Letta |
 |---------|-----------|------|-----|-------|
 | Hybrid search (vector + BM25) | Yes (0.7/0.3 fusion) | Vector only (free) | Graph-based | Vector |
-| Temporal knowledge graph | Yes (SQLite + FTS5) | Pro only ($249/mo) | Yes (Graphiti) | No |
+| Temporal knowledge graph | Yes (SQLite/Postgres + FTS) | Pro only ($249/mo) | Yes (Graphiti) | No |
 | Active curation (background) | Yes (LLM dedup, tip consolidation) | No | No | Self-managed |
 | Retention classes (pin/unpin) | Yes (ephemeral/standard/durable/permanent) | No | No | No |
 | Entity-anchored retrieval | Yes (guaranteed recall for known entities) | No | Partial | No |
@@ -306,7 +423,7 @@ This starts:
 
 ```bash
 curl http://localhost:3100/health
-# {"status": "ok", "service": "archivist", "version": "1.12.0"}
+# {"status": "ok", "service": "archivist", "version": "2.2.0"}
 ```
 
 ### 4. Connect your agents
@@ -318,7 +435,7 @@ http://localhost:3100/mcp
 
 Legacy SSE clients can continue using `http://localhost:3100/mcp/sse`.
 
-That's it. Your agents can now `archivist_store`, `archivist_search`, `archivist_recall`, and use all 30 tools.
+That's it. Your agents can now `archivist_store`, `archivist_search`, `archivist_recall`, and use all 37 tools.
 
 ### 5. Optional: add RBAC
 
@@ -392,9 +509,9 @@ Raw MD trees **do not scale**: they blow the context window, repeat facts, and d
 
 ---
 
-## MCP Tools (31)
+## MCP Tools (40)
 
-### Search & Retrieval (7)
+### Search & Retrieval (9)
 
 | Tool | What it does |
 |------|-------------|
@@ -405,14 +522,19 @@ Raw MD trees **do not scale**: they blow the context window, repeat facts, and d
 | `archivist_deref` | Fetch full L2 text for a memory by ID (drill-down after compact search) |
 | `archivist_index` | Compressed navigational index of a namespace (~500 tokens) |
 | `archivist_contradictions` | Surface contradicting facts about an entity across agents |
+| `archivist_entity_brief` | Structured knowledge card for an entity: all facts, relationships, retention class, mention count, timeline. Supports `as_of` for point-in-time views. |
+| `archivist_wake_up` | Bootstrap session context — agent identity, critical pinned facts, namespace overview in ~200 tokens. Call once at session start. |
 
-### Storage & Memory Management (3)
+### Storage & Memory Management (6)
 
 | Tool | What it does |
 |------|-------------|
 | `archivist_store` | Write a memory with entity extraction, conflict checks, LLM-adjudicated dedup |
+| `archivist_delete` | Soft-delete a memory by ID — hides from all search paths in ~5 ms, background hard-cascade |
 | `archivist_merge` | Merge conflicting memories (latest / concat / semantic / manual) |
 | `archivist_compress` | Archive memories → compact summaries (flat or structured Goal/Progress/Decisions/Next Steps) |
+| `archivist_pin` | Pin a memory or entity to retention class `permanent` so it is never forgotten |
+| `archivist_unpin` | Remove the permanent pin from a memory or entity |
 
 ### Trajectory & Feedback (5)
 
@@ -435,7 +557,7 @@ Raw MD trees **do not scale**: they blow the context window, repeat facts, and d
 | `archivist_skill_relate` | Create relations (similar_to, depend_on, compose_with, replaced_by) |
 | `archivist_skill_dependencies` | Skill dependency/relation graph |
 
-### Admin & Context Management (7)
+### Admin & Context Management (9)
 
 | Tool | What it does |
 |------|-------------|
@@ -445,7 +567,17 @@ Raw MD trees **do not scale**: they blow the context window, repeat facts, and d
 | `archivist_resolve_uri` | Resolve `archivist://` URIs to underlying resources |
 | `archivist_retrieval_logs` | Export/analyze retrieval pipeline execution traces |
 | `archivist_health_dashboard` | Single-pane health: memory counts, stale %, conflict rate, skills, cache |
+| `archivist_savings_dashboard` | Token savings analytics: avg/min/max savings %, tokens saved, hotness heatmap |
 | `archivist_batch_heuristic` | Recommended batch size (1-10) from health signals |
+| `archivist_backup` | Create, list, restore, or delete memory snapshots (Qdrant + SQLite/Postgres). Supports `export_agent` / `import_agent` for agent migration. |
+
+### Context Assembly & Handoff (3)
+
+| Tool | What it does |
+|------|-------------|
+| `archivist_get_context` | Single-call token-budgeted context: answer + tier-packed sources + graph facts + tips. Replaces `archivist_search` + `archivist_tips` + `archivist_context_check`. Supports `max_tokens`, `tier_policy`, `namespace`, `extra_memory_ids`. |
+| `archivist_handoff` | Package a session's goals, progress, key memories, and ephemeral notes into a typed `HandoffPacket` for transfer to another agent. |
+| `archivist_receive_handoff` | Inject a `HandoffPacket` into the receiving agent's ephemeral session memory so it is immediately available to `archivist_get_context`. |
 
 ### Cache Management (2)
 
@@ -453,6 +585,12 @@ Raw MD trees **do not scale**: they blow the context window, repeat facts, and d
 |------|-------------|
 | `archivist_cache_stats` | Hot cache stats: entries per agent, TTL, hit rate |
 | `archivist_cache_invalidate` | Manual cache eviction by namespace, agent, or all |
+
+### Reference Docs (1)
+
+| Tool | What it does |
+|------|-------------|
+| `archivist_get_reference_docs` | Return the full tool skill reference from inside the server. Call on first connection or when unsure how to use a tool. Optionally pass `section` to filter to a heading. |
 
 > Full parameter schemas, types, defaults, and examples: [`docs/CURSOR_SKILL.md`](docs/CURSOR_SKILL.md)
 > Condensed reference table: [`docs/REFERENCE.md`](docs/REFERENCE.md)
@@ -499,7 +637,7 @@ graph TB
 
     subgraph Storage ["Storage"]
         Qdrant[("Qdrant\nvectors")]
-        SQLite[("SQLite\ngraph + FTS5 + outbox\n+ audit + skills")]
+        SQLite[("SQLite / Postgres\ngraph + FTS + outbox\n+ audit + skills")]
         Files[("Markdown\nMEMORY_ROOT")]
     end
 
@@ -601,9 +739,9 @@ The codebase is organized by domain:
 | `reverse_hyde_question` | text | The generated question (for debugging) |
 | `thought_type` | keyword | Semantic classification (decision/lesson/insight/...) |
 
-**SQLite tables (17):**
+**SQLite / PostgreSQL tables (23+):**
 
-`entities`, `relationships`, `facts`, `memory_chunks`, `memory_fts` (FTS5), `memory_fts_exact` (FTS5), `needle_registry`, `curator_state`, `audit_log`, `memory_versions`, `trajectories`, `tips`, `annotations`, `ratings`, `memory_outcomes`, `skills`, `skill_versions`, `skill_lessons`, `skill_events`, `retrieval_logs`, `curator_queue`, `memory_hotness`, `skill_relations`
+`entities`, `relationships`, `facts`, `memory_chunks`, `memory_fts` (FTS5 / tsvector), `memory_fts_exact` (FTS5 / tsvector), `needle_registry`, `curator_state`, `audit_log`, `memory_versions`, `trajectories`, `tips`, `annotations`, `ratings`, `memory_outcomes`, `skills`, `skill_versions`, `skill_lessons`, `skill_events`, `retrieval_logs`, `curator_queue`, `memory_hotness`, `skill_relations`, `outbox`
 
 ### Three-Layer Memory Hierarchy
 
@@ -638,6 +776,8 @@ All configuration is via environment variables. See [`.env.example`](.env.exampl
 | `QDRANT_URL` | `http://localhost:6333` | Qdrant endpoint |
 | `MEMORY_ROOT` | `/data/memories` | Directory watched for `.md` file ingestion |
 | `MCP_PORT` | `3100` | Server listen port |
+| `GRAPH_BACKEND` | `sqlite` | Database backend: `sqlite` (default) or `postgres` |
+| `DATABASE_URL` | *(empty)* | PostgreSQL DSN — required when `GRAPH_BACKEND=postgres` |
 
 ### Retrieval Tuning
 
@@ -651,6 +791,18 @@ All configuration is via environment variables. See [`.env.example`](.env.exampl
 | `RERANK_ENABLED` | `false` | Enable cross-encoder reranking |
 | `RERANK_MODEL` | `BAAI/bge-reranker-v2-m3` | Reranker model |
 | `DEFAULT_CONTEXT_BUDGET` | `128000` | Default token budget for context management |
+
+### Answer Finder (v2.3)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CONTEXT_PACK_POLICY` | `adaptive` | Tier packing strategy for `archivist_get_context`: `adaptive` (3-pass L0→L1→L2), `l0_first` (maximum compression), or `l2_first` (full content, legacy behavior) |
+| `CONTEXT_L0_BUDGET_SHARE` | `0.30` | Fraction of `max_tokens` reserved for L0 summaries in adaptive packing |
+| `CONTEXT_MIN_FULL_RESULTS` | `3` | Minimum number of results always upgraded to their best available tier regardless of budget |
+| `AUTO_COMPRESS_ENABLED` | `false` | When `true`, dropped overflow results are LLM-summarized and re-injected as a synthetic L1 chunk |
+| `AUTO_COMPRESS_THRESHOLD` | `0.85` | Budget utilization fraction (0–1) that triggers auto-compression when enabled |
+| `SESSION_STORE_MAX_ENTRIES` | `512` | Maximum in-process entries across all sessions in the `SessionStore` ephemeral tier |
+| `SESSION_STORE_TTL_SECONDS` | `3600` | Default TTL for `SessionStore` entries (1 hour) |
 
 ### Curation & Intelligence
 
@@ -730,7 +882,9 @@ Graceful degradation throughout. Vector search, BM25, graph lookup, and caching 
 <details>
 <summary><strong>How do I scale beyond a single instance?</strong></summary>
 
-Qdrant can be run as a cluster (see Qdrant docs). SQLite is the current bottleneck for horizontal scaling — all writes are serialized through a single `asyncio.Lock` and a single connection. This is a fundamental property of the SQLite backend (not a Phase 3 regression) and is fine for single-instance deployments with dozens of concurrent agents. For fleets exceeding ~50 concurrent writers, the upcoming PostgreSQL `GraphBackend` (v2.2 roadmap) eliminates this constraint via connection pooling and row-level locks. The `GraphBackend` and `VectorBackend` protocols introduced in Phase 3 make that swap mechanical.
+Qdrant can be run as a cluster (see Qdrant docs). SQLite is the bottleneck for horizontal scaling — all writes are serialized through a single `asyncio.Lock` and a single connection. This is fine for single-instance deployments with dozens of concurrent agents.
+
+For fleets exceeding ~50 concurrent writers, switch to the **PostgreSQL backend**: set `GRAPH_BACKEND=postgres` and `DATABASE_URL` in `.env`, then restart. Postgres MVCC handles concurrent writers natively via connection pooling — no global write lock. See [`docs/DOCKER.md#postgresql-backend`](docs/DOCKER.md#postgresql-backend-production-grade) for quickstart instructions.
 </details>
 
 <details>
@@ -748,7 +902,7 @@ The REST endpoints (`/admin/*`, `/health`, `/metrics`) work with plain HTTP. For
 <details>
 <summary><strong>How does the hybrid search work?</strong></summary>
 
-Vector search (Qdrant) and keyword search (SQLite FTS5 with BM25 scoring) run in parallel. Results are normalized to [0,1] and fused: `0.7 × vector_score + 0.3 × bm25_score` (configurable). This catches both semantically similar content and exact keyword matches that vector search might miss.
+Vector search (Qdrant) and keyword search (SQLite FTS5 or Postgres `tsvector` with BM25 scoring) run in parallel. Results are normalized to [0,1] and fused: `0.7 × vector_score + 0.3 × bm25_score` (configurable). This catches both semantically similar content and exact keyword matches that vector search might miss.
 </details>
 
 <details>
@@ -781,8 +935,9 @@ Manual MCP and HTTP validation: [`QA_CHECKLIST.md`](QA_CHECKLIST.md). Full guide
 | Milestone | Status |
 |-----------|--------|
 | Phase 3 + 3.5 — transactional outbox, atomic SQLite + queued Qdrant | Shipped ([`docs/rearchitect_storage_phase3.md`](docs/rearchitect_storage_phase3.md)) |
+| **PostgreSQL first-class backend** — all hot paths, backup, tests, Docker | **Shipped (v2.2)** |
+| **Answer Finder** — tiered memory, adaptive packing, get_relevant_context, handoff, observability | **Shipped (v2.3)** |
 | Pydantic config validation + stronger env validation | Planned |
-| PostgreSQL graph/outbox backend (protocols in place) | Planned |
 
 Full phased plan: [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
@@ -830,10 +985,10 @@ Archivist is integration and execution on top of public work from the agent-memo
 | [`tests/qa/README.md`](tests/qa/README.md) | QA package scope and pytest commands |
 | [`benchmarks/README.md`](benchmarks/README.md) | Thin LongMemEval + BEIR commands (reference benchmarks) |
 | [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) | Pipeline benchmark results, reproduction steps, competitive comparison |
-| [`docs/DOCKER.md`](docs/DOCKER.md) | Docker Compose stack, host vLLM + cloud LLM, volume overrides |
+| [`docs/DOCKER.md`](docs/DOCKER.md) | Docker Compose stack, PostgreSQL backend, host vLLM + cloud LLM, volume overrides |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Storage transaction model, module map, diagrams, historical release notes |
 | [`docs/rearchitect_storage_phase3.md`](docs/rearchitect_storage_phase3.md) | Phase 3 + 3.5 outbox design reference |
-| [`docs/CURSOR_SKILL.md`](docs/CURSOR_SKILL.md) | Full parameter schemas and examples for all 31 MCP tools |
+| [`docs/CURSOR_SKILL.md`](docs/CURSOR_SKILL.md) | Full parameter schemas and examples for all 37 MCP tools |
 | [`docs/REFERENCE.md`](docs/REFERENCE.md) | Condensed tool reference table |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | Phased roadmap and differentiation goals |
 | [`docs/INSPIRATION.md`](docs/INSPIRATION.md) | Credits, research lineage, ReMe comparison |

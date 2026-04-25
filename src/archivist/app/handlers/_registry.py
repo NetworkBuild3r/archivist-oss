@@ -14,6 +14,8 @@ from .tools_admin import HANDLERS as ADMIN_HANDLERS
 from .tools_admin import TOOLS as ADMIN_TOOLS
 from .tools_cache import HANDLERS as CACHE_HANDLERS
 from .tools_cache import TOOLS as CACHE_TOOLS
+from .tools_context import HANDLERS as CONTEXT_HANDLERS
+from .tools_context import TOOLS as CONTEXT_TOOLS
 from .tools_docs import HANDLERS as DOCS_HANDLERS
 from .tools_docs import TOOLS as DOCS_TOOLS
 from .tools_search import HANDLERS as SEARCH_HANDLERS
@@ -37,6 +39,7 @@ for _handlers in (
     SKILL_HANDLERS,
     ADMIN_HANDLERS,
     CACHE_HANDLERS,
+    CONTEXT_HANDLERS,
     DOCS_HANDLERS,
 ):
     TOOL_REGISTRY.update(_handlers)
@@ -48,6 +51,7 @@ ALL_TOOLS: list[Tool] = (
     + SKILL_TOOLS
     + ADMIN_TOOLS
     + CACHE_TOOLS
+    + CONTEXT_TOOLS
     + DOCS_TOOLS
 )
 

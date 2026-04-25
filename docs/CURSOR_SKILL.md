@@ -4,7 +4,7 @@ Authoritative parameter lists and examples for every MCP tool. A condensed table
 
 ## Overview
 
-Archivist exposes 31 memory tools via the Model Context Protocol (MCP) over Streamable HTTP (preferred) or legacy HTTP SSE. Any MCP-compatible client can connect and use these tools.
+Archivist exposes 41 memory tools via the Model Context Protocol (MCP) over Streamable HTTP (preferred) or legacy HTTP SSE. Any MCP-compatible client can connect and use these tools.
 
 ## Connection
 
@@ -386,6 +386,14 @@ Recommend batch size (1-10) from health signals. Considers conflict rate, stale 
 **Parameters:**
 - `window_days` (integer, default: 7) -- Analysis window
 
+### archivist_savings_dashboard
+
+Token savings statistics from the Answer Finder engine: average/min/max savings %, total tokens saved vs naive full-history retrieval, per-policy breakdown, and hotness heatmap.
+
+**Parameters:**
+- `window_days` (integer, default: 7) -- Analysis window for retrieval log aggregation
+- `heatmap_top_n` (integer, default: 50) -- Number of top memories to include in hotness heatmap
+
 ---
 
 ## Cache Management (2 tools)
@@ -407,6 +415,56 @@ Manually invalidate the hot cache.
 
 ---
 
+## Context Assembly & Handoff (3 tools)
+
+### archivist_get_context
+
+High-level token-budgeted context assembly for agents. Returns tiered memories, graph facts, and procedural tips in a single call — replaces multi-step search + recall patterns.
+
+**Parameters:**
+- `agent_id` (string, **required**) -- Calling agent
+- `task_description` (string, **required**) -- What the agent is about to do
+- `namespace` (string) -- Memory namespace to search
+- `max_tokens` (integer, default: 8000) -- Token budget for returned context
+- `include_graph` (boolean, default: true) -- Include knowledge graph facts
+- `include_tips` (boolean, default: true) -- Include procedural tips from past trajectories
+- `extra_memory_ids` (array of string) -- Pin-include specific memory IDs regardless of score
+- `pack_policy` (enum: `adaptive`, `l0_first`, `l2_first`) -- Override packing policy for this call
+
+**Example:**
+```json
+{
+  "name": "archivist_get_context",
+  "arguments": {
+    "agent_id": "planner",
+    "task_description": "Plan the next sprint for the payments team",
+    "namespace": "payments",
+    "max_tokens": 6000
+  }
+}
+```
+
+### archivist_handoff
+
+Package the current session (summary, active goals, recovery tips, top memories, knowledge snapshot, ephemeral notes) into a typed `HandoffPacket` for transfer to another agent.
+
+**Parameters:**
+- `agent_id` (string, **required**) -- Sending agent
+- `session_id` (string, **required**) -- Current session identifier
+- `namespace` (string) -- Namespace scope for the knowledge snapshot
+- `target_agent_id` (string) -- Intended recipient agent (informational; used to filter context)
+
+### archivist_receive_handoff
+
+Inject a `HandoffPacket` into the receiving agent's ephemeral `SessionStore`. The receiving agent can then call `archivist_get_context` to include the handoff context in retrieval.
+
+**Parameters:**
+- `packet` (object, **required**) -- A `HandoffPacket` returned by `archivist_handoff`
+- `receiving_agent_id` (string, **required**) -- Agent receiving the handoff
+- `session_id` (string) -- Session to inject into (defaults to a new session)
+
+---
+
 ## Reference Docs (1 tool)
 
 ### archivist_get_reference_docs
@@ -420,13 +478,16 @@ Return the full Archivist agent skill reference (this document) or a single name
 
 ## Tips
 
-1. **Start with `archivist_search`** for most queries -- it handles the full retrieval pipeline
-2. **Use `archivist_recall`** when you know the entity name and want structured data
-3. **Set `refine: false`** on `archivist_search` for faster results (skips LLM refinement)
-4. **Use `tier: l0`** with `max_tokens` for lightweight pre-message injection
-5. **Use `archivist_store`** with high `importance_score` (>0.9) to prevent TTL expiry
-6. **Check `archivist_namespaces`** to see what you can access
-7. **Use `archivist_context_check`** before reasoning to decide if compaction is needed
-8. **Use `archivist_compress` with `format: structured`** for Goal/Progress/Decisions/Next Steps summaries
-9. **Log trajectories** with `archivist_log_trajectory` so future searches benefit from outcome-aware retrieval
-10. **Check skill health** with `archivist_skill_health` before invoking unreliable external tools
+1. **Start with `archivist_get_context`** for pre-prompt injection — tier-aware, token-budgeted, single call
+2. **Use `archivist_search`** for explicit ad-hoc queries within a task
+3. **Use `archivist_recall`** when you know the entity name and want structured facts
+4. **Set `refine: false`** on `archivist_search` for faster results (skips LLM refinement)
+5. **Use `tier: l0`** with `max_tokens` for lightweight pre-message injection
+6. **Use `archivist_store`** with high `importance_score` (>0.9) to prevent TTL expiry
+7. **Check `archivist_namespaces`** to see what you can access
+8. **Use `archivist_context_check`** before reasoning to decide if compaction is needed
+9. **Use `archivist_compress` with `format: structured`** for Goal/Progress/Decisions/Next Steps summaries
+10. **Log trajectories** with `archivist_log_trajectory` so future searches benefit from outcome-aware retrieval
+11. **Check skill health** with `archivist_skill_health` before invoking unreliable external tools
+12. **Hand off sessions** with `archivist_handoff` + `archivist_receive_handoff` to transfer context between agents
+13. **Monitor token savings** with `archivist_savings_dashboard` to confirm the Answer Finder is reducing noise

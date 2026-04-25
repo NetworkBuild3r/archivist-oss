@@ -2,11 +2,19 @@
 
 Backs up:
   - Qdrant collections via the native snapshot REST API
-  - SQLite graph.db via Python's online backup API
+  - SQLite graph.db via Python's online backup API  (GRAPH_BACKEND=sqlite)
+  - PostgreSQL database via ``pg_dump`` custom format (GRAPH_BACKEND=postgres)
   - Optionally, memory source files as a tarball
 
 Each snapshot is a timestamped directory under BACKUP_DIR containing the above
 artefacts plus a manifest.json with metadata for validation during restore.
+
+Postgres backup requirements
+----------------------------
+``pg_dump`` and ``pg_restore`` / ``psql`` must be installed and on ``PATH``
+(they are included in the ``postgresql-client`` package on most distributions
+and in the official ``postgres`` Docker image).  The ``DATABASE_URL``
+environment variable is used to derive the connection parameters.
 """
 
 import asyncio
@@ -15,10 +23,12 @@ import logging
 import os
 import shutil
 import sqlite3
+import subprocess
 import tarfile
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 import httpx
 
@@ -26,6 +36,8 @@ from archivist.core.config import (
     BACKUP_DIR,
     BACKUP_INCLUDE_FILES,
     BACKUP_RETENTION_COUNT,
+    DATABASE_URL,
+    GRAPH_BACKEND,
     MEMORY_ROOT,
     QDRANT_COLLECTION,
     QDRANT_URL,
@@ -95,12 +107,22 @@ def create_snapshot(label: str = "") -> dict:
             logger.error(msg)
             errors.append(msg)
 
-    try:
-        _backup_sqlite(snap_dir)
-    except Exception as e:
-        msg = f"SQLite backup failed: {e}"
-        logger.error(msg)
-        errors.append(msg)
+    _is_pg = (GRAPH_BACKEND or "sqlite").lower() == "postgres"
+
+    if _is_pg:
+        try:
+            _backup_postgres(snap_dir)
+        except Exception as e:
+            msg = f"Postgres backup failed: {e}"
+            logger.error(msg)
+            errors.append(msg)
+    else:
+        try:
+            _backup_sqlite(snap_dir)
+        except Exception as e:
+            msg = f"SQLite backup failed: {e}"
+            logger.error(msg)
+            errors.append(msg)
 
     if BACKUP_INCLUDE_FILES and os.path.isdir(MEMORY_ROOT):
         try:
@@ -119,8 +141,10 @@ def create_snapshot(label: str = "") -> dict:
         "label": label,
         "created_at": ts.isoformat(),
         "vector_dim": VECTOR_DIM,
+        "graph_backend": (GRAPH_BACKEND or "sqlite").lower(),
         "collections": collection_info,
         "sqlite_backed_up": os.path.isfile(snap_dir / "graph.db"),
+        "postgres_backed_up": os.path.isfile(snap_dir / "graph.pgdump"),
         "files_backed_up": os.path.isfile(snap_dir / "memories.tar.gz"),
         "errors": errors,
         "elapsed_ms": elapsed_ms,
@@ -194,6 +218,123 @@ def _backup_sqlite(snap_dir: Path) -> None:
     logger.info("SQLite backup: %.1f MB", size_bytes / (1024 * 1024))
 
 
+def _pg_env() -> dict[str, str]:
+    """Build a minimal environment for pg_dump / psql from DATABASE_URL.
+
+    Parses ``postgresql://user:password@host:port/dbname`` and sets the
+    standard ``PG*`` env variables.  Any component that is absent in the URL
+    is omitted so that pg_dump falls back to its own defaults (unix socket,
+    current user, etc.).
+    """
+    env = os.environ.copy()
+    if not DATABASE_URL:
+        return env
+
+    try:
+        parsed = urlparse(DATABASE_URL)
+        if parsed.hostname:
+            env["PGHOST"] = parsed.hostname
+        if parsed.port:
+            env["PGPORT"] = str(parsed.port)
+        if parsed.username:
+            env["PGUSER"] = parsed.username
+        if parsed.password:
+            env["PGPASSWORD"] = parsed.password
+        # Path starts with '/' so strip leading slash to get dbname
+        if parsed.path and parsed.path.lstrip("/"):
+            env["PGDATABASE"] = parsed.path.lstrip("/")
+    except Exception as exc:
+        logger.warning("Could not parse DATABASE_URL for pg env: %s", exc)
+
+    return env
+
+
+def _backup_postgres(snap_dir: Path) -> None:
+    """Dump PostgreSQL database to a custom-format ``pg_dump`` archive.
+
+    The output file is ``graph.pgdump`` inside the snapshot directory.
+    Uses ``pg_dump --format=custom`` which produces a compressed binary
+    archive that ``pg_restore`` can reload selectively.
+
+    Raises:
+        RuntimeError: if ``pg_dump`` exits with a non-zero status.
+        FileNotFoundError: if ``pg_dump`` is not on PATH.
+    """
+    dest_path = snap_dir / "graph.pgdump"
+    pg_env = _pg_env()
+
+    cmd = [
+        "pg_dump",
+        "--format=custom",
+        "--no-password",
+        f"--file={dest_path}",
+    ]
+    # If DATABASE_URL contains the dbname we already set PGDATABASE above;
+    # pass it as the positional argument too for older pg_dump versions.
+    if DATABASE_URL:
+        cmd.append(DATABASE_URL)
+
+    logger.info("Running: %s", " ".join(str(c) for c in cmd))
+    result = subprocess.run(
+        cmd,
+        env=pg_env,
+        capture_output=True,
+        text=True,
+        timeout=600,  # 10 minutes
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"pg_dump failed (exit {result.returncode}):\n{result.stderr}")
+
+    size_bytes = dest_path.stat().st_size
+    logger.info("Postgres backup: %.1f MB → %s", size_bytes / (1024 * 1024), dest_path.name)
+
+
+def _restore_postgres(backup_path: Path) -> None:
+    """Restore a PostgreSQL database from a ``pg_dump`` custom-format archive.
+
+    Uses ``pg_restore --clean --if-exists`` to drop and recreate all objects,
+    making the restore idempotent against a pre-existing database.
+
+    Args:
+        backup_path: Path to the ``graph.pgdump`` file.
+
+    Raises:
+        RuntimeError: if ``pg_restore`` exits with a non-zero status.
+        FileNotFoundError: if ``pg_restore`` is not on PATH or backup missing.
+    """
+    if not backup_path.is_file():
+        raise FileNotFoundError(f"Postgres backup file not found: {backup_path}")
+
+    pg_env = _pg_env()
+
+    cmd = [
+        "pg_restore",
+        "--clean",
+        "--if-exists",
+        "--no-password",
+    ]
+    if DATABASE_URL:
+        cmd += ["--dbname", DATABASE_URL]
+    cmd.append(str(backup_path))
+
+    logger.info("Running: %s", " ".join(cmd))
+    result = subprocess.run(
+        cmd,
+        env=pg_env,
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    # pg_restore exits 1 for warnings (e.g. object doesn't exist for --clean);
+    # treat exit > 1 as a hard failure.
+    if result.returncode > 1:
+        raise RuntimeError(f"pg_restore failed (exit {result.returncode}):\n{result.stderr}")
+    if result.returncode == 1:
+        logger.warning("pg_restore completed with warnings:\n%s", result.stderr)
+
+    logger.info("Postgres database restored from %s", backup_path.name)
+
+
 def _backup_memory_files(snap_dir: Path) -> None:
     """Create a tarball of MEMORY_ROOT markdown files."""
     tar_path = str(snap_dir / "memories.tar.gz")
@@ -237,15 +378,21 @@ def list_snapshots() -> list[dict]:
                     db_path = entry / "graph.db"
                     if db_path.is_file():
                         total_size += db_path.stat().st_size
+                if manifest.get("postgres_backed_up"):
+                    pg_path = entry / "graph.pgdump"
+                    if pg_path.is_file():
+                        total_size += pg_path.stat().st_size
                 snapshots.append(
                     {
                         "snapshot_id": manifest.get("snapshot_id", entry.name),
                         "label": manifest.get("label", ""),
                         "created_at": manifest.get("created_at", ""),
+                        "graph_backend": manifest.get("graph_backend", "sqlite"),
                         "collections": len(manifest.get("collections", {})),
                         "total_points": total_points,
                         "total_size_mb": round(total_size / (1024 * 1024), 2),
                         "sqlite": manifest.get("sqlite_backed_up", False),
+                        "postgres": manifest.get("postgres_backed_up", False),
                         "files": manifest.get("files_backed_up", False),
                         "errors": len(manifest.get("errors", [])),
                     }
@@ -307,17 +454,31 @@ def restore_snapshot(snapshot_id: str, target: str = "all") -> dict:
                 errors.append(f"Snapshot file missing for collection '{coll}'")
 
     if target in ("all", "sqlite"):
-        db_backup = snap_dir / "graph.db"
-        if db_backup.is_file():
-            try:
-                _restore_sqlite(db_backup)
-                restored["sqlite"] = "restored"
-            except Exception as e:
-                msg = f"SQLite restore failed: {e}"
-                logger.error(msg)
-                errors.append(msg)
+        _snap_backend = manifest.get("graph_backend", "sqlite").lower()
+        if _snap_backend == "postgres":
+            pg_backup = snap_dir / "graph.pgdump"
+            if pg_backup.is_file():
+                try:
+                    _restore_postgres(pg_backup)
+                    restored["postgres"] = "restored"
+                except Exception as e:
+                    msg = f"Postgres restore failed: {e}"
+                    logger.error(msg)
+                    errors.append(msg)
+            else:
+                errors.append("Postgres backup file (graph.pgdump) not found in snapshot")
         else:
-            errors.append("SQLite backup file not found in snapshot")
+            db_backup = snap_dir / "graph.db"
+            if db_backup.is_file():
+                try:
+                    _restore_sqlite(db_backup)
+                    restored["sqlite"] = "restored"
+                except Exception as e:
+                    msg = f"SQLite restore failed: {e}"
+                    logger.error(msg)
+                    errors.append(msg)
+            else:
+                errors.append("SQLite backup file not found in snapshot")
 
     elapsed_ms = round((time.monotonic() - t0) * 1000, 1)
     restored["elapsed_ms"] = elapsed_ms
@@ -477,29 +638,68 @@ def export_agent(agent_id: str, output_dir: str = "") -> dict:
 
 
 def _export_agent_graph(agent_id: str, out_dir: Path, safe_agent: str, ts: str) -> int:
-    """Export agent-related graph data (entities, facts) to NDJSON."""
+    """Export agent-related graph data (entities, facts) to NDJSON.
+
+    Uses the async pool so the export works correctly for both SQLite and
+    Postgres backends without needing a direct sqlite3 connection.
+    """
     graph_path = out_dir / f"agent_{safe_agent}_{ts}_graph.ndjson"
     count = 0
 
-    conn = sqlite3.connect(SQLITE_PATH, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    try:
-        with open(graph_path, "w", encoding="utf-8") as f:
-            for row in conn.execute(
-                "SELECT * FROM facts WHERE agent_id = ? ORDER BY created_at", (agent_id,)
-            ):
-                f.write(json.dumps(dict(row), ensure_ascii=False, default=str) + "\n")
-                count += 1
+    async def _run() -> int:
+        from archivist.storage.sqlite_pool import pool
 
-            for row in conn.execute(
-                "SELECT mc.* FROM memory_chunks mc WHERE mc.agent_id = ?", (agent_id,)
-            ):
-                record = dict(row)
-                record["_table"] = "memory_chunks"
-                f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
-                count += 1
-    finally:
-        conn.close()
+        rows_written = 0
+        async with pool.read() as conn:
+            with open(graph_path, "w", encoding="utf-8") as f:
+                for row in await conn.fetchall(
+                    "SELECT * FROM facts WHERE agent_id = ? ORDER BY created_at",
+                    (agent_id,),
+                ):
+                    f.write(json.dumps(dict(row), ensure_ascii=False, default=str) + "\n")
+                    rows_written += 1
+
+                for row in await conn.fetchall(
+                    "SELECT mc.* FROM memory_chunks mc WHERE mc.agent_id = ?",
+                    (agent_id,),
+                ):
+                    record = dict(row)
+                    record["_table"] = "memory_chunks"
+                    f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+                    rows_written += 1
+        return rows_written
+
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # Called from a sync context inside asyncio.to_thread()
+
+            future = asyncio.run_coroutine_threadsafe(_run(), loop)
+            count = future.result(timeout=120)
+        else:
+            count = loop.run_until_complete(_run())
+    except Exception as exc:
+        logger.warning("_export_agent_graph pool query failed, falling back to sqlite3: %s", exc)
+        # Fallback for SQLite-only deployments where the pool may not be initialized
+        if (GRAPH_BACKEND or "sqlite").lower() != "postgres" and os.path.isfile(SQLITE_PATH):
+            conn_s = sqlite3.connect(SQLITE_PATH, check_same_thread=False)
+            conn_s.row_factory = sqlite3.Row
+            try:
+                with open(graph_path, "w", encoding="utf-8") as f:
+                    for row in conn_s.execute(
+                        "SELECT * FROM facts WHERE agent_id = ? ORDER BY created_at", (agent_id,)
+                    ):
+                        f.write(json.dumps(dict(row), ensure_ascii=False, default=str) + "\n")
+                        count += 1
+                    for row in conn_s.execute(
+                        "SELECT mc.* FROM memory_chunks mc WHERE mc.agent_id = ?", (agent_id,)
+                    ):
+                        record = dict(row)
+                        record["_table"] = "memory_chunks"
+                        f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+                        count += 1
+            finally:
+                conn_s.close()
 
     return count
 

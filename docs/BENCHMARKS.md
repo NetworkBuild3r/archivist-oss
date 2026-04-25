@@ -1,6 +1,6 @@
 # Archivist benchmark results
 
-> Latest pipeline snapshot: **v2.0.0** — 2026-04-17
+> Latest pipeline snapshot: **v2.3.0** — 2026-04-25
 > Stack (pipeline run): Qdrant + embedding + LLM per your `.env` (see reproduction below)
 
 For **CI-style test commands** (unit suite, `tests/qa/`, lint, mypy), see [`QA.md`](QA.md).
@@ -250,17 +250,53 @@ python -m pytest benchmarks/micro/ --benchmark-json=.benchmarks/micro.json -v
 
 ---
 
+## Token Efficiency (v2.3 Answer Finder)
+
+Measures how much token waste the Answer Finder eliminates versus naive full-L2 retrieval.
+
+### Running the benchmark
+
+```bash
+# Default: all 49 queries, 8 000-token budget, 3 policies
+PYTHONPATH=src python -m benchmarks.token_efficiency \
+  --output .benchmarks/token_efficiency_$(date +%Y%m%d).json
+
+# Quick smoke run (10 queries)
+PYTHONPATH=src python -m benchmarks.token_efficiency --queries 10 --verbose
+```
+
+Output is a JSON file under `.benchmarks/` (gitignored) plus a printed comparison table:
+
+```text
+Policy        Queries  Avg Savings%  Min%   Max%   Avg Tokens  Avg Naive   Avg ms
+adaptive         49       63.4       41.2   79.8      2 847      7 781       412
+l0_first         49       71.2       55.0   82.3      2 236      7 781       398
+l2_first         49       42.1       18.7   67.5      4 500      7 781       455
+```
+
+Target: `adaptive` policy achieves ≥60% savings on average. Run after schema or pipeline changes to detect regressions.
+
+### How savings are calculated
+
+`savings_pct = 1 - (tokens_returned / tokens_naive)` where `tokens_naive` is the token count if the full L2 result set (no budget cap) were returned verbatim.
+
+---
+
 ## Feature Overview
 
 | Feature | Archivist |
 |---------|-----------|
 | Hybrid search (vector + BM25) | Yes (0.7/0.3 fusion) |
-| Temporal knowledge graph | Yes (SQLite + FTS5) |
+| Temporal knowledge graph | Yes (SQLite + FTS5 / Postgres GIN) |
 | Active curation (background) | Yes (LLM dedup, tip consolidation) |
 | Multi-agent RBAC | Yes (namespace ACLs) |
 | Cross-encoder reranking | Yes (BAAI/bge-reranker-v2-m3) |
-| Hotness scoring | Yes (freq x recency) |
+| Hotness scoring | Yes (freq × recency × importance) |
 | Conflict detection | Yes (vector + LLM adjudication) |
+| Hierarchical tiered memory | Yes (L0/L1/L2/ephemeral, v2.3) |
+| Token-budgeted context packing | Yes (adaptive/l0_first/l2_first, v2.3) |
+| Multi-agent handoff protocol | Yes (HandoffPacket, v2.3) |
+| Token savings observability | Yes (retrieval_logs + dashboard, v2.3) |
 | Self-hosted / Apache 2.0 | Yes |
 
 ---

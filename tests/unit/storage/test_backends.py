@@ -57,6 +57,167 @@ class TestTranslateSql:
 
 
 # ---------------------------------------------------------------------------
+# SQL dialect translation (Phase 2 additions)
+# ---------------------------------------------------------------------------
+
+
+class TestTranslateSqlDialects:
+    """Tests for Phase 2 additions to _translate_sql(): INSERT OR IGNORE/REPLACE,
+    COLLATE NOCASE stripping, and fetchval interface."""
+
+    def _t(self, sql: str) -> str:
+        from archivist.storage.asyncpg_backend import _translate_sql
+
+        return _translate_sql(sql)
+
+    # --- INSERT OR IGNORE ---
+
+    def test_insert_or_ignore_basic(self):
+        result = self._t("INSERT OR IGNORE INTO t (a) VALUES (?)")
+        assert "INSERT OR IGNORE" not in result
+        assert "INSERT INTO" in result
+        assert "ON CONFLICT DO NOTHING" in result
+        assert "$1" in result
+
+    def test_insert_or_ignore_multi_col(self):
+        result = self._t(
+            "INSERT OR IGNORE INTO memory_points "
+            "(memory_id, qdrant_id, point_type, created_at) VALUES (?, ?, ?, ?)"
+        )
+        assert "ON CONFLICT DO NOTHING" in result
+        assert "$4" in result
+        assert "$5" not in result
+
+    def test_insert_or_ignore_case_insensitive(self):
+        result = self._t("insert or ignore into t (x) values (?)")
+        assert "ON CONFLICT DO NOTHING" in result
+
+    # --- INSERT OR REPLACE ---
+
+    def test_insert_or_replace_needle_registry(self):
+        result = self._t(
+            "INSERT OR REPLACE INTO needle_registry "
+            "(token, memory_id, namespace, agent_id, actor_id, actor_type, chunk_text, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+        )
+        assert "INSERT OR REPLACE" not in result
+        assert "INSERT INTO needle_registry" in result
+        assert "ON CONFLICT (token, memory_id) DO UPDATE SET" in result
+        # Conflict-target columns must NOT appear in SET clause
+        assert "token=EXCLUDED" not in result
+        assert "memory_id=EXCLUDED" not in result
+        # Non-PK columns must appear
+        assert "namespace=EXCLUDED.namespace" in result
+        assert "chunk_text=EXCLUDED.chunk_text" in result
+
+    def test_insert_or_replace_memory_hotness(self):
+        result = self._t(
+            "INSERT OR REPLACE INTO memory_hotness "
+            "(memory_id, score, retrieval_count, last_accessed, updated_at) "
+            "VALUES (?, ?, ?, ?, ?)"
+        )
+        assert "ON CONFLICT (memory_id) DO UPDATE SET" in result
+        assert "memory_id=EXCLUDED" not in result
+        assert "score=EXCLUDED.score" in result
+        assert "updated_at=EXCLUDED.updated_at" in result
+
+    def test_insert_or_replace_no_columns_falls_back_to_nothing(self):
+        """When no column list is parseable, fall back to DO NOTHING."""
+        result = self._t("INSERT OR REPLACE INTO t VALUES (?, ?)")
+        assert "ON CONFLICT" in result
+
+    # --- COLLATE NOCASE ---
+
+    def test_collate_nocase_stripped_from_where(self):
+        result = self._t("SELECT * FROM t WHERE name = ? COLLATE NOCASE")
+        assert "COLLATE NOCASE" not in result
+        assert "$1" in result
+
+    def test_collate_nocase_stripped_from_like(self):
+        result = self._t(
+            "SELECT * FROM entities "
+            "WHERE name LIKE ? COLLATE NOCASE OR aliases LIKE ? COLLATE NOCASE "
+            "ORDER BY mention_count DESC LIMIT ?"
+        )
+        assert "COLLATE NOCASE" not in result
+        assert "$1" in result
+        assert "$2" in result
+        assert "$3" in result
+
+    def test_collate_nocase_case_insensitive(self):
+        result = self._t("WHERE x = ? collate nocase")
+        assert "collate nocase" not in result.lower()
+
+    def test_collate_nocase_in_create_table_not_stripped(self):
+        """COLLATE NOCASE in DDL strings inside schema_guard is SQLite-only;
+        the translator is not applied to DDL (only to runtime queries via conn methods),
+        but we verify it strips correctly if it were applied."""
+        result = self._t("CREATE TABLE t (name TEXT COLLATE NOCASE)")
+        assert "COLLATE NOCASE" not in result
+
+    # --- Combined transformations ---
+
+    def test_insert_or_ignore_with_collate_nocase(self):
+        """Both transforms apply in the same statement."""
+        result = self._t(
+            "INSERT OR IGNORE INTO t (name) SELECT name COLLATE NOCASE FROM src WHERE active = ?"
+        )
+        assert "INSERT OR IGNORE" not in result
+        assert "COLLATE NOCASE" not in result
+        assert "ON CONFLICT DO NOTHING" in result
+
+    def test_plain_insert_unchanged(self):
+        """Normal INSERT is not modified."""
+        result = self._t("INSERT INTO t (a, b) VALUES (?, ?)")
+        assert "ON CONFLICT" not in result
+        assert result == "INSERT INTO t (a, b) VALUES ($1, $2)"
+
+    # --- fetchval interface ---
+
+    def test_asyncpg_connection_has_fetchval(self):
+        from archivist.storage.asyncpg_backend import AsyncpgConnection
+
+        assert hasattr(AsyncpgConnection, "fetchval")
+        assert callable(AsyncpgConnection.fetchval)
+
+    def test_wrapped_sqlite_conn_has_fetchval(self):
+        from archivist.storage.sqlite_pool import _WrappedSQLiteConn
+
+        assert hasattr(_WrappedSQLiteConn, "fetchval")
+        assert callable(_WrappedSQLiteConn.fetchval)
+
+    async def test_wrapped_sqlite_conn_fetchval_returns_scalar(self, tmp_path):
+        """fetchval returns the first column of the first row."""
+        import aiosqlite
+
+        db_path = str(tmp_path / "test.db")
+        async with aiosqlite.connect(db_path) as raw_conn:
+            await raw_conn.execute("CREATE TABLE x (val INTEGER)")
+            await raw_conn.execute("INSERT INTO x VALUES (42)")
+            await raw_conn.commit()
+
+            from archivist.storage.sqlite_pool import _WrappedSQLiteConn
+
+            wrapped = _WrappedSQLiteConn(raw_conn)
+            result = await wrapped.fetchval("SELECT val FROM x")
+            assert result == 42
+
+    async def test_wrapped_sqlite_conn_fetchval_none_when_empty(self, tmp_path):
+        """fetchval returns None when query returns no rows."""
+        import aiosqlite
+
+        db_path = str(tmp_path / "test.db")
+        async with aiosqlite.connect(db_path) as raw_conn:
+            await raw_conn.execute("CREATE TABLE x (val INTEGER)")
+
+            from archivist.storage.sqlite_pool import _WrappedSQLiteConn
+
+            wrapped = _WrappedSQLiteConn(raw_conn)
+            result = await wrapped.fetchval("SELECT val FROM x WHERE val = 999")
+            assert result is None
+
+
+# ---------------------------------------------------------------------------
 # SQLiteGraphBackend class name and alias
 # ---------------------------------------------------------------------------
 
@@ -216,9 +377,11 @@ class TestAsyncpgGraphBackendMocked:
         backend = AsyncpgGraphBackend()
         backend._pool = mock_asyncpg_pool
 
-        await backend.execute("SELECT * FROM t WHERE a = ?", ("val",))
+        # For non-SELECT statements execute() calls raw conn.execute directly.
+        await backend.execute("INSERT INTO t (a) VALUES (?)", ("val",))
         raw_conn = mock_asyncpg_pool.acquire().__aenter__.return_value
         call_args = raw_conn.execute.call_args
+        assert call_args is not None
         assert "$1" in call_args[0][0]
         assert "?" not in call_args[0][0]
 
@@ -302,10 +465,52 @@ class TestAsyncpgConnection:
         raw.fetchrow.assert_called_once_with("SELECT * FROM t WHERE id = $1", 7)
         assert result == {"id": 7}
 
-    async def test_executescript_splits_statements(self):
+    async def test_executescript_passes_full_script(self):
         conn, raw = self._make_conn()
-        await conn.executescript("CREATE TABLE a (id INT); CREATE TABLE b (id INT);")
-        assert raw.execute.call_count == 2
+        script = "CREATE TABLE a (id INT); CREATE TABLE b (id INT);"
+        await conn.executescript(script)
+        # executescript passes the full script as a single call
+        raw.execute.assert_called_once_with(script)
+
+    async def test_execute_dml_rowcount_parsed(self):
+        """DML execute() returns a proxy with rowcount parsed from asyncpg status string."""
+        from archivist.storage.asyncpg_backend import AsyncpgConnection
+
+        raw = AsyncMock()
+        raw.execute = AsyncMock(return_value="DELETE 5")
+        conn = AsyncpgConnection(raw)
+        cur = await conn.execute("DELETE FROM t WHERE id = ?", (42,))
+        assert cur.rowcount == 5
+
+    async def test_execute_insert_rowcount_parsed(self):
+        """INSERT status 'INSERT 0 1' → rowcount == 1."""
+        from archivist.storage.asyncpg_backend import AsyncpgConnection
+
+        raw = AsyncMock()
+        raw.execute = AsyncMock(return_value="INSERT 0 1")
+        conn = AsyncpgConnection(raw)
+        cur = await conn.execute("INSERT INTO t (v) VALUES (?)", (1,))
+        assert cur.rowcount == 1
+
+    async def test_execute_select_rowcount_is_minus_one(self):
+        """SELECT proxy has rowcount == -1 (no DML run yet, matches DB-API 2.0)."""
+        from archivist.storage.asyncpg_backend import AsyncpgConnection
+
+        raw = AsyncMock()
+        raw.fetch = AsyncMock(return_value=[])
+        conn = AsyncpgConnection(raw)
+        cur = await conn.execute("SELECT * FROM t")
+        assert cur.rowcount == -1
+
+    async def test_execute_dml_rowcount_zero_on_bad_status(self):
+        """Unparseable status string does not crash; rowcount falls back to 0."""
+        from archivist.storage.asyncpg_backend import AsyncpgConnection
+
+        raw = AsyncMock()
+        raw.execute = AsyncMock(return_value="COMMAND OK")
+        conn = AsyncpgConnection(raw)
+        cur = await conn.execute("UPDATE t SET v=1")
+        assert cur.rowcount == 0
 
     async def test_commit_is_noop(self):
         conn, raw = self._make_conn()
@@ -564,6 +769,86 @@ class TestUpsertFtsChunkNoopOnPostgres:
 
         assert len(sqlite_calls) == 1
         assert len(pg_calls) == 0
+
+
+class TestUpsertFtsChunkTierFields:
+    """upsert_fts_chunk() forwards importance and tier_label to both backends."""
+
+    async def test_importance_and_tier_forwarded_to_postgres(self, monkeypatch):
+        pg_calls = []
+
+        async def _fake_pg(**kwargs):
+            pg_calls.append(kwargs)
+
+        async def _fake_sqlite(**kwargs):
+            pass
+
+        monkeypatch.setattr("archivist.core.config.GRAPH_BACKEND", "postgres")
+        monkeypatch.setattr("archivist.storage.graph._upsert_fts_chunk_postgres", _fake_pg)
+        monkeypatch.setattr("archivist.storage.graph._upsert_fts_chunk_sqlite", _fake_sqlite)
+
+        from archivist.storage.graph import upsert_fts_chunk
+
+        await upsert_fts_chunk(
+            qdrant_id="pg-1",
+            text="important fact",
+            file_path="/f",
+            chunk_index=0,
+            importance=0.9,
+            tier_label="l0",
+        )
+
+        assert len(pg_calls) == 1
+        assert pg_calls[0]["importance"] == 0.9
+        assert pg_calls[0]["tier_label"] == "l0"
+
+    async def test_importance_and_tier_forwarded_to_sqlite(self, monkeypatch):
+        sqlite_calls = []
+
+        async def _fake_pg(**kwargs):
+            pass
+
+        async def _fake_sqlite(**kwargs):
+            sqlite_calls.append(kwargs)
+
+        monkeypatch.setattr("archivist.core.config.GRAPH_BACKEND", "sqlite")
+        monkeypatch.setattr("archivist.storage.graph._upsert_fts_chunk_postgres", _fake_pg)
+        monkeypatch.setattr("archivist.storage.graph._upsert_fts_chunk_sqlite", _fake_sqlite)
+
+        from archivist.storage.graph import upsert_fts_chunk
+
+        await upsert_fts_chunk(
+            qdrant_id="sq-1",
+            text="procedural tip",
+            file_path="/g",
+            chunk_index=1,
+            importance=0.3,
+            tier_label="l1",
+        )
+
+        assert len(sqlite_calls) == 1
+        assert sqlite_calls[0]["importance"] == 0.3
+        assert sqlite_calls[0]["tier_label"] == "l1"
+
+    async def test_defaults_are_l2_and_half(self, monkeypatch):
+        captured = []
+
+        async def _fake_sqlite(**kwargs):
+            captured.append(kwargs)
+
+        async def _fake_pg(**kwargs):
+            pass
+
+        monkeypatch.setattr("archivist.core.config.GRAPH_BACKEND", "sqlite")
+        monkeypatch.setattr("archivist.storage.graph._upsert_fts_chunk_postgres", _fake_pg)
+        monkeypatch.setattr("archivist.storage.graph._upsert_fts_chunk_sqlite", _fake_sqlite)
+
+        from archivist.storage.graph import upsert_fts_chunk
+
+        await upsert_fts_chunk(qdrant_id="def-1", text="x", file_path="/h", chunk_index=0)
+
+        assert captured[0]["importance"] == 0.5
+        assert captured[0]["tier_label"] == "l2"
 
 
 class TestDeleteFtsRowsAsyncNoopOnPostgres:

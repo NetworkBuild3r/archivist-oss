@@ -52,38 +52,163 @@ logger = logging.getLogger("archivist.asyncpg_backend")
 
 _PLACEHOLDER_RE = re.compile(r"\?")
 
+# SQLite-ism patterns translated to standard SQL before $N substitution.
+# Order matters: more specific patterns first.
+_INSERT_OR_IGNORE_RE = re.compile(r"\bINSERT\s+OR\s+IGNORE\s+INTO\b", re.IGNORECASE)
+_INSERT_OR_REPLACE_RE = re.compile(r"\bINSERT\s+OR\s+REPLACE\s+INTO\b", re.IGNORECASE)
+_COLLATE_NOCASE_RE = re.compile(r"\s+COLLATE\s+NOCASE\b", re.IGNORECASE)
+
 
 def _translate_sql(sql: str) -> str:
-    """Convert SQLite ``?`` placeholders to asyncpg ``$N`` style.
+    """Convert SQLite SQL idioms to Postgres-compatible SQL.
+
+    Transformations applied (in order):
+
+    1. ``INSERT OR IGNORE INTO`` → ``INSERT INTO … ON CONFLICT DO NOTHING``
+    2. ``INSERT OR REPLACE INTO`` → ``INSERT INTO … ON CONFLICT DO UPDATE SET …``
+    3. ``COLLATE NOCASE`` → stripped (citext handles case-insensitivity natively).
+    4. ``?`` placeholders → ``$1``, ``$2``, … (asyncpg style).
 
     Examples::
 
         >>> _translate_sql("SELECT * FROM t WHERE a = ? AND b = ?")
         'SELECT * FROM t WHERE a = $1 AND b = $2'
-        >>> _translate_sql("INSERT INTO t VALUES (?, ?)")
-        'INSERT INTO t VALUES ($1, $2)'
-        >>> _translate_sql("SELECT 1")  # no placeholders — unchanged
-        'SELECT 1'
-
-    Args:
-        sql: SQL string using ``?`` placeholders.
-
-    Returns:
-        SQL string with ``?`` replaced by ``$1``, ``$2``, … in order.
+        >>> _translate_sql("INSERT OR IGNORE INTO t (a) VALUES (?)")
+        'INSERT INTO t (a) VALUES ($1) ON CONFLICT DO NOTHING'
+        >>> _translate_sql("SELECT * FROM t WHERE name = ? COLLATE NOCASE")
+        'SELECT * FROM t WHERE name = $1'
     """
+    # Track which ORx substitution fired so we can append the right ON CONFLICT clause.
+    _mode = [None]  # "ignore" | "replace" | None
+
+    def _replace_insert(m: re.Match[str]) -> str:
+        keyword = m.group(0).upper()
+        if "IGNORE" in keyword:
+            _mode[0] = "ignore"
+        else:
+            _mode[0] = "replace"
+        return "INSERT INTO"
+
+    # Step 1 & 2: normalise INSERT OR x → INSERT INTO
+    sql2 = _INSERT_OR_IGNORE_RE.sub(_replace_insert, sql)
+    sql2 = _INSERT_OR_REPLACE_RE.sub(_replace_insert, sql2)
+
+    # Step 3: strip COLLATE NOCASE (citext handles it at the column level)
+    sql2 = _COLLATE_NOCASE_RE.sub("", sql2)
+
+    # Step 4: ? → $N
     counter = 0
 
-    def _replace(_m: re.Match[str]) -> str:
+    def _replace_placeholder(_m: re.Match[str]) -> str:
         nonlocal counter
         counter += 1
         return f"${counter}"
 
-    return _PLACEHOLDER_RE.sub(_replace, sql)
+    sql2 = _PLACEHOLDER_RE.sub(_replace_placeholder, sql2)
+
+    # Step 5: append ON CONFLICT clause if INSERT OR x was detected
+    if _mode[0] == "ignore":
+        sql2 = sql2.rstrip().rstrip(";") + " ON CONFLICT DO NOTHING"
+    elif _mode[0] == "replace":
+        # ON CONFLICT (target) DO UPDATE SET requires knowing both the conflict
+        # target columns (PK / UNIQUE) and the non-PK columns to update.
+        # We parse the table name and column list from the INSERT and look up a
+        # static per-table conflict-target map derived from schema_postgres.sql.
+        _tbl_match = re.search(r"INSERT\s+INTO\s+(\w+)\s*\(([^)]+)\)", sql2, re.IGNORECASE)
+        if _tbl_match:
+            table_name = _tbl_match.group(1).lower()
+            cols = [c.strip() for c in _tbl_match.group(2).split(",")]
+            # Per-table conflict targets (match PRIMARY KEY / UNIQUE in schema_postgres.sql)
+            _conflict_targets: dict[str, list[str]] = {
+                "needle_registry": ["token", "memory_id"],
+                "memory_hotness": ["memory_id"],
+                "memory_points": ["memory_id", "qdrant_id", "point_type"],
+                "delete_failures": ["memory_id"],
+                "outbox": ["id"],
+                "skill_relations": ["skill_a", "skill_b", "relation_type"],
+            }
+            conflict_cols = _conflict_targets.get(table_name)
+            pk_set = set(conflict_cols) if conflict_cols else {"id", "rowid"}
+            update_cols = [c for c in cols if c.lower() not in pk_set]
+            if conflict_cols and update_cols:
+                target = ", ".join(conflict_cols)
+                set_clause = ", ".join(f"{c}=EXCLUDED.{c}" for c in update_cols)
+                sql2 = (
+                    sql2.rstrip().rstrip(";")
+                    + f" ON CONFLICT ({target}) DO UPDATE SET {set_clause}"
+                )
+            elif conflict_cols:
+                target = ", ".join(conflict_cols)
+                sql2 = sql2.rstrip().rstrip(";") + f" ON CONFLICT ({target}) DO NOTHING"
+            else:
+                # Unknown table — safe fallback
+                sql2 = sql2.rstrip().rstrip(";") + " ON CONFLICT DO NOTHING"
+        else:
+            # No parseable column list — safe fallback
+            sql2 = sql2.rstrip().rstrip(";") + " ON CONFLICT DO NOTHING"
+
+    return sql2
 
 
 # ---------------------------------------------------------------------------
 # Connection wrapper
 # ---------------------------------------------------------------------------
+
+
+class _PgCursorProxy:
+    """Cursor-like proxy returned by ``AsyncpgConnection.execute()``.
+
+    ``graph.py`` uses the SQLite cursor pattern::
+
+        cur = await conn.execute(sql, params)
+        row = await cur.fetchone()
+
+    asyncpg's ``connection.execute()`` returns a status string, not a cursor.
+    This proxy allows the cursor pattern to work transparently on Postgres.
+
+    For DML statements (INSERT/UPDATE/DELETE) the ``rowcount`` property
+    returns the number of rows affected, parsed from the asyncpg status string
+    (e.g. ``"DELETE 5"`` → 5, ``"INSERT 0 1"`` → 1).  SELECT proxies return
+    -1 for ``rowcount``, matching the DB-API 2.0 convention for un-executed
+    queries.
+
+    Args:
+        conn: The underlying asyncpg connection.
+        sql: Translated SQL statement (``$N`` placeholders).
+        params: Positional parameters.
+        _rowcount: Pre-parsed affected-row count for DML proxies.
+    """
+
+    __slots__ = ("_conn", "_params", "_rowcount", "_sql")
+
+    def __init__(
+        self,
+        conn: asyncpg_module.Connection[Any],
+        sql: str,
+        params: tuple[Any, ...] | list[Any],
+        _rowcount: int = -1,
+    ) -> None:
+        self._conn = conn
+        self._sql = sql
+        self._params = params
+        self._rowcount = _rowcount
+
+    @property
+    def rowcount(self) -> int:
+        """Number of rows affected by the last DML statement.
+
+        Matches ``aiosqlite.Cursor.rowcount`` behaviour: returns the count for
+        INSERT/UPDATE/DELETE, and -1 for SELECT proxies (query not yet run).
+        """
+        return self._rowcount
+
+    async def fetchone(self) -> Any | None:
+        """Fetch the first row, or ``None`` if the result set is empty."""
+        return await self._conn.fetchrow(self._sql, *self._params)
+
+    async def fetchall(self) -> list[Any]:
+        """Fetch all rows."""
+        return await self._conn.fetch(self._sql, *self._params)
 
 
 class AsyncpgConnection:
@@ -106,24 +231,40 @@ class AsyncpgConnection:
     # ------------------------------------------------------------------
 
     async def execute(self, sql: str, params: tuple[Any, ...] | list[Any] = ()) -> Any:
-        """Execute *sql* with *params* and return the status string.
+        """Execute *sql* with *params* and return a cursor-like proxy.
+
+        Returns a ``_PgCursorProxy`` so that callers using the SQLite cursor
+        pattern (``cur = await conn.execute(sql); await cur.fetchone()``) work
+        transparently.  For non-SELECT statements the side-effect runs
+        immediately; callers that ignore the return value are unaffected.
 
         Args:
             sql: SQL statement (``?`` placeholders allowed).
             params: Positional parameters.
 
         Returns:
-            The asyncpg command status string (e.g. ``"INSERT 0 1"``).
+            A ``_PgCursorProxy`` whose ``.fetchone()`` / ``.fetchall()``
+            execute the query against asyncpg.
         """
         translated = _translate_sql(sql)
         _t0 = time.monotonic()
         try:
-            result = await self._conn.execute(translated, *params)
+            stripped = translated.lstrip().upper()
+            if not stripped.startswith("SELECT") and not stripped.startswith("WITH"):
+                # Non-SELECT: run immediately for side-effect, return DML proxy with rowcount.
+                # asyncpg returns a status string like "DELETE 5" / "UPDATE 3" / "INSERT 0 1".
+                status = await self._conn.execute(translated, *params)
+                m.observe(m.PG_POOL_QUERY_MS, (time.monotonic() - _t0) * 1000.0)
+                try:
+                    _rc = int(str(status).rsplit(" ", 1)[-1])
+                except (ValueError, AttributeError):
+                    _rc = 0
+                return _PgCursorProxy(self._conn, "SELECT 1 WHERE FALSE", (), _rowcount=_rc)
+            m.observe(m.PG_POOL_QUERY_MS, (time.monotonic() - _t0) * 1000.0)
         except Exception:
             m.inc(m.PG_POOL_ERRORS_TOTAL)
             raise
-        m.observe(m.PG_POOL_QUERY_MS, (time.monotonic() - _t0) * 1000.0)
-        return result
+        return _PgCursorProxy(self._conn, translated, tuple(params))
 
     async def executemany(self, sql: str, params: list[tuple[Any, ...]] | list[list[Any]]) -> None:
         """Execute *sql* once per row in *params*.
@@ -181,18 +322,40 @@ class AsyncpgConnection:
         m.observe(m.PG_POOL_QUERY_MS, (time.monotonic() - _t0) * 1000.0)
         return result
 
+    async def fetchval(self, sql: str, params: tuple[Any, ...] | list[Any] = ()) -> Any | None:
+        """Execute *sql* and return the first column of the first row.
+
+        Used for ``INSERT … RETURNING id`` and similar single-value queries.
+
+        Args:
+            sql: SQL statement (``?`` placeholders allowed).
+            params: Positional parameters.
+
+        Returns:
+            The scalar value from column 0 of the first row, or ``None``.
+        """
+        translated = _translate_sql(sql)
+        _t0 = time.monotonic()
+        try:
+            result = await self._conn.fetchval(translated, *params)
+        except Exception:
+            m.inc(m.PG_POOL_ERRORS_TOTAL)
+            raise
+        m.observe(m.PG_POOL_QUERY_MS, (time.monotonic() - _t0) * 1000.0)
+        return result
+
     async def executescript(self, script: str) -> None:
         """Execute a multi-statement SQL script (DDL).
 
-        asyncpg does not have a native ``executescript``.  We split on ``;``
-        and execute each non-empty statement individually.
+        asyncpg supports multi-statement scripts natively when ``execute()``
+        is called without bind parameters.  We pass the entire script as a
+        single call so that ``$$``-quoted PL/pgSQL blocks, ``DO`` statements,
+        and comment sections are handled correctly by the server parser.
 
         Args:
             script: One or more SQL statements separated by ``;``.
         """
-        statements = [s.strip() for s in script.split(";") if s.strip()]
-        for stmt in statements:
-            await self._conn.execute(stmt)
+        await self._conn.execute(script)
 
     # ------------------------------------------------------------------
     # Pass-through helpers used by aiosqlite-style callers

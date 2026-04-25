@@ -682,7 +682,7 @@ async def _handle_index(arguments: dict) -> list[TextContent]:
         if denied:
             return [TextContent(type="text", text=denied)]
 
-    index_text = build_namespace_index(namespace, agent_ids=[agent_id] if agent_id else None)
+    index_text = await build_namespace_index(namespace, agent_ids=[agent_id] if agent_id else None)
     return [TextContent(type="text", text=index_text)]
 
 

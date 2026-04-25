@@ -28,10 +28,15 @@ from archivist.core.config import (
     ADAPTIVE_VECTOR_LIMIT_ENABLED,
     ADAPTIVE_VECTOR_LIMIT_MULTIPLIER,
     ADAPTIVE_VECTOR_MIN_RESULTS,
+    AUTO_COMPRESS_ENABLED,
+    AUTO_COMPRESS_THRESHOLD,
     BM25_ENABLED,
     BM25_RESCUE_ENABLED,
     BM25_RESCUE_MAX_SLOTS,
     BM25_RESCUE_MIN_SCORE_RATIO,
+    CONTEXT_L0_BUDGET_SHARE,
+    CONTEXT_MIN_FULL_RESULTS,
+    CONTEXT_PACK_POLICY,
     CROSS_AGENT_MAX_SHARE,
     DYNAMIC_THRESHOLD_ENABLED,
     GRAPH_RETRIEVAL_ENABLED,
@@ -67,6 +72,7 @@ from archivist.core.result_types import ResultCandidate
 from archivist.core.trajectory import get_outcome_adjustments
 from archivist.features.embeddings import embed_batch, embed_text
 from archivist.features.llm import llm_query
+from archivist.retrieval.context_packer import pack_context
 from archivist.retrieval.memory_fusion import dedupe_vector_hits
 from archivist.retrieval.query_classifier import SUBCATEGORY_TO_TOPIC, classify_query_full
 from archivist.retrieval.query_expansion import expand_query
@@ -653,7 +659,7 @@ async def recursive_retrieve(
 
     if QUERY_CLASSIFICATION_ENABLED and not memory_type:
         if namespace:
-            stage0_inventory = get_inventory(namespace)
+            stage0_inventory = await get_inventory(namespace)
         auto_type, auto_subcategory = await classify_query_full(
             query,
             inventory=stage0_inventory,
@@ -739,8 +745,17 @@ async def recursive_retrieve(
             result_count=len(out.get("sources", [])),
             cache_hit=True,
             duration_ms=elapsed,
+            tokens_returned=out.get("retrieval_trace", {})
+            .get("context_status", {})
+            .get("result_tokens_approx"),
+            tokens_naive=None,
+            savings_pct=out.get("retrieval_trace", {})
+            .get("context_status", {})
+            .get("token_savings_pct"),
+            pack_policy=out.get("retrieval_trace", {})
+            .get("context_status", {})
+            .get("pack_policy", ""),
         )
-        out["cache_hit"] = True
         m.inc(m.CACHE_HIT)
         m.inc(m.SEARCH_TOTAL)
         m.observe(m.SEARCH_DURATION, elapsed)
@@ -760,12 +775,14 @@ async def recursive_retrieve(
         if agent_ids:
             _seen_mem = set()
             for aid in agent_ids:
-                for rh in lookup_needle_tokens(query, namespace=namespace, agent_id=aid):
+                for rh in await lookup_needle_tokens(query, namespace=namespace, agent_id=aid):
                     if rh["memory_id"] not in _seen_mem:
                         _seen_mem.add(rh["memory_id"])
                         _raw_registry.append(rh)
         else:
-            _raw_registry = lookup_needle_tokens(query, namespace=namespace, agent_id=agent_id)
+            _raw_registry = await lookup_needle_tokens(
+                query, namespace=namespace, agent_id=agent_id
+            )
 
         if _raw_registry:
             m.inc(m.NEEDLE_REGISTRY_HITS, {"namespace": namespace}, value=len(_raw_registry))
@@ -1165,7 +1182,7 @@ async def recursive_retrieve(
             coarse = ltr_rank_results(coarse)
             _ltr_used = True
         else:
-            coarse = apply_hotness_to_results(coarse)
+            coarse = await apply_hotness_to_results(coarse)
             coarse = apply_importance_to_results(coarse)
 
         # Stage 2: Threshold filter (Phase 1, dynamic v1.10)
@@ -1202,7 +1219,7 @@ async def recursive_retrieve(
                         TEMPORAL_DECAY_HALFLIFE_DAYS,
                         temporal_intent=temporal_intent,
                     )
-                wider_coarse = apply_hotness_to_results(wider_coarse)
+                wider_coarse = await apply_hotness_to_results(wider_coarse)
                 wider_coarse = apply_importance_to_results(wider_coarse)
                 wider_filtered = apply_retrieval_threshold(wider_coarse, effective_threshold)
                 filtered, _ = _merge_into_results(filtered, wider_filtered)
@@ -1295,7 +1312,7 @@ async def recursive_retrieve(
         filtered_ids = [str(r.get("id", "")) for r in filtered if r.get("id")]
         if filtered_ids:
             try:
-                adjustments = get_outcome_adjustments(filtered_ids)
+                adjustments = await get_outcome_adjustments(filtered_ids)
                 for r in filtered:
                     adj = adjustments.get(str(r.get("id", "")), 0.0)
                     if adj != 0.0:
@@ -1385,17 +1402,75 @@ async def recursive_retrieve(
     # Cap how many chunks we refine (per-request limit)
     enriched = enriched[:limit]
 
-    # If max_tokens specified, further cap by token budget
+    # If max_tokens specified, use tier-aware packing instead of greedy truncation.
+    _packed_ctx = None
     if max_tokens and max_tokens > 0:
-        budget = 0
-        capped = []
-        for r in enriched:
-            chunk_toks = count_tokens(select_tier(r, tier))
-            if budget + chunk_toks > max_tokens:
-                break
-            budget += chunk_toks
-            capped.append(r)
-        enriched = capped if capped else enriched[:1]
+        _packed_ctx = pack_context(
+            enriched,
+            max_tokens=max_tokens,
+            tier_policy=CONTEXT_PACK_POLICY,
+            l0_budget_share=CONTEXT_L0_BUDGET_SHARE,
+            min_full_results=CONTEXT_MIN_FULL_RESULTS,
+        )
+        enriched = _packed_ctx.sources
+
+    # Auto-compress hook (Phase 3): when over-budget AND enabled, compact the
+    # dropped content into a synthetic L1-tier result and inject it into enriched.
+    _compress_savings: int = 0
+    if (
+        AUTO_COMPRESS_ENABLED
+        and _packed_ctx is not None
+        and _packed_ctx.over_budget
+        and _packed_ctx.dropped_count > 0
+    ):
+        _budget_pct = (
+            round(_packed_ctx.total_tokens / _packed_ctx.budget_tokens * 100, 1)
+            if _packed_ctx.budget_tokens
+            else 0.0
+        )
+        if _budget_pct >= AUTO_COMPRESS_THRESHOLD * 100:
+            try:
+                from archivist.write.compaction import compact_flat
+
+                _overflow = enriched[_packed_ctx.dropped_count :]  # trailing dropped items
+                if not _overflow:
+                    # Fallback: compress the last N packed items when drop list is empty
+                    _n_compress = max(1, len(enriched) // 3)
+                    _overflow = enriched[-_n_compress:]
+
+                _overflow_pairs = [
+                    (
+                        str(r.get("id", r.get("qdrant_id", ""))),
+                        r.get("tier_text") or r.get("text", ""),
+                    )
+                    for r in _overflow
+                    if r.get("tier_text") or r.get("text")
+                ]
+                if _overflow_pairs:
+                    _compressed_text = await compact_flat(_overflow_pairs)
+                    _compress_savings = sum(len(p[1].split()) for p in _overflow_pairs) - len(
+                        _compressed_text.split()
+                    )
+                    _synthetic = {
+                        "id": "compressed_overflow",
+                        "score": 0.0,
+                        "text": _compressed_text,
+                        "tier_text": _compressed_text,
+                        "_packed_tier": "l1",
+                        "file_path": "compressed",
+                        "date": "",
+                        "agent_id": "",
+                        "memory_type": "compressed_summary",
+                        "_is_synthetic_compress": True,
+                    }
+                    enriched.append(_synthetic)
+                    logger.debug(
+                        "auto_compress: injected synthetic L1 from %d overflow items, ~%d tokens saved",
+                        len(_overflow_pairs),
+                        _compress_savings,
+                    )
+            except Exception as _ce:
+                logger.warning("auto_compress hook failed: %s", _ce)
 
     n_refine = len(enriched)
 
@@ -1403,18 +1478,42 @@ async def recursive_retrieve(
     if _micro_hits:
         m.inc(m.MICRO_CHUNK_HITS, {"namespace": namespace}, value=_micro_hits)
 
-    # Context-status signaling (v1.0, upgraded v1.1 with tokenizer)
-    result_tokens_approx = sum(count_tokens(select_tier(r, tier)) for r in enriched)
-    budget_tokens = max_tokens if max_tokens and max_tokens > 0 else None
-    if budget_tokens:
-        budget_used_pct = round(result_tokens_approx / budget_tokens * 100, 1)
+    # Context-status signaling — use packer metadata when available (v2.0)
+    if _packed_ctx is not None:
+        result_tokens_approx = _packed_ctx.total_tokens
+        budget_tokens: int | None = _packed_ctx.budget_tokens
+        budget_used_pct = (
+            round(result_tokens_approx / budget_tokens * 100, 1) if budget_tokens else 0.0
+        )
+        _over_budget = _packed_ctx.over_budget
+        _tier_distribution = _packed_ctx.tier_distribution
+        _token_savings_pct = _packed_ctx.token_savings_pct
+        _dropped_count = _packed_ctx.dropped_count
+        _naive_tokens: int | None = _packed_ctx.naive_tokens if _packed_ctx.naive_tokens else None
     else:
-        budget_used_pct = 0.0
+        result_tokens_approx = sum(count_tokens(select_tier(r, tier)) for r in enriched)
+        budget_tokens = max_tokens if max_tokens and max_tokens > 0 else None
+        budget_used_pct = (
+            round(result_tokens_approx / budget_tokens * 100, 1) if budget_tokens else 0.0
+        )
+        _over_budget = bool(budget_tokens and budget_used_pct >= 100)
+        _tier_distribution = {}
+        _token_savings_pct = 0.0
+        _dropped_count = 0
+        _naive_tokens = None
+
     _ctx_status = {
         "result_tokens_approx": result_tokens_approx,
         "budget_tokens": budget_tokens or "unlimited",
         "budget_used_pct": budget_used_pct,
         "tier": tier,
+        "over_budget": _over_budget,
+        "tier_distribution": _tier_distribution,
+        "token_savings_pct": _token_savings_pct,
+        "dropped_count": _dropped_count,
+        "pack_policy": CONTEXT_PACK_POLICY if _packed_ctx is not None else "none",
+        "auto_compressed": _compress_savings > 0,
+        "compress_savings_approx": _compress_savings,
         "hint": "compress" if budget_tokens and budget_used_pct > 80 else "ok",
     }
 
@@ -1427,11 +1526,13 @@ async def recursive_retrieve(
     )
 
     if not refine:
-        # Return tier-appropriate text in sources
+        # Return tier-appropriate text in sources (use packer text if already set)
         for r in enriched:
-            r["tier_text"] = select_tier(r, tier)
+            if "tier_text" not in r:
+                r["tier_text"] = select_tier(r, tier)
         no_refine = {
             "answer": "",
+            "over_budget": _over_budget,
             "sources": enriched[: min(10, limit)],
             "chunks_searched": n_coarse,
             "chunks_after_threshold": len(filtered),
@@ -1477,6 +1578,7 @@ async def recursive_retrieve(
     if not refined:
         no_rel = {
             "answer": "Found chunks but none were relevant after refinement.",
+            "over_budget": _over_budget,
             "sources": [],
             "chunks_searched": n_coarse,
             "chunks_after_threshold": len(filtered),
@@ -1529,6 +1631,7 @@ async def recursive_retrieve(
 
     final_result = {
         "answer": answer,
+        "over_budget": _over_budget,
         "sources": [
             {
                 "file": r["source"],
@@ -1570,6 +1673,10 @@ async def recursive_retrieve(
         result_count=len(refined),
         cache_hit=False,
         duration_ms=elapsed,
+        tokens_returned=result_tokens_approx,
+        tokens_naive=_naive_tokens,
+        savings_pct=_token_savings_pct if _token_savings_pct else None,
+        pack_policy=CONTEXT_PACK_POLICY if _packed_ctx is not None else "",
     )
     m.inc(m.SEARCH_TOTAL)
     m.inc(m.CACHE_MISS)
