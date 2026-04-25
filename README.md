@@ -43,6 +43,7 @@ Point any MCP client at `http://localhost:3100/mcp` — done. Your agents now ha
 
 | Capability | What you get |
 |------------|----------------|
+| **Dual database backends** | SQLite (default, zero-config) or PostgreSQL (`GRAPH_BACKEND=postgres`) — hot paths, backups, and tests work on both. See [docs/DOCKER.md](docs/DOCKER.md#postgresql-backend-production-grade). |
 | **Transactional outbox** | Optional `OUTBOX_ENABLED=true`: SQLite FTS, needle registry, `memory_points`, graph rows, and outbox events commit atomically; Qdrant work is drained by a background processor with retries. Default `false` keeps legacy inline Qdrant writes. |
 | **Hybrid retrieval** | Vector + BM25 fusion, graph augmentation, reranking, tiered context — see [How It Works](#how-it-works). |
 | **MCP tool surface** | 31 tools for search, storage, trajectories, skills, admin, cache — stable signatures. |
@@ -50,6 +51,10 @@ Point any MCP client at `http://localhost:3100/mcp` — done. Your agents now ha
 | **Active curation** | Background curator, queue, compaction, hotness — configurable. |
 
 ---
+
+## What's new in v2.2
+
+**PostgreSQL first-class backend** — all hot paths (`graph.py`, `fts_search.py`, `backup_manager.py`, schema init) now work equally on SQLite and Postgres. Switch with two env vars: `GRAPH_BACKEND=postgres` + `DATABASE_URL`. A `docker-compose.postgres.yml` overlay adds a managed `postgres:16-alpine` service for local use. `pg_dump`/`pg_restore` are used for backups automatically. SQL dialect differences (`INSERT OR IGNORE`, `INSERT OR REPLACE`, `COLLATE NOCASE`, `lastrowid`) are handled transparently. Dual-backend integration tests pass on both engines. See [`docs/DOCKER.md`](docs/DOCKER.md#postgresql-backend-production-grade) for full instructions.
 
 ## What's new in v2.1
 
@@ -730,7 +735,9 @@ Graceful degradation throughout. Vector search, BM25, graph lookup, and caching 
 <details>
 <summary><strong>How do I scale beyond a single instance?</strong></summary>
 
-Qdrant can be run as a cluster (see Qdrant docs). SQLite is the current bottleneck for horizontal scaling — all writes are serialized through a single `asyncio.Lock` and a single connection. This is a fundamental property of the SQLite backend (not a Phase 3 regression) and is fine for single-instance deployments with dozens of concurrent agents. For fleets exceeding ~50 concurrent writers, the upcoming PostgreSQL `GraphBackend` (v2.2 roadmap) eliminates this constraint via connection pooling and row-level locks. The `GraphBackend` and `VectorBackend` protocols introduced in Phase 3 make that swap mechanical.
+Qdrant can be run as a cluster (see Qdrant docs). SQLite is the bottleneck for horizontal scaling — all writes are serialized through a single `asyncio.Lock` and a single connection. This is fine for single-instance deployments with dozens of concurrent agents.
+
+For fleets exceeding ~50 concurrent writers, switch to the **PostgreSQL backend**: set `GRAPH_BACKEND=postgres` and `DATABASE_URL` in `.env`, then restart. Postgres MVCC handles concurrent writers natively via connection pooling — no global write lock. See [`docs/DOCKER.md#postgresql-backend`](docs/DOCKER.md#postgresql-backend-production-grade) for quickstart instructions.
 </details>
 
 <details>
@@ -781,8 +788,8 @@ Manual MCP and HTTP validation: [`QA_CHECKLIST.md`](QA_CHECKLIST.md). Full guide
 | Milestone | Status |
 |-----------|--------|
 | Phase 3 + 3.5 — transactional outbox, atomic SQLite + queued Qdrant | Shipped ([`docs/rearchitect_storage_phase3.md`](docs/rearchitect_storage_phase3.md)) |
+| **PostgreSQL first-class backend** — all hot paths, backup, tests, Docker | **Shipped (v2.2)** |
 | Pydantic config validation + stronger env validation | Planned |
-| PostgreSQL graph/outbox backend (protocols in place) | Planned |
 
 Full phased plan: [`docs/ROADMAP.md`](docs/ROADMAP.md).
 

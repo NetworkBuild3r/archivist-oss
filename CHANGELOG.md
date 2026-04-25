@@ -5,6 +5,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-04-24
+
+### Added
+
+- **PostgreSQL first-class backend** (`GRAPH_BACKEND=postgres`) — all storage hot paths, schema init, FTS, and backup tools now work equally on SQLite and PostgreSQL. Set `GRAPH_BACKEND=postgres` + `DATABASE_URL` to switch; SQLite remains the default and is unaffected.
+- **`docker-compose.postgres.yml`** — Compose overlay that starts a `postgres:16-alpine` service, sets `GRAPH_BACKEND=postgres`, and wires `DATABASE_URL` automatically. Provides `PG_USER/PASSWORD/DB/PORT/POOL_MIN/POOL_MAX` variables.
+- **`pg_dump` / `pg_restore` backup** (`backup_manager.py`) — `archivist_backup` and `archivist_restore` detect the active backend and use `pg_dump --format=custom` / `pg_restore --clean` for Postgres. Snapshot manifests now include `graph_backend`.
+- **`_translate_sql()`** in `asyncpg_backend.py` — transparent SQLite→Postgres SQL rewriting: `INSERT OR IGNORE` → `ON CONFLICT DO NOTHING`, `INSERT OR REPLACE` → `ON CONFLICT DO UPDATE SET`, `COLLATE NOCASE` stripped (Postgres uses `CITEXT`).
+- **`fetchval()` on both connection wrappers** — `AsyncpgConnection` and `_WrappedSQLiteConn` both expose `fetchval()` for scalar-result queries (e.g. `INSERT … RETURNING id`).
+- **Postgres-aware schema init** — `init_schema_async()` loads `schema_postgres.sql` for Postgres; `init_schema()`, `_migrate_schema()`, `_migrate_entity_unique_constraint()`, `_init_fts5()`, and `schema_guard()` all skip when Postgres is active.
+- **`tests/integration/storage/test_dual_backend.py`** — parametrized dual-backend integration tests that run the canonical graph operation suite against both SQLite (always) and Postgres (skipped when `POSTGRES_TEST_DSN` is unset).
+- **16 new SQL-translation unit tests** in `tests/unit/storage/test_backends.py` covering all `_translate_sql()` transformations and `fetchval()` contracts.
+- **Postgres section in `docs/DOCKER.md`** — compose quickstart, external-Postgres instructions, schema comparison table, backup notes, and integration-test instructions.
+- **`.env.example` Postgres variables** — documented `GRAPH_BACKEND`, `DATABASE_URL`, `PG_POOL_MIN/MAX`, and the `docker-compose.postgres.yml` helper variables.
+
+### Changed
+
+- All formerly-synchronous `get_db()` callers across `skills.py`, `trajectory.py`, `curator_queue.py`, `curator.py`, `metrics.py`, `dashboard.py`, and `compressed_index.py` are now `async def` using `async with pool.read()/write()`.
+- `graph.py` `upsert_entity()` and `add_fact()` use `conn.fetchval("… RETURNING id")` on Postgres and `cur.lastrowid` on SQLite.
+- `README.md` — added "Dual database backends" to the features table, updated the scaling FAQ, added v2.2 release note, and marked the PostgreSQL roadmap milestone as shipped.
+
 ## [2.1.0] - 2026-04-17
 
 ### Added
