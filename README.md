@@ -7,7 +7,7 @@
 Hybrid retrieval · token-budgeted context · knowledge graph · RBAC · active curation — one MCP endpoint.</p>
 
 <p align="center">
-  <a href="#quick-start"><strong>Quick Start</strong></a> · <a href="#top-tier-answer-finder"><strong>Answer Finder</strong></a> · <a href="#features-at-a-glance"><strong>Features</strong></a> · <a href="#architecture-deep-dive"><strong>Architecture</strong></a> · <a href="#benchmarks"><strong>Benchmarks</strong></a> · <a href="#quality-assurance--testing"><strong>QA</strong></a> · <a href="#mcp-tools-40"><strong>40 MCP Tools</strong></a> · <a href="#configuration-reference"><strong>Config</strong></a> · <a href="docs/ROADMAP.md"><strong>Roadmap</strong></a> · <a href="#development"><strong>Development</strong></a>
+  <a href="#quick-start"><strong>Quick Start</strong></a> · <a href="#top-tier-answer-finder"><strong>Answer Finder</strong></a> · <a href="#features-at-a-glance"><strong>Features</strong></a> · <a href="#architecture-deep-dive"><strong>Architecture</strong></a> · <a href="#benchmarks"><strong>Benchmarks</strong></a> · <a href="#quality-assurance--testing"><strong>QA</strong></a> · <a href="#mcp-tools-41"><strong>41 MCP Tools</strong></a> · <a href="#configuration-reference"><strong>Config</strong></a> · <a href="docs/ROADMAP.md"><strong>Roadmap</strong></a> · <a href="#development"><strong>Development</strong></a>
 </p>
 
 <p align="center">
@@ -142,7 +142,7 @@ await archivist_receive_handoff(
 | **Dual database backends** | SQLite (default, zero-config) or PostgreSQL (`GRAPH_BACKEND=postgres`) — hot paths, backups, and tests work on both. See [docs/DOCKER.md](docs/DOCKER.md#postgresql-backend-production-grade). |
 | **Transactional outbox** | Optional `OUTBOX_ENABLED=true`: SQLite/Postgres FTS, needle registry, `memory_points`, graph rows, and outbox events commit atomically; Qdrant work is drained by a background processor with retries. Default `false` keeps legacy inline Qdrant writes. |
 | **Hybrid retrieval** | Vector + BM25 fusion, graph augmentation, hotness-weighted FTS, tier-aware packing, reranking — see [How It Works](#how-it-works). |
-| **MCP tool surface** | 40 tools for search, storage, trajectories, skills, admin, cache, context, handoff, and docs — stable signatures. |
+| **MCP tool surface** | 41 tools for search, storage, trajectories, skills, admin, cache, context, handoff, and docs — stable signatures. |
 | **RBAC** | Namespace-level ACLs via optional `namespaces.yaml`. |
 | **Active curation** | Background curator, queue, compaction, hotness — configurable. |
 

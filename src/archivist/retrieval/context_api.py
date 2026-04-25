@@ -40,7 +40,7 @@ class ContextChunk:
     memory_id: str
     text: str
     score: float
-    tier: str          # 'l0' | 'l1' | 'l2' | 'ephemeral'
+    tier: str  # 'l0' | 'l1' | 'l2' | 'ephemeral'
     file_path: str
     date: str
     agent_id: str
@@ -235,7 +235,11 @@ async def get_relevant_context(
     if include_tips:
         try:
             tip_rows = await search_tips(agent_id=agent_id, limit=5)
-            tips = [r.get("content") or r.get("tip", "") for r in tip_rows if r.get("content") or r.get("tip")]
+            tips = [
+                r.get("content") or r.get("tip", "")
+                for r in tip_rows
+                if r.get("content") or r.get("tip")
+            ]
         except Exception as e:
             logger.debug("tips fetch failed: %s", e)
 
@@ -352,12 +356,11 @@ async def create_handoff_packet(
         from archivist.core.trajectory import _ensure_trajectory_schema
 
         _ensure_trajectory_schema()
-        async with pool.read() as conn:
-            rows = await conn.fetchall(
-                "SELECT task_description FROM trajectories "
-                "WHERE agent_id=? AND outcome='in_progress' ORDER BY created_at DESC LIMIT 10",
-                (agent_id,),
-            )
+        rows = await pool.fetchall(
+            "SELECT task_description FROM trajectories "
+            "WHERE agent_id=? AND outcome='in_progress' ORDER BY created_at DESC LIMIT 10",
+            (agent_id,),
+        )
         active_goals = [r["task_description"] for r in rows if r["task_description"]]
     except Exception as e:
         logger.debug("handoff active_goals failed: %s", e)
@@ -366,17 +369,20 @@ async def create_handoff_packet(
     open_questions: list[str] = []
     try:
         tip_rows = await search_tips(agent_id=agent_id, category="recovery", limit=10)
-        open_questions = [r.get("content") or r.get("tip", "") for r in tip_rows if r.get("content") or r.get("tip")]
+        open_questions = [
+            r.get("content") or r.get("tip", "")
+            for r in tip_rows
+            if r.get("content") or r.get("tip")
+        ]
     except Exception as e:
         logger.debug("handoff tips failed: %s", e)
 
     # --- 4. Top hotness memory IDs ---
     key_memory_ids: list[str] = []
     try:
-        async with pool.read() as conn:
-            rows = await conn.fetchall(
-                "SELECT memory_id FROM memory_hotness ORDER BY score DESC LIMIT 20",
-            )
+        rows = await pool.fetchall(
+            "SELECT memory_id FROM memory_hotness ORDER BY score DESC LIMIT 20",
+        )
         candidates = [r["memory_id"] for r in rows]
         scores = await get_hotness_scores(candidates)
         key_memory_ids = sorted(candidates, key=lambda mid: scores.get(mid, 0.0), reverse=True)[:10]
@@ -386,24 +392,23 @@ async def create_handoff_packet(
     # --- 5. Knowledge snapshot: top entities + facts ---
     knowledge_snapshot: dict = {"entities": [], "facts": []}
     try:
-        async with pool.read() as conn:
-            entity_rows = await conn.fetchall(
-                "SELECT name, entity_type, mention_count FROM entities "
-                "WHERE namespace=? OR namespace='global' "
-                "ORDER BY mention_count DESC LIMIT 15",
-                (namespace,),
-            )
-            knowledge_snapshot["entities"] = [
-                {"name": r["name"], "type": r["entity_type"], "mentions": r["mention_count"]}
-                for r in entity_rows
-            ]
-            fact_rows = await conn.fetchall(
-                "SELECT subject, predicate, object FROM facts "
-                "WHERE confidence >= 0.7 ORDER BY created_at DESC LIMIT 20",
-            )
-            knowledge_snapshot["facts"] = [
-                f"{r['subject']} {r['predicate']} {r['object']}" for r in fact_rows
-            ]
+        entity_rows = await pool.fetchall(
+            "SELECT name, entity_type, mention_count FROM entities "
+            "WHERE namespace=? OR namespace='global' "
+            "ORDER BY mention_count DESC LIMIT 15",
+            (namespace,),
+        )
+        knowledge_snapshot["entities"] = [
+            {"name": r["name"], "type": r["entity_type"], "mentions": r["mention_count"]}
+            for r in entity_rows
+        ]
+        fact_rows = await pool.fetchall(
+            "SELECT subject, predicate, object FROM facts "
+            "WHERE confidence >= 0.7 ORDER BY created_at DESC LIMIT 20",
+        )
+        knowledge_snapshot["facts"] = [
+            f"{r['subject']} {r['predicate']} {r['object']}" for r in fact_rows
+        ]
     except Exception as e:
         logger.debug("handoff knowledge_snapshot failed: %s", e)
 

@@ -315,10 +315,15 @@ CREATE TABLE IF NOT EXISTS retrieval_logs (
     result_count    INTEGER DEFAULT 0,
     cache_hit       INTEGER DEFAULT 0,
     duration_ms     INTEGER,
-    created_at      TEXT NOT NULL
+    created_at      TEXT NOT NULL,
+    tokens_returned INTEGER,
+    tokens_naive    INTEGER,
+    savings_pct     REAL,
+    pack_policy     TEXT DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_rl_agent ON retrieval_logs(agent_id);
 CREATE INDEX IF NOT EXISTS idx_rl_created ON retrieval_logs(created_at);
+CREATE INDEX IF NOT EXISTS idx_rl_pack_policy ON retrieval_logs(pack_policy);
 
 CREATE TABLE IF NOT EXISTS audit_log (
     id        TEXT PRIMARY KEY,

@@ -373,11 +373,16 @@ def _migrate_schema():
         ("memory_chunks", "ttl_at", "TEXT"),
         ("memory_chunks", "decay_rate", "REAL NOT NULL DEFAULT 0.0"),
         ("memory_hotness", "importance_signal", "REAL NOT NULL DEFAULT 0.5"),
+        # Phase 5 answer-finder: token savings in retrieval_logs
+        ("retrieval_logs", "tokens_returned", "INTEGER"),
+        ("retrieval_logs", "tokens_naive", "INTEGER"),
+        ("retrieval_logs", "savings_pct", "REAL"),
+        ("retrieval_logs", "pack_policy", "TEXT DEFAULT " + "''"),
     ]
     # needle_registry may not exist yet (schema_guard creates it lazily),
     # so these ALTER TABLEs are attempted but silently skipped on failure.
     _needle_migrations = [
-        ("needle_registry", "actor_id", "TEXT NOT NULL DEFAULT ''"),
+        ("needle_registry", "actor_id", "TEXT NOT NULL DEFAULT " + "''"),
         ("needle_registry", "actor_type", "TEXT NOT NULL DEFAULT ''"),
     ]
     indexes = [
@@ -397,6 +402,8 @@ def _migrate_schema():
         # Phase 1 answer-finder: tier/importance indexes
         "CREATE INDEX IF NOT EXISTS idx_mc_importance ON memory_chunks(importance DESC)",
         "CREATE INDEX IF NOT EXISTS idx_mc_tier ON memory_chunks(tier_label)",
+        # Phase 5 answer-finder: pack_policy index on retrieval_logs
+        "CREATE INDEX IF NOT EXISTS idx_rl_pack_policy ON retrieval_logs(pack_policy)",
     ]
     with GRAPH_WRITE_LOCK:
         conn = get_db()

@@ -149,9 +149,7 @@ class SessionStore:
         prefix = (agent_id, session_id)
         with self._lock:
             return [
-                k[2]
-                for k, e in self._data.items()
-                if k[:2] == prefix and not e.is_expired(now)
+                k[2] for k, e in self._data.items() if k[:2] == prefix and not e.is_expired(now)
             ]
 
     def size(self) -> int:

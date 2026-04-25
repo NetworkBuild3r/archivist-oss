@@ -272,8 +272,13 @@ async def get_token_savings_stats(agent_id: str = "", window_days: int = 7) -> d
         )
         stats["per_policy"] = [dict(r) for r in policy_rows]
 
-    for key in ("avg_savings_pct", "min_savings_pct", "max_savings_pct",
-                "avg_tokens_returned", "avg_tokens_naive"):
+    for key in (
+        "avg_savings_pct",
+        "min_savings_pct",
+        "max_savings_pct",
+        "avg_tokens_returned",
+        "avg_tokens_naive",
+    ):
         if stats.get(key) is not None:
             stats[key] = round(float(stats[key]), 1)
     for key in ("total_tokens_saved", "total_tokens_returned", "total_tokens_naive"):

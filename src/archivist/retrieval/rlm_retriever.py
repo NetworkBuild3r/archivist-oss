@@ -745,10 +745,16 @@ async def recursive_retrieve(
             result_count=len(out.get("sources", [])),
             cache_hit=True,
             duration_ms=elapsed,
-            tokens_returned=out.get("retrieval_trace", {}).get("context_status", {}).get("result_tokens_approx"),
+            tokens_returned=out.get("retrieval_trace", {})
+            .get("context_status", {})
+            .get("result_tokens_approx"),
             tokens_naive=None,
-            savings_pct=out.get("retrieval_trace", {}).get("context_status", {}).get("token_savings_pct"),
-            pack_policy=out.get("retrieval_trace", {}).get("context_status", {}).get("pack_policy", ""),
+            savings_pct=out.get("retrieval_trace", {})
+            .get("context_status", {})
+            .get("token_savings_pct"),
+            pack_policy=out.get("retrieval_trace", {})
+            .get("context_status", {})
+            .get("pack_policy", ""),
         )
         m.inc(m.CACHE_HIT)
         m.inc(m.SEARCH_TOTAL)
@@ -1433,15 +1439,18 @@ async def recursive_retrieve(
                     _overflow = enriched[-_n_compress:]
 
                 _overflow_pairs = [
-                    (str(r.get("id", r.get("qdrant_id", ""))), r.get("tier_text") or r.get("text", ""))
+                    (
+                        str(r.get("id", r.get("qdrant_id", ""))),
+                        r.get("tier_text") or r.get("text", ""),
+                    )
                     for r in _overflow
                     if r.get("tier_text") or r.get("text")
                 ]
                 if _overflow_pairs:
                     _compressed_text = await compact_flat(_overflow_pairs)
-                    _compress_savings = sum(
-                        len(p[1].split()) for p in _overflow_pairs
-                    ) - len(_compressed_text.split())
+                    _compress_savings = sum(len(p[1].split()) for p in _overflow_pairs) - len(
+                        _compressed_text.split()
+                    )
                     _synthetic = {
                         "id": "compressed_overflow",
                         "score": 0.0,
@@ -1473,7 +1482,9 @@ async def recursive_retrieve(
     if _packed_ctx is not None:
         result_tokens_approx = _packed_ctx.total_tokens
         budget_tokens: int | None = _packed_ctx.budget_tokens
-        budget_used_pct = round(result_tokens_approx / budget_tokens * 100, 1) if budget_tokens else 0.0
+        budget_used_pct = (
+            round(result_tokens_approx / budget_tokens * 100, 1) if budget_tokens else 0.0
+        )
         _over_budget = _packed_ctx.over_budget
         _tier_distribution = _packed_ctx.tier_distribution
         _token_savings_pct = _packed_ctx.token_savings_pct
@@ -1482,9 +1493,11 @@ async def recursive_retrieve(
     else:
         result_tokens_approx = sum(count_tokens(select_tier(r, tier)) for r in enriched)
         budget_tokens = max_tokens if max_tokens and max_tokens > 0 else None
-        budget_used_pct = round(result_tokens_approx / budget_tokens * 100, 1) if budget_tokens else 0.0
+        budget_used_pct = (
+            round(result_tokens_approx / budget_tokens * 100, 1) if budget_tokens else 0.0
+        )
         _over_budget = bool(budget_tokens and budget_used_pct >= 100)
-        _tier_distribution: dict[str, int] = {}
+        _tier_distribution = {}
         _token_savings_pct = 0.0
         _dropped_count = 0
         _naive_tokens = None
