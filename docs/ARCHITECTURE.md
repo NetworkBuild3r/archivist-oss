@@ -7,11 +7,11 @@ Archivist is a memory service for multi-agent fleets. It combines:
 | Layer | Technology | Role |
 |-------|------------|------|
 | **Vectors** | Qdrant | Semantic search over hierarchical chunks |
-| **Structured state** | SQLite (aiosqlite pool) | Knowledge graph, FTS5 BM25, needle registry, audit, trajectories, skills, outbox |
-| **Durability boundary** | Transactional outbox + `MemoryTransaction` | Atomic commit of SQLite artefacts with queued Qdrant work (Phase 3 + 3.5) |
+| **Structured state** | SQLite (default) or PostgreSQL (`GRAPH_BACKEND=postgres`) | Knowledge graph, FTS, needle registry, audit, trajectories, skills, outbox |
+| **Durability boundary** | Transactional outbox + `MemoryTransaction` | Atomic commit of graph/FTS artefacts with queued Qdrant work (Phase 3 + 3.5) |
 | **Source of truth (optional)** | File system | Markdown under `MEMORY_ROOT` for ingestion |
 
-Retrieval uses the **RLM** (recursive layered memory) pipeline in `rlm_retriever.py`. Writes on hot paths use **`MemoryTransaction`** so FTS5, needle rows, `memory_points`, entity/facts (where applicable), and outbox rows commit together when `OUTBOX_ENABLED=true`. See [`docs/rearchitect_storage_phase3.md`](rearchitect_storage_phase3.md) for the full design.
+Retrieval uses the **RLM** (recursive layered memory) pipeline in `rlm_retriever.py`. Writes on hot paths use **`MemoryTransaction`** so FTS, needle rows, `memory_points`, entity/facts (where applicable), and outbox rows commit together when `OUTBOX_ENABLED=true`. The graph backend is selected at startup via `GRAPH_BACKEND` (`sqlite` default, `postgres` for production scale). See [`docs/rearchitect_storage_phase3.md`](rearchitect_storage_phase3.md) for the outbox design and [`docs/DOCKER.md`](DOCKER.md) for Postgres setup.
 
 ---
 
@@ -105,7 +105,7 @@ Code lives under `src/archivist/`.
 | Area | Modules |
 |------|---------|
 | **App** | `app/main.py`, `app/mcp_server.py`, `app/handlers/*.py` — MCP tools, REST, startup |
-| **Storage** | `storage/graph.py`, `storage/sqlite_pool.py`, `storage/fts_search.py`, `storage/transaction.py`, `storage/outbox.py`, `storage/backends.py`, `storage/collection_router.py` |
+| **Storage** | `storage/graph.py`, `storage/sqlite_pool.py`, `storage/asyncpg_backend.py`, `storage/backend_factory.py`, `storage/fts_search.py`, `storage/transaction.py`, `storage/outbox.py`, `storage/backends.py`, `storage/collection_router.py`, `storage/backup_manager.py` |
 | **Retrieval** | `retrieval/rlm_retriever.py`, `retrieval/graph_retrieval.py`, `retrieval/reranker.py` |
 | **Write** | `write/indexer.py`, `write/chunking.py` |
 | **Lifecycle** | `lifecycle/memory_lifecycle.py`, `lifecycle/merge.py`, `lifecycle/cascade.py`, `lifecycle/curator_queue.py` |
@@ -138,15 +138,15 @@ Code lives under `src/archivist/`.
 
 Additional fields (`source_memory_id`, `is_reverse_hyde`, `thought_type`, actor provenance, etc.) are documented in [`docs/REFERENCE.md`](REFERENCE.md) and storage skills.
 
-### SQLite (representative)
+### SQLite / PostgreSQL (representative)
 
 - **Graph** — `entities`, `relationships`, `facts`
-- **Search** — `memory_chunks` (and FTS5 virtual tables), `needle_registry`
+- **Search** — `memory_chunks` (and FTS5 / `tsvector` virtual tables / GIN indexes), `needle_registry`
 - **Routing** — `memory_points` (primary / micro_chunk / reverse_hyde linkage)
 - **Outbox** — `outbox` (`id`, `event_type`, `payload`, `status`, `retry_count`, …)
 - **Operations** — `audit_log`, `memory_versions`, `curator_queue`, `retrieval_logs`, `trajectories`, `skills`, …
 
-Full table inventory: see the Archivist storage-schema skill (`.cursor/skills/archivist-storage-schema/SKILL.md`) when working on schema changes.
+Full table inventory: see the Archivist storage-schema skill (`.cursor/skills/archivist-storage-schema/SKILL.md`) when working on schema changes. Postgres DDL: [`storage/schema_postgres.sql`](../src/archivist/storage/schema_postgres.sql).
 
 ---
 
@@ -155,7 +155,8 @@ Full table inventory: see the Archivist storage-schema skill (`.cursor/skills/ar
 | Document | Content |
 |----------|---------|
 | [`rearchitect_storage_phase3.md`](rearchitect_storage_phase3.md) | Outbox design, failure modes, config, tests |
-| [`QA.md`](QA.md) | Test commands including `tests/qa/` |
+| [`DOCKER.md`](DOCKER.md) | Postgres backend quickstart, schema comparison, backup notes |
+| [`QA.md`](QA.md) | Test commands including `tests/qa/` and Postgres integration tests |
 | [`ROADMAP.md`](ROADMAP.md) | Product direction |
 
 ---

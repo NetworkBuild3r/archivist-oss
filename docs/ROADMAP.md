@@ -1,10 +1,10 @@
 # Archivist multi-agent memory — roadmap (April 2026)
 
-**Status** — Retrieval foundation is solid (v2 pipeline complete). Semantic chunking (Phase 5) is done. **Phase 3 + 3.5 (transactional outbox + `MemoryTransaction` + conn-passing shims)** is **complete**: see [`docs/rearchitect_storage_phase3.md`](rearchitect_storage_phase3.md) and [`CHANGELOG.md`](../CHANGELOG.md) **v2.1.0**.
+**Status** — Retrieval foundation is solid (v2 pipeline complete). Semantic chunking (Phase 5) is done. **Phase 3 + 3.5 (transactional outbox + `MemoryTransaction` + conn-passing shims)** is **complete**: see [`docs/rearchitect_storage_phase3.md`](rearchitect_storage_phase3.md) and [`CHANGELOG.md`](../CHANGELOG.md) **v2.1.0**. **PostgreSQL first-class backend** is **complete** (v2.2.0): all hot paths, schema init, FTS, backups, and Docker wiring work on both SQLite and Postgres — see [`CHANGELOG.md`](../CHANGELOG.md) **v2.2.0** and [`docs/DOCKER.md`](DOCKER.md).
 
 **Goal** — Remain the most **trustworthy and production-ready** open multi-agent memory layer in 2026: observable, RBAC-aware, and safe to run under fleet load.
 
-**Next milestones (engineering)** — **Pydantic v2–style config validation** (single source of truth for env + invalid combinations) and a **PostgreSQL-backed graph/outbox path** via the existing `GraphBackend` / pool abstraction (no MCP signature changes).
+**Next milestones (engineering)** — **Pydantic v2–style config validation** (single source of truth for env + invalid combinations).
 
 ---
 
@@ -93,6 +93,7 @@ Set `MCP_SSE_ENABLED=false` once all clients are on the modern transport to recl
 - [x] Phase 6 — Provenance & actor-aware memory
 - [x] Phase 6.5 — OpenClaw compatibility fix
 - [x] Phase 3 + 3.5 — Transactional outbox + atomic SQLite writes (see `docs/rearchitect_storage_phase3.md`)
+- [x] PostgreSQL first-class backend — v2.2.0 (see `CHANGELOG.md`)
 - [ ] Phase 7 — Multi-tier memory + checkpointing
 - [ ] Phase 8 — Intelligent Lifecycle Management
 - [ ] Phase 9 — Observability & Control Plane
@@ -112,5 +113,5 @@ Expected console flow: `Encoding Batch …` → tqdm batch bar → nDCG / MAP / 
 
 _Add new rows when you change default embed models, BEIR limits, or the thin harness._
 
-**Last Updated**: April 14, 2026
+**Last Updated**: April 25, 2026
 **Goal**: Become the most trustworthy, observable, and production-ready multi-agent memory system in 2026.

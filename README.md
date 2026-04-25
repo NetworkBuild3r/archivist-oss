@@ -7,7 +7,7 @@
 Hybrid retrieval, knowledge graph, RBAC, active curation — one MCP endpoint.</p>
 
 <p align="center">
-  <a href="#quick-start"><strong>Quick Start</strong></a> · <a href="#features-at-a-glance"><strong>Features</strong></a> · <a href="#architecture-deep-dive"><strong>Architecture</strong></a> · <a href="#benchmarks"><strong>Benchmarks</strong></a> · <a href="#quality-assurance--testing"><strong>QA</strong></a> · <a href="#mcp-tools-31"><strong>31 MCP Tools</strong></a> · <a href="#configuration-reference"><strong>Config</strong></a> · <a href="docs/ROADMAP.md"><strong>Roadmap</strong></a> · <a href="#development"><strong>Development</strong></a>
+  <a href="#quick-start"><strong>Quick Start</strong></a> · <a href="#features-at-a-glance"><strong>Features</strong></a> · <a href="#architecture-deep-dive"><strong>Architecture</strong></a> · <a href="#benchmarks"><strong>Benchmarks</strong></a> · <a href="#quality-assurance--testing"><strong>QA</strong></a> · <a href="#mcp-tools-37"><strong>37 MCP Tools</strong></a> · <a href="#configuration-reference"><strong>Config</strong></a> · <a href="docs/ROADMAP.md"><strong>Roadmap</strong></a> · <a href="#development"><strong>Development</strong></a>
 </p>
 
 <p align="center">
@@ -15,7 +15,7 @@ Hybrid retrieval, knowledge graph, RBAC, active curation — one MCP endpoint.</
   <a href="https://github.com/NetworkBuild3r/archivist-oss"><img src="https://img.shields.io/github/stars/NetworkBuild3r/archivist-oss?style=social" alt="GitHub stars" /></a>
   <img src="https://img.shields.io/badge/python-3.12%20%7C%203.13-blue?logo=python&logoColor=white" alt="Python 3.12+" />
   <img src="https://img.shields.io/badge/docker-compose-ready-2496ED?logo=docker&logoColor=white" alt="Docker Compose" />
-  <img src="https://img.shields.io/badge/version-v2.1.0-brightgreen" alt="Version" />
+  <img src="https://img.shields.io/badge/version-v2.2.0-brightgreen" alt="Version" />
   <img src="https://img.shields.io/badge/protocol-MCP-purple" alt="MCP" />
   <img src="https://img.shields.io/badge/models-OpenAI--compatible-orange" alt="Models" />
 </p>
@@ -44,9 +44,9 @@ Point any MCP client at `http://localhost:3100/mcp` — done. Your agents now ha
 | Capability | What you get |
 |------------|----------------|
 | **Dual database backends** | SQLite (default, zero-config) or PostgreSQL (`GRAPH_BACKEND=postgres`) — hot paths, backups, and tests work on both. See [docs/DOCKER.md](docs/DOCKER.md#postgresql-backend-production-grade). |
-| **Transactional outbox** | Optional `OUTBOX_ENABLED=true`: SQLite FTS, needle registry, `memory_points`, graph rows, and outbox events commit atomically; Qdrant work is drained by a background processor with retries. Default `false` keeps legacy inline Qdrant writes. |
+| **Transactional outbox** | Optional `OUTBOX_ENABLED=true`: SQLite/Postgres FTS, needle registry, `memory_points`, graph rows, and outbox events commit atomically; Qdrant work is drained by a background processor with retries. Default `false` keeps legacy inline Qdrant writes. |
 | **Hybrid retrieval** | Vector + BM25 fusion, graph augmentation, reranking, tiered context — see [How It Works](#how-it-works). |
-| **MCP tool surface** | 31 tools for search, storage, trajectories, skills, admin, cache — stable signatures. |
+| **MCP tool surface** | 37 tools for search, storage, trajectories, skills, admin, cache, and docs — stable signatures. |
 | **RBAC** | Namespace-level ACLs via optional `namespaces.yaml`. |
 | **Active curation** | Background curator, queue, compaction, hotness — configurable. |
 
@@ -113,8 +113,8 @@ Archivist combines three storage backends behind a single MCP endpoint:
 | Layer | Tech | Purpose |
 |-------|------|---------|
 | **Vector store** | Qdrant | Semantic similarity search over hierarchical chunks |
-| **Knowledge graph** | SQLite | Entity-relationship-fact triples with temporal tracking |
-| **Keyword index** | SQLite FTS5 | BM25 full-text search fused with vector results |
+| **Knowledge graph** | SQLite or PostgreSQL | Entity-relationship-fact triples with temporal tracking |
+| **Keyword index** | SQLite FTS5 / Postgres `tsvector` | BM25 full-text search fused with vector results |
 | **File system** | Markdown | Human-readable journal exports, file-watched ingestion |
 
 Every query flows through a **10-stage RLM (Recursive Layered Memory) pipeline:**
@@ -253,7 +253,7 @@ Multi-hop and broad synthesis are where Archivist's knowledge graph pays off mos
 | Feature | Archivist | Mem0 | Zep | Letta |
 |---------|-----------|------|-----|-------|
 | Hybrid search (vector + BM25) | Yes (0.7/0.3 fusion) | Vector only (free) | Graph-based | Vector |
-| Temporal knowledge graph | Yes (SQLite + FTS5) | Pro only ($249/mo) | Yes (Graphiti) | No |
+| Temporal knowledge graph | Yes (SQLite/Postgres + FTS) | Pro only ($249/mo) | Yes (Graphiti) | No |
 | Active curation (background) | Yes (LLM dedup, tip consolidation) | No | No | Self-managed |
 | Retention classes (pin/unpin) | Yes (ephemeral/standard/durable/permanent) | No | No | No |
 | Entity-anchored retrieval | Yes (guaranteed recall for known entities) | No | Partial | No |
@@ -311,7 +311,7 @@ This starts:
 
 ```bash
 curl http://localhost:3100/health
-# {"status": "ok", "service": "archivist", "version": "1.12.0"}
+# {"status": "ok", "service": "archivist", "version": "2.2.0"}
 ```
 
 ### 4. Connect your agents
@@ -323,7 +323,7 @@ http://localhost:3100/mcp
 
 Legacy SSE clients can continue using `http://localhost:3100/mcp/sse`.
 
-That's it. Your agents can now `archivist_store`, `archivist_search`, `archivist_recall`, and use all 30 tools.
+That's it. Your agents can now `archivist_store`, `archivist_search`, `archivist_recall`, and use all 37 tools.
 
 ### 5. Optional: add RBAC
 
@@ -397,9 +397,9 @@ Raw MD trees **do not scale**: they blow the context window, repeat facts, and d
 
 ---
 
-## MCP Tools (31)
+## MCP Tools (37)
 
-### Search & Retrieval (7)
+### Search & Retrieval (9)
 
 | Tool | What it does |
 |------|-------------|
@@ -410,14 +410,19 @@ Raw MD trees **do not scale**: they blow the context window, repeat facts, and d
 | `archivist_deref` | Fetch full L2 text for a memory by ID (drill-down after compact search) |
 | `archivist_index` | Compressed navigational index of a namespace (~500 tokens) |
 | `archivist_contradictions` | Surface contradicting facts about an entity across agents |
+| `archivist_entity_brief` | Structured knowledge card for an entity: all facts, relationships, retention class, mention count, timeline. Supports `as_of` for point-in-time views. |
+| `archivist_wake_up` | Bootstrap session context — agent identity, critical pinned facts, namespace overview in ~200 tokens. Call once at session start. |
 
-### Storage & Memory Management (3)
+### Storage & Memory Management (6)
 
 | Tool | What it does |
 |------|-------------|
 | `archivist_store` | Write a memory with entity extraction, conflict checks, LLM-adjudicated dedup |
+| `archivist_delete` | Soft-delete a memory by ID — hides from all search paths in ~5 ms, background hard-cascade |
 | `archivist_merge` | Merge conflicting memories (latest / concat / semantic / manual) |
 | `archivist_compress` | Archive memories → compact summaries (flat or structured Goal/Progress/Decisions/Next Steps) |
+| `archivist_pin` | Pin a memory or entity to retention class `permanent` so it is never forgotten |
+| `archivist_unpin` | Remove the permanent pin from a memory or entity |
 
 ### Trajectory & Feedback (5)
 
@@ -440,7 +445,7 @@ Raw MD trees **do not scale**: they blow the context window, repeat facts, and d
 | `archivist_skill_relate` | Create relations (similar_to, depend_on, compose_with, replaced_by) |
 | `archivist_skill_dependencies` | Skill dependency/relation graph |
 
-### Admin & Context Management (7)
+### Admin & Context Management (8)
 
 | Tool | What it does |
 |------|-------------|
@@ -451,6 +456,7 @@ Raw MD trees **do not scale**: they blow the context window, repeat facts, and d
 | `archivist_retrieval_logs` | Export/analyze retrieval pipeline execution traces |
 | `archivist_health_dashboard` | Single-pane health: memory counts, stale %, conflict rate, skills, cache |
 | `archivist_batch_heuristic` | Recommended batch size (1-10) from health signals |
+| `archivist_backup` | Create, list, restore, or delete memory snapshots (Qdrant + SQLite/Postgres). Supports `export_agent` / `import_agent` for agent migration. |
 
 ### Cache Management (2)
 
@@ -458,6 +464,12 @@ Raw MD trees **do not scale**: they blow the context window, repeat facts, and d
 |------|-------------|
 | `archivist_cache_stats` | Hot cache stats: entries per agent, TTL, hit rate |
 | `archivist_cache_invalidate` | Manual cache eviction by namespace, agent, or all |
+
+### Reference Docs (1)
+
+| Tool | What it does |
+|------|-------------|
+| `archivist_get_reference_docs` | Return the full tool skill reference from inside the server. Call on first connection or when unsure how to use a tool. Optionally pass `section` to filter to a heading. |
 
 > Full parameter schemas, types, defaults, and examples: [`docs/CURSOR_SKILL.md`](docs/CURSOR_SKILL.md)
 > Condensed reference table: [`docs/REFERENCE.md`](docs/REFERENCE.md)
@@ -504,7 +516,7 @@ graph TB
 
     subgraph Storage ["Storage"]
         Qdrant[("Qdrant\nvectors")]
-        SQLite[("SQLite\ngraph + FTS5 + outbox\n+ audit + skills")]
+        SQLite[("SQLite / Postgres\ngraph + FTS + outbox\n+ audit + skills")]
         Files[("Markdown\nMEMORY_ROOT")]
     end
 
@@ -606,9 +618,9 @@ The codebase is organized by domain:
 | `reverse_hyde_question` | text | The generated question (for debugging) |
 | `thought_type` | keyword | Semantic classification (decision/lesson/insight/...) |
 
-**SQLite tables (17):**
+**SQLite / PostgreSQL tables (23+):**
 
-`entities`, `relationships`, `facts`, `memory_chunks`, `memory_fts` (FTS5), `memory_fts_exact` (FTS5), `needle_registry`, `curator_state`, `audit_log`, `memory_versions`, `trajectories`, `tips`, `annotations`, `ratings`, `memory_outcomes`, `skills`, `skill_versions`, `skill_lessons`, `skill_events`, `retrieval_logs`, `curator_queue`, `memory_hotness`, `skill_relations`
+`entities`, `relationships`, `facts`, `memory_chunks`, `memory_fts` (FTS5 / tsvector), `memory_fts_exact` (FTS5 / tsvector), `needle_registry`, `curator_state`, `audit_log`, `memory_versions`, `trajectories`, `tips`, `annotations`, `ratings`, `memory_outcomes`, `skills`, `skill_versions`, `skill_lessons`, `skill_events`, `retrieval_logs`, `curator_queue`, `memory_hotness`, `skill_relations`, `outbox`
 
 ### Three-Layer Memory Hierarchy
 
@@ -643,6 +655,8 @@ All configuration is via environment variables. See [`.env.example`](.env.exampl
 | `QDRANT_URL` | `http://localhost:6333` | Qdrant endpoint |
 | `MEMORY_ROOT` | `/data/memories` | Directory watched for `.md` file ingestion |
 | `MCP_PORT` | `3100` | Server listen port |
+| `GRAPH_BACKEND` | `sqlite` | Database backend: `sqlite` (default) or `postgres` |
+| `DATABASE_URL` | *(empty)* | PostgreSQL DSN — required when `GRAPH_BACKEND=postgres` |
 
 ### Retrieval Tuning
 
@@ -755,7 +769,7 @@ The REST endpoints (`/admin/*`, `/health`, `/metrics`) work with plain HTTP. For
 <details>
 <summary><strong>How does the hybrid search work?</strong></summary>
 
-Vector search (Qdrant) and keyword search (SQLite FTS5 with BM25 scoring) run in parallel. Results are normalized to [0,1] and fused: `0.7 × vector_score + 0.3 × bm25_score` (configurable). This catches both semantically similar content and exact keyword matches that vector search might miss.
+Vector search (Qdrant) and keyword search (SQLite FTS5 or Postgres `tsvector` with BM25 scoring) run in parallel. Results are normalized to [0,1] and fused: `0.7 × vector_score + 0.3 × bm25_score` (configurable). This catches both semantically similar content and exact keyword matches that vector search might miss.
 </details>
 
 <details>
@@ -837,10 +851,10 @@ Archivist is integration and execution on top of public work from the agent-memo
 | [`tests/qa/README.md`](tests/qa/README.md) | QA package scope and pytest commands |
 | [`benchmarks/README.md`](benchmarks/README.md) | Thin LongMemEval + BEIR commands (reference benchmarks) |
 | [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) | Pipeline benchmark results, reproduction steps, competitive comparison |
-| [`docs/DOCKER.md`](docs/DOCKER.md) | Docker Compose stack, host vLLM + cloud LLM, volume overrides |
+| [`docs/DOCKER.md`](docs/DOCKER.md) | Docker Compose stack, PostgreSQL backend, host vLLM + cloud LLM, volume overrides |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Storage transaction model, module map, diagrams, historical release notes |
 | [`docs/rearchitect_storage_phase3.md`](docs/rearchitect_storage_phase3.md) | Phase 3 + 3.5 outbox design reference |
-| [`docs/CURSOR_SKILL.md`](docs/CURSOR_SKILL.md) | Full parameter schemas and examples for all 31 MCP tools |
+| [`docs/CURSOR_SKILL.md`](docs/CURSOR_SKILL.md) | Full parameter schemas and examples for all 37 MCP tools |
 | [`docs/REFERENCE.md`](docs/REFERENCE.md) | Condensed tool reference table |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | Phased roadmap and differentiation goals |
 | [`docs/INSPIRATION.md`](docs/INSPIRATION.md) | Credits, research lineage, ReMe comparison |

@@ -23,6 +23,26 @@ python -m pytest tests/qa/ -q --tb=no
 
 Details, markers, and optional chaos-only runs: [`tests/qa/README.md`](../tests/qa/README.md).
 
+### PostgreSQL integration tests
+
+Two integration test files exercise Postgres-specific behaviour and dual-backend parity. They require a live PostgreSQL database; set `POSTGRES_TEST_DSN` to enable them (otherwise they are skipped automatically).
+
+```bash
+# Start Postgres (Docker quickstart)
+docker run -d --name pg-test -e POSTGRES_USER=archivist -e POSTGRES_PASSWORD=archivist \
+  -e POSTGRES_DB=archivist_test -p 5432:5432 postgres:16-alpine
+
+# Run Postgres-specific integration tests
+POSTGRES_TEST_DSN="postgresql://archivist:archivist@localhost:5432/archivist_test" \
+  pytest tests/integration/storage/test_postgres_backend.py -v
+
+# Run dual-backend tests (SQLite always, Postgres when DSN set)
+POSTGRES_TEST_DSN="postgresql://archivist:archivist@localhost:5432/archivist_test" \
+  pytest tests/integration/storage/test_dual_backend.py -v
+```
+
+The dual-backend suite validates that `upsert_entity`, `add_fact`, `search_entities`, needle registry, and `fetchval` behave identically on both backends. Unit tests for SQL translation (`_translate_sql`) are always-run in `tests/unit/storage/test_backends.py`.
+
 ### Lint and types (local)
 
 ```bash
@@ -48,4 +68,4 @@ Chaos-oriented tests live in `tests/qa/test_chaos_fault_injection.py` (network b
 
 ## Storage architecture reference
 
-For the transactional boundary, outbox event types, and `conn=` shim pattern, see [`docs/rearchitect_storage_phase3.md`](rearchitect_storage_phase3.md) and [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) §Storage transaction model.
+For the transactional boundary, outbox event types, and `conn=` shim pattern, see [`docs/rearchitect_storage_phase3.md`](rearchitect_storage_phase3.md) and [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) §Storage transaction model. For the PostgreSQL backend, schema, and backup mechanics, see [`docs/DOCKER.md`](DOCKER.md) §PostgreSQL backend.

@@ -1,8 +1,8 @@
 # Archivist MCP tool reference
 
-Quick reference for **31** MCP tools exposed by the Archivist server. For full parameter schemas, defaults, and examples, see [`CURSOR_SKILL.md`](CURSOR_SKILL.md).
+Quick reference for **37** MCP tools exposed by the Archivist server. For full parameter schemas, defaults, and examples, see [`CURSOR_SKILL.md`](CURSOR_SKILL.md).
 
-## Search & Retrieval (7)
+## Search & Retrieval (9)
 
 | Tool | Purpose |
 |------|---------|
@@ -13,14 +13,19 @@ Quick reference for **31** MCP tools exposed by the Archivist server. For full p
 | `archivist_deref` | Dereference a memory by ID for full L2 detail (drill-down after L0/L1 search) |
 | `archivist_index` | Compressed navigational index of namespace knowledge (~500 tokens) |
 | `archivist_contradictions` | Surface contradicting facts about an entity across agents |
+| `archivist_entity_brief` | Structured knowledge card for an entity: facts, relationships, retention class, mention count, timeline. Supports `as_of` for point-in-time views. |
+| `archivist_wake_up` | Bootstrap session context — agent identity, critical pinned facts, namespace overview in ~200 tokens |
 
-## Storage & Memory Management (3)
+## Storage & Memory Management (6)
 
 | Tool | Purpose |
 |------|---------|
 | `archivist_store` | Write a memory with entity extraction, conflict checks, LLM dedup |
+| `archivist_delete` | Soft-delete a memory by ID — hides from all search paths in ~5 ms, background hard-cascade |
 | `archivist_merge` | Merge conflicting entries (latest / concat / semantic / manual) |
 | `archivist_compress` | Archive memories and return compact summaries (flat or structured Goal/Progress/Decisions/Next Steps) |
+| `archivist_pin` | Pin a memory or entity to retention class `permanent` — sets importance to 1.0 |
+| `archivist_unpin` | Remove the permanent pin from a memory or entity |
 
 ## Trajectory & Feedback (5)
 
@@ -43,7 +48,7 @@ Quick reference for **31** MCP tools exposed by the Archivist server. For full p
 | `archivist_skill_relate` | Create relations between skills (similar_to, depend_on, compose_with, replaced_by) |
 | `archivist_skill_dependencies` | Get skill dependency/relation graph |
 
-## Admin & Context Management (7)
+## Admin & Context Management (8)
 
 | Tool | Purpose |
 |------|---------|
@@ -54,6 +59,7 @@ Quick reference for **31** MCP tools exposed by the Archivist server. For full p
 | `archivist_retrieval_logs` | Export/analyze retrieval pipeline execution traces |
 | `archivist_health_dashboard` | Single-pane health: memory counts, stale %, conflict rate, skills, cache |
 | `archivist_batch_heuristic` | Recommended batch size (1-10) from health signals |
+| `archivist_backup` | Create, list, restore, or delete memory snapshots (Qdrant + SQLite/Postgres). Supports `export_agent` / `import_agent` for portable agent migration. |
 
 ## Cache Management (2)
 
@@ -62,13 +68,22 @@ Quick reference for **31** MCP tools exposed by the Archivist server. For full p
 | `archivist_cache_stats` | Hot cache stats (entries per agent, TTL, hit rate) |
 | `archivist_cache_invalidate` | Manual eviction by namespace, agent, or all |
 
+## Reference Docs (1)
+
+| Tool | Purpose |
+|------|---------|
+| `archivist_get_reference_docs` | Return the full Archivist tool skill reference from inside the server. Optionally pass `section` to filter to a heading (e.g. `search`, `storage`, `admin`). |
+
 ## Usage Hints
 
 - `min_score` / `RETRIEVAL_THRESHOLD`: set to `0` to disable score filtering for a single call when debugging recall.
 - Prefer `archivist_search` first; refine with `archivist_recall` when entities are known.
+- Use `archivist_entity_brief` when you need a structured knowledge card — faster than multiple search/recall calls.
+- Call `archivist_wake_up` once at session start to pre-load critical context in ~200 tokens.
 - Use `archivist_context_check` before reasoning to decide if context compaction is needed.
 - Use `archivist_compress` with `format: structured` for Goal/Progress/Decisions/Next Steps summaries.
 - Log trajectories so future searches benefit from outcome-aware retrieval scoring.
+- Pin critical facts (host IPs, credentials, ownership) with `archivist_pin` so the curator never forgets them.
 
 ## REST Endpoints (non-MCP)
 
