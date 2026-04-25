@@ -5,6 +5,65 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-04-25
+
+### Added — Answer Finder Architecture
+
+**Phase 1 — Tiered memory schema**
+- `memory_chunks` gains four new columns: `importance REAL` (0–1 priority signal), `tier_label TEXT` (`l0`/`l1`/`l2`/`ephemeral`), `ttl_at TEXT` (ISO expiry), `decay_rate REAL` (per-day decay). All default to safe values; existing rows get `tier_label='l2'`.
+- `memory_hotness` gains `importance_signal REAL` for blended hotness + outcome + quality scoring.
+- New indexes: `idx_mc_importance`, `idx_mc_tier`, `idx_mc_ttl` on `memory_chunks`.
+- Backward-compatible `ALTER TABLE` migrations applied on both SQLite and Postgres at startup.
+- `upsert_fts_chunk` (and `MemoryTransaction.upsert_fts_chunk`) accept `importance` and `tier_label` kwargs.
+- `indexer.py` and `tools_storage.py` forward `importance_score` and `tier_label` at write time.
+
+**Phase 2 — Hybrid retrieval + tier-aware token packing**
+- FTS search functions (`_search_fts_sqlite/postgres`, `_search_fts_exact_sqlite/postgres`) join `memory_hotness` and weight `ORDER BY` using `(rank * (1 + 0.3 * COALESCE(mh.importance_signal, 0.5)))`.
+- New `retrieval/context_packer.py` with `PackedContext` dataclass and `pack_context()` function supporting three policies: `adaptive` (3-pass L0→L1→L2), `l0_first`, and `l2_first`.
+- `rlm_retriever.py` replaces the previous greedy truncation loop with `pack_context()`; `over_budget` is now a top-level key in all search responses.
+- New config vars: `CONTEXT_PACK_POLICY` (default `adaptive`), `CONTEXT_L0_BUDGET_SHARE` (0.30), `CONTEXT_MIN_FULL_RESULTS` (3).
+
+**Phase 3 — Compression middleware + ephemeral session tier**
+- Auto-compress hook in `rlm_retriever.py`: when `AUTO_COMPRESS_ENABLED=true` and results overflow the budget, dropped chunks are summarized via `compact_flat()` and re-injected as a synthetic L1 result.
+- New `retrieval/session_store.py`: `SessionStore` — in-process, TTL-scoped, capacity-capped ephemeral memory. `get_session_store()` returns a process-level singleton.
+- `archivist_session_end` flushes the `SessionStore`; promoted entries are stored as durable memories when `persist_ephemeral=true`.
+- New config vars: `AUTO_COMPRESS_ENABLED` (false), `AUTO_COMPRESS_THRESHOLD` (0.85), `SESSION_STORE_MAX_ENTRIES` (512), `SESSION_STORE_TTL_SECONDS` (3600).
+
+**Phase 4 — `get_relevant_context()` API + multi-agent handoff**
+- New `retrieval/context_api.py`: `get_relevant_context()` assembles token-budgeted context in one call; `RelevantContext` dataclass with `answer`, `sources`, `graph_facts`, `tips`, `total_tokens`, `budget_tokens`, `over_budget`, `tier_distribution`, `token_savings_pct`, `provenance`, `pack_policy`.
+- `format_context_for_prompt()` renders a `RelevantContext` as a compact system-prompt prefix.
+- `create_handoff_packet()` / `receive_handoff_packet()` for typed goal + memory + knowledge snapshot transfer.
+- `HandoffPacket` dataclass: `from_agent`, `to_agent`, `session_summary`, `active_goals`, `open_questions`, `key_memory_ids`, `knowledge_snapshot`, `token_count`, `ephemeral_notes`.
+- New MCP tools registered in `_registry.py`:
+  - `archivist_get_context` — single-call context assembly (replaces `search + tips + context_check` pattern).
+  - `archivist_handoff` — create a `HandoffPacket` at session end.
+  - `archivist_receive_handoff` — inject a `HandoffPacket` into the receiving agent's ephemeral session.
+
+**Phase 5 — Token savings observability + benchmark suite**
+- `retrieval_logs` gains four new columns: `tokens_returned INTEGER`, `tokens_naive INTEGER`, `savings_pct REAL`, `pack_policy TEXT`. Plus `idx_rl_pack_policy` index.
+- `log_retrieval()` accepts and stores the new fields (fully backward-compatible — all default to `NULL`/`''`).
+- `get_token_savings_stats()` aggregate query function for dashboard.
+- `PackedContext.naive_tokens` field — L2-baseline token count carried out of the packer.
+- `rlm_retriever.py` wires `tokens_returned`, `tokens_naive`, `savings_pct`, `pack_policy` into both `log_retrieval()` call sites.
+- `dashboard.py`: `build_dashboard()` now includes `token_savings`, `tier_distribution`, `hotness_heatmap` sections, backed by `_token_savings_stats()`, `_tier_distribution_stats()`, `_hotness_heatmap()`.
+- New MCP tool: `archivist_savings_dashboard` — token savings analytics: avg/min/max savings %, total tokens saved vs naive full-L2 baseline, per-policy breakdown, hotness heatmap of top-N memories.
+- New benchmark: `benchmarks/token_efficiency.py` — 50-query benchmark across 3 domains (engineering / operations / agent-usage), 3 packing policies, competitor reference table. Output: `.benchmarks/token_efficiency_<date>.json`.
+
+**Phase 6 — Documentation**
+- `README.md` — "Top-Tier Answer Finder" section with API example, capability table, multi-agent handoff walkthrough, and competitor comparison table (Archivist vs Mem0 / Letta / Zep / Graphiti). Version badge updated to v2.3.0. MCP tool count updated to 40. New "Answer Finder (v2.3)" config reference section. Roadmap milestone marked shipped.
+- `.env.example` — documented all seven new Answer Finder config variables with comments.
+- `docs/DOCKER.md` — new "Answer Finder configuration" section covering packing policy, auto-compression, ephemeral store, observability, and benchmark run instructions.
+
+### Changed
+
+- `context_packer.PackedContext` — added `naive_tokens: int` field (L2-baseline token count for savings calculations).
+- `tools_admin.py` — imports `pool` at module level; `_handle_savings_dashboard` handler added.
+
+### Tests
+
+- `tests/unit/retrieval/test_context_api.py` — 22 tests for `RelevantContext`, `get_relevant_context`, `format_context_for_prompt`, and `HandoffPacket` round-trip.
+- `tests/unit/retrieval/test_phase5_observability.py` — 14 tests for `PackedContext.naive_tokens`, `log_retrieval` new kwargs, `get_token_savings_stats`, dashboard helper fallbacks, `build_dashboard` new keys, and the savings dashboard handler.
+
 ## [2.2.1] - 2026-04-25
 
 ### Fixed

@@ -163,3 +163,81 @@ POSTGRES_TEST_DSN="postgresql://archivist:archivist@localhost:5432/archivist_tes
 ### Switching back to SQLite
 
 Remove `GRAPH_BACKEND` and `DATABASE_URL` from `.env`. SQLite resumes on next restart — the Postgres data is unaffected.
+
+---
+
+## Answer Finder configuration (v2.3)
+
+Archivist v2.3 ships an Answer Finder layer that assembles token-budgeted context for every agent query. The defaults work out-of-the-box; tune the variables below when you need different behavior.
+
+All variables are optional. Uncomment them in `.env` or pass them as Docker Compose environment entries.
+
+### Context packing policy
+
+Controls how the tier-aware packer chooses between L0 headlines, L1 summaries, and L2 full content.
+
+```bash
+# adaptive (default): 3-pass — L0 first, upgrade to L1/L2 by score
+# l0_first: maximum compression (fewest tokens)
+# l2_first: greedy full content (legacy behavior)
+CONTEXT_PACK_POLICY=adaptive
+
+# Fraction of max_tokens reserved for L0 summaries in the adaptive first pass
+CONTEXT_L0_BUDGET_SHARE=0.30
+
+# Minimum results always upgraded to their best tier, regardless of budget
+CONTEXT_MIN_FULL_RESULTS=3
+```
+
+### Auto-compression (opt-in)
+
+When `AUTO_COMPRESS_ENABLED=true`, results that overflow the token budget are LLM-summarized and re-injected as a synthetic L1 chunk. This prevents silent truncation.
+
+```bash
+AUTO_COMPRESS_ENABLED=false         # set true to enable
+AUTO_COMPRESS_THRESHOLD=0.85        # budget utilization fraction that triggers compression
+```
+
+This feature requires an LLM endpoint (`LLM_URL`). If the LLM is unavailable, overflow items are silently dropped (same behavior as when disabled).
+
+### Ephemeral session store
+
+In-process per-session scratch memory. Entries expire after `SESSION_STORE_TTL_SECONDS` and are never written to SQLite or Qdrant unless explicitly promoted.
+
+```bash
+SESSION_STORE_MAX_ENTRIES=512       # total entries across all sessions
+SESSION_STORE_TTL_SECONDS=3600      # 1 hour per entry
+```
+
+Entries marked `promoted=true` during a session are flushed to durable memory when `archivist_session_end` is called with `persist_ephemeral=true`.
+
+### Token savings observability
+
+No configuration needed. Every retrieval logs `tokens_returned`, `tokens_naive`, `savings_pct`, and `pack_policy` to `retrieval_logs` automatically. View the dashboard:
+
+```bash
+# via MCP tool
+archivist_savings_dashboard(window_days=7, heatmap_top_n=50)
+
+# or via REST
+curl http://localhost:3100/admin/dashboard
+```
+
+### Running the token efficiency benchmark
+
+Requires a running Archivist stack with memories loaded:
+
+```bash
+cd /opt/appdata/archivist-oss   # or your checkout
+cp .env.example .env            # configure LLM_URL, EMBED_URL, QDRANT_URL
+
+# Quick run (10 queries)
+python -m benchmarks.token_efficiency --queries 10
+
+# Full benchmark (50 queries × 3 policies)
+python -m benchmarks.token_efficiency \
+  --output .benchmarks/token_efficiency_$(date +%Y%m%d).json
+
+# Results are printed as a formatted table and saved to .benchmarks/
+```
+
