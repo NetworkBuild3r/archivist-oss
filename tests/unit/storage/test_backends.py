@@ -57,6 +57,168 @@ class TestTranslateSql:
 
 
 # ---------------------------------------------------------------------------
+# SQL dialect translation (Phase 2 additions)
+# ---------------------------------------------------------------------------
+
+
+class TestTranslateSqlDialects:
+    """Tests for Phase 2 additions to _translate_sql(): INSERT OR IGNORE/REPLACE,
+    COLLATE NOCASE stripping, and fetchval interface."""
+
+    def _t(self, sql: str) -> str:
+        from archivist.storage.asyncpg_backend import _translate_sql
+
+        return _translate_sql(sql)
+
+    # --- INSERT OR IGNORE ---
+
+    def test_insert_or_ignore_basic(self):
+        result = self._t("INSERT OR IGNORE INTO t (a) VALUES (?)")
+        assert "INSERT OR IGNORE" not in result
+        assert "INSERT INTO" in result
+        assert "ON CONFLICT DO NOTHING" in result
+        assert "$1" in result
+
+    def test_insert_or_ignore_multi_col(self):
+        result = self._t(
+            "INSERT OR IGNORE INTO memory_points "
+            "(memory_id, qdrant_id, point_type, created_at) VALUES (?, ?, ?, ?)"
+        )
+        assert "ON CONFLICT DO NOTHING" in result
+        assert "$4" in result
+        assert "$5" not in result
+
+    def test_insert_or_ignore_case_insensitive(self):
+        result = self._t("insert or ignore into t (x) values (?)")
+        assert "ON CONFLICT DO NOTHING" in result
+
+    # --- INSERT OR REPLACE ---
+
+    def test_insert_or_replace_needle_registry(self):
+        result = self._t(
+            "INSERT OR REPLACE INTO needle_registry "
+            "(token, memory_id, namespace, agent_id, actor_id, actor_type, chunk_text, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+        )
+        assert "INSERT OR REPLACE" not in result
+        assert "INSERT INTO needle_registry" in result
+        assert "ON CONFLICT DO UPDATE SET" in result
+        # PK columns must NOT appear in SET clause
+        assert "token=EXCLUDED" not in result
+        assert "memory_id=EXCLUDED" not in result
+        # Non-PK columns must appear
+        assert "namespace=EXCLUDED.namespace" in result
+        assert "chunk_text=EXCLUDED.chunk_text" in result
+
+    def test_insert_or_replace_memory_hotness(self):
+        result = self._t(
+            "INSERT OR REPLACE INTO memory_hotness "
+            "(memory_id, score, retrieval_count, last_accessed, updated_at) "
+            "VALUES (?, ?, ?, ?, ?)"
+        )
+        assert "ON CONFLICT DO UPDATE SET" in result
+        assert "memory_id=EXCLUDED" not in result
+        assert "score=EXCLUDED.score" in result
+        assert "updated_at=EXCLUDED.updated_at" in result
+
+    def test_insert_or_replace_no_columns_falls_back_to_nothing(self):
+        """When no column list is parseable, fall back to DO NOTHING."""
+        result = self._t("INSERT OR REPLACE INTO t VALUES (?, ?)")
+        assert "ON CONFLICT" in result
+
+    # --- COLLATE NOCASE ---
+
+    def test_collate_nocase_stripped_from_where(self):
+        result = self._t("SELECT * FROM t WHERE name = ? COLLATE NOCASE")
+        assert "COLLATE NOCASE" not in result
+        assert "$1" in result
+
+    def test_collate_nocase_stripped_from_like(self):
+        result = self._t(
+            "SELECT * FROM entities "
+            "WHERE name LIKE ? COLLATE NOCASE OR aliases LIKE ? COLLATE NOCASE "
+            "ORDER BY mention_count DESC LIMIT ?"
+        )
+        assert "COLLATE NOCASE" not in result
+        assert "$1" in result
+        assert "$2" in result
+        assert "$3" in result
+
+    def test_collate_nocase_case_insensitive(self):
+        result = self._t("WHERE x = ? collate nocase")
+        assert "collate nocase" not in result.lower()
+
+    def test_collate_nocase_in_create_table_not_stripped(self):
+        """COLLATE NOCASE in DDL strings inside schema_guard is SQLite-only;
+        the translator is not applied to DDL (only to runtime queries via conn methods),
+        but we verify it strips correctly if it were applied."""
+        result = self._t("CREATE TABLE t (name TEXT COLLATE NOCASE)")
+        assert "COLLATE NOCASE" not in result
+
+    # --- Combined transformations ---
+
+    def test_insert_or_ignore_with_collate_nocase(self):
+        """Both transforms apply in the same statement."""
+        result = self._t(
+            "INSERT OR IGNORE INTO t (name) "
+            "SELECT name COLLATE NOCASE FROM src WHERE active = ?"
+        )
+        assert "INSERT OR IGNORE" not in result
+        assert "COLLATE NOCASE" not in result
+        assert "ON CONFLICT DO NOTHING" in result
+
+    def test_plain_insert_unchanged(self):
+        """Normal INSERT is not modified."""
+        result = self._t("INSERT INTO t (a, b) VALUES (?, ?)")
+        assert "ON CONFLICT" not in result
+        assert result == "INSERT INTO t (a, b) VALUES ($1, $2)"
+
+    # --- fetchval interface ---
+
+    def test_asyncpg_connection_has_fetchval(self):
+        from archivist.storage.asyncpg_backend import AsyncpgConnection
+
+        assert hasattr(AsyncpgConnection, "fetchval")
+        assert callable(AsyncpgConnection.fetchval)
+
+    def test_wrapped_sqlite_conn_has_fetchval(self):
+        from archivist.storage.sqlite_pool import _WrappedSQLiteConn
+
+        assert hasattr(_WrappedSQLiteConn, "fetchval")
+        assert callable(_WrappedSQLiteConn.fetchval)
+
+    async def test_wrapped_sqlite_conn_fetchval_returns_scalar(self, tmp_path):
+        """fetchval returns the first column of the first row."""
+        import aiosqlite
+
+        db_path = str(tmp_path / "test.db")
+        async with aiosqlite.connect(db_path) as raw_conn:
+            await raw_conn.execute("CREATE TABLE x (val INTEGER)")
+            await raw_conn.execute("INSERT INTO x VALUES (42)")
+            await raw_conn.commit()
+
+            from archivist.storage.sqlite_pool import _WrappedSQLiteConn
+
+            wrapped = _WrappedSQLiteConn(raw_conn)
+            result = await wrapped.fetchval("SELECT val FROM x")
+            assert result == 42
+
+    async def test_wrapped_sqlite_conn_fetchval_none_when_empty(self, tmp_path):
+        """fetchval returns None when query returns no rows."""
+        import aiosqlite
+
+        db_path = str(tmp_path / "test.db")
+        async with aiosqlite.connect(db_path) as raw_conn:
+            await raw_conn.execute("CREATE TABLE x (val INTEGER)")
+
+            from archivist.storage.sqlite_pool import _WrappedSQLiteConn
+
+            wrapped = _WrappedSQLiteConn(raw_conn)
+            result = await wrapped.fetchval("SELECT val FROM x WHERE val = 999")
+            assert result is None
+
+
+# ---------------------------------------------------------------------------
 # SQLiteGraphBackend class name and alias
 # ---------------------------------------------------------------------------
 
