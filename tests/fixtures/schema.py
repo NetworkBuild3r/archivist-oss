@@ -176,6 +176,106 @@ CREATE TABLE IF NOT EXISTS ratings (
     created_at  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_rat_memory ON ratings(memory_id);
+
+CREATE TABLE IF NOT EXISTS skills (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    provider TEXT NOT NULL DEFAULT '',
+    mcp_endpoint TEXT DEFAULT '',
+    current_version TEXT NOT NULL DEFAULT '0.0.0',
+    status TEXT NOT NULL DEFAULT 'active',
+    description TEXT DEFAULT '',
+    registered_by TEXT NOT NULL,
+    registered_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    metadata TEXT DEFAULT '{}',
+    UNIQUE(name, provider)
+);
+CREATE INDEX IF NOT EXISTS idx_skills_name ON skills(name);
+CREATE INDEX IF NOT EXISTS idx_skills_provider ON skills(provider);
+CREATE INDEX IF NOT EXISTS idx_skills_status ON skills(status);
+
+CREATE TABLE IF NOT EXISTS skill_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    skill_id TEXT NOT NULL REFERENCES skills(id),
+    version TEXT NOT NULL,
+    changelog TEXT DEFAULT '',
+    breaking_changes TEXT DEFAULT '',
+    observed_at TEXT NOT NULL,
+    reported_by TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    UNIQUE(skill_id, version)
+);
+CREATE INDEX IF NOT EXISTS idx_sv_skill ON skill_versions(skill_id);
+
+CREATE TABLE IF NOT EXISTS skill_lessons (
+    id TEXT PRIMARY KEY,
+    skill_id TEXT NOT NULL REFERENCES skills(id),
+    lesson_type TEXT NOT NULL DEFAULT 'general',
+    title TEXT NOT NULL,
+    content TEXT NOT NULL,
+    skill_version TEXT DEFAULT '',
+    agent_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    upvotes INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_sl_skill ON skill_lessons(skill_id);
+CREATE INDEX IF NOT EXISTS idx_sl_type ON skill_lessons(lesson_type);
+
+CREATE TABLE IF NOT EXISTS skill_events (
+    id TEXT PRIMARY KEY,
+    skill_id TEXT NOT NULL REFERENCES skills(id),
+    agent_id TEXT NOT NULL,
+    event_type TEXT NOT NULL DEFAULT 'invocation',
+    outcome TEXT NOT NULL DEFAULT 'unknown',
+    skill_version TEXT DEFAULT '',
+    duration_ms INTEGER,
+    error_message TEXT DEFAULT '',
+    trajectory_id TEXT DEFAULT '',
+    created_at TEXT NOT NULL,
+    metadata TEXT DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_se_skill ON skill_events(skill_id);
+CREATE INDEX IF NOT EXISTS idx_se_agent ON skill_events(agent_id);
+CREATE INDEX IF NOT EXISTS idx_se_outcome ON skill_events(outcome);
+
+CREATE TABLE IF NOT EXISTS skill_relations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    skill_a TEXT NOT NULL REFERENCES skills(id),
+    skill_b TEXT NOT NULL REFERENCES skills(id),
+    relation_type TEXT NOT NULL,
+    confidence REAL NOT NULL DEFAULT 1.0,
+    evidence TEXT DEFAULT '',
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sr_a ON skill_relations(skill_a);
+CREATE INDEX IF NOT EXISTS idx_sr_b ON skill_relations(skill_b);
+CREATE INDEX IF NOT EXISTS idx_sr_type ON skill_relations(relation_type);
+
+CREATE TABLE IF NOT EXISTS trajectories (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    task_description TEXT NOT NULL DEFAULT '',
+    outcome TEXT NOT NULL DEFAULT 'unknown',
+    created_at TEXT NOT NULL,
+    session_id TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_traj_agent ON trajectories(agent_id);
+
+CREATE TABLE IF NOT EXISTS tips (
+    id TEXT PRIMARY KEY,
+    trajectory_id TEXT NOT NULL REFERENCES trajectories(id),
+    agent_id TEXT NOT NULL,
+    category TEXT NOT NULL DEFAULT 'general',
+    tip_text TEXT NOT NULL,
+    archived INTEGER NOT NULL DEFAULT 0,
+    negative_example TEXT DEFAULT '',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_tips_agent ON tips(agent_id);
+CREATE INDEX IF NOT EXISTS idx_tips_category ON tips(category);
+CREATE INDEX IF NOT EXISTS idx_tips_archived ON tips(archived);
 """
 
 _FTS5_SQL: list[str] = [

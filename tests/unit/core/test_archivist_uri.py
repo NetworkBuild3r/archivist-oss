@@ -136,7 +136,7 @@ async def test_retrieval_log_roundtrip(async_pool):
     )
     assert lid
 
-    logs = await get_retrieval_logs(agent_id="agent-x")
+    logs = get_retrieval_logs(agent_id="agent-x")
     assert len(logs) == 1
     assert logs[0]["query"] == "test query"
     assert logs[0]["duration_ms"] == 150
@@ -160,7 +160,7 @@ async def test_retrieval_stats(async_pool):
             duration_ms=100 + i * 10,
         )
 
-    stats = await get_retrieval_stats("a1")
+    stats = get_retrieval_stats("a1")
     assert stats["total"] == 5
     assert stats["cache_hits"] == 3
     assert stats["cache_hit_rate"] == 0.6

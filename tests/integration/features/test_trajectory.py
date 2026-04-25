@@ -4,10 +4,10 @@ pytestmark = [pytest.mark.integration]
 """Tests for Phase 3 (v0.6.0) — trajectory, annotations, ratings, outcome-aware retrieval."""
 
 
-def test_outcome_adjustments_empty():
+async def test_outcome_adjustments_empty(async_pool):
     from trajectory import get_outcome_adjustments
 
-    assert get_outcome_adjustments([]) == {}
+    assert await get_outcome_adjustments([]) == {}
 
 
 async def test_add_annotation_and_retrieve(async_pool):
@@ -18,7 +18,7 @@ async def test_add_annotation_and_retrieve(async_pool):
     ann_id = await add_annotation("mem-1", "agent-a", "This fact is outdated", "stale", 0.3)
     assert ann_id
 
-    anns = get_annotations("mem-1")
+    anns = await get_annotations("mem-1")
     assert len(anns) == 1
     assert anns[0]["content"] == "This fact is outdated"
     assert anns[0]["annotation_type"] == "stale"
@@ -34,17 +34,17 @@ async def test_add_rating_and_summary(async_pool):
     await add_rating("mem-1", "agent-b", 1)
     await add_rating("mem-1", "agent-c", -1, "outdated")
 
-    summary = get_rating_summary("mem-1")
+    summary = await get_rating_summary("mem-1")
     assert summary["total"] == 3
     assert summary["up"] == 2
     assert summary["down"] == 1
 
 
-def test_search_tips_empty():
+async def test_search_tips_empty(async_pool):
     from trajectory import _ensure_trajectory_schema, search_tips
 
     _ensure_trajectory_schema()
-    tips = search_tips("agent-x", category="strategy")
+    tips = await search_tips("agent-x", category="strategy")
     assert tips == []
 
 
@@ -77,6 +77,6 @@ async def test_rating_clamp(async_pool):
     await add_rating("mem-2", "agent-a", 5)  # clamps to 1
     await add_rating("mem-2", "agent-b", -10)  # clamps to -1
 
-    summary = get_rating_summary("mem-2")
+    summary = await get_rating_summary("mem-2")
     assert summary["up"] == 1
     assert summary["down"] == 1
