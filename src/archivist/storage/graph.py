@@ -236,11 +236,19 @@ def init_schema():
             namespace TEXT NOT NULL DEFAULT '',
             date TEXT NOT NULL DEFAULT '',
             memory_type TEXT NOT NULL DEFAULT 'general',
-            is_excluded INTEGER NOT NULL DEFAULT 0
+            is_excluded INTEGER NOT NULL DEFAULT 0,
+            actor_id TEXT NOT NULL DEFAULT '',
+            actor_type TEXT NOT NULL DEFAULT '',
+            importance REAL NOT NULL DEFAULT 0.5,
+            tier_label TEXT NOT NULL DEFAULT 'l2',
+            ttl_at TEXT,
+            decay_rate REAL NOT NULL DEFAULT 0.0
         );
         CREATE INDEX IF NOT EXISTS idx_mc_qdrant ON memory_chunks(qdrant_id);
         CREATE INDEX IF NOT EXISTS idx_mc_namespace ON memory_chunks(namespace);
         CREATE INDEX IF NOT EXISTS idx_mc_agent ON memory_chunks(agent_id);
+        CREATE INDEX IF NOT EXISTS idx_mc_importance ON memory_chunks(importance DESC);
+        CREATE INDEX IF NOT EXISTS idx_mc_tier ON memory_chunks(tier_label);
 
         -- Tracks all Qdrant point IDs created for each memory (Phase 2).
         CREATE TABLE IF NOT EXISTS memory_points (
@@ -349,6 +357,12 @@ def _migrate_schema():
         ("memory_chunks", "actor_type", "TEXT NOT NULL DEFAULT ''"),
         ("entities", "actor_id", "TEXT NOT NULL DEFAULT ''"),
         ("entities", "actor_type", "TEXT NOT NULL DEFAULT ''"),
+        # Phase 1 answer-finder: tiered memory columns
+        ("memory_chunks", "importance", "REAL NOT NULL DEFAULT 0.5"),
+        ("memory_chunks", "tier_label", "TEXT NOT NULL DEFAULT 'l2'"),
+        ("memory_chunks", "ttl_at", "TEXT"),
+        ("memory_chunks", "decay_rate", "REAL NOT NULL DEFAULT 0.0"),
+        ("memory_hotness", "importance_signal", "REAL NOT NULL DEFAULT 0.5"),
     ]
     # needle_registry may not exist yet (schema_guard creates it lazily),
     # so these ALTER TABLEs are attempted but silently skipped on failure.
@@ -370,6 +384,9 @@ def _migrate_schema():
         "CREATE INDEX IF NOT EXISTS idx_mc_actor ON memory_chunks(actor_id)",
         "CREATE INDEX IF NOT EXISTS idx_mc_actor_type ON memory_chunks(actor_type)",
         "CREATE INDEX IF NOT EXISTS idx_entities_actor ON entities(actor_id)",
+        # Phase 1 answer-finder: tier/importance indexes
+        "CREATE INDEX IF NOT EXISTS idx_mc_importance ON memory_chunks(importance DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_mc_tier ON memory_chunks(tier_label)",
     ]
     with GRAPH_WRITE_LOCK:
         conn = get_db()
@@ -576,6 +593,8 @@ async def upsert_fts_chunk(
     memory_type: str = "general",
     actor_id: str = "",
     actor_type: str = "",
+    importance: float = 0.5,
+    tier_label: str = "l2",
     conn: aiosqlite.Connection | None = None,
 ):
     """Insert or replace a chunk in memory_chunks and sync to both FTS indexes.
@@ -587,6 +606,8 @@ async def upsert_fts_chunk(
     shadow-row maintenance is needed.
 
     Args:
+        importance: 0.0–1.0 priority signal for tier-aware retrieval packing.
+        tier_label: One of 'l0' | 'l1' | 'l2' | 'ephemeral'.
         conn: Optional open ``aiosqlite.Connection``.  When provided (e.g. from
             inside a ``MemoryTransaction``), writes join the caller's transaction
             instead of acquiring a new ``pool.write()`` lock.  When ``None``
@@ -606,6 +627,8 @@ async def upsert_fts_chunk(
             memory_type=memory_type,
             actor_id=actor_id,
             actor_type=actor_type,
+            importance=importance,
+            tier_label=tier_label,
         )
         m.inc(m.FTS_UPSERT_TOTAL, {"backend": "postgres"})
         return
@@ -621,6 +644,8 @@ async def upsert_fts_chunk(
         memory_type=memory_type,
         actor_id=actor_id,
         actor_type=actor_type,
+        importance=importance,
+        tier_label=tier_label,
         conn=conn,
     )
     m.inc(m.FTS_UPSERT_TOTAL, {"backend": "sqlite"})
@@ -637,6 +662,8 @@ async def _upsert_fts_chunk_postgres(
     memory_type: str = "general",
     actor_id: str = "",
     actor_type: str = "",
+    importance: float = 0.5,
+    tier_label: str = "l2",
 ) -> None:
     """Postgres upsert: insert/replace memory_chunks row.
 
@@ -650,14 +677,15 @@ async def _upsert_fts_chunk_postgres(
             await conn.execute(
                 "INSERT INTO memory_chunks "
                 "(qdrant_id, text, file_path, chunk_index, agent_id, namespace, date, "
-                "memory_type, actor_id, actor_type) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "memory_type, actor_id, actor_type, importance, tier_label) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT (qdrant_id) DO UPDATE SET "
                 "text=EXCLUDED.text, file_path=EXCLUDED.file_path, "
                 "chunk_index=EXCLUDED.chunk_index, agent_id=EXCLUDED.agent_id, "
                 "namespace=EXCLUDED.namespace, date=EXCLUDED.date, "
                 "memory_type=EXCLUDED.memory_type, actor_id=EXCLUDED.actor_id, "
-                "actor_type=EXCLUDED.actor_type",
+                "actor_type=EXCLUDED.actor_type, importance=EXCLUDED.importance, "
+                "tier_label=EXCLUDED.tier_label",
                 (
                     qdrant_id,
                     text,
@@ -669,6 +697,8 @@ async def _upsert_fts_chunk_postgres(
                     memory_type,
                     actor_id,
                     actor_type,
+                    importance,
+                    tier_label,
                 ),
             )
     except Exception as e:
@@ -689,6 +719,8 @@ async def _upsert_fts_chunk_sqlite(
     memory_type: str = "general",
     actor_id: str = "",
     actor_type: str = "",
+    importance: float = 0.5,
+    tier_label: str = "l2",
     conn: aiosqlite.Connection | None = None,
 ) -> None:
     """SQLite upsert: insert/replace memory_chunks row and maintain FTS5 shadow rows."""
@@ -719,8 +751,8 @@ async def _upsert_fts_chunk_sqlite(
             await c.execute("DELETE FROM memory_chunks WHERE qdrant_id = ?", (qdrant_id,))
 
         await c.execute(
-            "INSERT INTO memory_chunks (qdrant_id, text, file_path, chunk_index, agent_id, namespace, date, memory_type, actor_id, actor_type) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO memory_chunks (qdrant_id, text, file_path, chunk_index, agent_id, namespace, date, memory_type, actor_id, actor_type, importance, tier_label) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 qdrant_id,
                 text,
@@ -732,6 +764,8 @@ async def _upsert_fts_chunk_sqlite(
                 memory_type,
                 actor_id,
                 actor_type,
+                importance,
+                tier_label,
             ),
         )
         rowid_row = await (

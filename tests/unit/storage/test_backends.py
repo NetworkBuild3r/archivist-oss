@@ -771,6 +771,86 @@ class TestUpsertFtsChunkNoopOnPostgres:
         assert len(pg_calls) == 0
 
 
+class TestUpsertFtsChunkTierFields:
+    """upsert_fts_chunk() forwards importance and tier_label to both backends."""
+
+    async def test_importance_and_tier_forwarded_to_postgres(self, monkeypatch):
+        pg_calls = []
+
+        async def _fake_pg(**kwargs):
+            pg_calls.append(kwargs)
+
+        async def _fake_sqlite(**kwargs):
+            pass
+
+        monkeypatch.setattr("archivist.core.config.GRAPH_BACKEND", "postgres")
+        monkeypatch.setattr("archivist.storage.graph._upsert_fts_chunk_postgres", _fake_pg)
+        monkeypatch.setattr("archivist.storage.graph._upsert_fts_chunk_sqlite", _fake_sqlite)
+
+        from archivist.storage.graph import upsert_fts_chunk
+
+        await upsert_fts_chunk(
+            qdrant_id="pg-1",
+            text="important fact",
+            file_path="/f",
+            chunk_index=0,
+            importance=0.9,
+            tier_label="l0",
+        )
+
+        assert len(pg_calls) == 1
+        assert pg_calls[0]["importance"] == 0.9
+        assert pg_calls[0]["tier_label"] == "l0"
+
+    async def test_importance_and_tier_forwarded_to_sqlite(self, monkeypatch):
+        sqlite_calls = []
+
+        async def _fake_pg(**kwargs):
+            pass
+
+        async def _fake_sqlite(**kwargs):
+            sqlite_calls.append(kwargs)
+
+        monkeypatch.setattr("archivist.core.config.GRAPH_BACKEND", "sqlite")
+        monkeypatch.setattr("archivist.storage.graph._upsert_fts_chunk_postgres", _fake_pg)
+        monkeypatch.setattr("archivist.storage.graph._upsert_fts_chunk_sqlite", _fake_sqlite)
+
+        from archivist.storage.graph import upsert_fts_chunk
+
+        await upsert_fts_chunk(
+            qdrant_id="sq-1",
+            text="procedural tip",
+            file_path="/g",
+            chunk_index=1,
+            importance=0.3,
+            tier_label="l1",
+        )
+
+        assert len(sqlite_calls) == 1
+        assert sqlite_calls[0]["importance"] == 0.3
+        assert sqlite_calls[0]["tier_label"] == "l1"
+
+    async def test_defaults_are_l2_and_half(self, monkeypatch):
+        captured = []
+
+        async def _fake_sqlite(**kwargs):
+            captured.append(kwargs)
+
+        async def _fake_pg(**kwargs):
+            pass
+
+        monkeypatch.setattr("archivist.core.config.GRAPH_BACKEND", "sqlite")
+        monkeypatch.setattr("archivist.storage.graph._upsert_fts_chunk_postgres", _fake_pg)
+        monkeypatch.setattr("archivist.storage.graph._upsert_fts_chunk_sqlite", _fake_sqlite)
+
+        from archivist.storage.graph import upsert_fts_chunk
+
+        await upsert_fts_chunk(qdrant_id="def-1", text="x", file_path="/h", chunk_index=0)
+
+        assert captured[0]["importance"] == 0.5
+        assert captured[0]["tier_label"] == "l2"
+
+
 class TestDeleteFtsRowsAsyncNoopOnPostgres:
     """_delete_fts_rows_async() is a no-op on Postgres."""
 

@@ -505,6 +505,7 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
         "actor_type": actor_type,
         "confidence": confidence,
         "source_trace": source_trace.to_dict(),
+        "tier_label": "l2",
     }
     if retention in ("durable", "permanent"):
         ttl_expires_at = None
@@ -586,6 +587,8 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
                 memory_type=arguments.get("memory_type", "general"),
                 actor_id=actor_id,
                 actor_type=actor_type,
+                importance=importance,
+                tier_label=payload.get("tier_label", "l2"),
             )
         await txn.register_needle_tokens(
             pid,
@@ -610,6 +613,8 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
                     memory_type=arguments.get("memory_type", "general"),
                     actor_id=actor_id,
                     actor_type=actor_type,
+                    importance=float(mp.payload.get("importance_score", importance)),
+                    tier_label=mp.payload.get("tier_label", "l2"),
                 )
             await txn.register_needle_tokens(
                 mc_id,

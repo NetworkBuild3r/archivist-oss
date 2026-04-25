@@ -424,3 +424,83 @@ async def test_dual_hotness_batch_update(dual_pool):
     # Score may be 0 if the memory wasn't logged in time; just verify no crash
     assert isinstance(scores, dict), f"[{backend_name}] get_hotness_scores returned non-dict"
 
+
+# ---------------------------------------------------------------------------
+# Phase 1: tier/importance columns in memory_chunks
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dual_pool", ["sqlite"], indirect=True)
+async def test_dual_upsert_fts_chunk_tier_columns(dual_pool):
+    """upsert_fts_chunk persists importance and tier_label on both backends."""
+    backend, backend_name = dual_pool
+
+    from archivist.storage.graph import upsert_fts_chunk
+
+    qid = f"tier-test-{backend_name}"
+    await upsert_fts_chunk(
+        qdrant_id=qid,
+        text="Phase 1 tier test",
+        file_path=f"test/{backend_name}",
+        chunk_index=0,
+        importance=0.8,
+        tier_label="l1",
+    )
+
+    async with backend.read() as conn:
+        row = await conn.fetchone(
+            "SELECT importance, tier_label FROM memory_chunks WHERE qdrant_id = ?",
+            (qid,),
+        )
+
+    assert row is not None, f"[{backend_name}] memory_chunks row not found"
+    assert float(row["importance"]) == pytest.approx(0.8), (
+        f"[{backend_name}] importance mismatch: {row['importance']}"
+    )
+    assert row["tier_label"] == "l1", (
+        f"[{backend_name}] tier_label mismatch: {row['tier_label']}"
+    )
+
+    # Cleanup
+    async with backend.write() as conn:
+        await conn.execute("DELETE FROM memory_chunks WHERE qdrant_id = ?", (qid,))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dual_pool", ["sqlite"], indirect=True)
+async def test_dual_upsert_fts_chunk_defaults(dual_pool):
+    """upsert_fts_chunk stores safe defaults when importance/tier_label are omitted."""
+    backend, backend_name = dual_pool
+
+    from archivist.storage.graph import upsert_fts_chunk
+
+    qid = f"tier-default-{backend_name}"
+    await upsert_fts_chunk(
+        qdrant_id=qid,
+        text="default tier test",
+        file_path=f"test/{backend_name}",
+        chunk_index=1,
+    )
+
+    async with backend.read() as conn:
+        row = await conn.fetchone(
+            "SELECT importance, tier_label, decay_rate FROM memory_chunks WHERE qdrant_id = ?",
+            (qid,),
+        )
+
+    assert row is not None, f"[{backend_name}] memory_chunks row not found"
+    assert float(row["importance"]) == pytest.approx(0.5), (
+        f"[{backend_name}] default importance should be 0.5"
+    )
+    assert row["tier_label"] == "l2", (
+        f"[{backend_name}] default tier_label should be 'l2'"
+    )
+    assert float(row["decay_rate"]) == pytest.approx(0.0), (
+        f"[{backend_name}] default decay_rate should be 0.0"
+    )
+
+    # Cleanup
+    async with backend.write() as conn:
+        await conn.execute("DELETE FROM memory_chunks WHERE qdrant_id = ?", (qid,))
+

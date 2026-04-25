@@ -193,6 +193,8 @@ class MemoryTransaction:
         memory_type: str = "general",
         actor_id: str = "",
         actor_type: str = "",
+        importance: float = 0.5,
+        tier_label: str = "l2",
     ) -> None:
         """Upsert an FTS5 chunk using the transaction's open connection.
 
@@ -217,6 +219,8 @@ class MemoryTransaction:
             memory_type=memory_type,
             actor_id=actor_id,
             actor_type=actor_type,
+            importance=importance,
+            tier_label=tier_label,
             conn=self.conn,
         )
 

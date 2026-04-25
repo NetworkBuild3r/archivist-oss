@@ -138,6 +138,10 @@ CREATE TABLE IF NOT EXISTS memory_chunks (
     is_excluded  INTEGER NOT NULL DEFAULT 0,
     actor_id     TEXT NOT NULL DEFAULT '',
     actor_type   TEXT NOT NULL DEFAULT '',
+    importance   REAL NOT NULL DEFAULT 0.5,
+    tier_label   TEXT NOT NULL DEFAULT 'l2',
+    ttl_at       TEXT,
+    decay_rate   REAL NOT NULL DEFAULT 0.0,
     -- tsvector for stemmed search (Porter/english -- equivalent of FTS5 'porter unicode61')
     fts_vector        tsvector GENERATED ALWAYS AS (to_tsvector('english', text)) STORED,
     -- tsvector for exact/unstemmed search (equivalent of FTS5 'unicode61' / memory_fts_exact)
@@ -151,6 +155,9 @@ CREATE INDEX IF NOT EXISTS idx_mc_agent         ON memory_chunks (agent_id);
 CREATE INDEX IF NOT EXISTS idx_mc_excluded      ON memory_chunks (is_excluded);
 CREATE INDEX IF NOT EXISTS idx_mc_actor         ON memory_chunks (actor_id);
 CREATE INDEX IF NOT EXISTS idx_mc_actor_type    ON memory_chunks (actor_type);
+CREATE INDEX IF NOT EXISTS idx_mc_importance    ON memory_chunks (importance DESC);
+CREATE INDEX IF NOT EXISTS idx_mc_tier          ON memory_chunks (tier_label);
+CREATE INDEX IF NOT EXISTS idx_mc_ttl           ON memory_chunks (ttl_at) WHERE ttl_at IS NOT NULL;
 -- GIN indexes accelerate tsvector full-text search (equivalent of FTS5 BM25 index)
 CREATE INDEX IF NOT EXISTS idx_mc_fts           ON memory_chunks USING GIN (fts_vector);
 CREATE INDEX IF NOT EXISTS idx_mc_fts_simple    ON memory_chunks USING GIN (fts_vector_simple);
@@ -175,6 +182,39 @@ $$;
 
 -- CREATE INDEX ... IF NOT EXISTS is idempotent, safe to run on existing DBs.
 CREATE INDEX IF NOT EXISTS idx_mc_fts_simple ON memory_chunks USING GIN (fts_vector_simple);
+
+-- ---------------------------------------------------------------------------
+-- Migration: add Phase 1 answer-finder columns to existing Postgres DBs.
+-- Idempotent — each column is added only if it does not already exist.
+-- ---------------------------------------------------------------------------
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_name = 'memory_chunks' AND column_name = 'importance'
+    ) THEN
+        ALTER TABLE memory_chunks ADD COLUMN importance  REAL NOT NULL DEFAULT 0.5;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_name = 'memory_chunks' AND column_name = 'tier_label'
+    ) THEN
+        ALTER TABLE memory_chunks ADD COLUMN tier_label  TEXT NOT NULL DEFAULT 'l2';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_name = 'memory_chunks' AND column_name = 'ttl_at'
+    ) THEN
+        ALTER TABLE memory_chunks ADD COLUMN ttl_at      TEXT;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_name = 'memory_chunks' AND column_name = 'decay_rate'
+    ) THEN
+        ALTER TABLE memory_chunks ADD COLUMN decay_rate  REAL NOT NULL DEFAULT 0.0;
+    END IF;
+END
+$$;
 
 
 CREATE TABLE IF NOT EXISTS memory_points (
@@ -492,5 +532,18 @@ CREATE TABLE IF NOT EXISTS memory_hotness (
     score            DOUBLE PRECISION NOT NULL DEFAULT 0.0,
     retrieval_count  INTEGER NOT NULL DEFAULT 0,
     last_accessed    TEXT,
-    updated_at       TEXT NOT NULL
+    updated_at       TEXT NOT NULL,
+    importance_signal REAL NOT NULL DEFAULT 0.5
 );
+
+-- Migration: add importance_signal to existing Postgres DBs.  Idempotent.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_name = 'memory_hotness' AND column_name = 'importance_signal'
+    ) THEN
+        ALTER TABLE memory_hotness ADD COLUMN importance_signal REAL NOT NULL DEFAULT 0.5;
+    END IF;
+END
+$$;

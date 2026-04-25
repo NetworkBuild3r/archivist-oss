@@ -48,7 +48,8 @@ async def get_hotness_scores(memory_ids: list[str]) -> dict[str, float]:
                 score REAL NOT NULL DEFAULT 0.0,
                 retrieval_count INTEGER NOT NULL DEFAULT 0,
                 last_accessed TEXT,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                importance_signal REAL NOT NULL DEFAULT 0.5
             );
         """)
         _ensure()
@@ -138,7 +139,8 @@ async def batch_update_hotness() -> int:
                 score REAL NOT NULL DEFAULT 0.0,
                 retrieval_count INTEGER NOT NULL DEFAULT 0,
                 last_accessed TEXT,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                importance_signal REAL NOT NULL DEFAULT 0.5
             );
         """)
         _ensure()

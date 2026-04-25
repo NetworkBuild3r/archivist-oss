@@ -105,10 +105,17 @@ CREATE TABLE IF NOT EXISTS memory_chunks (
     memory_type TEXT NOT NULL DEFAULT 'general',
     is_excluded INTEGER NOT NULL DEFAULT 0,
     actor_id TEXT NOT NULL DEFAULT '',
-    actor_type TEXT NOT NULL DEFAULT ''
+    actor_type TEXT NOT NULL DEFAULT '',
+    importance REAL NOT NULL DEFAULT 0.5,
+    tier_label TEXT NOT NULL DEFAULT 'l2',
+    ttl_at TEXT,
+    decay_rate REAL NOT NULL DEFAULT 0.0
 );
 CREATE INDEX IF NOT EXISTS idx_mc_qdrant ON memory_chunks(qdrant_id);
 CREATE INDEX IF NOT EXISTS idx_mc_namespace ON memory_chunks(namespace);
+CREATE INDEX IF NOT EXISTS idx_mc_importance ON memory_chunks(importance DESC);
+CREATE INDEX IF NOT EXISTS idx_mc_tier ON memory_chunks(tier_label);
+CREATE INDEX IF NOT EXISTS idx_mc_ttl ON memory_chunks(ttl_at) WHERE ttl_at IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS memory_points (
     memory_id   TEXT NOT NULL,
@@ -158,7 +165,8 @@ CREATE TABLE IF NOT EXISTS memory_hotness (
     score           REAL NOT NULL DEFAULT 0.0,
     retrieval_count INTEGER NOT NULL DEFAULT 0,
     last_accessed   TEXT,
-    updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    importance_signal REAL NOT NULL DEFAULT 0.5
 );
 
 CREATE TABLE IF NOT EXISTS annotations (
