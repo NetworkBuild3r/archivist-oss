@@ -28,7 +28,10 @@ async def build_dashboard(window_days: int = 7) -> dict:
         audit_stats = await _audit_stats(conn, window_days)
         retrieval = await _retrieval_stats(conn, window_days)
         skill_overview = await _skill_overview(conn, window_days)
+        token_savings = await _token_savings_stats(conn, window_days)
+        tier_dist = await _tier_distribution_stats(conn, window_days)
 
+    hotness_heatmap = await _hotness_heatmap()
     stale = _stale_estimate()
 
     import archivist.retrieval.hot_cache as hot_cache
@@ -48,6 +51,9 @@ async def build_dashboard(window_days: int = 7) -> dict:
             "total_entries": cache.get("total_entries"),
             "agents": cache.get("agents"),
         },
+        "token_savings": token_savings,
+        "tier_distribution": tier_dist,
+        "hotness_heatmap": hotness_heatmap,
         "subsystems": health.all_status(),
     }
 
@@ -263,3 +269,128 @@ async def _skill_overview(conn, window_days: int) -> dict:
             "events_in_window": 0,
             "skill_success_rate": None,
         }
+
+
+async def _token_savings_stats(conn, window_days: int) -> dict:
+    """Aggregate token savings statistics from retrieval logs."""
+    try:
+        from archivist.core.config import GRAPH_BACKEND
+
+        if (GRAPH_BACKEND or "sqlite").lower() == "postgres":
+            cutoff = f"created_at >= NOW() - INTERVAL '{window_days} days'"
+            params: list = []
+        else:
+            cutoff = "created_at >= datetime('now', ?)"
+            params = [f"-{window_days} days"]
+
+        row = await conn.fetchone(
+            f"""SELECT
+                    COUNT(*) as total_queries,
+                    SUM(CASE WHEN tokens_naive IS NOT NULL THEN 1 ELSE 0 END) as queries_with_savings_data,
+                    AVG(savings_pct) as avg_savings_pct,
+                    MIN(savings_pct) as min_savings_pct,
+                    MAX(savings_pct) as max_savings_pct,
+                    SUM(CASE WHEN tokens_naive > 0
+                             THEN tokens_naive - tokens_returned ELSE 0 END) as total_tokens_saved,
+                    SUM(tokens_returned) as total_tokens_returned,
+                    SUM(tokens_naive) as total_tokens_naive
+                FROM retrieval_logs
+                WHERE {cutoff}
+                  AND tokens_naive IS NOT NULL""",
+            params,
+        )
+        stats = dict(row) if row else {}
+
+        policy_rows = await conn.fetchall(
+            f"""SELECT
+                    pack_policy,
+                    COUNT(*) as cnt,
+                    AVG(savings_pct) as avg_savings_pct,
+                    SUM(CASE WHEN tokens_naive > 0
+                             THEN tokens_naive - tokens_returned ELSE 0 END) as tokens_saved
+                FROM retrieval_logs
+                WHERE {cutoff}
+                  AND pack_policy IS NOT NULL
+                  AND pack_policy != ''
+                GROUP BY pack_policy
+                ORDER BY cnt DESC""",
+            params,
+        )
+        stats["per_policy"] = [dict(r) for r in policy_rows]
+
+        for key in ("avg_savings_pct", "min_savings_pct", "max_savings_pct"):
+            if stats.get(key) is not None:
+                stats[key] = round(float(stats[key]), 1)
+        for key in ("total_tokens_saved", "total_tokens_returned", "total_tokens_naive"):
+            if stats.get(key) is not None:
+                stats[key] = int(stats[key])
+
+        return stats
+    except Exception as e:
+        logger.warning("dashboard._token_savings_stats failed: %s", e, exc_info=True)
+        return {
+            "total_queries": 0,
+            "queries_with_savings_data": 0,
+            "avg_savings_pct": None,
+            "total_tokens_saved": 0,
+            "per_policy": [],
+        }
+
+
+async def _tier_distribution_stats(conn, window_days: int) -> dict:
+    """Aggregate tier-distribution breakdown from retrieval_trace context_status."""
+    try:
+        from archivist.core.config import GRAPH_BACKEND
+
+        if (GRAPH_BACKEND or "sqlite").lower() == "postgres":
+            cutoff = f"created_at >= NOW() - INTERVAL '{window_days} days'"
+            json_l0 = "retrieval_trace::json->'context_status'->>'tier_distribution'"
+            params: list = []
+        else:
+            cutoff = "created_at >= datetime('now', ?)"
+            json_l0 = "json_extract(retrieval_trace, '$.context_status.tier_distribution')"
+            params = [f"-{window_days} days"]
+
+        pack_rows = await conn.fetchall(
+            f"""SELECT
+                    pack_policy,
+                    COUNT(*) as cnt,
+                    AVG(result_count) as avg_results
+                FROM retrieval_logs
+                WHERE {cutoff}
+                  AND pack_policy IS NOT NULL
+                  AND pack_policy != ''
+                GROUP BY pack_policy""",
+            params,
+        )
+        return {
+            "by_pack_policy": [dict(r) for r in pack_rows],
+        }
+    except Exception as e:
+        logger.warning("dashboard._tier_distribution_stats failed: %s", e, exc_info=True)
+        return {"by_pack_policy": []}
+
+
+async def _hotness_heatmap(top_n: int = 50) -> list[dict]:
+    """Return top-N memories by hotness score for the heatmap widget."""
+    try:
+        async with pool.read() as conn:
+            rows = await conn.fetchall(
+                """SELECT
+                       mh.memory_id,
+                       mh.score,
+                       mh.retrieval_count,
+                       mh.last_accessed,
+                       mc.tier_label,
+                       mc.importance,
+                       mc.file_path
+                   FROM memory_hotness mh
+                   LEFT JOIN memory_chunks mc ON mc.qdrant_id = mh.memory_id
+                   ORDER BY mh.score DESC
+                   LIMIT ?""",
+                (top_n,),
+            )
+        return [dict(r) for r in rows]
+    except Exception as e:
+        logger.warning("dashboard._hotness_heatmap failed: %s", e, exc_info=True)
+        return []

@@ -56,6 +56,9 @@ class PackedContext:
     token_savings_pct: float = 0.0
     """Estimated savings vs returning every result at L2 (0–100)."""
 
+    naive_tokens: int = 0
+    """Total tokens if every result were returned at L2 (baseline for savings calculation)."""
+
 
 def pack_context(
     results: list[dict],
@@ -158,6 +161,7 @@ def _pack_greedy(
         dropped_count=dropped,
         tier_distribution=tier_dist,
         token_savings_pct=savings,
+        naive_tokens=naive_total,
     )
 
 
@@ -243,4 +247,5 @@ def _pack_adaptive(
         dropped_count=dropped,
         tier_distribution=tier_dist,
         token_savings_pct=savings,
+        naive_tokens=naive_total,
     )

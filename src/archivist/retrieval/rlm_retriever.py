@@ -745,8 +745,11 @@ async def recursive_retrieve(
             result_count=len(out.get("sources", [])),
             cache_hit=True,
             duration_ms=elapsed,
+            tokens_returned=out.get("retrieval_trace", {}).get("context_status", {}).get("result_tokens_approx"),
+            tokens_naive=None,
+            savings_pct=out.get("retrieval_trace", {}).get("context_status", {}).get("token_savings_pct"),
+            pack_policy=out.get("retrieval_trace", {}).get("context_status", {}).get("pack_policy", ""),
         )
-        out["cache_hit"] = True
         m.inc(m.CACHE_HIT)
         m.inc(m.SEARCH_TOTAL)
         m.observe(m.SEARCH_DURATION, elapsed)
@@ -1475,6 +1478,7 @@ async def recursive_retrieve(
         _tier_distribution = _packed_ctx.tier_distribution
         _token_savings_pct = _packed_ctx.token_savings_pct
         _dropped_count = _packed_ctx.dropped_count
+        _naive_tokens: int | None = _packed_ctx.naive_tokens if _packed_ctx.naive_tokens else None
     else:
         result_tokens_approx = sum(count_tokens(select_tier(r, tier)) for r in enriched)
         budget_tokens = max_tokens if max_tokens and max_tokens > 0 else None
@@ -1483,6 +1487,7 @@ async def recursive_retrieve(
         _tier_distribution: dict[str, int] = {}
         _token_savings_pct = 0.0
         _dropped_count = 0
+        _naive_tokens = None
 
     _ctx_status = {
         "result_tokens_approx": result_tokens_approx,
@@ -1655,6 +1660,10 @@ async def recursive_retrieve(
         result_count=len(refined),
         cache_hit=False,
         duration_ms=elapsed,
+        tokens_returned=result_tokens_approx,
+        tokens_naive=_naive_tokens,
+        savings_pct=_token_savings_pct if _token_savings_pct else None,
+        pack_policy=CONTEXT_PACK_POLICY if _packed_ctx is not None else "",
     )
     m.inc(m.SEARCH_TOTAL)
     m.inc(m.CACHE_MISS)

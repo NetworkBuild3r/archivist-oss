@@ -8,6 +8,7 @@ from archivist.app.dashboard import batch_heuristic, build_dashboard
 from archivist.core.rbac import get_namespace_for_agent, list_accessible_namespaces
 from archivist.features.skills import find_skill, get_lessons, get_skill_health
 from archivist.retrieval.retrieval_log import get_retrieval_logs, get_retrieval_stats
+from archivist.storage.sqlite_pool import pool
 
 from ._common import error_response, success_response
 
@@ -195,6 +196,32 @@ TOOLS: list[Tool] = [
                     "type": "integer",
                     "description": "Analysis window in days",
                     "default": 7,
+                },
+            },
+            "required": [],
+        },
+    ),
+    Tool(
+        name="archivist_savings_dashboard",
+        description=(
+            "Token savings and tier-distribution observability dashboard. "
+            "Shows avg/min/max savings %, total tokens saved vs naive full-L2 baseline, "
+            "per-policy breakdown (adaptive/l0_first/l2_first), and a hotness heatmap "
+            "of top-N most frequently retrieved memories. "
+            "Use to measure the efficiency of the Answer Finder pipeline over time."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "window_days": {
+                    "type": "integer",
+                    "description": "Analysis window in days (default 7).",
+                    "default": 7,
+                },
+                "heatmap_top_n": {
+                    "type": "integer",
+                    "description": "Number of top memories to include in hotness heatmap (default 50).",
+                    "default": 50,
                 },
             },
             "required": [],
@@ -403,6 +430,35 @@ async def _handle_health_dashboard(arguments: dict) -> list[TextContent]:
     return success_response(result, default=str)
 
 
+async def _handle_savings_dashboard(arguments: dict) -> list[TextContent]:
+    """Token savings + tier distribution + hotness heatmap dashboard."""
+    from archivist.app.dashboard import (
+        _hotness_heatmap,
+        _tier_distribution_stats,
+        _token_savings_stats,
+    )
+
+    window_days = int(arguments.get("window_days") or 7)
+    top_n = int(arguments.get("heatmap_top_n") or 50)
+
+    async with pool.read() as conn:
+        savings = await _token_savings_stats(conn, window_days)
+        tier_dist = await _tier_distribution_stats(conn, window_days)
+
+    heatmap = await _hotness_heatmap(top_n=top_n)
+
+    return success_response(
+        {
+            "window_days": window_days,
+            "token_savings": savings,
+            "tier_distribution": tier_dist,
+            "hotness_heatmap": heatmap,
+            "heatmap_count": len(heatmap),
+        },
+        default=str,
+    )
+
+
 async def _handle_batch_heuristic(arguments: dict) -> list[TextContent]:
     """Recommend batch size from memory health signals."""
     result = await batch_heuristic(window_days=arguments.get("window_days", 7))
@@ -484,5 +540,6 @@ HANDLERS: dict[str, object] = {
     "archivist_retrieval_logs": _handle_retrieval_logs,
     "archivist_health_dashboard": _handle_health_dashboard,
     "archivist_batch_heuristic": _handle_batch_heuristic,
+    "archivist_savings_dashboard": _handle_savings_dashboard,
     "archivist_backup": _handle_backup,
 }
