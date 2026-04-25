@@ -124,6 +124,19 @@ class _WrappedSQLiteConn:
         cur = await conn.execute(sql, params)
         return await cur.fetchone()
 
+    async def fetchval(self, sql: str, params: tuple | list = ()) -> Any | None:
+        """Execute *sql* and return the first column of the first row.
+
+        Mirrors ``AsyncpgConnection.fetchval`` so callers can use
+        ``INSERT … RETURNING id`` uniformly on both backends.
+        """
+        conn = object.__getattribute__(self, "_conn")
+        cur = await conn.execute(sql, params)
+        row = await cur.fetchone()
+        if row is None:
+            return None
+        return row[0]
+
 
 class SQLiteGraphBackend:
     """Single-connection async SQLite backend satisfying ``GraphBackend``.

@@ -52,33 +52,89 @@ logger = logging.getLogger("archivist.asyncpg_backend")
 
 _PLACEHOLDER_RE = re.compile(r"\?")
 
+# SQLite-ism patterns translated to standard SQL before $N substitution.
+# Order matters: more specific patterns first.
+_INSERT_OR_IGNORE_RE = re.compile(
+    r"\bINSERT\s+OR\s+IGNORE\s+INTO\b", re.IGNORECASE
+)
+_INSERT_OR_REPLACE_RE = re.compile(
+    r"\bINSERT\s+OR\s+REPLACE\s+INTO\b", re.IGNORECASE
+)
+_COLLATE_NOCASE_RE = re.compile(r"\s+COLLATE\s+NOCASE\b", re.IGNORECASE)
+
 
 def _translate_sql(sql: str) -> str:
-    """Convert SQLite ``?`` placeholders to asyncpg ``$N`` style.
+    """Convert SQLite SQL idioms to Postgres-compatible SQL.
+
+    Transformations applied (in order):
+
+    1. ``INSERT OR IGNORE INTO`` → ``INSERT INTO … ON CONFLICT DO NOTHING``
+    2. ``INSERT OR REPLACE INTO`` → ``INSERT INTO … ON CONFLICT DO UPDATE SET …``
+    3. ``COLLATE NOCASE`` → stripped (citext handles case-insensitivity natively).
+    4. ``?`` placeholders → ``$1``, ``$2``, … (asyncpg style).
 
     Examples::
 
         >>> _translate_sql("SELECT * FROM t WHERE a = ? AND b = ?")
         'SELECT * FROM t WHERE a = $1 AND b = $2'
-        >>> _translate_sql("INSERT INTO t VALUES (?, ?)")
-        'INSERT INTO t VALUES ($1, $2)'
-        >>> _translate_sql("SELECT 1")  # no placeholders — unchanged
-        'SELECT 1'
-
-    Args:
-        sql: SQL string using ``?`` placeholders.
-
-    Returns:
-        SQL string with ``?`` replaced by ``$1``, ``$2``, … in order.
+        >>> _translate_sql("INSERT OR IGNORE INTO t (a) VALUES (?)")
+        'INSERT INTO t (a) VALUES ($1) ON CONFLICT DO NOTHING'
+        >>> _translate_sql("SELECT * FROM t WHERE name = ? COLLATE NOCASE")
+        'SELECT * FROM t WHERE name = $1'
     """
+    # Track which ORx substitution fired so we can append the right ON CONFLICT clause.
+    _mode = [None]  # "ignore" | "replace" | None
+
+    def _replace_insert(m: re.Match[str]) -> str:
+        keyword = m.group(0).upper()
+        if "IGNORE" in keyword:
+            _mode[0] = "ignore"
+        else:
+            _mode[0] = "replace"
+        return "INSERT INTO"
+
+    # Step 1 & 2: normalise INSERT OR x → INSERT INTO
+    sql2 = _INSERT_OR_IGNORE_RE.sub(_replace_insert, sql)
+    sql2 = _INSERT_OR_REPLACE_RE.sub(_replace_insert, sql2)
+
+    # Step 3: strip COLLATE NOCASE (citext handles it at the column level)
+    sql2 = _COLLATE_NOCASE_RE.sub("", sql2)
+
+    # Step 4: ? → $N
     counter = 0
 
-    def _replace(_m: re.Match[str]) -> str:
+    def _replace_placeholder(_m: re.Match[str]) -> str:
         nonlocal counter
         counter += 1
         return f"${counter}"
 
-    return _PLACEHOLDER_RE.sub(_replace, sql)
+    sql2 = _PLACEHOLDER_RE.sub(_replace_placeholder, sql2)
+
+    # Step 5: append ON CONFLICT clause if INSERT OR x was detected
+    if _mode[0] == "ignore":
+        sql2 = sql2.rstrip().rstrip(";") + " ON CONFLICT DO NOTHING"
+    elif _mode[0] == "replace":
+        # ON CONFLICT DO UPDATE SET requires knowing the columns being inserted.
+        # We parse the column list from "INSERT INTO table (col1, col2, …) VALUES …"
+        # and build SET col1=EXCLUDED.col1, col2=EXCLUDED.col2, … skipping the PK.
+        _col_match = re.search(
+            r"INSERT\s+INTO\s+\w+\s*\(([^)]+)\)", sql2, re.IGNORECASE
+        )
+        if _col_match:
+            cols = [c.strip() for c in _col_match.group(1).split(",")]
+            # Skip common PK / identity columns to avoid "cannot UPDATE generated column"
+            _skip = {"id", "rowid", "memory_id", "token"}
+            update_cols = [c for c in cols if c.lower() not in _skip]
+            if update_cols:
+                set_clause = ", ".join(f"{c}=EXCLUDED.{c}" for c in update_cols)
+                sql2 = sql2.rstrip().rstrip(";") + f" ON CONFLICT DO UPDATE SET {set_clause}"
+            else:
+                sql2 = sql2.rstrip().rstrip(";") + " ON CONFLICT DO NOTHING"
+        else:
+            # Fallback: treat as ignore (idempotent)
+            sql2 = sql2.rstrip().rstrip(";") + " ON CONFLICT DO NOTHING"
+
+    return sql2
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +231,28 @@ class AsyncpgConnection:
         _t0 = time.monotonic()
         try:
             result = await self._conn.fetchrow(translated, *params)
+        except Exception:
+            m.inc(m.PG_POOL_ERRORS_TOTAL)
+            raise
+        m.observe(m.PG_POOL_QUERY_MS, (time.monotonic() - _t0) * 1000.0)
+        return result
+
+    async def fetchval(self, sql: str, params: tuple[Any, ...] | list[Any] = ()) -> Any | None:
+        """Execute *sql* and return the first column of the first row.
+
+        Used for ``INSERT … RETURNING id`` and similar single-value queries.
+
+        Args:
+            sql: SQL statement (``?`` placeholders allowed).
+            params: Positional parameters.
+
+        Returns:
+            The scalar value from column 0 of the first row, or ``None``.
+        """
+        translated = _translate_sql(sql)
+        _t0 = time.monotonic()
+        try:
+            result = await self._conn.fetchval(translated, *params)
         except Exception:
             m.inc(m.PG_POOL_ERRORS_TOTAL)
             raise

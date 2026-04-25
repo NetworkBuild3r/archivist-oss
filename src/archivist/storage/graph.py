@@ -29,6 +29,13 @@ logger = logging.getLogger("archivist.graph")
 GRAPH_WRITE_LOCK = threading.Lock()
 
 
+def _is_postgres() -> bool:
+    """Return True when the active graph backend is PostgreSQL."""
+    from archivist.core.config import GRAPH_BACKEND
+
+    return (GRAPH_BACKEND or "sqlite").lower() == "postgres"
+
+
 def _ensure_dir():
     os.makedirs(os.path.dirname(SQLITE_PATH), exist_ok=True)
 
@@ -1170,7 +1177,7 @@ async def upsert_entity(
 
     async def _run(c: aiosqlite.Connection) -> int:
         cur = await c.execute(
-            "SELECT id, mention_count, retention_class FROM entities WHERE name = ? COLLATE NOCASE AND namespace = ?",
+            "SELECT id, mention_count, retention_class FROM entities WHERE name = ? AND namespace = ?",
             (name, namespace),
         )
         row = await cur.fetchone()
@@ -1186,6 +1193,13 @@ async def upsert_entity(
                 (now, new_rc, row["id"]),
             )
             return row["id"]
+        if _is_postgres():
+            new_id = await c.fetchval(
+                "INSERT INTO entities (name, entity_type, first_seen, last_seen, retention_class, namespace, actor_id, actor_type) "
+                "VALUES (?,?,?,?,?,?,?,?) RETURNING id",
+                (name, entity_type, now, now, retention_class, namespace, actor_id, actor_type),
+            )
+            return new_id
         cur2 = await c.execute(
             "INSERT INTO entities (name, entity_type, first_seen, last_seen, retention_class, namespace, actor_id, actor_type) "
             "VALUES (?,?,?,?,?,?,?,?)",
@@ -1265,27 +1279,49 @@ async def add_fact(
             valid_from = _m.group(1)
 
     async def _run(c: aiosqlite.Connection) -> int:
-        cur = await c.execute(
-            "INSERT INTO facts (entity_id, fact_text, source_file, agent_id, created_at, "
-            "retention_class, valid_from, valid_until, namespace, memory_id, confidence, provenance, actor_id) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (
-                entity_id,
-                fact_text,
-                source_file,
-                agent_id,
-                now,
-                retention_class,
-                valid_from,
-                valid_until,
-                namespace,
-                memory_id,
-                confidence,
-                provenance,
-                actor_id,
-            ),
-        )
-        fid = cur.lastrowid
+        if _is_postgres():
+            fid = await c.fetchval(
+                "INSERT INTO facts (entity_id, fact_text, source_file, agent_id, created_at, "
+                "retention_class, valid_from, valid_until, namespace, memory_id, confidence, provenance, actor_id) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id",
+                (
+                    entity_id,
+                    fact_text,
+                    source_file,
+                    agent_id,
+                    now,
+                    retention_class,
+                    valid_from,
+                    valid_until,
+                    namespace,
+                    memory_id,
+                    confidence,
+                    provenance,
+                    actor_id,
+                ),
+            )
+        else:
+            cur = await c.execute(
+                "INSERT INTO facts (entity_id, fact_text, source_file, agent_id, created_at, "
+                "retention_class, valid_from, valid_until, namespace, memory_id, confidence, provenance, actor_id) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    entity_id,
+                    fact_text,
+                    source_file,
+                    agent_id,
+                    now,
+                    retention_class,
+                    valid_from,
+                    valid_until,
+                    namespace,
+                    memory_id,
+                    confidence,
+                    provenance,
+                    actor_id,
+                ),
+            )
+            fid = cur.lastrowid
 
         if new_words:
             old_facts_cur = await c.execute(
@@ -1357,19 +1393,23 @@ async def search_entities(query: str, limit: int = 10, namespace: str = "") -> l
 
     async with pool.read() as conn:
         norm_q = _normalize(query)
+        # On Postgres the entities.name column is citext so LIKE is already
+        # case-insensitive; COLLATE NOCASE is stripped by the SQL translator.
+        # On SQLite COLLATE NOCASE is kept for non-ASCII correctness.
+        collate = "" if _is_postgres() else " COLLATE NOCASE"
         if namespace:
             cur = await conn.execute(
-                "SELECT * FROM entities "
-                "WHERE (name LIKE ? COLLATE NOCASE OR aliases LIKE ? COLLATE NOCASE) "
-                "AND namespace = ? "
-                "ORDER BY mention_count DESC LIMIT ?",
+                f"SELECT * FROM entities "
+                f"WHERE (name LIKE ?{collate} OR aliases LIKE ?{collate}) "
+                f"AND namespace = ? "
+                f"ORDER BY mention_count DESC LIMIT ?",
                 (f"%{query}%", f"%{norm_q}%", namespace, limit),
             )
         else:
             cur = await conn.execute(
-                "SELECT * FROM entities "
-                "WHERE name LIKE ? COLLATE NOCASE OR aliases LIKE ? COLLATE NOCASE "
-                "ORDER BY mention_count DESC LIMIT ?",
+                f"SELECT * FROM entities "
+                f"WHERE name LIKE ?{collate} OR aliases LIKE ?{collate} "
+                f"ORDER BY mention_count DESC LIMIT ?",
                 (f"%{query}%", f"%{norm_q}%", limit),
             )
         return [dict(r) for r in await cur.fetchall()]
