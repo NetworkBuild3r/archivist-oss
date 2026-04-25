@@ -96,6 +96,12 @@ def schema_guard(ddl: str):
     Uses double-checked locking to avoid the TOCTOU race where two coroutines
     both see ``applied=False`` and both attempt to execute the DDL.
 
+    On **Postgres** the callable is a no-op: all tables (including those created
+    by per-module guard strings) are already present in ``schema_postgres.sql``
+    which is applied once at startup by :func:`init_schema_async`.  Marking
+    the guard as already applied prevents any attempt to run SQLite-only DDL
+    strings through a sync ``get_db()`` connection when Postgres is active.
+
     Usage (module level)::
 
         _ensure_schema = schema_guard(\"\"\"
@@ -115,6 +121,10 @@ def schema_guard(ddl: str):
             # Double-checked: another thread may have run DDL while we waited.
             if _ensure.applied:
                 return
+            # On Postgres all schema is handled by init_schema_async(); skip.
+            if _is_postgres():
+                _ensure.applied = True
+                return
             conn = get_db()
             try:
                 conn.executescript(ddl)
@@ -132,6 +142,20 @@ def schema_guard(ddl: str):
 
 
 def init_schema():
+    """Initialize the SQLite schema.
+
+    On Postgres this is a no-op — use :func:`init_schema_async` instead,
+    which loads ``schema_postgres.sql`` via the async pool.
+    """
+    if _is_postgres():
+        # All Postgres DDL lives in schema_postgres.sql and is applied by
+        # init_schema_async().  Calling get_db() on Postgres would return
+        # a SQLite connection, which is wrong.
+        logging.getLogger("archivist.graph").debug(
+            "init_schema() skipped — Postgres backend active; "
+            "use init_schema_async() instead"
+        )
+        return
     with GRAPH_WRITE_LOCK:
         conn = get_db()
         conn.executescript("""
@@ -297,7 +321,14 @@ def init_schema():
 
 
 def _migrate_schema():
-    """Add columns introduced in v1.7+ if upgrading from an older database."""
+    """Add columns introduced in v1.7+ if upgrading from an older database.
+
+    On Postgres this is a no-op: ``schema_postgres.sql`` already includes every
+    column and index in its final form, so ``ALTER TABLE … ADD COLUMN`` is
+    never needed.
+    """
+    if _is_postgres():
+        return
     _logger = logging.getLogger("archivist.graph")
     migrations = [
         ("facts", "retention_class", "TEXT NOT NULL DEFAULT 'standard'"),
@@ -372,7 +403,13 @@ def _migrate_entity_unique_constraint():
     The original schema has UNIQUE(name) which collides across namespaces.
     This migration copies to a new table with UNIQUE(name, namespace),
     then swaps in place.  Safe to run multiple times.
+
+    On Postgres this is a no-op: ``schema_postgres.sql`` defines the correct
+    constraint from the start and uses SQLite-specific ``PRAGMA``/``sqlite_master``
+    introspection that is not valid on Postgres.
     """
+    if _is_postgres():
+        return
     _logger = logging.getLogger("archivist.graph")
     with GRAPH_WRITE_LOCK:
         conn = get_db()
@@ -449,7 +486,13 @@ def _init_fts5():
 
     On success we run a trivial read and register ``fts5`` as healthy;
     on failure we register unhealthy so downstream BM25 search can skip FTS.
+
+    On Postgres this is a no-op: FTS is provided by ``tsvector``/GIN columns
+    defined in ``schema_postgres.sql``.  The ``fts5`` health key is set to
+    healthy by :func:`init_schema_async` after the Postgres DDL is applied.
     """
+    if _is_postgres():
+        return
     import archivist.core.health as health
 
     with GRAPH_WRITE_LOCK:
