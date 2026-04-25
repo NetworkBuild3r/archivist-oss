@@ -278,6 +278,17 @@ class ArchivistSettings(BaseSettings):
     # ── Context window management (v1.1) ─────────────────────────────────────
     default_context_budget: int = Field(default=128000, ge=1)
 
+    # ── Tier-aware context packing (Phase 2 — answer-finder) ─────────────────
+    # CONTEXT_PACK_POLICY: controls how the tier-aware packer allocates budget.
+    #   "adaptive"  — 3-pass: L0 summaries first, then upgrade to L1/L2 by score
+    #   "l0_first"  — always prefer shortest (L0) tier until budget is full
+    #   "l2_first"  — always prefer full-content (L2) tier (legacy behaviour)
+    context_pack_policy: str = "adaptive"
+    # Fraction of max_tokens reserved for the L0 pass in adaptive mode.
+    context_l0_budget_share: float = 0.30
+    # Always include at least this many results at their best available tier.
+    context_min_full_results: int = Field(default=3, ge=1)
+
     # ── Journal exports (v1.5) ────────────────────────────────────────────────
     journal_enabled: bool = False
     journal_dir: str = "/data/archivist/journal"
@@ -748,6 +759,10 @@ OUTBOX_ORPHAN_SWEEP_EVERY_N = _settings.outbox_orphan_sweep_every_n
 OUTBOX_RETENTION_DAYS = _settings.outbox_retention_days
 
 DEFAULT_CONTEXT_BUDGET = _settings.default_context_budget
+
+CONTEXT_PACK_POLICY = _settings.context_pack_policy
+CONTEXT_L0_BUDGET_SHARE = _settings.context_l0_budget_share
+CONTEXT_MIN_FULL_RESULTS = _settings.context_min_full_results
 
 JOURNAL_ENABLED = _settings.journal_enabled
 JOURNAL_DIR = _settings.journal_dir

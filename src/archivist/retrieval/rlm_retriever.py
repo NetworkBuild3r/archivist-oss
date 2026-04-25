@@ -32,6 +32,9 @@ from archivist.core.config import (
     BM25_RESCUE_ENABLED,
     BM25_RESCUE_MAX_SLOTS,
     BM25_RESCUE_MIN_SCORE_RATIO,
+    CONTEXT_L0_BUDGET_SHARE,
+    CONTEXT_MIN_FULL_RESULTS,
+    CONTEXT_PACK_POLICY,
     CROSS_AGENT_MAX_SHARE,
     DYNAMIC_THRESHOLD_ENABLED,
     GRAPH_RETRIEVAL_ENABLED,
@@ -67,6 +70,7 @@ from archivist.core.result_types import ResultCandidate
 from archivist.core.trajectory import get_outcome_adjustments
 from archivist.features.embeddings import embed_batch, embed_text
 from archivist.features.llm import llm_query
+from archivist.retrieval.context_packer import pack_context
 from archivist.retrieval.memory_fusion import dedupe_vector_hits
 from archivist.retrieval.query_classifier import SUBCATEGORY_TO_TOPIC, classify_query_full
 from archivist.retrieval.query_expansion import expand_query
@@ -1387,17 +1391,17 @@ async def recursive_retrieve(
     # Cap how many chunks we refine (per-request limit)
     enriched = enriched[:limit]
 
-    # If max_tokens specified, further cap by token budget
+    # If max_tokens specified, use tier-aware packing instead of greedy truncation.
+    _packed_ctx = None
     if max_tokens and max_tokens > 0:
-        budget = 0
-        capped = []
-        for r in enriched:
-            chunk_toks = count_tokens(select_tier(r, tier))
-            if budget + chunk_toks > max_tokens:
-                break
-            budget += chunk_toks
-            capped.append(r)
-        enriched = capped if capped else enriched[:1]
+        _packed_ctx = pack_context(
+            enriched,
+            max_tokens=max_tokens,
+            tier_policy=CONTEXT_PACK_POLICY,
+            l0_budget_share=CONTEXT_L0_BUDGET_SHARE,
+            min_full_results=CONTEXT_MIN_FULL_RESULTS,
+        )
+        enriched = _packed_ctx.sources
 
     n_refine = len(enriched)
 
@@ -1405,18 +1409,34 @@ async def recursive_retrieve(
     if _micro_hits:
         m.inc(m.MICRO_CHUNK_HITS, {"namespace": namespace}, value=_micro_hits)
 
-    # Context-status signaling (v1.0, upgraded v1.1 with tokenizer)
-    result_tokens_approx = sum(count_tokens(select_tier(r, tier)) for r in enriched)
-    budget_tokens = max_tokens if max_tokens and max_tokens > 0 else None
-    if budget_tokens:
-        budget_used_pct = round(result_tokens_approx / budget_tokens * 100, 1)
+    # Context-status signaling — use packer metadata when available (v2.0)
+    if _packed_ctx is not None:
+        result_tokens_approx = _packed_ctx.total_tokens
+        budget_tokens: int | None = _packed_ctx.budget_tokens
+        budget_used_pct = round(result_tokens_approx / budget_tokens * 100, 1) if budget_tokens else 0.0
+        _over_budget = _packed_ctx.over_budget
+        _tier_distribution = _packed_ctx.tier_distribution
+        _token_savings_pct = _packed_ctx.token_savings_pct
+        _dropped_count = _packed_ctx.dropped_count
     else:
-        budget_used_pct = 0.0
+        result_tokens_approx = sum(count_tokens(select_tier(r, tier)) for r in enriched)
+        budget_tokens = max_tokens if max_tokens and max_tokens > 0 else None
+        budget_used_pct = round(result_tokens_approx / budget_tokens * 100, 1) if budget_tokens else 0.0
+        _over_budget = bool(budget_tokens and budget_used_pct >= 100)
+        _tier_distribution: dict[str, int] = {}
+        _token_savings_pct = 0.0
+        _dropped_count = 0
+
     _ctx_status = {
         "result_tokens_approx": result_tokens_approx,
         "budget_tokens": budget_tokens or "unlimited",
         "budget_used_pct": budget_used_pct,
         "tier": tier,
+        "over_budget": _over_budget,
+        "tier_distribution": _tier_distribution,
+        "token_savings_pct": _token_savings_pct,
+        "dropped_count": _dropped_count,
+        "pack_policy": CONTEXT_PACK_POLICY if _packed_ctx is not None else "none",
         "hint": "compress" if budget_tokens and budget_used_pct > 80 else "ok",
     }
 
@@ -1429,11 +1449,13 @@ async def recursive_retrieve(
     )
 
     if not refine:
-        # Return tier-appropriate text in sources
+        # Return tier-appropriate text in sources (use packer text if already set)
         for r in enriched:
-            r["tier_text"] = select_tier(r, tier)
+            if "tier_text" not in r:
+                r["tier_text"] = select_tier(r, tier)
         no_refine = {
             "answer": "",
+            "over_budget": _over_budget,
             "sources": enriched[: min(10, limit)],
             "chunks_searched": n_coarse,
             "chunks_after_threshold": len(filtered),
@@ -1479,6 +1501,7 @@ async def recursive_retrieve(
     if not refined:
         no_rel = {
             "answer": "Found chunks but none were relevant after refinement.",
+            "over_budget": _over_budget,
             "sources": [],
             "chunks_searched": n_coarse,
             "chunks_after_threshold": len(filtered),
@@ -1531,6 +1554,7 @@ async def recursive_retrieve(
 
     final_result = {
         "answer": answer,
+        "over_budget": _over_budget,
         "sources": [
             {
                 "file": r["source"],

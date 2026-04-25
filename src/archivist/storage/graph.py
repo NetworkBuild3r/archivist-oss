@@ -273,6 +273,16 @@ def init_schema():
         CREATE INDEX IF NOT EXISTS idx_df_memory ON delete_failures(memory_id);
         CREATE INDEX IF NOT EXISTS idx_df_created ON delete_failures(created_at);
 
+        -- Hotness scoring table: created eagerly here so FTS LEFT JOINs always succeed.
+        CREATE TABLE IF NOT EXISTS memory_hotness (
+            memory_id         TEXT PRIMARY KEY,
+            score             REAL NOT NULL DEFAULT 0.0,
+            retrieval_count   INTEGER NOT NULL DEFAULT 0,
+            last_accessed     TEXT,
+            updated_at        TEXT NOT NULL DEFAULT (datetime('now')),
+            importance_signal REAL NOT NULL DEFAULT 0.5
+        );
+
         -- Transactional outbox for cross-store writes (Phase 3).
         -- Events are written atomically with SQLite artifacts and applied to
         -- Qdrant by the OutboxProcessor background task.
@@ -948,12 +958,13 @@ async def _search_fts_sqlite(
             sql = (
                 "SELECT mc.qdrant_id, mc.file_path, mc.chunk_index, mc.agent_id, "
                 "mc.namespace, mc.date, mc.memory_type, mc.text, "
-                "mc.actor_id, mc.actor_type, "
+                "mc.actor_id, mc.actor_type, mc.importance, mc.tier_label, "
                 "rank AS bm25_rank "
                 "FROM memory_fts "
                 "JOIN memory_chunks mc ON memory_fts.rowid = mc.rowid "
+                "LEFT JOIN memory_hotness mh ON mh.memory_id = mc.qdrant_id "
                 f"WHERE memory_fts MATCH ? {where_sql} "
-                "ORDER BY rank "
+                "ORDER BY (rank * (1 + 0.3 * COALESCE(mh.importance_signal, 0.5))) "
                 f"LIMIT ?"
             )
             params = [query] + params + [limit]
@@ -1023,15 +1034,17 @@ async def _search_fts_postgres(
             sql = (
                 "SELECT mc.qdrant_id, mc.file_path, mc.chunk_index, mc.agent_id, "
                 "mc.namespace, mc.date, mc.memory_type, mc.text, "
-                "mc.actor_id, mc.actor_type, "
+                "mc.actor_id, mc.actor_type, mc.importance, mc.tier_label, "
                 "ts_rank_cd(mc.fts_vector, to_tsquery('english', ?)) * 32 AS bm25_rank "
                 "FROM memory_chunks mc "
+                "LEFT JOIN memory_hotness mh ON mh.memory_id = mc.qdrant_id "
                 f"WHERE mc.fts_vector @@ to_tsquery('english', ?) {where_sql} "
-                "ORDER BY bm25_rank DESC "
+                "ORDER BY (ts_rank_cd(mc.fts_vector, to_tsquery('english', ?)) * 32 "
+                "          * (1 + 0.3 * COALESCE(mh.importance_signal, 0.5))) DESC "
                 "LIMIT ?"
             )
-            # tsquery_expr used twice: once in SELECT ranking, once in WHERE
-            params = [tsquery_expr, tsquery_expr] + params[1:] + [limit]
+            # tsquery_expr used three times: SELECT ranking, WHERE filter, ORDER BY
+            params = [tsquery_expr, tsquery_expr] + params[1:] + [tsquery_expr, limit]
 
             cur = await conn.execute(sql, params)
             results = []
@@ -1132,12 +1145,13 @@ async def _search_fts_exact_sqlite(
             sql = (
                 "SELECT mc.qdrant_id, mc.file_path, mc.chunk_index, mc.agent_id, "
                 "mc.namespace, mc.date, mc.memory_type, mc.text, "
-                "mc.actor_id, mc.actor_type, "
+                "mc.actor_id, mc.actor_type, mc.importance, mc.tier_label, "
                 "rank AS bm25_rank "
                 "FROM memory_fts_exact "
                 "JOIN memory_chunks mc ON memory_fts_exact.rowid = mc.rowid "
+                "LEFT JOIN memory_hotness mh ON mh.memory_id = mc.qdrant_id "
                 f"WHERE memory_fts_exact MATCH ? {where_sql} "
-                "ORDER BY rank "
+                "ORDER BY (rank * (1 + 0.3 * COALESCE(mh.importance_signal, 0.5))) "
                 f"LIMIT ?"
             )
             params = [query] + params + [limit]
@@ -1202,14 +1216,16 @@ async def _search_fts_exact_postgres(
             sql = (
                 "SELECT mc.qdrant_id, mc.file_path, mc.chunk_index, mc.agent_id, "
                 "mc.namespace, mc.date, mc.memory_type, mc.text, "
-                "mc.actor_id, mc.actor_type, "
+                "mc.actor_id, mc.actor_type, mc.importance, mc.tier_label, "
                 "ts_rank_cd(mc.fts_vector_simple, to_tsquery('simple', ?)) * 32 AS bm25_rank "
                 "FROM memory_chunks mc "
+                "LEFT JOIN memory_hotness mh ON mh.memory_id = mc.qdrant_id "
                 f"WHERE mc.fts_vector_simple @@ to_tsquery('simple', ?) {where_sql} "
-                "ORDER BY bm25_rank DESC "
+                "ORDER BY (ts_rank_cd(mc.fts_vector_simple, to_tsquery('simple', ?)) * 32 "
+                "          * (1 + 0.3 * COALESCE(mh.importance_signal, 0.5))) DESC "
                 "LIMIT ?"
             )
-            params = [tsquery_expr, tsquery_expr] + params[1:] + [limit]
+            params = [tsquery_expr, tsquery_expr] + params[1:] + [tsquery_expr, limit]
 
             cur = await conn.execute(sql, params)
             results = []
