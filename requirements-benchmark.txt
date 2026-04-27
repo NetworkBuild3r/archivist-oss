@@ -4,4 +4,4 @@
 #   pip install -r requirements-benchmark.txt
 #
 # beir pulls sentence-transformers, datasets, pytrec-eval-terrier (large download).
-beir>=2.0.0
+beir>=2.2.0
