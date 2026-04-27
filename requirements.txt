@@ -1,6 +1,6 @@
 mcp[http]>=1.9.0,<2.0.0
 qdrant-client>=1.13.0,<2.0.0
-httpx>=0.28.0
+httpx>=0.28.1
 watchfiles>=1.0.0
 pyyaml>=6.0
 tqdm>=4.66.0
