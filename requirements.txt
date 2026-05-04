@@ -8,7 +8,7 @@ uvicorn>=0.46.0
 starlette>=0.38.0
 
 # v1.12: async SQLite pool (replaces blocking threading.Lock pattern)
-aiosqlite>=0.20.0
+aiosqlite>=0.22.1
 
 # Pydantic Settings v2 (config system — replaces raw os.getenv pattern)
 pydantic-settings>=2.7.0
