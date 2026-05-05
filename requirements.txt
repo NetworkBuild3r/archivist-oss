@@ -11,7 +11,7 @@ starlette>=0.38.0
 aiosqlite>=0.20.0
 
 # Pydantic Settings v2 (config system — replaces raw os.getenv pattern)
-pydantic-settings>=2.7.0
+pydantic-settings>=2.14.0
 
 # Dev / test dependencies — see requirements-test.txt (used by CI)
 # pytest-benchmark>=5.1.0
