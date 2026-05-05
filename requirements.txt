@@ -5,7 +5,7 @@ watchfiles>=1.0.0
 pyyaml>=6.0.3
 tqdm>=4.66.0
 uvicorn>=0.46.0
-starlette>=0.38.0
+starlette>=1.0.0
 
 # v1.12: async SQLite pool (replaces blocking threading.Lock pattern)
 aiosqlite>=0.20.0
