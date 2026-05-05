@@ -93,6 +93,47 @@ def _get_graph_write_lock() -> asyncio.Lock:
 GRAPH_WRITE_LOCK_ASYNC: asyncio.Lock = asyncio.Lock()  # legacy alias, not used internally
 
 
+class _WrappedSQLiteConn:
+    """Thin wrapper around ``aiosqlite.Connection`` that adds ``fetchall`` /
+    ``fetchone`` convenience methods matching the interface of
+    ``AsyncpgConnection`` in ``asyncpg_backend.py``.
+
+    Delegating all other attribute access to the underlying connection keeps the
+    rest of the codebase working without change.
+    """
+
+    __slots__ = ("_conn",)
+
+    def __init__(self, conn: aiosqlite.Connection) -> None:
+        object.__setattr__(self, "_conn", conn)
+
+    def __getattr__(self, name: str):
+        return getattr(object.__getattribute__(self, "_conn"), name)
+
+    async def fetchall(self, sql: str, params: tuple | list = ()) -> list[aiosqlite.Row]:
+        conn = object.__getattribute__(self, "_conn")
+        cur = await conn.execute(sql, params)
+        return list(await cur.fetchall())
+
+    async def fetchone(self, sql: str, params: tuple | list = ()) -> aiosqlite.Row | None:
+        conn = object.__getattribute__(self, "_conn")
+        cur = await conn.execute(sql, params)
+        return await cur.fetchone()
+
+    async def fetchval(self, sql: str, params: tuple | list = ()) -> Any | None:
+        """Execute *sql* and return the first column of the first row.
+
+        Mirrors ``AsyncpgConnection.fetchval`` so callers can use
+        ``INSERT … RETURNING id`` uniformly on both backends.
+        """
+        conn = object.__getattribute__(self, "_conn")
+        cur = await conn.execute(sql, params)
+        row = await cur.fetchone()
+        if row is None:
+            return None
+        return row[0]
+
+
 class SQLiteGraphBackend:
     """Single-connection async SQLite backend satisfying ``GraphBackend``.
 
@@ -158,7 +199,7 @@ class SQLiteGraphBackend:
                 elapsed_ms = (time.monotonic() - t0) * 1000
                 m.observe(m.SQLITE_POOL_ACQUIRE_MS, elapsed_ms)
                 try:
-                    yield self._conn
+                    yield _WrappedSQLiteConn(self._conn)
                     await self._conn.commit()
                 except Exception:
                     m.inc(m.SQLITE_POOL_WRITE_ERRORS)
@@ -173,7 +214,7 @@ class SQLiteGraphBackend:
         """Yield the connection for read-only queries (no lock required under WAL)."""
         if self._conn is None:
             raise RuntimeError("SQLitePool is not initialized — call initialize_pool() first")
-        yield self._conn
+        yield _WrappedSQLiteConn(self._conn)
 
     # ------------------------------------------------------------------
     # GraphBackend Protocol convenience methods

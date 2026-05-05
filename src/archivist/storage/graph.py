@@ -29,6 +29,13 @@ logger = logging.getLogger("archivist.graph")
 GRAPH_WRITE_LOCK = threading.Lock()
 
 
+def _is_postgres() -> bool:
+    """Return True when the active graph backend is PostgreSQL."""
+    from archivist.core.config import GRAPH_BACKEND
+
+    return (GRAPH_BACKEND or "sqlite").lower() == "postgres"
+
+
 def _ensure_dir():
     os.makedirs(os.path.dirname(SQLITE_PATH), exist_ok=True)
 
@@ -89,6 +96,12 @@ def schema_guard(ddl: str):
     Uses double-checked locking to avoid the TOCTOU race where two coroutines
     both see ``applied=False`` and both attempt to execute the DDL.
 
+    On **Postgres** the callable is a no-op: all tables (including those created
+    by per-module guard strings) are already present in ``schema_postgres.sql``
+    which is applied once at startup by :func:`init_schema_async`.  Marking
+    the guard as already applied prevents any attempt to run SQLite-only DDL
+    strings through a sync ``get_db()`` connection when Postgres is active.
+
     Usage (module level)::
 
         _ensure_schema = schema_guard(\"\"\"
@@ -108,6 +121,10 @@ def schema_guard(ddl: str):
             # Double-checked: another thread may have run DDL while we waited.
             if _ensure.applied:
                 return
+            # On Postgres all schema is handled by init_schema_async(); skip.
+            if _is_postgres():
+                _ensure.applied = True
+                return
             conn = get_db()
             try:
                 conn.executescript(ddl)
@@ -125,6 +142,19 @@ def schema_guard(ddl: str):
 
 
 def init_schema():
+    """Initialize the SQLite schema.
+
+    On Postgres this is a no-op — use :func:`init_schema_async` instead,
+    which loads ``schema_postgres.sql`` via the async pool.
+    """
+    if _is_postgres():
+        # All Postgres DDL lives in schema_postgres.sql and is applied by
+        # init_schema_async().  Calling get_db() on Postgres would return
+        # a SQLite connection, which is wrong.
+        logging.getLogger("archivist.graph").debug(
+            "init_schema() skipped — Postgres backend active; use init_schema_async() instead"
+        )
+        return
     with GRAPH_WRITE_LOCK:
         conn = get_db()
         conn.executescript("""
@@ -206,11 +236,19 @@ def init_schema():
             namespace TEXT NOT NULL DEFAULT '',
             date TEXT NOT NULL DEFAULT '',
             memory_type TEXT NOT NULL DEFAULT 'general',
-            is_excluded INTEGER NOT NULL DEFAULT 0
+            is_excluded INTEGER NOT NULL DEFAULT 0,
+            actor_id TEXT NOT NULL DEFAULT '',
+            actor_type TEXT NOT NULL DEFAULT '',
+            importance REAL NOT NULL DEFAULT 0.5,
+            tier_label TEXT NOT NULL DEFAULT 'l2',
+            ttl_at TEXT,
+            decay_rate REAL NOT NULL DEFAULT 0.0
         );
         CREATE INDEX IF NOT EXISTS idx_mc_qdrant ON memory_chunks(qdrant_id);
         CREATE INDEX IF NOT EXISTS idx_mc_namespace ON memory_chunks(namespace);
         CREATE INDEX IF NOT EXISTS idx_mc_agent ON memory_chunks(agent_id);
+        CREATE INDEX IF NOT EXISTS idx_mc_importance ON memory_chunks(importance DESC);
+        CREATE INDEX IF NOT EXISTS idx_mc_tier ON memory_chunks(tier_label);
 
         -- Tracks all Qdrant point IDs created for each memory (Phase 2).
         CREATE TABLE IF NOT EXISTS memory_points (
@@ -234,6 +272,16 @@ def init_schema():
         );
         CREATE INDEX IF NOT EXISTS idx_df_memory ON delete_failures(memory_id);
         CREATE INDEX IF NOT EXISTS idx_df_created ON delete_failures(created_at);
+
+        -- Hotness scoring table: created eagerly here so FTS LEFT JOINs always succeed.
+        CREATE TABLE IF NOT EXISTS memory_hotness (
+            memory_id         TEXT PRIMARY KEY,
+            score             REAL NOT NULL DEFAULT 0.0,
+            retrieval_count   INTEGER NOT NULL DEFAULT 0,
+            last_accessed     TEXT,
+            updated_at        TEXT NOT NULL DEFAULT (datetime('now')),
+            importance_signal REAL NOT NULL DEFAULT 0.5
+        );
 
         -- Transactional outbox for cross-store writes (Phase 3).
         -- Events are written atomically with SQLite artifacts and applied to
@@ -290,7 +338,14 @@ def init_schema():
 
 
 def _migrate_schema():
-    """Add columns introduced in v1.7+ if upgrading from an older database."""
+    """Add columns introduced in v1.7+ if upgrading from an older database.
+
+    On Postgres this is a no-op: ``schema_postgres.sql`` already includes every
+    column and index in its final form, so ``ALTER TABLE … ADD COLUMN`` is
+    never needed.
+    """
+    if _is_postgres():
+        return
     _logger = logging.getLogger("archivist.graph")
     migrations = [
         ("facts", "retention_class", "TEXT NOT NULL DEFAULT 'standard'"),
@@ -312,11 +367,22 @@ def _migrate_schema():
         ("memory_chunks", "actor_type", "TEXT NOT NULL DEFAULT ''"),
         ("entities", "actor_id", "TEXT NOT NULL DEFAULT ''"),
         ("entities", "actor_type", "TEXT NOT NULL DEFAULT ''"),
+        # Phase 1 answer-finder: tiered memory columns
+        ("memory_chunks", "importance", "REAL NOT NULL DEFAULT 0.5"),
+        ("memory_chunks", "tier_label", "TEXT NOT NULL DEFAULT 'l2'"),
+        ("memory_chunks", "ttl_at", "TEXT"),
+        ("memory_chunks", "decay_rate", "REAL NOT NULL DEFAULT 0.0"),
+        ("memory_hotness", "importance_signal", "REAL NOT NULL DEFAULT 0.5"),
+        # Phase 5 answer-finder: token savings in retrieval_logs
+        ("retrieval_logs", "tokens_returned", "INTEGER"),
+        ("retrieval_logs", "tokens_naive", "INTEGER"),
+        ("retrieval_logs", "savings_pct", "REAL"),
+        ("retrieval_logs", "pack_policy", "TEXT DEFAULT " + "''"),
     ]
     # needle_registry may not exist yet (schema_guard creates it lazily),
     # so these ALTER TABLEs are attempted but silently skipped on failure.
     _needle_migrations = [
-        ("needle_registry", "actor_id", "TEXT NOT NULL DEFAULT ''"),
+        ("needle_registry", "actor_id", "TEXT NOT NULL DEFAULT " + "''"),
         ("needle_registry", "actor_type", "TEXT NOT NULL DEFAULT ''"),
     ]
     indexes = [
@@ -333,6 +399,11 @@ def _migrate_schema():
         "CREATE INDEX IF NOT EXISTS idx_mc_actor ON memory_chunks(actor_id)",
         "CREATE INDEX IF NOT EXISTS idx_mc_actor_type ON memory_chunks(actor_type)",
         "CREATE INDEX IF NOT EXISTS idx_entities_actor ON entities(actor_id)",
+        # Phase 1 answer-finder: tier/importance indexes
+        "CREATE INDEX IF NOT EXISTS idx_mc_importance ON memory_chunks(importance DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_mc_tier ON memory_chunks(tier_label)",
+        # Phase 5 answer-finder: pack_policy index on retrieval_logs
+        "CREATE INDEX IF NOT EXISTS idx_rl_pack_policy ON retrieval_logs(pack_policy)",
     ]
     with GRAPH_WRITE_LOCK:
         conn = get_db()
@@ -365,7 +436,13 @@ def _migrate_entity_unique_constraint():
     The original schema has UNIQUE(name) which collides across namespaces.
     This migration copies to a new table with UNIQUE(name, namespace),
     then swaps in place.  Safe to run multiple times.
+
+    On Postgres this is a no-op: ``schema_postgres.sql`` defines the correct
+    constraint from the start and uses SQLite-specific ``PRAGMA``/``sqlite_master``
+    introspection that is not valid on Postgres.
     """
+    if _is_postgres():
+        return
     _logger = logging.getLogger("archivist.graph")
     with GRAPH_WRITE_LOCK:
         conn = get_db()
@@ -442,7 +519,13 @@ def _init_fts5():
 
     On success we run a trivial read and register ``fts5`` as healthy;
     on failure we register unhealthy so downstream BM25 search can skip FTS.
+
+    On Postgres this is a no-op: FTS is provided by ``tsvector``/GIN columns
+    defined in ``schema_postgres.sql``.  The ``fts5`` health key is set to
+    healthy by :func:`init_schema_async` after the Postgres DDL is applied.
     """
+    if _is_postgres():
+        return
     import archivist.core.health as health
 
     with GRAPH_WRITE_LOCK:
@@ -527,6 +610,8 @@ async def upsert_fts_chunk(
     memory_type: str = "general",
     actor_id: str = "",
     actor_type: str = "",
+    importance: float = 0.5,
+    tier_label: str = "l2",
     conn: aiosqlite.Connection | None = None,
 ):
     """Insert or replace a chunk in memory_chunks and sync to both FTS indexes.
@@ -538,6 +623,8 @@ async def upsert_fts_chunk(
     shadow-row maintenance is needed.
 
     Args:
+        importance: 0.0–1.0 priority signal for tier-aware retrieval packing.
+        tier_label: One of 'l0' | 'l1' | 'l2' | 'ephemeral'.
         conn: Optional open ``aiosqlite.Connection``.  When provided (e.g. from
             inside a ``MemoryTransaction``), writes join the caller's transaction
             instead of acquiring a new ``pool.write()`` lock.  When ``None``
@@ -557,6 +644,8 @@ async def upsert_fts_chunk(
             memory_type=memory_type,
             actor_id=actor_id,
             actor_type=actor_type,
+            importance=importance,
+            tier_label=tier_label,
         )
         m.inc(m.FTS_UPSERT_TOTAL, {"backend": "postgres"})
         return
@@ -572,6 +661,8 @@ async def upsert_fts_chunk(
         memory_type=memory_type,
         actor_id=actor_id,
         actor_type=actor_type,
+        importance=importance,
+        tier_label=tier_label,
         conn=conn,
     )
     m.inc(m.FTS_UPSERT_TOTAL, {"backend": "sqlite"})
@@ -588,6 +679,8 @@ async def _upsert_fts_chunk_postgres(
     memory_type: str = "general",
     actor_id: str = "",
     actor_type: str = "",
+    importance: float = 0.5,
+    tier_label: str = "l2",
 ) -> None:
     """Postgres upsert: insert/replace memory_chunks row.
 
@@ -601,14 +694,15 @@ async def _upsert_fts_chunk_postgres(
             await conn.execute(
                 "INSERT INTO memory_chunks "
                 "(qdrant_id, text, file_path, chunk_index, agent_id, namespace, date, "
-                "memory_type, actor_id, actor_type) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "memory_type, actor_id, actor_type, importance, tier_label) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT (qdrant_id) DO UPDATE SET "
                 "text=EXCLUDED.text, file_path=EXCLUDED.file_path, "
                 "chunk_index=EXCLUDED.chunk_index, agent_id=EXCLUDED.agent_id, "
                 "namespace=EXCLUDED.namespace, date=EXCLUDED.date, "
                 "memory_type=EXCLUDED.memory_type, actor_id=EXCLUDED.actor_id, "
-                "actor_type=EXCLUDED.actor_type",
+                "actor_type=EXCLUDED.actor_type, importance=EXCLUDED.importance, "
+                "tier_label=EXCLUDED.tier_label",
                 (
                     qdrant_id,
                     text,
@@ -620,6 +714,8 @@ async def _upsert_fts_chunk_postgres(
                     memory_type,
                     actor_id,
                     actor_type,
+                    importance,
+                    tier_label,
                 ),
             )
     except Exception as e:
@@ -640,6 +736,8 @@ async def _upsert_fts_chunk_sqlite(
     memory_type: str = "general",
     actor_id: str = "",
     actor_type: str = "",
+    importance: float = 0.5,
+    tier_label: str = "l2",
     conn: aiosqlite.Connection | None = None,
 ) -> None:
     """SQLite upsert: insert/replace memory_chunks row and maintain FTS5 shadow rows."""
@@ -670,8 +768,8 @@ async def _upsert_fts_chunk_sqlite(
             await c.execute("DELETE FROM memory_chunks WHERE qdrant_id = ?", (qdrant_id,))
 
         await c.execute(
-            "INSERT INTO memory_chunks (qdrant_id, text, file_path, chunk_index, agent_id, namespace, date, memory_type, actor_id, actor_type) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO memory_chunks (qdrant_id, text, file_path, chunk_index, agent_id, namespace, date, memory_type, actor_id, actor_type, importance, tier_label) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 qdrant_id,
                 text,
@@ -683,6 +781,8 @@ async def _upsert_fts_chunk_sqlite(
                 memory_type,
                 actor_id,
                 actor_type,
+                importance,
+                tier_label,
             ),
         )
         rowid_row = await (
@@ -865,12 +965,13 @@ async def _search_fts_sqlite(
             sql = (
                 "SELECT mc.qdrant_id, mc.file_path, mc.chunk_index, mc.agent_id, "
                 "mc.namespace, mc.date, mc.memory_type, mc.text, "
-                "mc.actor_id, mc.actor_type, "
+                "mc.actor_id, mc.actor_type, mc.importance, mc.tier_label, "
                 "rank AS bm25_rank "
                 "FROM memory_fts "
                 "JOIN memory_chunks mc ON memory_fts.rowid = mc.rowid "
+                "LEFT JOIN memory_hotness mh ON mh.memory_id = mc.qdrant_id "
                 f"WHERE memory_fts MATCH ? {where_sql} "
-                "ORDER BY rank "
+                "ORDER BY (rank * (1 + 0.3 * COALESCE(mh.importance_signal, 0.5))) "
                 f"LIMIT ?"
             )
             params = [query] + params + [limit]
@@ -940,15 +1041,17 @@ async def _search_fts_postgres(
             sql = (
                 "SELECT mc.qdrant_id, mc.file_path, mc.chunk_index, mc.agent_id, "
                 "mc.namespace, mc.date, mc.memory_type, mc.text, "
-                "mc.actor_id, mc.actor_type, "
+                "mc.actor_id, mc.actor_type, mc.importance, mc.tier_label, "
                 "ts_rank_cd(mc.fts_vector, to_tsquery('english', ?)) * 32 AS bm25_rank "
                 "FROM memory_chunks mc "
+                "LEFT JOIN memory_hotness mh ON mh.memory_id = mc.qdrant_id "
                 f"WHERE mc.fts_vector @@ to_tsquery('english', ?) {where_sql} "
-                "ORDER BY bm25_rank DESC "
+                "ORDER BY (ts_rank_cd(mc.fts_vector, to_tsquery('english', ?)) * 32 "
+                "          * (1 + 0.3 * COALESCE(mh.importance_signal, 0.5))) DESC "
                 "LIMIT ?"
             )
-            # tsquery_expr used twice: once in SELECT ranking, once in WHERE
-            params = [tsquery_expr, tsquery_expr] + params[1:] + [limit]
+            # tsquery_expr used three times: SELECT ranking, WHERE filter, ORDER BY
+            params = [tsquery_expr, tsquery_expr] + params[1:] + [tsquery_expr, limit]
 
             cur = await conn.execute(sql, params)
             results = []
@@ -1049,12 +1152,13 @@ async def _search_fts_exact_sqlite(
             sql = (
                 "SELECT mc.qdrant_id, mc.file_path, mc.chunk_index, mc.agent_id, "
                 "mc.namespace, mc.date, mc.memory_type, mc.text, "
-                "mc.actor_id, mc.actor_type, "
+                "mc.actor_id, mc.actor_type, mc.importance, mc.tier_label, "
                 "rank AS bm25_rank "
                 "FROM memory_fts_exact "
                 "JOIN memory_chunks mc ON memory_fts_exact.rowid = mc.rowid "
+                "LEFT JOIN memory_hotness mh ON mh.memory_id = mc.qdrant_id "
                 f"WHERE memory_fts_exact MATCH ? {where_sql} "
-                "ORDER BY rank "
+                "ORDER BY (rank * (1 + 0.3 * COALESCE(mh.importance_signal, 0.5))) "
                 f"LIMIT ?"
             )
             params = [query] + params + [limit]
@@ -1119,14 +1223,16 @@ async def _search_fts_exact_postgres(
             sql = (
                 "SELECT mc.qdrant_id, mc.file_path, mc.chunk_index, mc.agent_id, "
                 "mc.namespace, mc.date, mc.memory_type, mc.text, "
-                "mc.actor_id, mc.actor_type, "
+                "mc.actor_id, mc.actor_type, mc.importance, mc.tier_label, "
                 "ts_rank_cd(mc.fts_vector_simple, to_tsquery('simple', ?)) * 32 AS bm25_rank "
                 "FROM memory_chunks mc "
+                "LEFT JOIN memory_hotness mh ON mh.memory_id = mc.qdrant_id "
                 f"WHERE mc.fts_vector_simple @@ to_tsquery('simple', ?) {where_sql} "
-                "ORDER BY bm25_rank DESC "
+                "ORDER BY (ts_rank_cd(mc.fts_vector_simple, to_tsquery('simple', ?)) * 32 "
+                "          * (1 + 0.3 * COALESCE(mh.importance_signal, 0.5))) DESC "
                 "LIMIT ?"
             )
-            params = [tsquery_expr, tsquery_expr] + params[1:] + [limit]
+            params = [tsquery_expr, tsquery_expr] + params[1:] + [tsquery_expr, limit]
 
             cur = await conn.execute(sql, params)
             results = []
@@ -1170,7 +1276,7 @@ async def upsert_entity(
 
     async def _run(c: aiosqlite.Connection) -> int:
         cur = await c.execute(
-            "SELECT id, mention_count, retention_class FROM entities WHERE name = ? COLLATE NOCASE AND namespace = ?",
+            "SELECT id, mention_count, retention_class FROM entities WHERE name = ? AND namespace = ?",
             (name, namespace),
         )
         row = await cur.fetchone()
@@ -1186,6 +1292,13 @@ async def upsert_entity(
                 (now, new_rc, row["id"]),
             )
             return row["id"]
+        if _is_postgres():
+            new_id = await c.fetchval(
+                "INSERT INTO entities (name, entity_type, first_seen, last_seen, retention_class, namespace, actor_id, actor_type) "
+                "VALUES (?,?,?,?,?,?,?,?) RETURNING id",
+                (name, entity_type, now, now, retention_class, namespace, actor_id, actor_type),
+            )
+            return new_id
         cur2 = await c.execute(
             "INSERT INTO entities (name, entity_type, first_seen, last_seen, retention_class, namespace, actor_id, actor_type) "
             "VALUES (?,?,?,?,?,?,?,?)",
@@ -1212,14 +1325,17 @@ async def add_relationship(
     from archivist.storage.sqlite_pool import pool
 
     now = datetime.now(UTC).isoformat()
+    # SQLite uses MIN() as a scalar; Postgres uses LEAST() (MIN is aggregate-only there).
+    # Qualify the table name to avoid column ambiguity in the DO UPDATE context.
+    clamp_fn = "LEAST" if _is_postgres() else "MIN"
     async with pool.write() as conn:
         await conn.execute(
-            """INSERT INTO relationships (source_entity_id, target_entity_id, relation_type,
+            f"""INSERT INTO relationships (source_entity_id, target_entity_id, relation_type,
                evidence, agent_id, created_at, updated_at, provenance, namespace)
                VALUES (?,?,?,?,?,?,?,?,?)
                ON CONFLICT(source_entity_id, target_entity_id, relation_type)
                DO UPDATE SET evidence=excluded.evidence, updated_at=excluded.updated_at,
-               confidence=min(confidence+0.1, 1.0), provenance=excluded.provenance""",
+               confidence={clamp_fn}(relationships.confidence+0.1, 1.0), provenance=excluded.provenance""",
             (source_id, target_id, rel_type, evidence, agent_id, now, now, provenance, namespace),
         )
 
@@ -1265,27 +1381,49 @@ async def add_fact(
             valid_from = _m.group(1)
 
     async def _run(c: aiosqlite.Connection) -> int:
-        cur = await c.execute(
-            "INSERT INTO facts (entity_id, fact_text, source_file, agent_id, created_at, "
-            "retention_class, valid_from, valid_until, namespace, memory_id, confidence, provenance, actor_id) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (
-                entity_id,
-                fact_text,
-                source_file,
-                agent_id,
-                now,
-                retention_class,
-                valid_from,
-                valid_until,
-                namespace,
-                memory_id,
-                confidence,
-                provenance,
-                actor_id,
-            ),
-        )
-        fid = cur.lastrowid
+        if _is_postgres():
+            fid = await c.fetchval(
+                "INSERT INTO facts (entity_id, fact_text, source_file, agent_id, created_at, "
+                "retention_class, valid_from, valid_until, namespace, memory_id, confidence, provenance, actor_id) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id",
+                (
+                    entity_id,
+                    fact_text,
+                    source_file,
+                    agent_id,
+                    now,
+                    retention_class,
+                    valid_from,
+                    valid_until,
+                    namespace,
+                    memory_id,
+                    confidence,
+                    provenance,
+                    actor_id,
+                ),
+            )
+        else:
+            cur = await c.execute(
+                "INSERT INTO facts (entity_id, fact_text, source_file, agent_id, created_at, "
+                "retention_class, valid_from, valid_until, namespace, memory_id, confidence, provenance, actor_id) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    entity_id,
+                    fact_text,
+                    source_file,
+                    agent_id,
+                    now,
+                    retention_class,
+                    valid_from,
+                    valid_until,
+                    namespace,
+                    memory_id,
+                    confidence,
+                    provenance,
+                    actor_id,
+                ),
+            )
+            fid = cur.lastrowid
 
         if new_words:
             old_facts_cur = await c.execute(
@@ -1357,19 +1495,23 @@ async def search_entities(query: str, limit: int = 10, namespace: str = "") -> l
 
     async with pool.read() as conn:
         norm_q = _normalize(query)
+        # On Postgres the entities.name column is citext so LIKE is already
+        # case-insensitive; COLLATE NOCASE is stripped by the SQL translator.
+        # On SQLite COLLATE NOCASE is kept for non-ASCII correctness.
+        collate = "" if _is_postgres() else " COLLATE NOCASE"
         if namespace:
             cur = await conn.execute(
-                "SELECT * FROM entities "
-                "WHERE (name LIKE ? COLLATE NOCASE OR aliases LIKE ? COLLATE NOCASE) "
-                "AND namespace = ? "
-                "ORDER BY mention_count DESC LIMIT ?",
+                f"SELECT * FROM entities "
+                f"WHERE (name LIKE ?{collate} OR aliases LIKE ?{collate}) "
+                f"AND namespace = ? "
+                f"ORDER BY mention_count DESC LIMIT ?",
                 (f"%{query}%", f"%{norm_q}%", namespace, limit),
             )
         else:
             cur = await conn.execute(
-                "SELECT * FROM entities "
-                "WHERE name LIKE ? COLLATE NOCASE OR aliases LIKE ? COLLATE NOCASE "
-                "ORDER BY mention_count DESC LIMIT ?",
+                f"SELECT * FROM entities "
+                f"WHERE name LIKE ?{collate} OR aliases LIKE ?{collate} "
+                f"ORDER BY mention_count DESC LIMIT ?",
                 (f"%{query}%", f"%{norm_q}%", limit),
             )
         return [dict(r) for r in await cur.fetchall()]

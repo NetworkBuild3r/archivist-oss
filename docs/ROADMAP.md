@@ -1,10 +1,10 @@
 # Archivist multi-agent memory — roadmap (April 2026)
 
-**Status** — Retrieval foundation is solid (v2 pipeline complete). Semantic chunking (Phase 5) is done. **Phase 3 + 3.5 (transactional outbox + `MemoryTransaction` + conn-passing shims)** is **complete**: see [`docs/rearchitect_storage_phase3.md`](rearchitect_storage_phase3.md) and [`CHANGELOG.md`](../CHANGELOG.md) **v2.1.0**.
+**Status** — Retrieval foundation is solid (v2 pipeline complete). Semantic chunking (Phase 5) is done. **Phase 3 + 3.5 (transactional outbox + `MemoryTransaction` + conn-passing shims)** is **complete**: see [`docs/rearchitect_storage_phase3.md`](rearchitect_storage_phase3.md) and [`CHANGELOG.md`](../CHANGELOG.md) **v2.1.0**. **PostgreSQL first-class backend** is **complete** (v2.2.0): all hot paths, schema init, FTS, backups, and Docker wiring work on both SQLite and Postgres — see [`CHANGELOG.md`](../CHANGELOG.md) **v2.2.0** and [`docs/DOCKER.md`](DOCKER.md). **Answer Finder (v2.3.0)** is **complete**: hierarchical tiered memory, token-budgeted context packing, auto-compression, ephemeral `SessionStore`, high-level `get_relevant_context()` API, multi-agent handoff protocol, and token savings observability — see [`CHANGELOG.md`](../CHANGELOG.md) **v2.3.0**.
 
-**Goal** — Remain the most **trustworthy and production-ready** open multi-agent memory layer in 2026: observable, RBAC-aware, and safe to run under fleet load.
+**Goal** — Be the most **trustworthy and production-ready** open multi-agent memory layer in 2026: observable, RBAC-aware, safe under fleet load, and the best answer finder in the industry.
 
-**Next milestones (engineering)** — **Pydantic v2–style config validation** (single source of truth for env + invalid combinations) and a **PostgreSQL-backed graph/outbox path** via the existing `GraphBackend` / pool abstraction (no MCP signature changes).
+**Next milestones (engineering)** — **Pydantic v2–style config validation** (single source of truth for env + invalid combinations); **Phase 8** intelligent lifecycle management.
 
 ---
 
@@ -27,11 +27,13 @@ We now shift from “great retrieval” to “great memory system for collaborat
 | # | Differentiator | Why It Wins | Current Status |
 |---|----------------|-------------|----------------|
 | 1 | **Full Provenance & Actor-Aware Memory** | Every fact knows *who* said it, when, and with what confidence | Done (Phase 6) |
-| 2 | **Memory as a Product** | Versioned, exportable, forkable, auditable memory graphs (Git for agent knowledge) | Not started |
-| 3 | **Native Multi-Agent Coordination** | Built-in shared/institutional memory with selective sharing, conflict resolution, and negotiation | Not started |
-| 4 | **Intelligent Self-Curation** | Automatic summarization, relevance-based forgetting, contradiction detection | Partial |
-| 5 | **Full Checkpointing + Time-Travel** | LangGraph-style resume, replay, branch, human-in-the-loop | Not started |
-| 6 | **Observability Dashboard** | Memory lineage, audit trails, cost tracking, visualization | Not started |
+| 2 | **Answer Finder — Token-Efficient Context** | Hierarchical tiers + token-budgeted packing + auto-compress; ≥60% token reduction vs naive retrieval | Done (v2.3.0) |
+| 3 | **Multi-Agent Handoff Protocol** | Typed `HandoffPacket` transfers session summary, goals, tips, and knowledge snapshot between agents | Done (v2.3.0) |
+| 4 | **Memory as a Product** | Versioned, exportable, forkable, auditable memory graphs (Git for agent knowledge) | Not started |
+| 5 | **Native Multi-Agent Coordination** | Built-in shared/institutional memory with selective sharing, conflict resolution, and negotiation | Not started |
+| 6 | **Intelligent Self-Curation** | Automatic summarization, relevance-based forgetting, contradiction detection | Partial |
+| 7 | **Full Checkpointing + Time-Travel** | LangGraph-style resume, replay, branch, human-in-the-loop | Not started |
+| 8 | **Observability Dashboard** | Memory lineage, audit trails, cost tracking, visualization | Partial (token savings heatmap done) |
 
 These six features combined will make Archivist the **most trustworthy and production-ready** memory layer.
 
@@ -93,6 +95,8 @@ Set `MCP_SSE_ENABLED=false` once all clients are on the modern transport to recl
 - [x] Phase 6 — Provenance & actor-aware memory
 - [x] Phase 6.5 — OpenClaw compatibility fix
 - [x] Phase 3 + 3.5 — Transactional outbox + atomic SQLite writes (see `docs/rearchitect_storage_phase3.md`)
+- [x] PostgreSQL first-class backend — v2.2.0 (see `CHANGELOG.md`)
+- [x] Answer Finder — v2.3.0: tiered memory, token packing, handoff protocol, savings observability
 - [ ] Phase 7 — Multi-tier memory + checkpointing
 - [ ] Phase 8 — Intelligent Lifecycle Management
 - [ ] Phase 9 — Observability & Control Plane
@@ -112,5 +116,5 @@ Expected console flow: `Encoding Batch …` → tqdm batch bar → nDCG / MAP / 
 
 _Add new rows when you change default embed models, BEIR limits, or the thin harness._
 
-**Last Updated**: April 14, 2026
+**Last Updated**: April 25, 2026
 **Goal**: Become the most trustworthy, observable, and production-ready multi-agent memory system in 2026.

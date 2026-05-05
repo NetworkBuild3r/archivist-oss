@@ -187,15 +187,12 @@ async def log_trajectory(
 
 async def attribute_decisions(trajectory_id: str) -> list[dict]:
     """Use LLM to identify which memories most influenced decisions in a trajectory."""
-    from archivist.storage.graph import get_db
     from archivist.storage.sqlite_pool import pool
 
     _ensure_trajectory_schema()
 
-    conn = get_db()
-    cur = conn.execute("SELECT * FROM trajectories WHERE id=?", (trajectory_id,))
-    row = cur.fetchone()
-    conn.close()
+    async with pool.read() as conn:
+        row = await conn.fetchone("SELECT * FROM trajectories WHERE id=?", (trajectory_id,))
 
     if not row:
         return []
@@ -244,15 +241,12 @@ async def attribute_decisions(trajectory_id: str) -> list[dict]:
 
 async def extract_tips(trajectory_id: str) -> list[dict]:
     """Extract actionable tips from a trajectory via LLM analysis."""
-    from archivist.storage.graph import get_db
     from archivist.storage.sqlite_pool import pool
 
     _ensure_trajectory_schema()
 
-    conn = get_db()
-    cur = conn.execute("SELECT * FROM trajectories WHERE id=?", (trajectory_id,))
-    row = cur.fetchone()
-    conn.close()
+    async with pool.read() as conn:
+        row = await conn.fetchone("SELECT * FROM trajectories WHERE id=?", (trajectory_id,))
 
     if not row:
         return []
@@ -294,28 +288,29 @@ async def extract_tips(trajectory_id: str) -> list[dict]:
     return stored_tips
 
 
-def get_outcome_adjustments(memory_ids: list[str]) -> dict[str, float]:
+async def get_outcome_adjustments(memory_ids: list[str]) -> dict[str, float]:
     """Return score adjustments for memories based on their outcome history.
 
     Memories linked to successful trajectories get a positive boost;
     those linked to failures get a negative penalty.
     """
-    from archivist.storage.graph import get_db
+    from archivist.storage.sqlite_pool import pool
 
     _ensure_trajectory_schema()
     if not memory_ids:
         return {}
 
-    conn = get_db()
     placeholders = ",".join("?" for _ in memory_ids)
-    cur = conn.execute(
-        f"""SELECT memory_id, outcome, outcome_score, influence
-            FROM memory_outcomes
-            WHERE memory_id IN ({placeholders})""",
-        memory_ids,
-    )
-    rows = [dict(r) for r in cur.fetchall()]
-    conn.close()
+    async with pool.read() as conn:
+        rows = [
+            dict(r)
+            for r in await conn.fetchall(
+                f"""SELECT memory_id, outcome, outcome_score, influence
+                    FROM memory_outcomes
+                    WHERE memory_id IN ({placeholders})""",
+                memory_ids,
+            )
+        ]
 
     adjustments: dict[str, float] = {}
     for r in rows:
@@ -331,25 +326,23 @@ def get_outcome_adjustments(memory_ids: list[str]) -> dict[str, float]:
     return adjustments
 
 
-def search_tips(agent_id: str, category: str = "", limit: int = 10) -> list[dict]:
+async def search_tips(agent_id: str, category: str = "", limit: int = 10) -> list[dict]:
     """Retrieve non-archived tips for an agent, optionally filtered by category."""
-    from archivist.storage.graph import get_db
+    from archivist.storage.sqlite_pool import pool
 
     _ensure_trajectory_schema()
-    conn = get_db()
-    if category:
-        cur = conn.execute(
-            "SELECT * FROM tips WHERE agent_id=? AND category=? AND archived=0 ORDER BY created_at DESC LIMIT ?",
-            (agent_id, category, limit),
-        )
-    else:
-        cur = conn.execute(
-            "SELECT * FROM tips WHERE agent_id=? AND archived=0 ORDER BY created_at DESC LIMIT ?",
-            (agent_id, limit),
-        )
-    rows = [dict(r) for r in cur.fetchall()]
-    conn.close()
-    return rows
+    async with pool.read() as conn:
+        if category:
+            rows = await conn.fetchall(
+                "SELECT * FROM tips WHERE agent_id=? AND category=? AND archived=0 ORDER BY created_at DESC LIMIT ?",
+                (agent_id, category, limit),
+            )
+        else:
+            rows = await conn.fetchall(
+                "SELECT * FROM tips WHERE agent_id=? AND archived=0 ORDER BY created_at DESC LIMIT ?",
+                (agent_id, limit),
+            )
+    return [dict(r) for r in rows]
 
 
 async def add_annotation(
@@ -374,19 +367,17 @@ async def add_annotation(
     return ann_id
 
 
-def get_annotations(memory_id: str) -> list[dict]:
+async def get_annotations(memory_id: str) -> list[dict]:
     """Get all annotations for a memory point."""
-    from archivist.storage.graph import get_db
+    from archivist.storage.sqlite_pool import pool
 
     _ensure_trajectory_schema()
-    conn = get_db()
-    cur = conn.execute(
-        "SELECT * FROM annotations WHERE memory_id=? ORDER BY created_at DESC",
-        (memory_id,),
-    )
-    rows = [dict(r) for r in cur.fetchall()]
-    conn.close()
-    return rows
+    async with pool.read() as conn:
+        rows = await conn.fetchall(
+            "SELECT * FROM annotations WHERE memory_id=? ORDER BY created_at DESC",
+            (memory_id,),
+        )
+    return [dict(r) for r in rows]
 
 
 async def add_rating(memory_id: str, agent_id: str, rating: int, context: str = "") -> str:
@@ -404,40 +395,40 @@ async def add_rating(memory_id: str, agent_id: str, rating: int, context: str = 
     return rating_id
 
 
-def get_rating_summary(memory_id: str) -> dict:
+async def get_rating_summary(memory_id: str) -> dict:
     """Get aggregate rating stats for a memory point."""
-    from archivist.storage.graph import get_db
+    from archivist.storage.sqlite_pool import pool
 
     _ensure_trajectory_schema()
-    conn = get_db()
-    cur = conn.execute(
-        "SELECT COUNT(*) as total, SUM(CASE WHEN rating > 0 THEN 1 ELSE 0 END) as up, "
-        "SUM(CASE WHEN rating < 0 THEN 1 ELSE 0 END) as down FROM ratings WHERE memory_id=?",
-        (memory_id,),
-    )
-    row = dict(cur.fetchone())
-    conn.close()
+    async with pool.read() as conn:
+        row = await conn.fetchone(
+            "SELECT COUNT(*) as total, SUM(CASE WHEN rating > 0 THEN 1 ELSE 0 END) as up, "
+            "SUM(CASE WHEN rating < 0 THEN 1 ELSE 0 END) as down FROM ratings WHERE memory_id=?",
+            (memory_id,),
+        )
+    r = dict(row) if row else {}
     return {
         "memory_id": memory_id,
-        "total": row["total"] or 0,
-        "up": row["up"] or 0,
-        "down": row["down"] or 0,
+        "total": r.get("total") or 0,
+        "up": r.get("up") or 0,
+        "down": r.get("down") or 0,
     }
 
 
 async def session_end_summary(agent_id: str, session_id: str) -> dict:
     """Generate a durable summary from a session's trajectories and store it as a memory."""
-    from archivist.storage.graph import get_db
+    from archivist.storage.sqlite_pool import pool
 
     _ensure_trajectory_schema()
 
-    conn = get_db()
-    cur = conn.execute(
-        "SELECT * FROM trajectories WHERE agent_id=? AND session_id=? ORDER BY created_at ASC",
-        (agent_id, session_id),
-    )
-    rows = [dict(r) for r in cur.fetchall()]
-    conn.close()
+    async with pool.read() as conn:
+        rows = [
+            dict(r)
+            for r in await conn.fetchall(
+                "SELECT * FROM trajectories WHERE agent_id=? AND session_id=? ORDER BY created_at ASC",
+                (agent_id, session_id),
+            )
+        ]
 
     if not rows:
         return {"error": "no_trajectories", "session_id": session_id}
@@ -501,17 +492,18 @@ async def consolidate_tips(budget: int = 20) -> dict:
     import archivist.lifecycle.curator_queue as curator_queue
     from archivist.core.config import CURATOR_TIP_BUDGET
     from archivist.features.embeddings import embed_text
-    from archivist.storage.graph import get_db
+    from archivist.storage.sqlite_pool import pool
 
     _ensure_trajectory_schema()
     budget = budget or CURATOR_TIP_BUDGET
 
-    conn = get_db()
-    cur = conn.execute(
-        "SELECT id, agent_id, category, tip_text, context FROM tips WHERE archived=0"
-    )
-    all_tips = [dict(r) for r in cur.fetchall()]
-    conn.close()
+    async with pool.read() as conn:
+        all_tips = [
+            dict(r)
+            for r in await conn.fetchall(
+                "SELECT id, agent_id, category, tip_text, context FROM tips WHERE archived=0"
+            )
+        ]
 
     if len(all_tips) < 3:
         return {"clusters_found": 0, "consolidated": 0, "budget_used": 0}
@@ -552,7 +544,7 @@ async def consolidate_tips(budget: int = 20) -> dict:
 
         original_ids = [t["id"] for t in cluster]
         fleet_agent = "fleet" if contrastive else cluster[0].get("agent_id", "curator")
-        curator_queue.enqueue(
+        await curator_queue.enqueue(
             "consolidate_tips",
             {
                 "consolidated_tip": {
@@ -615,36 +607,42 @@ def _cluster_tips(
 # ── Contrastive consolidation eligibility (v1.9) ─────────────────────────────
 
 
-def contrastive_consolidation_candidates(min_agents: int = 2, limit: int = 20) -> list[dict]:
+async def contrastive_consolidation_candidates(min_agents: int = 2, limit: int = 20) -> list[dict]:
     """Find task fingerprints worked on by multiple agents — eligible for
     cross-agent contrastive consolidation.
 
     Returns fingerprints with agent counts and outcome distributions so the
     curator can decide which clusters warrant LLM-driven contrastive merging.
     """
-    from archivist.storage.graph import get_db
+    from archivist.core.config import GRAPH_BACKEND
+    from archivist.storage.sqlite_pool import pool
 
     _ensure_trajectory_schema()
-    conn = get_db()
-    try:
-        cur = conn.execute(
-            """SELECT task_fingerprint,
-                      COUNT(DISTINCT agent_id) AS agent_count,
-                      COUNT(*) AS trajectory_count,
-                      SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END) AS successes,
-                      SUM(CASE WHEN outcome = 'failure' THEN 1 ELSE 0 END) AS failures,
-                      GROUP_CONCAT(DISTINCT agent_id) AS agents
-               FROM trajectories
-               WHERE task_fingerprint != ''
-               GROUP BY task_fingerprint
-               HAVING COUNT(DISTINCT agent_id) >= ?
-               ORDER BY trajectory_count DESC
-               LIMIT ?""",
-            (min_agents, limit),
-        )
-        rows = [dict(r) for r in cur.fetchall()]
-    finally:
-        conn.close()
+
+    if (GRAPH_BACKEND or "sqlite").lower() == "postgres":
+        group_concat_expr = "STRING_AGG(DISTINCT agent_id, ',')"
+    else:
+        group_concat_expr = "GROUP_CONCAT(DISTINCT agent_id)"
+
+    async with pool.read() as conn:
+        rows = [
+            dict(r)
+            for r in await conn.fetchall(
+                f"""SELECT task_fingerprint,
+                          COUNT(DISTINCT agent_id) AS agent_count,
+                          COUNT(*) AS trajectory_count,
+                          SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END) AS successes,
+                          SUM(CASE WHEN outcome = 'failure' THEN 1 ELSE 0 END) AS failures,
+                          {group_concat_expr} AS agents
+                   FROM trajectories
+                   WHERE task_fingerprint != ''
+                   GROUP BY task_fingerprint
+                   HAVING COUNT(DISTINCT agent_id) >= ?
+                   ORDER BY trajectory_count DESC
+                   LIMIT ?""",
+                (min_agents, limit),
+            )
+        ]
 
     return [
         {

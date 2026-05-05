@@ -29,6 +29,7 @@ from archivist.storage.collection_router import (
     ensure_collection,
 )
 from archivist.storage.graph import (
+    _is_postgres,
     add_fact,
     register_memory_points_batch,
     upsert_entity,
@@ -369,7 +370,7 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
                 }
             )
         if dedup and dedup.action == "merge":
-            curator_queue.enqueue(
+            await curator_queue.enqueue(
                 "merge_memory",
                 {
                     "new_text": text,
@@ -382,7 +383,7 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
         if dedup and dedup.action == "delete_old":
             for d in dedup.decisions:
                 if d.get("decision") == "delete":
-                    curator_queue.enqueue(
+                    await curator_queue.enqueue(
                         "archive_memory",
                         {
                             "memory_ids": [d.get("existing_id", "")],
@@ -504,6 +505,7 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
         "actor_type": actor_type,
         "confidence": confidence,
         "source_trace": source_trace.to_dict(),
+        "tier_label": "l2",
     }
     if retention in ("durable", "permanent"):
         ttl_expires_at = None
@@ -585,6 +587,8 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
                 memory_type=arguments.get("memory_type", "general"),
                 actor_id=actor_id,
                 actor_type=actor_type,
+                importance=importance,
+                tier_label=payload.get("tier_label", "l2"),
             )
         await txn.register_needle_tokens(
             pid,
@@ -609,6 +613,8 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
                     memory_type=arguments.get("memory_type", "general"),
                     actor_id=actor_id,
                     actor_type=actor_type,
+                    importance=float(mp.payload.get("importance_score", importance)),
+                    tier_label=mp.payload.get("tier_label", "l2"),
                 )
             await txn.register_needle_tokens(
                 mc_id,
@@ -982,7 +988,7 @@ async def _handle_compress(arguments: dict) -> list[TextContent]:
             }
         )
 
-    curator_queue.enqueue(
+    await curator_queue.enqueue(
         "archive_memory",
         {
             "memory_ids": memory_ids,
@@ -1045,8 +1051,9 @@ async def _handle_pin(arguments: dict) -> list[TextContent]:
         from archivist.storage.sqlite_pool import pool
 
         async with pool.write() as conn:
+            _collate = "" if _is_postgres() else " COLLATE NOCASE"
             cur = await conn.execute(
-                "SELECT id FROM entities WHERE name = ? COLLATE NOCASE AND namespace = ?",
+                f"SELECT id FROM entities WHERE name = ?{_collate} AND namespace = ?",
                 (entity_name, namespace or "global"),
             )
             row = await cur.fetchone()
@@ -1121,8 +1128,9 @@ async def _handle_unpin(arguments: dict) -> list[TextContent]:
         from archivist.storage.sqlite_pool import pool
 
         async with pool.write() as conn:
+            _collate = "" if _is_postgres() else " COLLATE NOCASE"
             cur = await conn.execute(
-                "SELECT id FROM entities WHERE name = ? COLLATE NOCASE", (entity_name,)
+                f"SELECT id FROM entities WHERE name = ?{_collate}", (entity_name,)
             )
             row = await cur.fetchone()
             if row:

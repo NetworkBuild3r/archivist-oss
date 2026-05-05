@@ -611,7 +611,7 @@ class TestCuratorQueueDrainAsync:
         from curator_queue import drain, enqueue
 
         with patch("curator_queue._apply_delete", new_callable=AsyncMock) as mock_del:
-            enqueue("delete_memory", {"memory_ids": ["m1"], "namespace": "ns"})
+            await enqueue("delete_memory", {"memory_ids": ["m1"], "namespace": "ns"})
             result = await drain(limit=10)
 
         assert len(result) == 1
@@ -622,7 +622,7 @@ class TestCuratorQueueDrainAsync:
         from curator_queue import drain, enqueue
 
         with patch("curator_queue._apply_archive", new_callable=AsyncMock) as mock_arc:
-            enqueue("archive_memory", {"memory_ids": ["m1"], "namespace": "ns"})
+            await enqueue("archive_memory", {"memory_ids": ["m1"], "namespace": "ns"})
             result = await drain(limit=10)
 
         assert len(result) == 1
@@ -635,7 +635,7 @@ class TestCuratorQueueDrainAsync:
         with patch(
             "curator_queue._apply_delete", new_callable=AsyncMock, side_effect=Exception("boom")
         ):
-            enqueue("delete_memory", {"memory_ids": ["m1"]})
+            await enqueue("delete_memory", {"memory_ids": ["m1"]})
             result = await drain(limit=10)
 
         assert result[0]["status"] == "failed"
@@ -2113,7 +2113,7 @@ class TestSoftDeleteMemory:
             patch("memory_lifecycle.log_memory_event", new_callable=AsyncMock),
             patch("memory_lifecycle.set_fts_excluded_batch"),
         ):
-            mock_cq.enqueue.return_value = "op-123"
+            mock_cq.enqueue = AsyncMock(return_value="op-123")
             await soft_delete_memory("mem-1", "test-ns")
 
         # set_payload called with deleted=True for the primary ID
@@ -2141,7 +2141,7 @@ class TestSoftDeleteMemory:
             patch("memory_lifecycle.log_memory_event", new_callable=AsyncMock),
             patch("memory_lifecycle.set_fts_excluded_batch"),
         ):
-            mock_cq.enqueue.return_value = "op-456"
+            mock_cq.enqueue = AsyncMock(return_value="op-456")
             result = await soft_delete_memory("mem-2", "test-ns")
 
         mock_cq.enqueue.assert_called_once_with(
@@ -2167,7 +2167,7 @@ class TestSoftDeleteMemory:
             patch("memory_lifecycle.log_memory_event", side_effect=_fake_log),
             patch("memory_lifecycle.set_fts_excluded_batch"),
         ):
-            mock_cq.enqueue.return_value = "op-789"
+            mock_cq.enqueue = AsyncMock(return_value="op-789")
             await soft_delete_memory("mem-3", "test-ns")
 
         assert len(log_calls) == 1
@@ -2195,7 +2195,7 @@ class TestSoftDeleteMemory:
             patch("memory_lifecycle.curator_queue") as mock_cq,
             patch("memory_lifecycle.log_memory_event", new_callable=AsyncMock),
         ):
-            mock_cq.enqueue.return_value = "op-0"
+            mock_cq.enqueue = AsyncMock(return_value="op-0")
             await soft_delete_memory("mem-fts", "test-ns")
 
         conn = sqlite3.connect(config.SQLITE_PATH)
@@ -2220,7 +2220,7 @@ class TestSoftDeleteMemory:
             patch("memory_lifecycle.log_memory_event", new_callable=AsyncMock),
             patch("memory_lifecycle.set_fts_excluded_batch"),
         ):
-            mock_cq.enqueue.return_value = "op-err"
+            mock_cq.enqueue = AsyncMock(return_value="op-err")
             with pytest.raises((RuntimeError, Exception)):
                 await soft_delete_memory("mem-fail", "test-ns")
 

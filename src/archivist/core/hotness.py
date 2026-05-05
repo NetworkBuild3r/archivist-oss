@@ -3,7 +3,7 @@
 Formula (adapted from OpenViking):
     hotness = sigmoid(log1p(retrieval_count)) * exp(-ln2 * days_since_last_access / halflife)
 
-Batch scan aggregates from retrieval_logs into a memory_hotness SQLite table.
+Batch scan aggregates from retrieval_logs into a memory_hotness table.
 RLM pipeline blends hotness into scores after temporal decay.
 """
 
@@ -12,19 +12,8 @@ import math
 from datetime import UTC, datetime
 
 from archivist.core.config import HOTNESS_HALFLIFE_DAYS, HOTNESS_WEIGHT
-from archivist.storage.graph import schema_guard
 
 logger = logging.getLogger("archivist.hotness")
-
-_ensure_schema = schema_guard("""
-    CREATE TABLE IF NOT EXISTS memory_hotness (
-        memory_id TEXT PRIMARY KEY,
-        score REAL NOT NULL DEFAULT 0.0,
-        retrieval_count INTEGER NOT NULL DEFAULT 0,
-        last_accessed TEXT,
-        updated_at TEXT NOT NULL
-    );
-""")
 
 
 def _sigmoid(x: float) -> float:
@@ -41,25 +30,42 @@ def compute_hotness(
     return frequency * recency
 
 
-def get_hotness_scores(memory_ids: list[str]) -> dict[str, float]:
+async def get_hotness_scores(memory_ids: list[str]) -> dict[str, float]:
     """Look up precomputed hotness for a batch of memory IDs."""
-    from archivist.storage.graph import get_db
+    from archivist.storage.graph import _is_postgres
+    from archivist.storage.sqlite_pool import pool
 
-    _ensure_schema()
     if not memory_ids:
         return {}
 
-    conn = get_db()
+    # Ensure the SQLite schema exists (no-op on Postgres — table is in schema_postgres.sql)
+    if not _is_postgres():
+        from archivist.storage.graph import schema_guard
+
+        _ensure = schema_guard("""
+            CREATE TABLE IF NOT EXISTS memory_hotness (
+                memory_id TEXT PRIMARY KEY,
+                score REAL NOT NULL DEFAULT 0.0,
+                retrieval_count INTEGER NOT NULL DEFAULT 0,
+                last_accessed TEXT,
+                updated_at TEXT NOT NULL,
+                importance_signal REAL NOT NULL DEFAULT 0.5
+            );
+        """)
+        _ensure()
+
     placeholders = ",".join("?" for _ in memory_ids)
-    rows = conn.execute(
-        f"SELECT memory_id, score FROM memory_hotness WHERE memory_id IN ({placeholders})",
-        memory_ids,
-    ).fetchall()
-    conn.close()
+    async with pool.read() as conn:
+        rows = await conn.fetchall(
+            f"SELECT memory_id, score FROM memory_hotness WHERE memory_id IN ({placeholders})",
+            memory_ids,
+        )
     return {r["memory_id"]: r["score"] for r in rows}
 
 
-def apply_hotness_to_results(results: list[dict], weight: float | None = None) -> list[dict]:
+async def apply_hotness_to_results(
+    results: list[dict], weight: float | None = None
+) -> list[dict]:
     """Blend hotness scores into retrieval results after temporal decay."""
     w = weight if weight is not None else HOTNESS_WEIGHT
     if w <= 0 or not results:
@@ -69,7 +75,7 @@ def apply_hotness_to_results(results: list[dict], weight: float | None = None) -
     if not ids:
         return results
 
-    scores = get_hotness_scores(ids)
+    scores = await get_hotness_scores(ids)
     if not scores:
         return results
 
@@ -84,48 +90,80 @@ def apply_hotness_to_results(results: list[dict], weight: float | None = None) -
     return results
 
 
-def batch_update_hotness() -> int:
+def _retrieval_logs_query(is_postgres: bool) -> str:
+    """Return the retrieval_logs aggregation query for the active backend."""
+    if is_postgres:
+        # Postgres: use ->> JSON operator and NOW() - INTERVAL for date arithmetic
+        return """
+            SELECT
+                retrieval_trace::json->>'result_ids' AS result_ids,
+                created_at
+            FROM retrieval_logs
+            WHERE cache_hit = FALSE
+              AND created_at > NOW() - INTERVAL '7 days'
+            ORDER BY created_at DESC
+            LIMIT 5000
+        """
+    # SQLite: use json_extract() and datetime('now', ...)
+    return """
+        SELECT
+            json_extract(retrieval_trace, '$.result_ids') as result_ids,
+            created_at
+        FROM retrieval_logs
+        WHERE cache_hit = 0
+          AND created_at > datetime('now', '-7 days')
+        ORDER BY created_at DESC
+        LIMIT 5000
+    """
+
+
+async def batch_update_hotness() -> int:
     """Aggregate retrieval_logs into memory_hotness. Called from curator cycle.
 
     v1.11: Fixes population bug -- creates rows for memories found in
     retrieval_logs that lack a memory_hotness entry.  Also applies importance
     feedback with cold-start guardrails (grace period, floor, relative frequency).
     """
-    from archivist.storage.graph import get_db
+    import json as _json
 
-    _ensure_schema()
+    from archivist.storage.graph import _is_postgres
+    from archivist.storage.sqlite_pool import pool
 
-    conn = get_db()
+    # Ensure SQLite schema exists (no-op on Postgres)
+    if not _is_postgres():
+        from archivist.storage.graph import schema_guard
+
+        _ensure = schema_guard("""
+            CREATE TABLE IF NOT EXISTS memory_hotness (
+                memory_id TEXT PRIMARY KEY,
+                score REAL NOT NULL DEFAULT 0.0,
+                retrieval_count INTEGER NOT NULL DEFAULT 0,
+                last_accessed TEXT,
+                updated_at TEXT NOT NULL,
+                importance_signal REAL NOT NULL DEFAULT 0.5
+            );
+        """)
+        _ensure()
+
     now = datetime.now(UTC)
     now_iso = now.isoformat()
 
     memory_counts: dict[str, int] = {}
     memory_last_access: dict[str, str] = {}
 
-    hotness_rows = conn.execute(
-        "SELECT memory_id, retrieval_count, last_accessed FROM memory_hotness"
-    ).fetchall()
-    for r in hotness_rows:
-        memory_counts[r["memory_id"]] = r["retrieval_count"]
-        memory_last_access[r["memory_id"]] = r["last_accessed"] or now_iso
+    async with pool.read() as conn:
+        hotness_rows = await conn.fetchall(
+            "SELECT memory_id, retrieval_count, last_accessed FROM memory_hotness"
+        )
+        for r in hotness_rows:
+            memory_counts[r["memory_id"]] = r["retrieval_count"]
+            memory_last_access[r["memory_id"]] = r["last_accessed"] or now_iso
 
-    try:
-        log_rows = conn.execute("""
-            SELECT
-                json_extract(retrieval_trace, '$.result_ids') as result_ids,
-                created_at
-            FROM retrieval_logs
-            WHERE cache_hit = 0 AND created_at > datetime('now', '-7 days')
-            ORDER BY created_at DESC
-            LIMIT 5000
-        """).fetchall()
-    except Exception as e:
-        logger.debug("hotness.batch_update: retrieval_logs query failed: %s", e)
-        log_rows = []
-
-    conn.close()
-
-    import json as _json
+        try:
+            log_rows = await conn.fetchall(_retrieval_logs_query(_is_postgres()))
+        except Exception as e:
+            logger.debug("hotness.batch_update: retrieval_logs query failed: %s", e)
+            log_rows = []
 
     for row in log_rows:
         try:
@@ -144,8 +182,7 @@ def batch_update_hotness() -> int:
                 memory_last_access[mid] = row["created_at"]
 
     updated = 0
-    write_conn = get_db()
-    try:
+    async with pool.write() as conn:
         for mid, count in memory_counts.items():
             last_str = memory_last_access.get(mid, now_iso)
             try:
@@ -156,19 +193,17 @@ def batch_update_hotness() -> int:
             days = max((now - last_dt).total_seconds() / 86400, 0.0)
             score = compute_hotness(count, days)
 
-            write_conn.execute(
-                "INSERT INTO memory_hotness (memory_id, score, retrieval_count, last_accessed, updated_at) "
+            await conn.execute(
+                "INSERT INTO memory_hotness "
+                "(memory_id, score, retrieval_count, last_accessed, updated_at) "
                 "VALUES (?, ?, ?, ?, ?) "
                 "ON CONFLICT(memory_id) DO UPDATE SET score=excluded.score, "
-                "retrieval_count=excluded.retrieval_count, last_accessed=excluded.last_accessed, "
+                "retrieval_count=excluded.retrieval_count, "
+                "last_accessed=excluded.last_accessed, "
                 "updated_at=excluded.updated_at",
                 (mid, score, count, last_str, now_iso),
             )
             updated += 1
-
-        write_conn.commit()
-    finally:
-        write_conn.close()
 
     logger.info("Hotness batch update: %d memories scored", updated)
     return updated

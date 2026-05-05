@@ -85,3 +85,159 @@ Run Qdrant and Archivist on the host; point `QDRANT_URL`, `EMBED_URL`, and `LLM_
 - **Port conflict**: if host port `6333` is already in use, change `QDRANT_PORT` in `.env` or stop the other service.
 - **Archivist cannot reach embeddings on host**: confirm vLLM listens on `0.0.0.0:8000`, not only `127.0.0.1`, if needed.
 - **Vector dimension mismatch**: `VECTOR_DIM` must match the embedding model (e.g. `768` for `bge-base-en-v1.5`). Recreate the Qdrant collection if you change dimension after data was indexed.
+
+## PostgreSQL backend (production-grade)
+
+The default backend is SQLite — zero config, works instantly, and supports dozens of concurrent agents. Switch to PostgreSQL for **large fleets or horizontal scaling**; Postgres MVCC replaces the single-writer `asyncio.Lock` with connection-pool concurrency.
+
+### Compose quickstart (managed Postgres in Docker)
+
+```bash
+cp .env.example .env
+# Edit .env for LLM / embed as usual — no DATABASE_URL needed for the managed service
+
+docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d --build
+curl http://localhost:3100/health
+```
+
+`docker-compose.postgres.yml` starts a `postgres:16-alpine` service, sets `GRAPH_BACKEND=postgres`, and wires `DATABASE_URL` automatically. Data persists in the `pg-data` named Docker volume.
+
+To customise credentials or port, add these to `.env` before composing up:
+
+```bash
+PG_USER=myuser
+PG_PASSWORD=secret
+PG_DB=archivist
+PG_PORT=5432
+PG_POOL_MIN=2
+PG_POOL_MAX=10
+```
+
+### External Postgres (RDS, Supabase, Cloud SQL, etc.)
+
+Add to `.env` and use the standard compose file:
+
+```bash
+GRAPH_BACKEND=postgres
+DATABASE_URL=postgresql://user:password@host:5432/archivist
+PG_POOL_MIN=2
+PG_POOL_MAX=10
+```
+
+The schema (`schema_postgres.sql`) is applied automatically on first startup. All statements are idempotent (`IF NOT EXISTS`), so re-running is safe.
+
+### Requirements
+
+- `asyncpg` — already in `requirements.txt`
+- `pg_dump` / `pg_restore` on PATH for backup MCP tools (`postgresql-client` package)
+
+### Schema highlights
+
+Full DDL: [`src/archivist/storage/schema_postgres.sql`](../src/archivist/storage/schema_postgres.sql)
+
+| SQLite | Postgres equivalent |
+|--------|---------------------|
+| `INTEGER PRIMARY KEY AUTOINCREMENT` | `SERIAL PRIMARY KEY` |
+| `TEXT NOT NULL UNIQUE COLLATE NOCASE` | `CITEXT NOT NULL UNIQUE` |
+| FTS5 virtual tables | `tsvector` columns + GIN indexes |
+| `INSERT OR IGNORE` | `INSERT INTO … ON CONFLICT DO NOTHING` (auto-translated) |
+| `INSERT OR REPLACE` | `INSERT INTO … ON CONFLICT DO UPDATE SET …` (auto-translated) |
+
+### Backups
+
+`archivist_backup` / `archivist_restore` detect the active backend automatically:
+
+- **SQLite** — Python Online Backup API (`graph.db`)
+- **Postgres** — `pg_dump --format=custom` (`graph.pgdump`) / `pg_restore --clean`
+
+Both are stored under `BACKUP_DIR` alongside the Qdrant snapshots in a timestamped directory with `manifest.json` recording `graph_backend`.
+
+### Postgres integration tests
+
+```bash
+POSTGRES_TEST_DSN="postgresql://archivist:archivist@localhost:5432/archivist_test" \
+  pytest tests/integration/storage/test_postgres_backend.py \
+         tests/integration/storage/test_dual_backend.py -v
+```
+
+### Switching back to SQLite
+
+Remove `GRAPH_BACKEND` and `DATABASE_URL` from `.env`. SQLite resumes on next restart — the Postgres data is unaffected.
+
+---
+
+## Answer Finder configuration (v2.3)
+
+Archivist v2.3 ships an Answer Finder layer that assembles token-budgeted context for every agent query. The defaults work out-of-the-box; tune the variables below when you need different behavior.
+
+All variables are optional. Uncomment them in `.env` or pass them as Docker Compose environment entries.
+
+### Context packing policy
+
+Controls how the tier-aware packer chooses between L0 headlines, L1 summaries, and L2 full content.
+
+```bash
+# adaptive (default): 3-pass — L0 first, upgrade to L1/L2 by score
+# l0_first: maximum compression (fewest tokens)
+# l2_first: greedy full content (legacy behavior)
+CONTEXT_PACK_POLICY=adaptive
+
+# Fraction of max_tokens reserved for L0 summaries in the adaptive first pass
+CONTEXT_L0_BUDGET_SHARE=0.30
+
+# Minimum results always upgraded to their best tier, regardless of budget
+CONTEXT_MIN_FULL_RESULTS=3
+```
+
+### Auto-compression (opt-in)
+
+When `AUTO_COMPRESS_ENABLED=true`, results that overflow the token budget are LLM-summarized and re-injected as a synthetic L1 chunk. This prevents silent truncation.
+
+```bash
+AUTO_COMPRESS_ENABLED=false         # set true to enable
+AUTO_COMPRESS_THRESHOLD=0.85        # budget utilization fraction that triggers compression
+```
+
+This feature requires an LLM endpoint (`LLM_URL`). If the LLM is unavailable, overflow items are silently dropped (same behavior as when disabled).
+
+### Ephemeral session store
+
+In-process per-session scratch memory. Entries expire after `SESSION_STORE_TTL_SECONDS` and are never written to SQLite or Qdrant unless explicitly promoted.
+
+```bash
+SESSION_STORE_MAX_ENTRIES=512       # total entries across all sessions
+SESSION_STORE_TTL_SECONDS=3600      # 1 hour per entry
+```
+
+Entries marked `promoted=true` during a session are flushed to durable memory when `archivist_session_end` is called with `persist_ephemeral=true`.
+
+### Token savings observability
+
+No configuration needed. Every retrieval logs `tokens_returned`, `tokens_naive`, `savings_pct`, and `pack_policy` to `retrieval_logs` automatically. View the dashboard:
+
+```bash
+# via MCP tool
+archivist_savings_dashboard(window_days=7, heatmap_top_n=50)
+
+# or via REST
+curl http://localhost:3100/admin/dashboard
+```
+
+### Running the token efficiency benchmark
+
+Requires a running Archivist stack with memories loaded:
+
+```bash
+cd /opt/appdata/archivist-oss   # or your checkout
+cp .env.example .env            # configure LLM_URL, EMBED_URL, QDRANT_URL
+
+# Quick run (10 queries)
+python -m benchmarks.token_efficiency --queries 10
+
+# Full benchmark (50 queries × 3 policies)
+python -m benchmarks.token_efficiency \
+  --output .benchmarks/token_efficiency_$(date +%Y%m%d).json
+
+# Results are printed as a formatted table and saved to .benchmarks/
+```
+

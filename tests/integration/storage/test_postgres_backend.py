@@ -264,7 +264,11 @@ async def test_fts_stemmed_search(pg_fts_backend):
 
 
 async def test_fts_simple_exact_search(pg_fts_backend):
-    """fts_vector_simple (unstemmed) matches exact tokens like IP addresses."""
+    """fts_vector_simple (unstemmed) matches exact tokens like IP addresses.
+
+    The 'simple' config preserves tokens without stemming. An IP address like
+    192.168.1.100 is stored as a single token; the query must use the full token.
+    """
     async with pg_fts_backend.write() as conn:
         await conn.execute(
             "INSERT INTO memory_chunks (qdrant_id, text, file_path, chunk_index, namespace) "
@@ -287,7 +291,8 @@ async def test_fts_simple_exact_search(pg_fts_backend):
         rows = await conn.fetchall(
             "SELECT mc.qdrant_id "
             "FROM memory_chunks mc "
-            "WHERE fts_vector_simple @@ to_tsquery('simple', '192') "
+            # plainto_tsquery matches the full IP token stored by 'simple' config
+            "WHERE fts_vector_simple @@ plainto_tsquery('simple', '192.168.1.100') "
             "AND namespace = 'fts_parity_test'"
         )
 
@@ -322,3 +327,283 @@ async def test_fts_scoring_in_bm25_range(pg_fts_backend):
     # FTS5 BM25 typically produces values in 0.5-30 range;
     # ts_rank_cd is 0-1 * 32 = 0-32.  We just verify it's in a reasonable range.
     assert 0 < score <= 32
+
+
+# ---------------------------------------------------------------------------
+# High-level graph function tests (entity/fact CRUD, needle registry)
+# These tests exercise upsert_entity(), add_fact(), search_entities(), etc.
+# against a real Postgres backend by patching the module-level pool singleton
+# with the test backend.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+async def pg_graph(monkeypatch):
+    """Initialize a full Postgres graph schema and patch the pool singleton.
+
+    After the test, reverts the pool and closes the connection.
+    """
+    pytest.importorskip("asyncpg")
+    from pathlib import Path
+
+    from archivist.storage import graph as _graph
+    from archivist.storage import sqlite_pool as _sp
+    from archivist.storage.asyncpg_backend import AsyncpgGraphBackend
+
+    backend = AsyncpgGraphBackend()
+    await backend.initialize(POSTGRES_DSN, min_size=2, max_size=5)
+
+    schema_sql = (
+        Path(__file__).parents[3] / "src/archivist/storage/schema_postgres.sql"
+    ).read_text()
+    await backend.execute_ddl(schema_sql)
+
+    # Pre-clean any stale test data from previous runs (FK order: children first)
+    async with backend.write() as conn:
+        await conn.execute("DELETE FROM relationships WHERE namespace = 'pg_graph_test'")
+        await conn.execute("DELETE FROM needle_registry WHERE namespace = 'pg_graph_test'")
+        await conn.execute("DELETE FROM facts WHERE namespace = 'pg_graph_test'")
+        await conn.execute("DELETE FROM entities WHERE namespace = 'pg_graph_test'")
+
+    original_pool = _sp.pool
+    monkeypatch.setattr(_sp, "pool", backend)
+    monkeypatch.setattr("archivist.core.config.GRAPH_BACKEND", "postgres")
+
+    # Reset schema guards so they don't try to call get_db()
+    for attr in dir(_graph):
+        obj = getattr(_graph, attr, None)
+        if hasattr(obj, "reset") and callable(obj.reset):
+            obj.reset()
+    # Mark needle registry guard applied so it doesn't re-run SQLite DDL
+    if hasattr(_graph, "_ensure_needle_registry"):
+        _graph._ensure_needle_registry.applied = True  # type: ignore[attr-defined]
+
+    yield backend
+
+    # Clean up test data — FK order: children before parents
+    async with backend.write() as conn:
+        await conn.execute("DELETE FROM relationships WHERE namespace = 'pg_graph_test'")
+        await conn.execute("DELETE FROM needle_registry WHERE namespace = 'pg_graph_test'")
+        await conn.execute("DELETE FROM facts WHERE namespace = 'pg_graph_test'")
+        await conn.execute("DELETE FROM entities WHERE namespace = 'pg_graph_test'")
+
+    monkeypatch.setattr(_sp, "pool", original_pool)
+    await backend.close()
+
+
+async def test_upsert_entity_returns_id(pg_graph):
+    """upsert_entity() returns a valid integer ID on Postgres."""
+    from archivist.storage.graph import upsert_entity
+
+    eid = await upsert_entity("PostgresTestEntity", "tool", namespace="pg_graph_test")
+    assert isinstance(eid, int)
+    assert eid > 0
+
+
+async def test_upsert_entity_idempotent(pg_graph):
+    """upsert_entity() returns the same ID on repeated calls (RETURNING id path)."""
+    from archivist.storage.graph import upsert_entity
+
+    eid1 = await upsert_entity("IdempotentEnt", "service", namespace="pg_graph_test")
+    eid2 = await upsert_entity("IdempotentEnt", "service", namespace="pg_graph_test")
+    assert eid1 == eid2
+    assert eid1 > 0
+
+
+async def test_upsert_entity_increments_mention_count(pg_graph):
+    """upsert_entity() increments mention_count on repeated calls."""
+    from archivist.storage.graph import upsert_entity
+
+    eid = await upsert_entity("MentionEnt", "tool", namespace="pg_graph_test")
+    await upsert_entity("MentionEnt", "tool", namespace="pg_graph_test")
+
+    async with pg_graph.read() as conn:
+        rows = await conn.fetchall("SELECT mention_count FROM entities WHERE id = ?", (eid,))
+    assert rows[0]["mention_count"] == 2
+
+
+async def test_upsert_entity_citext_case_insensitive(pg_graph):
+    """citext column makes entity names case-insensitive on Postgres."""
+    from archivist.storage.graph import upsert_entity
+
+    eid_lower = await upsert_entity("citext_test_entity", "org", namespace="pg_graph_test")
+    eid_upper = await upsert_entity("CITEXT_TEST_ENTITY", "org", namespace="pg_graph_test")
+    # citext UNIQUE constraint treats both as the same row
+    assert eid_lower == eid_upper
+
+
+async def test_add_fact_returns_id(pg_graph):
+    """add_fact() returns a valid integer ID on Postgres (RETURNING id path)."""
+    from archivist.storage.graph import add_fact, upsert_entity
+
+    eid = await upsert_entity("FactEntity", "tool", namespace="pg_graph_test")
+    fid = await add_fact(eid, "Postgres is production-ready", namespace="pg_graph_test")
+    assert isinstance(fid, int)
+    assert fid > 0
+
+
+async def test_add_fact_multiple_ids_unique(pg_graph):
+    """Each add_fact() call returns a distinct ID."""
+    from archivist.storage.graph import add_fact, upsert_entity
+
+    eid = await upsert_entity("MultiFact", "service", namespace="pg_graph_test")
+    fid1 = await add_fact(eid, "fact one", namespace="pg_graph_test")
+    fid2 = await add_fact(eid, "fact two", namespace="pg_graph_test")
+    assert fid1 != fid2
+
+
+async def test_get_entity_facts_round_trip(pg_graph):
+    """add_fact() + get_entity_facts() correctly stores and retrieves fact text."""
+    from archivist.storage.graph import add_fact, get_entity_facts, upsert_entity
+
+    eid = await upsert_entity("RoundTripEnt", "tool", namespace="pg_graph_test")
+    await add_fact(
+        eid,
+        "Archivist supports PostgreSQL as a first-class backend",
+        namespace="pg_graph_test",
+    )
+
+    facts = await get_entity_facts(eid)
+    assert len(facts) >= 1
+    texts = [f["fact_text"] for f in facts]
+    assert any("PostgreSQL" in t for t in texts)
+
+
+async def test_search_entities_returns_results(pg_graph):
+    """search_entities() finds entities by name on Postgres (citext LIKE)."""
+    from archivist.storage.graph import search_entities, upsert_entity
+
+    await upsert_entity("SearchableEntity", "tool", namespace="pg_graph_test")
+    results = await search_entities("SearchableEntity", namespace="pg_graph_test")
+    assert len(results) >= 1
+    assert any(r["name"].lower() == "searchableentity" for r in results)
+
+
+async def test_search_entities_case_insensitive(pg_graph):
+    """search_entities() is case-insensitive on Postgres via citext."""
+    from archivist.storage.graph import search_entities, upsert_entity
+
+    await upsert_entity("CaseSensTest", "tool", namespace="pg_graph_test")
+    results = await search_entities("casesenstest", namespace="pg_graph_test")
+    assert len(results) >= 1
+
+
+async def test_add_relationship(pg_graph):
+    """add_relationship() creates a relationship between two entities."""
+    from archivist.storage.graph import add_relationship, upsert_entity
+
+    src = await upsert_entity("RelSrc", "service", namespace="pg_graph_test")
+    tgt = await upsert_entity("RelTgt", "service", namespace="pg_graph_test")
+    # Should not raise
+    await add_relationship(
+        src, tgt, "depends_on", "RelSrc depends on RelTgt", namespace="pg_graph_test"
+    )
+
+    async with pg_graph.read() as conn:
+        rows = await conn.fetchall(
+            "SELECT relation_type FROM relationships "
+            "WHERE source_entity_id = ? AND target_entity_id = ?",
+            (src, tgt),
+        )
+    assert len(rows) >= 1
+    assert rows[0]["relation_type"] == "depends_on"
+
+
+async def test_fetchval_returning_id(pg_graph):
+    """AsyncpgConnection.fetchval() correctly retrieves a RETURNING id value."""
+    async with pg_graph.write() as conn:
+        new_id = await conn.fetchval(
+            "INSERT INTO entities "
+            "(name, entity_type, first_seen, last_seen, namespace) "
+            "VALUES (?, ?, ?, ?, ?) RETURNING id",
+            (
+                "FetchvalTestEnt",
+                "tool",
+                "2026-01-01T00:00:00",
+                "2026-01-01T00:00:00",
+                "pg_graph_test",
+            ),
+        )
+    assert new_id is not None
+    assert isinstance(new_id, int)
+    assert new_id > 0
+
+
+# ---------------------------------------------------------------------------
+# Needle registry tests on Postgres
+# ---------------------------------------------------------------------------
+
+
+async def test_register_needle_tokens_upsert(pg_graph):
+    """register_needle_tokens() is idempotent (INSERT OR REPLACE → ON CONFLICT DO UPDATE)."""
+    from archivist.storage.graph import register_needle_tokens
+
+    memory_id = "pg-needle-mem-001"
+    text = "Deploy to 192.168.1.100 at 09:30 UTC cron job"
+    await register_needle_tokens(memory_id, text, namespace="pg_graph_test")
+    # Run twice — second call must not raise a uniqueness error
+    await register_needle_tokens(memory_id, text, namespace="pg_graph_test")
+
+    async with pg_graph.read() as conn:
+        rows = await conn.fetchall(
+            "SELECT token FROM needle_registry WHERE memory_id = ? AND namespace = ?",
+            (memory_id, "pg_graph_test"),
+        )
+    assert len(rows) >= 1
+
+
+async def test_lookup_needle_tokens(pg_graph):
+    """lookup_needle_tokens() returns rows for registered tokens."""
+    from archivist.storage.graph import lookup_needle_tokens, register_needle_tokens
+
+    memory_id = "pg-needle-mem-002"
+    text = "Server at 10.0.0.55 restarted at 14:45 UTC"
+    await register_needle_tokens(memory_id, text, namespace="pg_graph_test")
+
+    results = await lookup_needle_tokens("10.0.0.55", namespace="pg_graph_test")
+    assert any(r.get("memory_id") == memory_id for r in results)
+
+
+# ---------------------------------------------------------------------------
+# INSERT OR IGNORE path via pool
+# ---------------------------------------------------------------------------
+
+
+async def test_insert_or_ignore_via_pool(pg_graph):
+    """INSERT OR IGNORE is correctly translated to ON CONFLICT DO NOTHING on Postgres."""
+    async with pg_graph.write() as conn:
+        await conn.execute(
+            "INSERT INTO entities "
+            "(name, entity_type, first_seen, last_seen, namespace) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                "IgnoreTestEnt",
+                "tool",
+                "2026-01-01T00:00:00",
+                "2026-01-01T00:00:00",
+                "pg_graph_test",
+            ),
+        )
+
+    # Second insert via OR IGNORE — must not raise
+    async with pg_graph.write() as conn:
+        await conn.execute(
+            "INSERT OR IGNORE INTO entities "
+            "(name, entity_type, first_seen, last_seen, namespace) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                "IgnoreTestEnt",
+                "tool",
+                "2026-01-01T00:00:00",
+                "2026-01-01T00:00:00",
+                "pg_graph_test",
+            ),
+        )
+
+    async with pg_graph.read() as conn:
+        rows = await conn.fetchall(
+            "SELECT id FROM entities WHERE name = ? AND namespace = ?",
+            ("IgnoreTestEnt", "pg_graph_test"),
+        )
+    # Exactly one row — the second insert was silently ignored
+    assert len(rows) == 1

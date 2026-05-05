@@ -108,6 +108,20 @@ def _point_id(filepath: str, chunk_idx: int) -> str:
     return f"{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:32]}"
 
 
+def _tier_label_for(payload: dict) -> str:
+    """Derive the tier_label from a chunk payload.
+
+    A chunk whose Qdrant payload already has ``l0`` text is classified as 'l0',
+    one with ``l1`` text is 'l1', otherwise defaults to 'l2'.  The labels map
+    directly to the Phase-1 tier taxonomy.
+    """
+    if payload.get("l0"):
+        return "l0"
+    if payload.get("l1"):
+        return "l1"
+    return "l2"
+
+
 def compute_ttl(namespace: str, importance: float = 0.5) -> int | None:
     """Compute TTL expiration timestamp based on namespace config."""
     if importance >= 0.9:
@@ -337,6 +351,8 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
                             memory_type=p.payload.get("memory_type", "general"),
                             actor_id=p.payload.get("actor_id", ""),
                             actor_type=p.payload.get("actor_type", ""),
+                            importance=float(p.payload.get("importance_score", 0.5)),
+                            tier_label=_tier_label_for(p.payload),
                         )
                 for p in points:
                     await txn.register_needle_tokens(

@@ -93,7 +93,7 @@ _ensure_skill_schema = schema_guard("""
 """)
 
 
-def register_skill(
+async def register_skill(
     name: str,
     provider: str = "",
     mcp_endpoint: str = "",
@@ -103,39 +103,37 @@ def register_skill(
     metadata: dict | None = None,
 ) -> dict:
     """Register a new skill or update an existing one."""
-    from archivist.storage.graph import get_db
+    from archivist.storage.sqlite_pool import pool
 
     _ensure_skill_schema()
     now = datetime.now(UTC).isoformat()
 
-    conn = get_db()
-    try:
-        cur = conn.execute(
+    async with pool.write() as conn:
+        row = await conn.fetchone(
             "SELECT id, current_version FROM skills WHERE name=? AND provider=?",
             (name, provider),
         )
-        existing = cur.fetchone()
 
-        if existing:
-            skill_id = existing["id"]
-            old_version = existing["current_version"]
-            conn.execute(
+        if row:
+            skill_id = row["id"]
+            old_version = row["current_version"]
+            await conn.execute(
                 """UPDATE skills SET current_version=?, mcp_endpoint=?, description=?,
                    status='active', updated_at=?, metadata=? WHERE id=?""",
                 (version, mcp_endpoint, description, now, json.dumps(metadata or {}), skill_id),
             )
             if version != old_version:
-                conn.execute(
-                    """INSERT OR IGNORE INTO skill_versions
+                await conn.execute(
+                    """INSERT INTO skill_versions
                        (skill_id, version, observed_at, reported_by)
-                       VALUES (?,?,?,?)""",
+                       VALUES (?,?,?,?)
+                       ON CONFLICT(skill_id, version) DO NOTHING""",
                     (skill_id, version, now, registered_by),
                 )
-            conn.commit()
             return {"skill_id": skill_id, "action": "updated", "version": version}
         else:
             skill_id = str(uuid.uuid4())
-            conn.execute(
+            await conn.execute(
                 """INSERT INTO skills
                    (id, name, provider, mcp_endpoint, current_version, description,
                     registered_by, registered_at, updated_at, metadata)
@@ -153,19 +151,16 @@ def register_skill(
                     json.dumps(metadata or {}),
                 ),
             )
-            conn.execute(
+            await conn.execute(
                 """INSERT INTO skill_versions
                    (skill_id, version, observed_at, reported_by)
                    VALUES (?,?,?,?)""",
                 (skill_id, version, now, registered_by),
             )
-            conn.commit()
             return {"skill_id": skill_id, "action": "registered", "version": version}
-    finally:
-        conn.close()
 
 
-def record_version(
+async def record_version(
     skill_id: str,
     version: str,
     changelog: str = "",
@@ -173,32 +168,28 @@ def record_version(
     reported_by: str = "",
 ) -> dict:
     """Record a new version observation for a skill."""
-    from archivist.storage.graph import get_db
+    from archivist.storage.sqlite_pool import pool
 
     _ensure_skill_schema()
     now = datetime.now(UTC).isoformat()
 
-    conn = get_db()
-    try:
-        conn.execute(
+    async with pool.write() as conn:
+        await conn.execute(
             """INSERT INTO skill_versions (skill_id, version, changelog, breaking_changes, observed_at, reported_by)
                VALUES (?,?,?,?,?,?)
                ON CONFLICT(skill_id, version) DO UPDATE SET
                changelog=excluded.changelog, breaking_changes=excluded.breaking_changes""",
             (skill_id, version, changelog, breaking_changes, now, reported_by),
         )
-        conn.execute(
+        await conn.execute(
             "UPDATE skills SET current_version=?, updated_at=? WHERE id=?",
             (version, now, skill_id),
         )
-        conn.commit()
-    finally:
-        conn.close()
 
     return {"skill_id": skill_id, "version": version, "recorded_at": now}
 
 
-def add_lesson(
+async def add_lesson(
     skill_id: str,
     title: str,
     content: str,
@@ -207,49 +198,43 @@ def add_lesson(
     agent_id: str = "",
 ) -> str:
     """Add a lesson learned to a skill."""
-    from archivist.storage.graph import get_db
+    from archivist.storage.sqlite_pool import pool
 
     _ensure_skill_schema()
     lesson_id = str(uuid.uuid4())
     now = datetime.now(UTC).isoformat()
 
-    conn = get_db()
-    try:
-        conn.execute(
+    async with pool.write() as conn:
+        await conn.execute(
             """INSERT INTO skill_lessons
                (id, skill_id, lesson_type, title, content, skill_version, agent_id, created_at)
                VALUES (?,?,?,?,?,?,?,?)""",
             (lesson_id, skill_id, lesson_type, title, content, skill_version, agent_id, now),
         )
-        conn.commit()
-    finally:
-        conn.close()
 
     return lesson_id
 
 
-def get_lessons(skill_id: str, lesson_type: str = "", limit: int = 20) -> list[dict]:
+async def get_lessons(skill_id: str, lesson_type: str = "", limit: int = 20) -> list[dict]:
     """Retrieve lessons learned for a skill."""
-    from archivist.storage.graph import get_db
+    from archivist.storage.sqlite_pool import pool
 
     _ensure_skill_schema()
-    conn = get_db()
-    if lesson_type:
-        cur = conn.execute(
-            "SELECT * FROM skill_lessons WHERE skill_id=? AND lesson_type=? ORDER BY created_at DESC LIMIT ?",
-            (skill_id, lesson_type, limit),
-        )
-    else:
-        cur = conn.execute(
-            "SELECT * FROM skill_lessons WHERE skill_id=? ORDER BY created_at DESC LIMIT ?",
-            (skill_id, limit),
-        )
-    rows = [dict(r) for r in cur.fetchall()]
-    conn.close()
-    return rows
+    async with pool.read() as conn:
+        if lesson_type:
+            rows = await conn.fetchall(
+                "SELECT * FROM skill_lessons WHERE skill_id=? AND lesson_type=? ORDER BY created_at DESC LIMIT ?",
+                (skill_id, lesson_type, limit),
+            )
+        else:
+            rows = await conn.fetchall(
+                "SELECT * FROM skill_lessons WHERE skill_id=? ORDER BY created_at DESC LIMIT ?",
+                (skill_id, limit),
+            )
+    return [dict(r) for r in rows]
 
 
-def log_skill_event(
+async def log_skill_event(
     skill_id: str,
     agent_id: str,
     outcome: str,
@@ -261,23 +246,19 @@ def log_skill_event(
     metadata: dict | None = None,
 ) -> str:
     """Log a skill usage event (invocation, failure, etc.)."""
-    from archivist.storage.graph import get_db
+    from archivist.storage.sqlite_pool import pool
 
     _ensure_skill_schema()
     event_id = str(uuid.uuid4())
     now = datetime.now(UTC).isoformat()
 
-    if outcome == "failure" and not skill_version:
-        conn = get_db()
-        cur = conn.execute("SELECT current_version FROM skills WHERE id=?", (skill_id,))
-        row = cur.fetchone()
-        conn.close()
-        if row:
-            skill_version = row["current_version"]
+    async with pool.write() as conn:
+        if outcome == "failure" and not skill_version:
+            row = await conn.fetchone("SELECT current_version FROM skills WHERE id=?", (skill_id,))
+            if row:
+                skill_version = row["current_version"]
 
-    conn = get_db()
-    try:
-        conn.execute(
+        await conn.execute(
             """INSERT INTO skill_events
                (id, skill_id, agent_id, event_type, outcome, skill_version,
                 duration_ms, error_message, trajectory_id, created_at, metadata)
@@ -296,76 +277,73 @@ def log_skill_event(
                 json.dumps(metadata or {}),
             ),
         )
-        conn.commit()
-    finally:
-        conn.close()
 
     return event_id
 
 
-def get_skill_health(skill_id: str, window_days: int = 30) -> dict:
+async def get_skill_health(skill_id: str, window_days: int = 30) -> dict:
     """Compute health metrics for a skill from its event history."""
-    from archivist.storage.graph import get_db
+    from archivist.core.config import GRAPH_BACKEND
+    from archivist.storage.sqlite_pool import pool
 
     _ensure_skill_schema()
-    conn = get_db()
 
-    cur = conn.execute("SELECT * FROM skills WHERE id=?", (skill_id,))
-    skill_row = cur.fetchone()
-    if not skill_row:
-        conn.close()
-        return {"error": "skill_not_found", "skill_id": skill_id}
+    if (GRAPH_BACKEND or "sqlite").lower() == "postgres":
+        window_expr = f"created_at >= NOW() - INTERVAL '{window_days} days'"
+        window_params: list = []
+    else:
+        window_expr = "created_at >= datetime('now', ?)"
+        window_params = [f"-{window_days} days"]
 
-    skill = dict(skill_row)
+    async with pool.read() as conn:
+        skill_row = await conn.fetchone("SELECT * FROM skills WHERE id=?", (skill_id,))
+        if not skill_row:
+            return {"error": "skill_not_found", "skill_id": skill_id}
 
-    cur = conn.execute(
-        """SELECT outcome, COUNT(*) as cnt FROM skill_events
-           WHERE skill_id=? AND created_at >= datetime('now', ?)
-           GROUP BY outcome""",
-        (skill_id, f"-{window_days} days"),
-    )
-    outcome_counts = {row["outcome"]: row["cnt"] for row in cur.fetchall()}
+        skill = dict(skill_row)
 
-    total = sum(outcome_counts.values())
-    successes = outcome_counts.get("success", 0)
-    failures = outcome_counts.get("failure", 0)
-    success_rate = successes / total if total > 0 else None
+        outcome_rows = await conn.fetchall(
+            f"SELECT outcome, COUNT(*) as cnt FROM skill_events "
+            f"WHERE skill_id=? AND {window_expr} GROUP BY outcome",
+            [skill_id] + window_params,
+        )
+        outcome_counts = {row["outcome"]: row["cnt"] for row in outcome_rows}
 
-    cur = conn.execute(
-        "SELECT created_at FROM skill_events WHERE skill_id=? AND outcome='success' ORDER BY created_at DESC LIMIT 1",
-        (skill_id,),
-    )
-    last_success_row = cur.fetchone()
-    last_success = last_success_row["created_at"] if last_success_row else None
+        total = sum(outcome_counts.values())
+        successes = outcome_counts.get("success", 0)
+        failures = outcome_counts.get("failure", 0)
+        success_rate = successes / total if total > 0 else None
 
-    cur = conn.execute(
-        "SELECT created_at, error_message, skill_version FROM skill_events WHERE skill_id=? AND outcome='failure' ORDER BY created_at DESC LIMIT 1",
-        (skill_id,),
-    )
-    last_failure_row = cur.fetchone()
-    last_failure = dict(last_failure_row) if last_failure_row else None
+        last_success_row = await conn.fetchone(
+            "SELECT created_at FROM skill_events WHERE skill_id=? AND outcome='success' ORDER BY created_at DESC LIMIT 1",
+            (skill_id,),
+        )
+        last_success = last_success_row["created_at"] if last_success_row else None
 
-    cur = conn.execute(
-        "SELECT COUNT(*) as cnt FROM skill_lessons WHERE skill_id=?",
-        (skill_id,),
-    )
-    lessons_count = cur.fetchone()["cnt"]
+        last_failure_row = await conn.fetchone(
+            "SELECT created_at, error_message, skill_version FROM skill_events WHERE skill_id=? AND outcome='failure' ORDER BY created_at DESC LIMIT 1",
+            (skill_id,),
+        )
+        last_failure = dict(last_failure_row) if last_failure_row else None
 
-    cur = conn.execute(
-        "SELECT AVG(duration_ms) as avg_ms FROM skill_events WHERE skill_id=? AND duration_ms IS NOT NULL AND created_at >= datetime('now', ?)",
-        (skill_id, f"-{window_days} days"),
-    )
-    avg_row = cur.fetchone()
-    avg_duration_ms = round(avg_row["avg_ms"]) if avg_row and avg_row["avg_ms"] else None
+        lessons_row = await conn.fetchone(
+            "SELECT COUNT(*) as cnt FROM skill_lessons WHERE skill_id=?",
+            (skill_id,),
+        )
+        lessons_count = lessons_row["cnt"] if lessons_row else 0
 
-    versions = []
-    cur = conn.execute(
-        "SELECT version, breaking_changes, status, observed_at FROM skill_versions WHERE skill_id=? ORDER BY observed_at DESC LIMIT 5",
-        (skill_id,),
-    )
-    versions = [dict(r) for r in cur.fetchall()]
+        avg_row = await conn.fetchone(
+            f"SELECT AVG(duration_ms) as avg_ms FROM skill_events "
+            f"WHERE skill_id=? AND duration_ms IS NOT NULL AND {window_expr}",
+            [skill_id] + window_params,
+        )
+        avg_duration_ms = round(avg_row["avg_ms"]) if avg_row and avg_row["avg_ms"] else None
 
-    conn.close()
+        version_rows = await conn.fetchall(
+            "SELECT version, breaking_changes, status, observed_at FROM skill_versions WHERE skill_id=? ORDER BY observed_at DESC LIMIT 5",
+            (skill_id,),
+        )
+        versions = [dict(r) for r in version_rows]
 
     health = "healthy"
     if success_rate is not None and success_rate < 0.5:
@@ -395,60 +373,52 @@ def get_skill_health(skill_id: str, window_days: int = 30) -> dict:
     }
 
 
-def find_skill(name: str, provider: str = "") -> dict | None:
+async def find_skill(name: str, provider: str = "") -> dict | None:
     """Look up a skill by name (and optionally provider)."""
-    from archivist.storage.graph import get_db
+    from archivist.storage.sqlite_pool import pool
 
     _ensure_skill_schema()
-    conn = get_db()
-    if provider:
-        cur = conn.execute(
-            "SELECT * FROM skills WHERE name=? AND provider=?",
-            (name, provider),
-        )
-    else:
-        cur = conn.execute(
-            "SELECT * FROM skills WHERE name=? ORDER BY updated_at DESC LIMIT 1",
-            (name,),
-        )
-    row = cur.fetchone()
-    conn.close()
+    async with pool.read() as conn:
+        if provider:
+            row = await conn.fetchone(
+                "SELECT * FROM skills WHERE name=? AND provider=?",
+                (name, provider),
+            )
+        else:
+            row = await conn.fetchone(
+                "SELECT * FROM skills WHERE name=? ORDER BY updated_at DESC LIMIT 1",
+                (name,),
+            )
     return dict(row) if row else None
 
 
-def list_skills(status: str = "", limit: int = 100) -> list[dict]:
+async def list_skills(status: str = "", limit: int = 100) -> list[dict]:
     """Return all registered skills, optionally filtered by status."""
-    from archivist.storage.graph import get_db
+    from archivist.storage.sqlite_pool import pool
 
     _ensure_skill_schema()
-    conn = get_db()
-    if status:
-        cur = conn.execute(
-            "SELECT * FROM skills WHERE status=? ORDER BY name LIMIT ?",
-            (status, limit),
-        )
-    else:
-        cur = conn.execute("SELECT * FROM skills ORDER BY name LIMIT ?", (limit,))
-    rows = [dict(r) for r in cur.fetchall()]
-    conn.close()
-    return rows
+    async with pool.read() as conn:
+        if status:
+            rows = await conn.fetchall(
+                "SELECT * FROM skills WHERE status=? ORDER BY name LIMIT ?",
+                (status, limit),
+            )
+        else:
+            rows = await conn.fetchall("SELECT * FROM skills ORDER BY name LIMIT ?", (limit,))
+    return [dict(r) for r in rows]
 
 
-def update_skill_status(skill_id: str, status: str) -> None:
+async def update_skill_status(skill_id: str, status: str) -> None:
     """Update a skill's status (active, deprecated, disabled)."""
-    from archivist.storage.graph import get_db
+    from archivist.storage.sqlite_pool import pool
 
     _ensure_skill_schema()
     now = datetime.now(UTC).isoformat()
-    conn = get_db()
-    try:
-        conn.execute(
+    async with pool.write() as conn:
+        await conn.execute(
             "UPDATE skills SET status=?, updated_at=? WHERE id=?",
             (status, now, skill_id),
         )
-        conn.commit()
-    finally:
-        conn.close()
 
 
 # ── Skill relation graph (v1.0) ─────────────────────────────────────────────
@@ -456,7 +426,7 @@ def update_skill_status(skill_id: str, status: str) -> None:
 VALID_RELATION_TYPES = {"similar_to", "depend_on", "compose_with", "replaced_by"}
 
 
-def add_skill_relation(
+async def add_skill_relation(
     skill_a_id: str,
     skill_b_id: str,
     relation_type: str,
@@ -465,7 +435,7 @@ def add_skill_relation(
     created_by: str = "",
 ) -> int:
     """Create or update a relation between two skills."""
-    from archivist.storage.graph import get_db
+    from archivist.storage.sqlite_pool import pool
 
     _ensure_skill_schema()
     if relation_type not in VALID_RELATION_TYPES:
@@ -475,90 +445,94 @@ def add_skill_relation(
 
     now = datetime.now(UTC).isoformat()
 
-    conn = get_db()
-    try:
-        cur = conn.execute(
+    async with pool.write() as conn:
+        existing = await conn.fetchone(
             "SELECT id FROM skill_relations WHERE skill_a=? AND skill_b=? AND relation_type=?",
             (skill_a_id, skill_b_id, relation_type),
         )
-        existing = cur.fetchone()
 
         if existing:
-            conn.execute(
+            await conn.execute(
                 "UPDATE skill_relations SET confidence=?, evidence=?, created_by=?, created_at=? WHERE id=?",
                 (confidence, evidence, created_by, now, existing["id"]),
             )
-            conn.commit()
             return existing["id"]
         else:
-            cur = conn.execute(
-                """INSERT INTO skill_relations (skill_a, skill_b, relation_type, confidence, evidence, created_by, created_at)
-                   VALUES (?,?,?,?,?,?,?)""",
-                (skill_a_id, skill_b_id, relation_type, confidence, evidence, created_by, now),
-            )
-            conn.commit()
-            return cur.lastrowid
-    finally:
-        conn.close()
+            # Use RETURNING id for Postgres; fall back to a subsequent SELECT for SQLite
+            # (asyncpg_backend translates ? → $N; AsyncpgConnection.execute returns status string)
+            from archivist.core.config import GRAPH_BACKEND
+
+            if (GRAPH_BACKEND or "sqlite").lower() == "postgres":
+                row = await conn.fetchone(
+                    """INSERT INTO skill_relations (skill_a, skill_b, relation_type, confidence, evidence, created_by, created_at)
+                       VALUES (?,?,?,?,?,?,?) RETURNING id""",
+                    (skill_a_id, skill_b_id, relation_type, confidence, evidence, created_by, now),
+                )
+                return row["id"] if row else 0
+            else:
+                cur = await conn.execute(
+                    """INSERT INTO skill_relations (skill_a, skill_b, relation_type, confidence, evidence, created_by, created_at)
+                       VALUES (?,?,?,?,?,?,?)""",
+                    (skill_a_id, skill_b_id, relation_type, confidence, evidence, created_by, now),
+                )
+                return cur.lastrowid
 
 
-def get_skill_relations(skill_id: str, depth: int = 1) -> list[dict]:
+async def get_skill_relations(skill_id: str, depth: int = 1) -> list[dict]:
     """Get the relation graph for a skill. depth=1 for direct, depth>1 for multi-hop."""
-    from archivist.storage.graph import get_db
+    from archivist.storage.sqlite_pool import pool
 
     _ensure_skill_schema()
-    conn = get_db()
 
-    visited = set()
+    visited: set[tuple] = set()
     frontier = {skill_id}
-    all_relations = []
+    all_relations: list[dict] = []
 
-    for _ in range(depth):
-        if not frontier:
-            break
-        placeholders = ",".join("?" for _ in frontier)
-        ids = list(frontier)
+    async with pool.read() as conn:
+        for _ in range(depth):
+            if not frontier:
+                break
+            ids = list(frontier)
+            placeholders = ",".join("?" for _ in ids)
 
-        rows = conn.execute(
-            f"""SELECT sr.*, sa.name as skill_a_name, sb.name as skill_b_name
-                FROM skill_relations sr
-                JOIN skills sa ON sr.skill_a = sa.id
-                JOIN skills sb ON sr.skill_b = sb.id
-                WHERE sr.skill_a IN ({placeholders}) OR sr.skill_b IN ({placeholders})""",
-            ids + ids,
-        ).fetchall()
+            rows = await conn.fetchall(
+                f"""SELECT sr.*, sa.name as skill_a_name, sb.name as skill_b_name
+                    FROM skill_relations sr
+                    JOIN skills sa ON sr.skill_a = sa.id
+                    JOIN skills sb ON sr.skill_b = sb.id
+                    WHERE sr.skill_a IN ({placeholders}) OR sr.skill_b IN ({placeholders})""",
+                ids + ids,
+            )
 
-        next_frontier = set()
-        for r in rows:
-            rel = dict(r)
-            rel_key = (rel["skill_a"], rel["skill_b"], rel["relation_type"])
-            if rel_key not in visited:
-                visited.add(rel_key)
-                all_relations.append(rel)
-                next_frontier.add(rel["skill_a"])
-                next_frontier.add(rel["skill_b"])
+            next_frontier: set[str] = set()
+            for r in rows:
+                rel = dict(r)
+                rel_key = (rel["skill_a"], rel["skill_b"], rel["relation_type"])
+                if rel_key not in visited:
+                    visited.add(rel_key)
+                    all_relations.append(rel)
+                    next_frontier.add(rel["skill_a"])
+                    next_frontier.add(rel["skill_b"])
 
-        frontier = next_frontier - {skill_id} - set(ids)
+            frontier = next_frontier - {skill_id} - set(ids)
 
-    conn.close()
     return all_relations
 
 
-def get_skill_substitutes(skill_id: str) -> list[dict]:
+async def get_skill_substitutes(skill_id: str) -> list[dict]:
     """Find skills that can substitute for this one (similar_to or replaced_by)."""
-    from archivist.storage.graph import get_db
+    from archivist.storage.sqlite_pool import pool
 
     _ensure_skill_schema()
-    conn = get_db()
-    rows = conn.execute(
-        """SELECT s.*, sr.relation_type, sr.confidence
-           FROM skill_relations sr
-           JOIN skills s ON (s.id = sr.skill_b AND sr.skill_a = ?)
-                         OR (s.id = sr.skill_a AND sr.skill_b = ?)
-           WHERE sr.relation_type IN ('similar_to', 'replaced_by')
-           AND s.status = 'active'
-           ORDER BY sr.confidence DESC""",
-        (skill_id, skill_id),
-    ).fetchall()
-    conn.close()
+    async with pool.read() as conn:
+        rows = await conn.fetchall(
+            """SELECT s.*, sr.relation_type, sr.confidence
+               FROM skill_relations sr
+               JOIN skills s ON (s.id = sr.skill_b AND sr.skill_a = ?)
+                             OR (s.id = sr.skill_a AND sr.skill_b = ?)
+               WHERE sr.relation_type IN ('similar_to', 'replaced_by')
+               AND s.status = 'active'
+               ORDER BY sr.confidence DESC""",
+            (skill_id, skill_id),
+        )
     return [dict(r) for r in rows]

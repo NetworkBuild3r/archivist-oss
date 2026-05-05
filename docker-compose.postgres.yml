@@ -1,0 +1,62 @@
+# Archivist — PostgreSQL override
+#
+# Adds a managed PostgreSQL service and reconfigures Archivist to use it.
+#
+# Usage:
+#   cp .env.example .env        # set LLM / EMBED / keys as usual
+#   docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d --build
+#   curl http://localhost:3100/health
+#
+# The `postgres` service is NOT started by the default `docker compose up`.
+# You must explicitly reference this file with -f, as shown above.
+#
+# Connection string
+# -----------------
+# DATABASE_URL is set automatically from the compose variables below.
+# To connect with an *external* Postgres instance, set DATABASE_URL in your
+# .env file and remove (or leave unused) the `postgres` service block.
+#
+# Volumes
+# -------
+# pg-data  — Postgres data directory (persistent, named Docker volume)
+# archivist-data — no longer used for graph.db when Postgres is active;
+#                  kept for config dir and backup volume.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${PG_USER:-archivist}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-archivist}
+      POSTGRES_DB: ${PG_DB:-archivist}
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    ports:
+      - "${PG_PORT:-5432}:5432"
+    networks:
+      - archivist-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-archivist} -d ${PG_DB:-archivist}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  archivist:
+    environment:
+      # Switch Archivist to the Postgres backend
+      GRAPH_BACKEND: postgres
+      DATABASE_URL: postgresql://${PG_USER:-archivist}:${PG_PASSWORD:-archivist}@postgres:5432/${PG_DB:-archivist}
+      PG_POOL_MIN: ${PG_POOL_MIN:-2}
+      PG_POOL_MAX: ${PG_POOL_MAX:-10}
+      # SQLite path is still created for backup_manager fallback; ignored by the app
+      SQLITE_PATH: /data/archivist/graph.db
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+
+volumes:
+  pg-data:

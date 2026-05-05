@@ -11,8 +11,6 @@ import threading
 import time
 from dataclasses import dataclass
 
-from archivist.storage.graph import get_db
-
 logger = logging.getLogger("archivist.inventory")
 
 INVENTORY_TTL_SECONDS = 60
@@ -55,12 +53,12 @@ def invalidate_all() -> None:
         pass
 
 
-def _fetch_top_entities(conn, namespace: str, limit: int = 10) -> list[str]:
+async def _fetch_top_entities(conn, namespace: str, limit: int = 10) -> list[str]:
     """Entity names linked to this namespace via facts + memory_chunks file paths."""
     if not namespace:
         return []
     try:
-        cur = conn.execute(
+        rows = await conn.fetchall(
             """
             SELECT DISTINCT e.name, e.mention_count
             FROM entities e
@@ -71,14 +69,13 @@ def _fetch_top_entities(conn, namespace: str, limit: int = 10) -> list[str]:
             """,
             (namespace, limit),
         )
-        rows = cur.fetchall()
         if rows:
             return [r["name"] for r in rows]
     except Exception as e:
         logger.debug("Top entities query failed for %s: %s", namespace, e)
 
     try:
-        cur = conn.execute(
+        rows = await conn.fetchall(
             """
             SELECT name, mention_count FROM entities
             WHERE mention_count >= 2 AND namespace = ?
@@ -87,18 +84,19 @@ def _fetch_top_entities(conn, namespace: str, limit: int = 10) -> list[str]:
             """,
             (namespace or "global", limit),
         )
-        return [r["name"] for r in cur.fetchall()]
+        return [r["name"] for r in rows]
     except Exception as e:
         logger.debug("Top entities fallback failed: %s", e)
         return []
 
 
-def _fetch_inventory(namespace: str) -> NamespaceInventory:
-    conn = get_db()
-    try:
+async def _fetch_inventory(namespace: str) -> NamespaceInventory:
+    from archivist.storage.sqlite_pool import pool
+
+    async with pool.read() as conn:
         by_type: dict[str, int] = {}
         if namespace:
-            cur = conn.execute(
+            rows = await conn.fetchall(
                 """
                 SELECT memory_type, COUNT(*) AS cnt
                 FROM memory_chunks
@@ -107,44 +105,40 @@ def _fetch_inventory(namespace: str) -> NamespaceInventory:
                 """,
                 (namespace,),
             )
-            for row in cur.fetchall():
-                by_type[row["memory_type"] or "general"] = row["cnt"]
         else:
-            cur = conn.execute(
+            rows = await conn.fetchall(
                 """
                 SELECT memory_type, COUNT(*) AS cnt
                 FROM memory_chunks
                 GROUP BY memory_type
                 """
             )
-            for row in cur.fetchall():
-                by_type[row["memory_type"] or "general"] = row["cnt"]
+        for row in rows:
+            by_type[row["memory_type"] or "general"] = row["cnt"]
 
         total = sum(by_type.values())
-        top_entities = _fetch_top_entities(conn, namespace, limit=10)
+        top_entities = await _fetch_top_entities(conn, namespace, limit=10)
 
         has_fleet = False
         try:
-            row = conn.execute(
+            row = await conn.fetchone(
                 "SELECT COUNT(*) AS c FROM tips WHERE agent_id = 'fleet' AND archived = 0"
-            ).fetchone()
-            has_fleet = row and row["c"] and row["c"] > 0
+            )
+            has_fleet = row is not None and row["c"] and row["c"] > 0
         except Exception:
             pass
 
-        return NamespaceInventory(
-            namespace=namespace,
-            total_memories=total,
-            by_type=by_type,
-            top_entities=top_entities,
-            has_fleet_tips=has_fleet,
-            cached_at=time.monotonic(),
-        )
-    finally:
-        conn.close()
+    return NamespaceInventory(
+        namespace=namespace,
+        total_memories=total,
+        by_type=by_type,
+        top_entities=top_entities,
+        has_fleet_tips=has_fleet,
+        cached_at=time.monotonic(),
+    )
 
 
-def get_inventory(namespace: str) -> NamespaceInventory:
+async def get_inventory(namespace: str) -> NamespaceInventory:
     """Return inventory for namespace, using TTL cache."""
     now = time.monotonic()
     with _lock:
@@ -153,7 +147,7 @@ def get_inventory(namespace: str) -> NamespaceInventory:
             ts, inv = hit
             if now - ts <= INVENTORY_TTL_SECONDS:
                 return inv
-    fresh = _fetch_inventory(namespace)
+    fresh = await _fetch_inventory(namespace)
     with _lock:
         _cache[namespace] = (now, fresh)
         if len(_cache) > _INVENTORY_CACHE_MAX:

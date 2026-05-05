@@ -17,35 +17,35 @@ pytestmark = [pytest.mark.integration]
 
 
 class TestCuratorQueue:
-    def test_enqueue_returns_uuid(self):
+    async def test_enqueue_returns_uuid(self, async_pool):
         from curator_queue import enqueue
 
-        op_id = enqueue("merge_memory", {"ids": ["a", "b"]})
+        op_id = await enqueue("merge_memory", {"ids": ["a", "b"]})
         assert len(op_id) == 36  # UUID format
 
-    def test_enqueue_invalid_op_type(self):
+    async def test_enqueue_invalid_op_type(self, async_pool):
         from curator_queue import enqueue
 
         with pytest.raises(ValueError, match="Invalid op_type"):
-            enqueue("invalid_op", {})
+            await enqueue("invalid_op", {})
 
-    def test_stats_counts_pending(self):
+    async def test_stats_counts_pending(self, async_pool):
         from curator_queue import enqueue, stats
 
-        enqueue("merge_memory", {})
-        enqueue("archive_memory", {})
-        s = stats()
+        await enqueue("merge_memory", {})
+        await enqueue("archive_memory", {})
+        s = await stats()
         assert s["pending"] >= 2
         assert s["total"] >= 2
 
     async def test_drain_applies_ops(self, async_pool):
         from curator_queue import drain, enqueue, stats
 
-        enqueue("skip_store", {"reason": "test"})
+        await enqueue("skip_store", {"reason": "test"})
         applied = await drain(limit=10)
         assert len(applied) >= 1
         assert applied[0]["status"] == "applied"
-        s = stats()
+        s = await stats()
         assert s["pending"] == 0
 
     async def test_drain_empty_returns_empty(self, async_pool):
@@ -107,13 +107,13 @@ class TestHotnessScoring:
 
 
 class TestSkillRelations:
-    def test_add_and_get_relation(self):
+    async def test_add_and_get_relation(self, async_pool):
         from skills import add_skill_relation, get_skill_relations, register_skill
 
-        r1 = register_skill(name="kubectl", provider="k8s", registered_by="test")
-        r2 = register_skill(name="helm", provider="k8s", registered_by="test")
+        r1 = await register_skill(name="kubectl", provider="k8s", registered_by="test")
+        r2 = await register_skill(name="helm", provider="k8s", registered_by="test")
 
-        rel_id = add_skill_relation(
+        rel_id = await add_skill_relation(
             skill_a_id=r1["skill_id"],
             skill_b_id=r2["skill_id"],
             relation_type="compose_with",
@@ -123,23 +123,23 @@ class TestSkillRelations:
         )
         assert rel_id > 0
 
-        rels = get_skill_relations(r1["skill_id"])
+        rels = await get_skill_relations(r1["skill_id"])
         assert len(rels) >= 1
         assert rels[0]["relation_type"] == "compose_with"
 
-    def test_invalid_relation_type(self):
+    async def test_invalid_relation_type(self, async_pool):
         from skills import add_skill_relation
 
         with pytest.raises(ValueError, match="Invalid relation_type"):
-            add_skill_relation("a", "b", "invalid_type", created_by="test")
+            await add_skill_relation("a", "b", "invalid_type", created_by="test")
 
-    def test_get_substitutes(self):
+    async def test_get_substitutes(self, async_pool):
         from skills import add_skill_relation, get_skill_substitutes, register_skill
 
-        r1 = register_skill(name="docker", provider="oci", registered_by="test")
-        r2 = register_skill(name="podman", provider="oci", registered_by="test")
+        r1 = await register_skill(name="docker", provider="oci", registered_by="test")
+        r2 = await register_skill(name="podman", provider="oci", registered_by="test")
 
-        add_skill_relation(
+        await add_skill_relation(
             skill_a_id=r1["skill_id"],
             skill_b_id=r2["skill_id"],
             relation_type="similar_to",
@@ -147,7 +147,7 @@ class TestSkillRelations:
             created_by="test",
         )
 
-        subs = get_skill_substitutes(r1["skill_id"])
+        subs = await get_skill_substitutes(r1["skill_id"])
         assert len(subs) >= 1
         assert subs[0]["name"] == "podman"
 
@@ -169,7 +169,7 @@ class TestTipConsolidationSchema:
         assert "negative_example" in columns
         assert "archived" in columns
 
-    def test_search_tips_excludes_archived(self):
+    async def test_search_tips_excludes_archived(self, async_pool):
         from graph import get_db
         from trajectory import _ensure_trajectory_schema, search_tips
 
@@ -194,7 +194,7 @@ class TestTipConsolidationSchema:
         )
         conn.commit()
 
-        tips = search_tips("test")
+        tips = await search_tips("test")
         assert len(tips) == 1
         assert tips[0]["tip_text"] == "active tip"
 

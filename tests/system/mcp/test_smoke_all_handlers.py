@@ -282,7 +282,7 @@ class TestSkillHandlers:
         )
         _assert_text_response(result)
 
-    async def test_skill_event_not_found_returns_error(self) -> None:
+    async def test_skill_event_not_found_returns_error(self, qa_pool) -> None:
         from archivist.app.handlers.tools_skills import _handle_skill_event
 
         result = await _handle_skill_event(
@@ -297,7 +297,7 @@ class TestSkillHandlers:
         assert data.get("error") == "skill_not_found"
         assert "coroutine" not in result[0].text
 
-    async def test_skill_lesson_not_found_returns_error(self) -> None:
+    async def test_skill_lesson_not_found_returns_error(self, qa_pool) -> None:
         from archivist.app.handlers.tools_skills import _handle_skill_lesson
 
         result = await _handle_skill_lesson(
@@ -312,7 +312,7 @@ class TestSkillHandlers:
         data = json.loads(result[0].text)
         assert data.get("error") == "skill_not_found"
 
-    async def test_skill_health_not_found_returns_error(self) -> None:
+    async def test_skill_health_not_found_returns_error(self, qa_pool) -> None:
         from archivist.app.handlers.tools_skills import _handle_skill_health
 
         result = await _handle_skill_health({"skill_name": "nonexistent_skill_xyz"})
@@ -320,7 +320,7 @@ class TestSkillHandlers:
         data = json.loads(result[0].text)
         assert data.get("error") == "skill_not_found"
 
-    async def test_skill_relate_not_found_returns_error(self) -> None:
+    async def test_skill_relate_not_found_returns_error(self, qa_pool) -> None:
         from archivist.app.handlers.tools_skills import _handle_skill_relate
 
         result = await _handle_skill_relate(
@@ -335,7 +335,7 @@ class TestSkillHandlers:
         data = json.loads(result[0].text)
         assert data.get("error") == "skill_not_found"
 
-    async def test_skill_dependencies_not_found_returns_error(self) -> None:
+    async def test_skill_dependencies_not_found_returns_error(self, qa_pool) -> None:
         from archivist.app.handlers.tools_skills import _handle_skill_dependencies
 
         result = await _handle_skill_dependencies({"skill_name": "nonexistent_skill_xyz"})

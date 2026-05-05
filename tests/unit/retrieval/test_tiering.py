@@ -1,6 +1,5 @@
 """Unit tests for tiering, temporal decay, contradiction detection, and compressed index."""
 
-import sqlite3
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
@@ -141,31 +140,9 @@ class TestRetrievalTraceV05:
 
 
 class TestCompressedIndex:
-    def test_compressed_index_empty_namespace(self):
-        import graph
+    @pytest.mark.asyncio
+    async def test_compressed_index_empty_namespace(self, async_pool):
         from compressed_index import build_namespace_index
 
-        original_get_db = graph.get_db
-
-        class FakeConn:
-            def __init__(self):
-                self._db = sqlite3.connect(":memory:")
-                self._db.row_factory = sqlite3.Row
-                self._db.execute(
-                    "CREATE TABLE entities (id INTEGER PRIMARY KEY, name TEXT, entity_type TEXT, mention_count INTEGER)"
-                )
-
-            def execute(self, *args, **kwargs):
-                return self._db.execute(*args, **kwargs)
-
-            def close(self):
-                self._db.close()
-
-        fake = FakeConn()
-        graph.get_db = lambda: fake
-        try:
-            result = build_namespace_index("test-ns")
-            assert "No indexed knowledge" in result
-        finally:
-            graph.get_db = original_get_db
-            fake.close()
+        result = await build_namespace_index("test-ns-empty-xyz-unique")
+        assert "No indexed knowledge" in result
