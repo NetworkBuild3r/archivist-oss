@@ -57,6 +57,19 @@ _PLACEHOLDER_RE = re.compile(r"\?")
 _INSERT_OR_IGNORE_RE = re.compile(r"\bINSERT\s+OR\s+IGNORE\s+INTO\b", re.IGNORECASE)
 _INSERT_OR_REPLACE_RE = re.compile(r"\bINSERT\s+OR\s+REPLACE\s+INTO\b", re.IGNORECASE)
 _COLLATE_NOCASE_RE = re.compile(r"\s+COLLATE\s+NOCASE\b", re.IGNORECASE)
+# SQLite's two-argument MIN(a, b) / MAX(a, b) are scalar functions; Postgres uses LEAST/GREATEST.
+# This matches MIN( or MAX( only when immediately followed by a non-whitespace character (i.e.
+# it is the two-argument scalar form, not the SQL aggregate MIN(...) used over a column).
+_MIN2_RE = re.compile(r"\bMIN\s*\(", re.IGNORECASE)
+_MAX2_RE = re.compile(r"\bMAX\s*\(", re.IGNORECASE)
+
+
+def _replace_min2(m: re.Match[str]) -> str:
+    return "LEAST("
+
+
+def _replace_max2(m: re.Match[str]) -> str:
+    return "GREATEST("
 
 
 def _translate_sql(sql: str) -> str:
@@ -67,7 +80,11 @@ def _translate_sql(sql: str) -> str:
     1. ``INSERT OR IGNORE INTO`` → ``INSERT INTO … ON CONFLICT DO NOTHING``
     2. ``INSERT OR REPLACE INTO`` → ``INSERT INTO … ON CONFLICT DO UPDATE SET …``
     3. ``COLLATE NOCASE`` → stripped (citext handles case-insensitivity natively).
-    4. ``?`` placeholders → ``$1``, ``$2``, … (asyncpg style).
+    4. Two-argument ``MIN(a, b)`` / ``MAX(a, b)`` → ``LEAST(a, b)`` / ``GREATEST(a, b)``.
+       These are scalar comparison functions in SQLite but do not exist in PostgreSQL,
+       which uses ``LEAST``/``GREATEST`` instead.  The aggregate ``MIN(col)`` form is
+       unaffected because both databases accept it as-is.
+    5. ``?`` placeholders → ``$1``, ``$2``, … (asyncpg style).
 
     Examples::
 
@@ -77,6 +94,8 @@ def _translate_sql(sql: str) -> str:
         'INSERT INTO t (a) VALUES ($1) ON CONFLICT DO NOTHING'
         >>> _translate_sql("SELECT * FROM t WHERE name = ? COLLATE NOCASE")
         'SELECT * FROM t WHERE name = $1'
+        >>> _translate_sql("UPDATE r SET confidence=MIN(confidence+0.01, 1.0) WHERE id=?")
+        'UPDATE r SET confidence=LEAST(confidence+0.01, 1.0) WHERE id=$1'
     """
     # Track which ORx substitution fired so we can append the right ON CONFLICT clause.
     _mode = [None]  # "ignore" | "replace" | None
@@ -96,7 +115,15 @@ def _translate_sql(sql: str) -> str:
     # Step 3: strip COLLATE NOCASE (citext handles it at the column level)
     sql2 = _COLLATE_NOCASE_RE.sub("", sql2)
 
-    # Step 4: ? → $N
+    # Step 4: MIN(a, b) / MAX(a, b) → LEAST(a, b) / GREATEST(a, b)
+    # SQLite exposes these as two-argument scalar comparison functions; PostgreSQL
+    # does not have MIN/MAX as scalar functions — it uses LEAST/GREATEST instead.
+    # The SQL aggregate forms (SELECT MIN(col) FROM …) are unaffected because
+    # both databases accept the aggregate MIN(col) syntax natively.
+    sql2 = _MIN2_RE.sub(_replace_min2, sql2)
+    sql2 = _MAX2_RE.sub(_replace_max2, sql2)
+
+    # Step 5: ? → $N
     counter = 0
 
     def _replace_placeholder(_m: re.Match[str]) -> str:
