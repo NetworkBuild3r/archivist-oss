@@ -179,10 +179,17 @@ async def file_watcher():
                     logger.error("Watcher delete failed for %s: %s", path, e)
 
 
+_CRITICAL_SUBSYSTEMS = frozenset({"qdrant", "postgres", "embeddings"})
+
+
 async def handle_health(_request):
     statuses = health.all_status()
     overall = "healthy"
-    if any(not v.get("healthy", True) for v in statuses.values()):
+    if any(
+        not v.get("healthy", True)
+        for k, v in statuses.items()
+        if k in _CRITICAL_SUBSYSTEMS
+    ):
         overall = "degraded"
     return JSONResponse(
         {
