@@ -122,6 +122,32 @@ class TestHandleHealth:
         body = json.loads(resp.body)
         assert body["status"] == "degraded"
 
+    @pytest.mark.asyncio
+    async def test_llm_down_does_not_cause_503(self, monkeypatch):
+        """LLM is non-critical: an LLM failure must NOT trigger a 503 liveness kill."""
+        import archivist.core.health as health
+        from archivist.app.main import handle_health
+
+        monkeypatch.setattr(
+            health,
+            "_status",
+            {
+                "qdrant": {"healthy": True, "detail": "", "since": "t", "latency_ms": 0.0},
+                "embeddings": {"healthy": True, "detail": "", "since": "t", "latency_ms": 0.0},
+                "llm": {
+                    "healthy": False,
+                    "detail": "404 Not Found",
+                    "since": "t",
+                    "latency_ms": 0.0,
+                },
+            },
+        )
+        resp = await handle_health(_make_request())
+        assert resp.status_code == 200
+        body = json.loads(resp.body)
+        assert body["status"] == "healthy"
+        assert body["subsystems"]["llm"]["healthy"] is False
+
 
 # ---------------------------------------------------------------------------
 # /debug/config endpoint
