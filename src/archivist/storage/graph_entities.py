@@ -43,6 +43,33 @@ async def upsert_entity(
     now = datetime.now(UTC).isoformat()
 
     async def _run(c: aiosqlite.Connection) -> int:
+        if _is_postgres():
+            # Atomic upsert keyed by (name, namespace).  A plain INSERT after a
+            # SELECT races under concurrency and still fails on the old global
+            # UNIQUE(name) constraint when the same name exists in another ns.
+            new_id = await c.fetchval(
+                """
+                INSERT INTO entities
+                    (name, entity_type, first_seen, last_seen, retention_class, namespace, actor_id, actor_type)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (name, namespace)
+                DO UPDATE SET
+                    last_seen = EXCLUDED.last_seen,
+                    mention_count = entities.mention_count + 1,
+                    retention_class = CASE
+                        WHEN EXCLUDED.retention_class = 'permanent' THEN EXCLUDED.retention_class
+                        WHEN EXCLUDED.retention_class = 'durable' AND entities.retention_class NOT IN ('permanent') THEN EXCLUDED.retention_class
+                        WHEN EXCLUDED.retention_class = 'standard' AND entities.retention_class IN ('ephemeral') THEN EXCLUDED.retention_class
+                        ELSE entities.retention_class
+                    END,
+                    actor_id = CASE WHEN EXCLUDED.actor_id <> '' THEN EXCLUDED.actor_id ELSE entities.actor_id END,
+                    actor_type = CASE WHEN EXCLUDED.actor_type <> '' THEN EXCLUDED.actor_type ELSE entities.actor_type END
+                RETURNING id
+                """,
+                (name, entity_type, now, now, retention_class, namespace, actor_id, actor_type),
+            )
+            return new_id
+
         cur = await c.execute(
             "SELECT id, mention_count, retention_class FROM entities WHERE name = ? AND namespace = ?",
             (name, namespace),
@@ -60,13 +87,6 @@ async def upsert_entity(
                 (now, new_rc, row["id"]),
             )
             return row["id"]
-        if _is_postgres():
-            new_id = await c.fetchval(
-                "INSERT INTO entities (name, entity_type, first_seen, last_seen, retention_class, namespace, actor_id, actor_type) "
-                "VALUES (?,?,?,?,?,?,?,?) RETURNING id",
-                (name, entity_type, now, now, retention_class, namespace, actor_id, actor_type),
-            )
-            return new_id
         cur2 = await c.execute(
             "INSERT INTO entities (name, entity_type, first_seen, last_seen, retention_class, namespace, actor_id, actor_type) "
             "VALUES (?,?,?,?,?,?,?,?)",

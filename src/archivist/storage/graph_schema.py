@@ -585,6 +585,56 @@ def _migrate_schema():
         conn.close()
 
 
+async def _migrate_entity_unique_constraint_postgres() -> None:
+    """Ensure Postgres entities uniqueness is namespace-scoped.
+
+    Older Postgres deployments created ``entities_name_unique`` as
+    ``UNIQUE(name)`` while runtime code scoped entity lookup by ``name`` and
+    ``namespace``.  That mismatch rejects valid writes when the same entity name
+    exists in multiple namespaces.  This migration keeps the public constraint
+    name stable but changes its key to ``(name, namespace)``.
+
+    Fresh installs get ``UNIQUE(name, namespace)`` from ``schema_postgres.sql``;
+    this path repairs databases that already applied the old constraint.
+    """
+    if not _is_postgres():
+        return
+
+    from archivist.storage.sqlite_pool import pool
+
+    sql = """
+    DO $$
+    BEGIN
+        IF EXISTS (
+            SELECT 1
+            FROM pg_constraint c
+            JOIN pg_class t ON t.oid = c.conrelid
+            JOIN pg_namespace n ON n.oid = t.relnamespace
+            WHERE n.nspname = 'public'
+              AND t.relname = 'entities'
+              AND c.conname = 'entities_name_unique'
+              AND c.contype = 'u'
+              AND pg_get_constraintdef(c.oid) = 'UNIQUE (name)'
+        ) THEN
+            ALTER TABLE entities DROP CONSTRAINT entities_name_unique;
+            ALTER TABLE entities ADD CONSTRAINT entities_name_unique UNIQUE (name, namespace);
+        ELSIF NOT EXISTS (
+            SELECT 1
+            FROM pg_constraint c
+            JOIN pg_class t ON t.oid = c.conrelid
+            JOIN pg_namespace n ON n.oid = t.relnamespace
+            WHERE n.nspname = 'public'
+              AND t.relname = 'entities'
+              AND c.conname = 'entities_name_unique'
+              AND c.contype = 'u'
+        ) THEN
+            ALTER TABLE entities ADD CONSTRAINT entities_name_unique UNIQUE (name, namespace);
+        END IF;
+    END $$;
+    """
+    await pool.execute_ddl(sql)
+
+
 def _migrate_entity_unique_constraint():
     """Rebuild entities UNIQUE constraint to include namespace (idempotent).
 
@@ -592,9 +642,9 @@ def _migrate_entity_unique_constraint():
     This migration copies to a new table with UNIQUE(name, namespace),
     then swaps in place.  Safe to run multiple times.
 
-    On Postgres this is a no-op: ``schema_postgres.sql`` defines the correct
-    constraint from the start and uses SQLite-specific ``PRAGMA``/``sqlite_master``
-    introspection that is not valid on Postgres.
+    On Postgres this is a no-op — use :func:`_migrate_entity_unique_constraint_postgres`
+    (called from :func:`init_schema_async`) instead.  SQLite-specific
+    ``PRAGMA``/``sqlite_master`` introspection is not valid on Postgres.
     """
     if _is_postgres():
         return
@@ -744,6 +794,7 @@ async def init_schema_async() -> None:
     ddl = schema_path.read_text()
     try:
         await pool.execute_ddl(ddl)
+        await _migrate_entity_unique_constraint_postgres()
         health.register("fts5", healthy=True)
         logging.getLogger("archivist.graph").info(
             "Postgres schema applied from %s", schema_path.name
