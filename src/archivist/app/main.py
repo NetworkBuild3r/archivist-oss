@@ -29,6 +29,7 @@ from archivist.core.config import (
     METRICS_AUTH_EXEMPT,
     METRICS_COLLECT_INTERVAL_SECONDS,
     METRICS_ENABLED,
+    NAMESPACES_CONFIG_PATH,
     QDRANT_COLLECTION,
     QDRANT_HNSW_EF_CONSTRUCT,
     QDRANT_HNSW_M,
@@ -277,6 +278,27 @@ def _log_task_exception(task: asyncio.Task):
         logger.exception("Background task %r crashed", task.get_name(), exc_info=exc)
 
 
+def _warn_if_no_access_control() -> None:
+    """Log a loud, operator-visible warning if the server has zero access control.
+
+    Fires only when BOTH ``ARCHIVIST_API_KEY`` and ``NAMESPACES_CONFIG_PATH`` are
+    unset — i.e. the server is about to serve every MCP tool call and every
+    ``/admin/*`` route to any caller that can reach it. Permissive-by-default is a
+    supported, documented single-operator/local-dev configuration; this only makes
+    that choice visible, it never blocks startup and never logs a credential value
+    (INIT-014/SPEC-001).
+    """
+    if not ARCHIVIST_API_KEY and not NAMESPACES_CONFIG_PATH:
+        logger.critical(
+            "SECURITY: starting with NO ACCESS CONTROL — both ARCHIVIST_API_KEY and "
+            "NAMESPACES_CONFIG_PATH are unset. Every MCP tool call and every "
+            "/admin/* route is open to any caller that can reach this port. This is "
+            "expected for local/single-operator use; set ARCHIVIST_API_KEY and/or "
+            "NAMESPACES_CONFIG_PATH before exposing this server to any shared or "
+            "untrusted network."
+        )
+
+
 async def _startup():
     """Run on app startup: init DB, load RBAC, ensure Qdrant collection, start background tasks."""
     import archivist.storage.sqlite_pool as _pool_module
@@ -303,6 +325,8 @@ async def _startup():
 
     load_rbac_config()
     logger.info("RBAC config loaded")
+
+    _warn_if_no_access_control()
 
     ensure_qdrant_collection()
 
@@ -442,13 +466,19 @@ class ArchivistAuthMiddleware(BaseHTTPMiddleware):
     Auth precedence (first match wins):
       1. Authorization: Bearer <actual-key>
       2. X-API-Key: <actual-key>
-      3. Authorization: Bearer ${ARCHIVIST_API_KEY}  (literal — OpenClaw ≤v2026.4.8
-         does not interpolate env vars inside the headers config object; we accept the
-         known placeholder string and log a warning so operators can track the issue).
+
+    A third, historical case is explicitly rejected rather than accepted: OpenClaw
+    <=v2026.4.8 does not interpolate env vars inside the headers config object, so it
+    can send the literal, un-interpolated string ``Bearer ${ARCHIVIST_API_KEY}``. That
+    string used to be treated as a valid credential — a public, universal auth bypass,
+    since the placeholder is documented in this open-source file. It is now always
+    rejected (401); the diagnostic warning is still logged so the OpenClaw-specific
+    misconfiguration remains easy to spot in server logs (INIT-014/SPEC-001).
     """
 
     # Literal un-interpolated placeholder sent by OpenClaw when env-var
-    # substitution is not applied to the mcp.servers headers object.
+    # substitution is not applied to the mcp.servers headers object. Detected so we
+    # can log a helpful diagnostic — it is never accepted as a credential.
     _OPENCLAW_PLACEHOLDER = "Bearer ${ARCHIVIST_API_KEY}"
 
     async def dispatch(self, request, call_next):
@@ -462,11 +492,11 @@ class ArchivistAuthMiddleware(BaseHTTPMiddleware):
         xkey = request.headers.get("x-api-key", "")
         ok = auth == f"Bearer {ARCHIVIST_API_KEY}" or xkey == ARCHIVIST_API_KEY
         if not ok and auth == self._OPENCLAW_PLACEHOLDER:
-            ok = True
             logger.warning(
                 "auth.uninterpolated_placeholder: client sent literal "
                 "'Bearer ${ARCHIVIST_API_KEY}' instead of the resolved key — "
-                "fix client env-var interpolation or switch to X-API-Key header",
+                "request rejected; fix client env-var interpolation or switch to "
+                "X-API-Key header",
                 extra={"client": str(getattr(request.client, "host", "unknown"))},
             )
         if not ok:
@@ -605,13 +635,15 @@ async def handle_backup_restore(request):
             {"error": "target must be 'all', 'qdrant', or 'sqlite'"}, status_code=400
         )
 
-    from archivist.storage.backup_manager import restore_snapshot
+    from archivist.storage.backup_manager import SnapshotPathError, restore_snapshot
 
     try:
         result = restore_snapshot(snapshot_id, target=target)
         return JSONResponse(result)
     except FileNotFoundError as e:
         return JSONResponse({"error": str(e)}, status_code=404)
+    except SnapshotPathError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=409)
     except Exception as e:
@@ -625,10 +657,13 @@ async def handle_backup_delete(request):
     if not snapshot_id:
         return JSONResponse({"error": "snapshot_id required"}, status_code=400)
 
-    from archivist.storage.backup_manager import delete_snapshot
+    from archivist.storage.backup_manager import SnapshotPathError, delete_snapshot
 
-    if delete_snapshot(snapshot_id):
-        return JSONResponse({"deleted": snapshot_id})
+    try:
+        if delete_snapshot(snapshot_id):
+            return JSONResponse({"deleted": snapshot_id})
+    except SnapshotPathError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
     return JSONResponse({"error": "snapshot not found"}, status_code=404)
 
 
