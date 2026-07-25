@@ -7,8 +7,8 @@ pytestmark = [pytest.mark.integration, pytest.mark.retrieval, pytest.mark.rbac]
 
 class TestNamespaceInventory:
     async def test_inventory_counts_by_type_and_ttl_invalidate(self, async_pool, monkeypatch):
-        import namespace_inventory as ni
-        from graph import upsert_fts_chunk
+        import archivist.storage.namespace_inventory as ni
+        from archivist.storage.graph import upsert_fts_chunk
 
         ni.invalidate_all()
         monkeypatch.setattr(ni, "INVENTORY_TTL_SECONDS", 3600)
@@ -43,7 +43,7 @@ class TestNamespaceInventory:
         assert inv3.total_memories == 50
 
     async def test_inventory_empty_namespace_string(self, async_pool):
-        import namespace_inventory as ni
+        import archivist.storage.namespace_inventory as ni
 
         ni.invalidate_all()
         inv = await ni.get_inventory("")
@@ -52,8 +52,8 @@ class TestNamespaceInventory:
 
 class TestQueryClassifier:
     async def test_skip_small_namespace(self):
-        from namespace_inventory import NamespaceInventory
-        from query_classifier import classify_query, invalidate_all_cache
+        from archivist.retrieval.query_classifier import classify_query, invalidate_all_cache
+        from archivist.storage.namespace_inventory import NamespaceInventory
 
         invalidate_all_cache()
 
@@ -68,8 +68,8 @@ class TestQueryClassifier:
         assert await classify_query("how do I deploy", inv) == ""
 
     async def test_single_type_short_circuits(self):
-        from namespace_inventory import NamespaceInventory
-        from query_classifier import classify_query, invalidate_all_cache
+        from archivist.retrieval.query_classifier import classify_query, invalidate_all_cache
+        from archivist.storage.namespace_inventory import NamespaceInventory
 
         invalidate_all_cache()
 
@@ -84,8 +84,8 @@ class TestQueryClassifier:
         assert await classify_query("anything", inv) == "skill"
 
     async def test_skew_heuristic_no_llm(self):
-        from namespace_inventory import NamespaceInventory
-        from query_classifier import classify_query, invalidate_all_cache
+        from archivist.retrieval.query_classifier import classify_query, invalidate_all_cache
+        from archivist.storage.namespace_inventory import NamespaceInventory
 
         invalidate_all_cache()
 
@@ -100,8 +100,8 @@ class TestQueryClassifier:
         assert await classify_query("mixed question", inv) == "skill"
 
     async def test_llm_classification_respects_inventory(self, mock_llm):
-        from namespace_inventory import NamespaceInventory
-        from query_classifier import classify_query, invalidate_all_cache
+        from archivist.retrieval.query_classifier import classify_query, invalidate_all_cache
+        from archivist.storage.namespace_inventory import NamespaceInventory
 
         invalidate_all_cache()
 
@@ -117,8 +117,8 @@ class TestQueryClassifier:
         assert await classify_query("what happened yesterday", inv) == "experience"
 
     async def test_llm_returns_empty_type_overridden(self, mock_llm):
-        from namespace_inventory import NamespaceInventory
-        from query_classifier import classify_query, invalidate_all_cache
+        from archivist.retrieval.query_classifier import classify_query, invalidate_all_cache
+        from archivist.storage.namespace_inventory import NamespaceInventory
 
         invalidate_all_cache()
 
@@ -138,7 +138,7 @@ class TestCompactionMultiAgent:
     async def test_structured_multi_agent_prompt(self, mock_llm):
         import json
 
-        from compaction import compact_structured
+        from archivist.write.compaction import compact_structured
 
         mock_llm.return_value = json.dumps(
             {
@@ -155,7 +155,7 @@ class TestCompactionMultiAgent:
         assert "multiple agents" in call_kw.get("system", "")
 
     async def test_flat_multi_agent_prompt(self, mock_llm):
-        from compaction import compact_flat
+        from archivist.write.compaction import compact_flat
 
         mock_llm.return_value = "summary"
         await compact_flat([("a", "text")], multi_agent=True)

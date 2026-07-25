@@ -32,7 +32,7 @@ class TestPhase2SyntheticQuestionPipeline:
 
     def test_search_vectors_returns_representation_type(self):
         """search_vectors result rows must include representation_type."""
-        from rlm_retriever import search_vectors
+        from archivist.retrieval.rlm_retriever import search_vectors
 
         source = inspect.getsource(search_vectors)
         assert "representation_type" in source
@@ -41,7 +41,7 @@ class TestPhase2SyntheticQuestionPipeline:
 
     def test_search_vectors_filters_synthetic_when_disabled(self):
         """search_vectors must exclude synthetic_question points when the feature is off."""
-        from rlm_retriever import search_vectors
+        from archivist.retrieval.rlm_retriever import search_vectors
 
         source = inspect.getsource(search_vectors)
         assert "SYNTHETIC_QUESTIONS_ENABLED" in source
@@ -49,7 +49,7 @@ class TestPhase2SyntheticQuestionPipeline:
 
     def test_dedupe_keeps_best_score(self):
         """When a chunk and its synthetic question both match, keep the higher score."""
-        from memory_fusion import dedupe_vector_hits
+        from archivist.retrieval.memory_fusion import dedupe_vector_hits
 
         chunk_hit = {
             "id": "chunk-1",
@@ -75,7 +75,7 @@ class TestPhase2SyntheticQuestionPipeline:
 
     def test_dedupe_marks_synthetic_match_when_chunk_wins(self):
         """Even when the chunk score wins, synthetic_match should be True."""
-        from memory_fusion import dedupe_vector_hits
+        from archivist.retrieval.memory_fusion import dedupe_vector_hits
 
         chunk_hit = {
             "id": "chunk-1",
@@ -100,7 +100,7 @@ class TestPhase2SyntheticQuestionPipeline:
 
     def test_dedupe_no_synthetic_match_for_pure_chunks(self):
         """Chunks without a synthetic twin should NOT have synthetic_match."""
-        from memory_fusion import dedupe_vector_hits
+        from archivist.retrieval.memory_fusion import dedupe_vector_hits
 
         hits = [
             {
@@ -126,13 +126,13 @@ class TestPhase2SyntheticQuestionPipeline:
             assert "synthetic_match" not in r
 
     def test_trace_includes_synthetic_hits_key(self):
-        from rlm_retriever import recursive_retrieve
+        from archivist.retrieval.rlm_retriever import recursive_retrieve
 
         source = inspect.getsource(recursive_retrieve)
         assert "synthetic_hits" in source
 
     def test_force_invalidate_all_clears_cache(self):
-        import hot_cache
+        import archivist.retrieval.hot_cache as hot_cache
 
         old_enabled = hot_cache.HOT_CACHE_ENABLED
         try:
@@ -150,14 +150,18 @@ class TestPhase2SyntheticQuestionPipeline:
         """Synthetic question points must carry required fields for the search path."""
         from unittest.mock import AsyncMock, patch
 
-        import synthetic_questions
+        import archivist.write.synthetic_questions as synthetic_questions
 
         mock_qs = '["How do backups work?", "When is the backup window?"]'
         with (
             patch.object(synthetic_questions, "SYNTHETIC_QUESTIONS_ENABLED", True),
             patch.object(synthetic_questions, "SYNTHETIC_QUESTIONS_COUNT", 2),
-            patch("synthetic_questions.llm_query", new_callable=AsyncMock) as mock_llm,
-            patch("synthetic_questions.embed_batch", new_callable=AsyncMock) as mock_embed,
+            patch(
+                "archivist.write.synthetic_questions.llm_query", new_callable=AsyncMock
+            ) as mock_llm,
+            patch(
+                "archivist.write.synthetic_questions.embed_batch", new_callable=AsyncMock
+            ) as mock_embed,
         ):
             mock_llm.return_value = mock_qs
             mock_embed.return_value = [[0.1] * 1024, [0.2] * 1024]
@@ -201,7 +205,7 @@ class TestPhase3NominateThenRerank:
     """Phase 3: verify the clean nominate-then-rerank pipeline."""
 
     def test_v2_path_bypasses_rrf_merge(self):
-        from rlm_retriever import recursive_retrieve
+        from archivist.retrieval.rlm_retriever import recursive_retrieve
 
         source = inspect.getsource(recursive_retrieve)
         lines = source.split("\n")
@@ -215,7 +219,7 @@ class TestPhase3NominateThenRerank:
                 assert "rrf_merge" not in line
 
     def test_v2_path_bypasses_bm25_merge(self):
-        from rlm_retriever import recursive_retrieve
+        from archivist.retrieval.rlm_retriever import recursive_retrieve
 
         source = inspect.getsource(recursive_retrieve)
         assert "not RERANKER_ENABLED" in source
@@ -223,13 +227,13 @@ class TestPhase3NominateThenRerank:
     def test_v2_path_does_id_based_dedup(self):
         # INIT-022/SPEC-005 (H6): nomination/dedup logic now lives in
         # _run_reranker_pipeline, extracted out of recursive_retrieve.
-        from rlm_retriever import _run_reranker_pipeline
+        from archivist.retrieval.rlm_retriever import _run_reranker_pipeline
 
         source = inspect.getsource(_run_reranker_pipeline)
         assert "candidate_pool" in source
 
     def test_v2_pool_collects_all_nomination_sources(self):
-        from rlm_retriever import recursive_retrieve
+        from archivist.retrieval.rlm_retriever import recursive_retrieve
 
         source = inspect.getsource(recursive_retrieve)
         for source_name in ("vec_results", "bm25_hits", "literal_hits", "_registry_hits"):
@@ -238,7 +242,7 @@ class TestPhase3NominateThenRerank:
     def test_v2_trace_includes_nomination_pool_size(self):
         # INIT-022/SPEC-005 (H6): nomination/dedup logic now lives in
         # _run_reranker_pipeline, extracted out of recursive_retrieve.
-        from rlm_retriever import _run_reranker_pipeline
+        from archivist.retrieval.rlm_retriever import _run_reranker_pipeline
 
         source = inspect.getsource(_run_reranker_pipeline)
         assert "nomination_pool_size" in source
@@ -345,7 +349,7 @@ class TestPhase3NominateThenRerank:
     def test_legacy_path_preserved(self):
         # INIT-022/SPEC-005 (H6): legacy-path post-processing now lives in
         # _run_legacy_pipeline, extracted out of recursive_retrieve.
-        from rlm_retriever import _run_legacy_pipeline
+        from archivist.retrieval.rlm_retriever import _run_legacy_pipeline
 
         source = inspect.getsource(_run_legacy_pipeline)
         assert "LEGACY PATH" in source
@@ -354,7 +358,7 @@ class TestPhase3NominateThenRerank:
         assert "apply_retrieval_threshold" in source
 
     def test_v2_no_threshold_filter(self):
-        from rlm_retriever import recursive_retrieve
+        from archivist.retrieval.rlm_retriever import recursive_retrieve
 
         source = inspect.getsource(recursive_retrieve)
         lines = source.split("\n")
@@ -387,24 +391,24 @@ class TestPhase4ParentTextAtIndexTime:
     """Phase 4: verify parent context is stored at index time, not fetched at runtime."""
 
     def test_enrich_with_parent_deleted(self):
-        import rlm_retriever
+        import archivist.retrieval.rlm_retriever as rlm_retriever
 
         assert not hasattr(rlm_retriever, "enrich_with_parent")
 
     def test_no_enrich_with_parent_calls(self):
-        from rlm_retriever import recursive_retrieve
+        from archivist.retrieval.rlm_retriever import recursive_retrieve
 
         source = inspect.getsource(recursive_retrieve)
         assert "enrich_with_parent" not in source
 
     def test_search_vectors_returns_parent_text(self):
-        from rlm_retriever import search_vectors
+        from archivist.retrieval.rlm_retriever import search_vectors
 
         source = inspect.getsource(search_vectors)
         assert '"parent_text"' in source or "'parent_text'" in source
 
     def test_indexer_stores_parent_text_hierarchical(self):
-        from indexer import index_file
+        from archivist.write.indexer import index_file
 
         source = inspect.getsource(index_file)
         assert "parent_text" in source
@@ -428,13 +432,13 @@ class TestPhase4ParentTextAtIndexTime:
                 assert parent_text == "Parent text here"
 
     def test_indexer_flat_chunks_have_empty_parent_text(self):
-        from indexer import index_file
+        from archivist.write.indexer import index_file
 
         source = inspect.getsource(index_file)
         assert source.count('"parent_text"') >= 2
 
     def test_reranker_reads_parent_text(self):
-        from reranker import _build_pair
+        from archivist.retrieval.reranker import _build_pair
 
         candidate_with_text = {
             "text": "Child chunk content",
@@ -445,7 +449,7 @@ class TestPhase4ParentTextAtIndexTime:
         assert "Parent context:" in pair
 
     def test_reranker_backward_compat_parent_context(self):
-        from reranker import _build_pair
+        from archivist.retrieval.reranker import _build_pair
 
         candidate_legacy = {
             "text": "Child chunk content",
@@ -455,7 +459,7 @@ class TestPhase4ParentTextAtIndexTime:
         assert "Legacy parent context" in pair
 
     def test_reranker_no_parent_text_omits_section(self):
-        from reranker import _build_pair
+        from archivist.retrieval.reranker import _build_pair
 
         candidate_no_parent = {
             "text": "Standalone chunk content",
@@ -465,14 +469,14 @@ class TestPhase4ParentTextAtIndexTime:
         assert "Parent context:" not in pair
 
     def test_refine_uses_parent_text(self):
-        from rlm_retriever import _refine_one_chunk
+        from archivist.retrieval.rlm_retriever import _refine_one_chunk
 
         source = inspect.getsource(_refine_one_chunk)
         assert "parent_text" in source
         assert "parent_context" not in source
 
     def test_v2_trace_parent_enriched_uses_parent_text(self):
-        from rlm_retriever import recursive_retrieve
+        from archivist.retrieval.rlm_retriever import recursive_retrieve
 
         source = inspect.getsource(recursive_retrieve)
         assert "parent_text" in source
@@ -490,7 +494,7 @@ class TestPhase5SemanticChunking:
     def test_chunking_strategy_config_exists(self):
         import os
 
-        import config
+        import archivist.core.config as config
 
         assert hasattr(config, "CHUNKING_STRATEGY")
         assert config.CHUNKING_STRATEGY in ("semantic", "fixed")
@@ -498,12 +502,12 @@ class TestPhase5SemanticChunking:
             assert config.CHUNKING_STRATEGY == "semantic"
 
     def test_chunk_text_semantic_exported(self):
-        from chunking import chunk_text_semantic
+        from archivist.utils.chunking import chunk_text_semantic
 
         assert callable(chunk_text_semantic)
 
     def test_chunk_text_semantic_short_doc_fast_path(self):
-        from chunking import chunk_text_semantic
+        from archivist.utils.chunking import chunk_text_semantic
 
         text = "## Title\n\nShort content that fits in one chunk easily."
         result = chunk_text_semantic(text, size=2000)
@@ -511,7 +515,7 @@ class TestPhase5SemanticChunking:
         assert result[0] == text.strip()
 
     def test_chunk_text_semantic_long_doc_splits(self):
-        from chunking import chunk_text_semantic
+        from archivist.utils.chunking import chunk_text_semantic
 
         body = "Content word. " * 50
         text = f"## Section A\n\n{body}\n\n## Section B\n\n{body}"
@@ -519,7 +523,7 @@ class TestPhase5SemanticChunking:
         assert len(result) >= 2
 
     def test_chunk_text_semantic_no_cross_section_merge(self):
-        from chunking import chunk_text_semantic
+        from archivist.utils.chunking import chunk_text_semantic
 
         body = "unique_marker_{n}. " * 40
         text = f"## One\n\n{body.format(n='A')}\n\n## Two\n\n{body.format(n='B')}"
@@ -530,7 +534,7 @@ class TestPhase5SemanticChunking:
             assert not (has_a and has_b)
 
     def test_hierarchical_accepts_strategy_param(self):
-        from chunking import chunk_text_hierarchical
+        from archivist.utils.chunking import chunk_text_hierarchical
 
         sig = inspect.signature(chunk_text_hierarchical)
         assert "strategy" in sig.parameters
@@ -538,7 +542,7 @@ class TestPhase5SemanticChunking:
         assert default == "semantic"
 
     def test_hierarchical_semantic_uses_chunk_text_semantic(self, monkeypatch):
-        import chunking
+        import archivist.utils.chunking as chunking
 
         calls = []
         original = chunking.chunk_text_semantic
@@ -554,7 +558,7 @@ class TestPhase5SemanticChunking:
         assert len(calls) > 0
 
     def test_hierarchical_fixed_does_not_use_chunk_text_semantic(self, monkeypatch):
-        import chunking
+        import archivist.utils.chunking as chunking
 
         calls = []
         original = chunking.chunk_text_semantic
@@ -570,19 +574,19 @@ class TestPhase5SemanticChunking:
         assert len(calls) == 0
 
     def test_indexer_imports_chunking_strategy(self):
-        import indexer
+        import archivist.write.indexer as indexer
 
         source = inspect.getsource(indexer)
         assert "CHUNKING_STRATEGY" in source
 
     def test_indexer_passes_strategy_to_hierarchical(self):
-        import indexer
+        import archivist.write.indexer as indexer
 
         source = inspect.getsource(indexer)
         assert "strategy=CHUNKING_STRATEGY" in source
 
     def test_short_document_strategy_invariant(self):
-        from chunking import chunk_text_hierarchical
+        from archivist.utils.chunking import chunk_text_hierarchical
 
         text = "## Note\n\nA short note that fits comfortably inside one parent chunk."
         sem = chunk_text_hierarchical(text, "note.md", parent_size=2000, strategy="semantic")

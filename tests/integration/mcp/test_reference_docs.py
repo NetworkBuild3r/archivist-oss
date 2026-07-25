@@ -12,7 +12,7 @@ class TestGetReferenceDocs:
 
     async def test_full_return(self, tmp_path, monkeypatch):
         """Handler returns full file content when no section is given."""
-        import handlers.tools_docs as tools_docs
+        import archivist.app.handlers.tools_docs as tools_docs
 
         doc = tmp_path / "CURSOR_SKILL.md"
         doc.write_text("## Search\n\ncontent A\n\n## Storage\n\ncontent B\n")
@@ -25,7 +25,7 @@ class TestGetReferenceDocs:
 
     async def test_section_filter_match(self, tmp_path, monkeypatch):
         """Handler returns only the matching section block."""
-        import handlers.tools_docs as tools_docs
+        import archivist.app.handlers.tools_docs as tools_docs
 
         doc = tmp_path / "CURSOR_SKILL.md"
         doc.write_text("## Search\n\ncontent A\n\n## Storage\n\ncontent B\n")
@@ -38,7 +38,7 @@ class TestGetReferenceDocs:
 
     async def test_section_filter_no_match(self, tmp_path, monkeypatch):
         """Handler returns error JSON listing available sections when no match."""
-        import handlers.tools_docs as tools_docs
+        import archivist.app.handlers.tools_docs as tools_docs
 
         doc = tmp_path / "CURSOR_SKILL.md"
         doc.write_text("## Search\n\ncontent A\n\n## Storage\n\ncontent B\n")
@@ -53,7 +53,7 @@ class TestGetReferenceDocs:
 
     async def test_missing_doc_returns_error(self, tmp_path, monkeypatch):
         """Handler returns error JSON when the doc file does not exist."""
-        import handlers.tools_docs as tools_docs
+        import archivist.app.handlers.tools_docs as tools_docs
 
         monkeypatch.setattr(tools_docs, "_SKILL_DOC", tmp_path / "missing.md")
         monkeypatch.setattr(tools_docs, "_FALLBACK_DOC", tmp_path / "also_missing.md")

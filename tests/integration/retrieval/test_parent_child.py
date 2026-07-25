@@ -3,7 +3,7 @@ import pytest
 """Tests for hierarchical parent-child chunking."""
 
 
-from chunking import chunk_text, chunk_text_hierarchical, chunk_text_semantic
+from archivist.utils.chunking import chunk_text, chunk_text_hierarchical, chunk_text_semantic
 
 pytestmark = [pytest.mark.integration, pytest.mark.retrieval]
 

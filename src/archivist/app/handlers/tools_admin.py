@@ -11,7 +11,13 @@ from archivist.features.skills import find_skill, get_lessons, get_skill_health
 from archivist.retrieval.retrieval_log import get_retrieval_logs, get_retrieval_stats
 from archivist.storage.sqlite_pool import pool
 
-from ._common import error_response, success_response
+from ._common import (
+    error_response,
+    require_caller,
+    require_rbac,
+    resolve_caller,
+    success_response,
+)
 
 logger = logging.getLogger("archivist.mcp")
 
@@ -207,7 +213,8 @@ TOOLS: list[Tool] = [
         description=(
             "Token savings and tier-distribution observability dashboard. "
             "Shows avg/min/max savings %, total tokens saved vs naive full-L2 baseline, "
-            "per-policy breakdown (adaptive/l0_first/l2_first), and a hotness heatmap "
+            "per-policy breakdown (adaptive/l0_first/l2_first), estimated USD cost "
+            "(null when TOKEN_USD_PER_1K unset), and a hotness heatmap "
             "of top-N most frequently retrieved memories. "
             "Use to measure the efficiency of the Answer Finder pipeline over time."
         ),
@@ -226,6 +233,53 @@ TOOLS: list[Tool] = [
                 },
             },
             "required": [],
+        },
+    ),
+    Tool(
+        name="archivist_memory_lineage",
+        description=(
+            "Return lineage edges for a memory or entity: provenance parents, version "
+            "history, audit actors, and retrieval-log mentions (where data exists). "
+            "Read requires RBAC access to the resource namespace. Does not return "
+            "secrets or full memory text — observability edges only."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "agent_id": {
+                    "type": "string",
+                    "description": "Calling agent for RBAC",
+                },
+                "caller_agent_id": {
+                    "type": "string",
+                    "description": "Original caller agent (overrides agent_id for RBAC)",
+                    "default": "",
+                },
+                "memory_id": {
+                    "type": "string",
+                    "description": "Memory (Qdrant) id to resolve lineage for",
+                    "default": "",
+                },
+                "entity_id": {
+                    "type": "string",
+                    "description": "Entity numeric id or name (alternative to memory_id)",
+                    "default": "",
+                },
+                "namespace": {
+                    "type": "string",
+                    "description": (
+                        "Namespace for RBAC. Required for entity lineage when not "
+                        "inferable; for memories, defaults to the memory's namespace."
+                    ),
+                    "default": "",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max edges per source (default 50, max 200)",
+                    "default": 50,
+                },
+            },
+            "required": ["agent_id"],
         },
     ),
     Tool(
@@ -460,6 +514,97 @@ async def _handle_savings_dashboard(arguments: dict) -> list[TextContent]:
     )
 
 
+async def _handle_memory_lineage(arguments: dict) -> list[TextContent]:
+    """Lineage edges for a memory or entity — RBAC on namespace reads."""
+    from archivist.app.lineage import (
+        build_entity_lineage,
+        build_memory_lineage,
+        resolve_memory_namespace,
+        validate_entity_id,
+        validate_memory_id,
+    )
+    from archivist.core.rbac import is_permissive_mode
+
+    caller = resolve_caller(arguments)
+    if err := require_caller(caller):
+        return err
+
+    memory_id_raw = (arguments.get("memory_id") or "").strip()
+    entity_id_raw = (arguments.get("entity_id") or "").strip()
+    namespace = (arguments.get("namespace") or "").strip()
+    limit = int(arguments.get("limit") or 50)
+
+    if memory_id_raw and entity_id_raw:
+        return error_response(
+            {
+                "error": "invalid_arguments",
+                "reason": "Provide memory_id or entity_id, not both.",
+            }
+        )
+    if not memory_id_raw and not entity_id_raw:
+        return error_response(
+            {
+                "error": "invalid_arguments",
+                "reason": "memory_id or entity_id is required.",
+            }
+        )
+
+    if memory_id_raw:
+        memory_id = validate_memory_id(memory_id_raw)
+        if not memory_id:
+            return error_response({"error": "invalid_id", "reason": "memory_id failed validation."})
+        if is_permissive_mode():
+            result = await build_memory_lineage(memory_id, limit=limit)
+            ns = namespace or result.get("namespace") or ""
+        else:
+            # Authorize against the namespace that actually owns the memory. A
+            # caller-supplied namespace is only a claim and must never widen
+            # access (INIT-001/SPEC-012, SEC-012-01).
+            ns = await resolve_memory_namespace(memory_id)
+            if not ns:
+                # Unknown namespace for a memory under strict RBAC — deny closed.
+                return error_response(
+                    {
+                        "error": "access_denied",
+                        "reason": "Unable to resolve memory namespace for RBAC.",
+                        "hint": "Ensure the memory is indexed before requesting lineage.",
+                    }
+                )
+            if namespace and namespace != ns:
+                # Same shape as a plain denial — no cross-namespace existence oracle.
+                return error_response(
+                    {
+                        "error": "access_denied",
+                        "reason": "memory does not belong to the requested namespace.",
+                    }
+                )
+            denied = require_rbac(caller, "read", ns)
+            if denied:
+                return denied
+            result = await build_memory_lineage(memory_id, limit=limit, namespace=ns)
+        result["namespace"] = ns
+        return success_response(result, default=str)
+
+    entity_id = validate_entity_id(entity_id_raw)
+    if not entity_id:
+        return error_response({"error": "invalid_id", "reason": "entity_id failed validation."})
+    if not namespace:
+        namespace = get_namespace_for_agent(caller) if caller else ""
+    if namespace and not is_permissive_mode():
+        denied = require_rbac(caller, "read", namespace)
+        if denied:
+            return denied
+    elif not namespace and not is_permissive_mode():
+        return error_response(
+            {
+                "error": "access_denied",
+                "reason": "namespace is required for entity lineage under RBAC.",
+            }
+        )
+    result = await build_entity_lineage(entity_id, namespace=namespace, limit=limit)
+    return success_response(result, default=str)
+
+
 async def _handle_batch_heuristic(arguments: dict) -> list[TextContent]:
     """Recommend batch size from memory health signals."""
     result = await batch_heuristic(window_days=arguments.get("window_days", 7))
@@ -552,5 +697,6 @@ HANDLERS: dict[str, object] = {
     "archivist_health_dashboard": _handle_health_dashboard,
     "archivist_batch_heuristic": _handle_batch_heuristic,
     "archivist_savings_dashboard": _handle_savings_dashboard,
+    "archivist_memory_lineage": _handle_memory_lineage,
     "archivist_backup": _handle_backup,
 }

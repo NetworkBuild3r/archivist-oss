@@ -19,6 +19,7 @@ from starlette.routing import Mount, Route
 from watchfiles import Change, awatch
 
 import archivist.core.health as health
+from archivist.app.mcp_server import server
 from archivist.core.config import (
     ARCHIVIST_API_KEY,
     ARCHIVIST_INVALIDATION_EXPORT_PATH,
@@ -42,7 +43,6 @@ from archivist.lifecycle.curator_queue import drain as drain_curator_queue
 from archivist.storage.graph import init_schema_async
 from archivist.storage.qdrant import qdrant_client
 from archivist.write.indexer import delete_file_points, full_index, index_file
-from mcp_server import server
 
 logging.basicConfig(
     level=logging.INFO,
@@ -188,7 +188,7 @@ async def handle_health(_request):
         {
             "status": overall,
             "service": "archivist",
-            "version": "2.0.1",
+            "version": "2.3.0",
             "subsystems": statuses,
             "timestamp": datetime.now(UTC).isoformat(),
         },
@@ -348,9 +348,11 @@ async def _startup():
         (_outbox_processor.drain_loop(), "outbox_drain"),
     ]
     if not OUTBOX_ENABLED:
-        logger.info(
-            "OutboxProcessor drain loop started (OUTBOX_ENABLED=false — "
-            "drain is a no-op until flag is flipped)"
+        logger.warning(
+            "OUTBOX_ENABLED=false — OutboxProcessor drain loop started but hot-path "
+            "writes use the deprecated legacy inline Qdrant path; set "
+            "OUTBOX_ENABLED=true (default) for durable transactional writes, or keep "
+            "false explicitly during the deprecation window (INIT-001/SPEC-004)"
         )
     for coro, name in background_tasks_spec:
         t = asyncio.create_task(coro, name=name)

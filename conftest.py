@@ -23,25 +23,27 @@ def _isolate_env(monkeypatch, tmp_path):
     monkeypatch.setenv("BM25_ENABLED", "false")
     os.makedirs(str(tmp_path / "memories"), exist_ok=True)
 
-    import config
-    import graph
+    import archivist.core.config as config
+    import archivist.storage.graph as graph
 
     monkeypatch.setattr(config, "SQLITE_PATH", db_path)
     monkeypatch.setattr(graph, "SQLITE_PATH", db_path)
     graph.init_schema()
 
     _schema_guards = [
-        ("graph", "_ensure_needle_registry"),
-        ("trajectory", "_ensure_trajectory_schema"),
-        ("skills", "_ensure_skill_schema"),
-        ("curator_queue", "_ensure_schema"),
-        ("retrieval_log", "_ensure_schema"),
-        ("hotness", "_ensure_schema"),
-        ("audit", "_ensure_audit_schema"),
+        ("archivist.storage.graph", "_ensure_needle_registry"),
+        ("archivist.core.trajectory", "_ensure_trajectory_schema"),
+        ("archivist.features.skills", "_ensure_skill_schema"),
+        ("archivist.lifecycle.curator_queue", "_ensure_schema"),
+        ("archivist.retrieval.retrieval_log", "_ensure_schema"),
+        ("archivist.core.hotness", "_ensure_schema"),
+        ("archivist.core.audit", "_ensure_audit_schema"),
     ]
+    import importlib
+
     for mod_name, guard_attr in _schema_guards:
         try:
-            mod = __import__(mod_name)
+            mod = importlib.import_module(mod_name)
             guard = getattr(mod, guard_attr, None)
             if guard is not None and hasattr(guard, "reset"):
                 guard.reset()
@@ -61,12 +63,12 @@ def graph_db(tmp_path, monkeypatch):
 
     import importlib
 
-    import config
+    import archivist.core.config as config
 
     importlib.reload(config)
-    monkeypatch.setattr("config.SQLITE_PATH", db_path)
+    monkeypatch.setattr("archivist.core.config.SQLITE_PATH", db_path)
 
-    import graph
+    import archivist.storage.graph as graph
 
     monkeypatch.setattr(graph, "SQLITE_PATH", db_path)
     graph.init_schema()
@@ -85,12 +87,12 @@ async def async_pool(tmp_path, monkeypatch):
 
     import importlib
 
-    import config
+    import archivist.core.config as config
 
     importlib.reload(config)
-    monkeypatch.setattr("config.SQLITE_PATH", db_path)
+    monkeypatch.setattr("archivist.core.config.SQLITE_PATH", db_path)
 
-    import graph
+    import archivist.storage.graph as graph
     from archivist.storage import sqlite_pool as _pool_mod
 
     monkeypatch.setattr(graph, "SQLITE_PATH", db_path)
@@ -134,7 +136,7 @@ agent_namespaces:
 
     import importlib
 
-    import rbac
+    import archivist.core.rbac as rbac
 
     importlib.reload(rbac)
     rbac._config = None
@@ -146,6 +148,6 @@ agent_namespaces:
 @pytest.fixture
 def mock_llm():
     """Patch llm.llm_query to return a canned response without HTTP calls."""
-    with patch("llm.llm_query", new_callable=AsyncMock) as mock:
+    with patch("archivist.features.llm.llm_query", new_callable=AsyncMock) as mock:
         mock.return_value = "Mocked LLM response."
         yield mock

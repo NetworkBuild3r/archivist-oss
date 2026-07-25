@@ -69,7 +69,7 @@ jobs:
 
 # ─── Type check (ratchet — error count may only decrease) ────────────────────
   typecheck:
-    name: Type Check (mypy ratchet ≤ 90 errors)
+    name: Type Check (mypy ratchet ≤ 175 errors, hard fail)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -87,14 +87,17 @@ jobs:
       - name: mypy — ratchet gate (count may not increase above baseline)
         # Only real type errors count — import-not-found / import-untyped are
         # excluded because they vary by environment.
-        # Baseline: 90 real type errors measured locally (qdrant-client 1.17.1).
+        # Baseline: 170 real type errors measured on Python 3.12 (matching this
+        # job and the Dockerfile floor) via `pyproject.toml`'s
+        # `[tool.mypy] python_version = "3.12"`. The previous "3.11" setting
+        # made mypy abort after ~3 errors (numpy's bundled .pyi stubs need 3.12+
+        # syntax support), so the old "≤ 90"/"≤ 120" ceilings were never
+        # actually exercised against the full codebase — this job is now a
+        # real hard gate. INIT-001/SPEC-005.
         # grep is anchored to ^src/archivist/ to avoid matching note: lines
         # that quote type names containing the word "error".
-        # TODO: once CI count is stable, remove continue-on-error and set
-        #       MYPY_MAX_ERRORS to 5 above that value.
-        continue-on-error: true
         env:
-          MYPY_MAX_ERRORS: "120"
+          MYPY_MAX_ERRORS: "175"
         run: |
           OUTPUT=$(python -m mypy src/archivist/ --config-file pyproject.toml 2>&1)
           echo "$OUTPUT"
@@ -133,7 +136,7 @@ jobs:
       - name: Run unit + regression tests
         # unit: pure logic — no I/O, no SQLite, no Qdrant — fastest feedback loop
         # regression: specific bug guards — also no external services
-        # --cov-fail-under=0: overrides pyproject.toml fail_under (46%) which is
+        # --cov-fail-under=0: overrides pyproject.toml fail_under (49%) which is
         # calibrated for the full suite; unit+regression alone cover ~24% by design.
         run: |
           python -m pytest \

@@ -10,7 +10,7 @@ pytestmark = [pytest.mark.integration]
 
 
 def test_metrics_counter():
-    import metrics as m
+    import archivist.core.metrics as m
 
     m._counters.clear()
     m._gauges.clear()
@@ -27,7 +27,7 @@ def test_metrics_counter():
 
 
 def test_metrics_histogram():
-    import metrics as m
+    import archivist.core.metrics as m
 
     m._counters.clear()
     m._gauges.clear()
@@ -45,7 +45,7 @@ def test_metrics_histogram():
 
 
 def test_metrics_gauge():
-    import metrics as m
+    import archivist.core.metrics as m
 
     m._counters.clear()
     m._gauges.clear()
@@ -62,7 +62,7 @@ def test_metrics_gauge():
 
 
 def test_metrics_render_format():
-    import metrics as m
+    import archivist.core.metrics as m
 
     m._counters.clear()
     m._gauges.clear()
@@ -78,7 +78,7 @@ def test_metrics_render_format():
 
 
 def test_webhook_config():
-    from config import WEBHOOK_EVENTS, WEBHOOK_TIMEOUT, WEBHOOK_URL
+    from archivist.core.config import WEBHOOK_EVENTS, WEBHOOK_TIMEOUT, WEBHOOK_URL
 
     assert isinstance(WEBHOOK_URL, str)
     assert WEBHOOK_TIMEOUT > 0
@@ -87,7 +87,7 @@ def test_webhook_config():
 
 def test_webhook_fire_no_url():
     """fire_background should be a no-op when WEBHOOK_URL is empty."""
-    import webhooks
+    import archivist.features.webhooks as webhooks
 
     original = webhooks.WEBHOOK_URL
     try:
@@ -134,8 +134,8 @@ def _patch_dbs():
     """)
     _test_conn.commit()
 
-    import dashboard as dash_mod
-    import graph
+    import archivist.app.dashboard as dash_mod
+    import archivist.storage.graph as graph
 
     graph._original_get_db = graph.get_db
     graph.get_db = lambda: _test_conn
@@ -143,7 +143,7 @@ def _patch_dbs():
 
 
 def _unpatch_dbs():
-    import graph
+    import archivist.storage.graph as graph
 
     graph.get_db = graph._original_get_db
     if _test_conn:
@@ -153,7 +153,7 @@ def _unpatch_dbs():
 def test_batch_heuristic_default():
     _patch_dbs()
     try:
-        from dashboard import batch_heuristic
+        from archivist.app.dashboard import batch_heuristic
 
         result = batch_heuristic(window_days=7)
         assert "suggested_batch_size" in result
@@ -168,7 +168,7 @@ def test_batch_heuristic_default():
 
 def test_batch_heuristic_range():
     """Batch size should always be between 1 and 10."""
-    from dashboard import batch_heuristic
+    from archivist.app.dashboard import batch_heuristic
 
     _patch_dbs()
     try:
@@ -184,13 +184,13 @@ def test_batch_heuristic_range():
 
 
 def test_metrics_enabled_config():
-    from config import METRICS_ENABLED
+    from archivist.core.config import METRICS_ENABLED
 
     assert isinstance(METRICS_ENABLED, bool)
 
 
 def test_webhook_events_parsing():
     """WEBHOOK_EVENTS should be a set (possibly empty)."""
-    from config import WEBHOOK_EVENTS
+    from archivist.core.config import WEBHOOK_EVENTS
 
     assert isinstance(WEBHOOK_EVENTS, set)

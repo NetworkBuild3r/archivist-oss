@@ -310,7 +310,7 @@ Return the dependency/relation graph for a skill.
 
 ---
 
-## Admin & Context Management (7 tools)
+## Admin & Context Management (8 tools)
 
 ### archivist_context_check
 
@@ -388,11 +388,22 @@ Recommend batch size (1-10) from health signals. Considers conflict rate, stale 
 
 ### archivist_savings_dashboard
 
-Token savings statistics from the Answer Finder engine: average/min/max savings %, total tokens saved vs naive full-history retrieval, per-policy breakdown, and hotness heatmap.
+Token savings statistics from the Answer Finder engine: average/min/max savings %, total tokens saved vs naive full-history retrieval, per-policy breakdown, estimated USD (`estimated_usd_*`, `null` when `TOKEN_USD_PER_1K` unset), and hotness heatmap.
 
 **Parameters:**
 - `window_days` (integer, default: 7) -- Analysis window for retrieval log aggregation
 - `heatmap_top_n` (integer, default: 50) -- Number of top memories to include in hotness heatmap
+
+### archivist_memory_lineage
+
+Lineage edges for a memory or entity from provenance, version history, audit actors, and retrieval-log mentions. Requires namespace read access. Returns observability edges only — no secrets or full memory text.
+
+**Parameters:**
+- `agent_id` (string, **required**) -- Calling agent for RBAC
+- `memory_id` (string) -- Memory id (mutually exclusive with `entity_id`)
+- `entity_id` (string) -- Entity numeric id or name
+- `namespace` (string) -- Namespace for RBAC (required for entity lineage under strict RBAC)
+- `limit` (integer, default: 50) -- Max edges per source
 
 ---
 
@@ -416,6 +427,8 @@ Manually invalidate the hot cache.
 ---
 
 ## Context Assembly & Handoff (3 tools)
+
+Handoff tools are unchanged. For durable agent-state resume/time-travel, see **Agent Checkpoints** below.
 
 ### archivist_get_context
 
@@ -465,6 +478,70 @@ Inject a `HandoffPacket` into the receiving agent's ephemeral `SessionStore`. Th
 
 ---
 
+## Agent Checkpoints (5 tools)
+
+Phase-7 agent-state checkpoints (resume / time-travel). Namespace-scoped; distinct from L0–L2 memory tiers and from handoff packets.
+
+### archivist_checkpoint_save
+
+Persist a checkpoint payload for an agent session.
+
+**Parameters:**
+- `agent_id` (string, **required**)
+- `session_id` (string, **required**)
+- `namespace` (string, **required**) -- RBAC write required
+- `payload` (object) -- State blob (max 256 KiB JSON)
+- `metadata` (object) -- Optional labels (max 64 KiB JSON)
+- `parent_checkpoint_id` (string) -- Optional parent in the same namespace
+
+### archivist_checkpoint_list
+
+List checkpoints for `agent_id` + `session_id` in `namespace` (oldest first).
+
+### archivist_checkpoint_get
+
+Fetch one checkpoint by `checkpoint_id` **and** `namespace`. Id alone is never sufficient.
+
+### archivist_checkpoint_resume
+
+Load a checkpoint and inject a resume packet into the caller's `SessionStore` for `session_id` only (does not mutate other agents). Returns `resume_packet` with `injected_keys`, `extra_memory_ids`, and `summary` for `archivist_get_context`.
+
+### archivist_checkpoint_replay
+
+Read-only parent-chain walk from a leaf checkpoint (root → leaf). No SessionStore mutation.
+
+---
+
+## Coordination Beyond Handoff (5 tools)
+
+Selective share + consensus v1 (explicit accept/reject + audit). Extends — does not replace — handoff (GR-003). Conflict outcomes use SPEC-006 actions: `supersede` | `merge` | `keep_both`.
+
+### archivist_share_propose
+
+Propose a selective share of `memory_ids` and/or `scope` to `recipient_agent_id` in a `namespace`. Proposer needs namespace **read**. Creates a pending grant.
+
+**Parameters:**
+- `agent_id` (string, **required**) -- Proposer
+- `recipient_agent_id` (string, **required**)
+- `namespace` (string, **required**)
+- `memory_ids` (array of string) -- Selective IDs (required if `scope` empty)
+- `scope` (string) -- Optional Memory-as-Product scope label
+- `reason` (string) -- Audited rationale
+
+### archivist_share_accept / archivist_share_reject
+
+Recipient-only decisions. Audited; idempotent when already in the target status. Accept may inject shared IDs into the recipient `SessionStore` for `session_id`. Optional `materialize_namespace` on accept requires **write** RBAC (cannot write unauthorized namespaces).
+
+### archivist_share_attach_conflict
+
+Attach a conflict/consensus outcome to a grant. `action` must be `supersede`, `merge`, or `keep_both`.
+
+### archivist_share_get
+
+Fetch one grant by `grant_id` + `namespace`. Visible to proposer or recipient with namespace read.
+
+---
+
 ## Reference Docs (1 tool)
 
 ### archivist_get_reference_docs
@@ -490,4 +567,6 @@ Return the full Archivist agent skill reference (this document) or a single name
 10. **Log trajectories** with `archivist_log_trajectory` so future searches benefit from outcome-aware retrieval
 11. **Check skill health** with `archivist_skill_health` before invoking unreliable external tools
 12. **Hand off sessions** with `archivist_handoff` + `archivist_receive_handoff` to transfer context between agents
-13. **Monitor token savings** with `archivist_savings_dashboard` to confirm the Answer Finder is reducing noise
+13. **Selectively share memories** with `archivist_share_propose` / `accept` / `reject` (consensus v1 = explicit decision + audit; does not replace handoff)
+14. **Resume agent state** with `archivist_checkpoint_save` + `archivist_checkpoint_resume` (namespace-scoped; use `replay` for chain inspection)
+15. **Monitor token savings** with `archivist_savings_dashboard` to confirm the Answer Finder is reducing noise

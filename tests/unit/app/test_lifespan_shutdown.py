@@ -17,7 +17,7 @@ pytestmark = [pytest.mark.unit]
 
 
 async def test_lifespan_shutdown_closes_embeddings_and_llm_clients(monkeypatch):
-    import main
+    import archivist.app.main as main
 
     class FakeManager:
         @asynccontextmanager

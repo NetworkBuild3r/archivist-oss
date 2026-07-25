@@ -553,6 +553,38 @@ class OutboxProcessor:
 
 
 # ---------------------------------------------------------------------------
+# Legacy inline-path deprecation (INIT-001/SPEC-004)
+# ---------------------------------------------------------------------------
+
+_legacy_inline_warned: bool = False
+
+
+def warn_legacy_inline_qdrant_once() -> None:
+    """Log a single process-wide deprecation warning for inline Qdrant writes.
+
+    Call from every ``OUTBOX_ENABLED=false`` branch that still applies Qdrant
+    mutations synchronously. Emits at most once per process so log volume stays
+    bounded during the deprecation window (INIT-001/SPEC-004).
+    """
+    global _legacy_inline_warned
+    if _legacy_inline_warned:
+        return
+    _legacy_inline_warned = True
+    logger.warning(
+        "OUTBOX_ENABLED=false uses the deprecated legacy inline Qdrant write path; "
+        "set OUTBOX_ENABLED=true (the default) for durable transactional writes, "
+        "or keep OUTBOX_ENABLED=false explicitly during the deprecation window "
+        "(INIT-001/SPEC-004)"
+    )
+
+
+def reset_legacy_inline_warning_for_tests() -> None:
+    """Reset the once-per-process guard — test-only helper."""
+    global _legacy_inline_warned
+    _legacy_inline_warned = False
+
+
+# ---------------------------------------------------------------------------
 # Module-level processor singleton (lazy — set by main.py after startup)
 # ---------------------------------------------------------------------------
 

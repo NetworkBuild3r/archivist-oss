@@ -12,7 +12,11 @@ pytestmark = [pytest.mark.integration]
 
 
 def test_set_request_id_from_x_request_id():
-    from observability import get_request_id, reset_request_id, set_request_id_from_scope
+    from archivist.core.observability import (
+        get_request_id,
+        reset_request_id,
+        set_request_id_from_scope,
+    )
 
     scope = {"headers": [(b"x-request-id", b"trace-abc-99")]}
     tok = set_request_id_from_scope(scope)
@@ -23,7 +27,11 @@ def test_set_request_id_from_x_request_id():
 
 
 def test_set_request_id_generates_when_missing():
-    from observability import get_request_id, reset_request_id, set_request_id_from_scope
+    from archivist.core.observability import (
+        get_request_id,
+        reset_request_id,
+        set_request_id_from_scope,
+    )
 
     scope = {"headers": []}
     tok = set_request_id_from_scope(scope)
@@ -36,7 +44,7 @@ def test_set_request_id_generates_when_missing():
 
 
 def test_slow_embed_warning_when_over_threshold(monkeypatch, caplog):
-    import observability as obs
+    import archivist.core.observability as obs
 
     monkeypatch.setattr(obs, "SLOW_EMBED_MS", 10.0)
     tok = obs._request_id.set("req-xyz")
@@ -52,7 +60,7 @@ def test_slow_embed_warning_when_over_threshold(monkeypatch, caplog):
 
 
 def test_slow_embed_no_warning_when_disabled(monkeypatch, caplog):
-    import observability as obs
+    import archivist.core.observability as obs
 
     monkeypatch.setattr(obs, "SLOW_EMBED_MS", 0.0)
     with caplog.at_level(logging.WARNING, logger="archivist.observability"):
@@ -61,8 +69,8 @@ def test_slow_embed_no_warning_when_disabled(monkeypatch, caplog):
 
 
 async def test_dispatch_tool_records_tool_duration():
-    import metrics as m
-    from handlers._registry import dispatch_tool
+    import archivist.core.metrics as m
+    from archivist.app.handlers._registry import dispatch_tool
 
     m._counters.clear()
     m._gauges.clear()
@@ -75,9 +83,9 @@ async def test_dispatch_tool_records_tool_duration():
 
 
 async def test_handle_invalidate_appends_export_jsonl(tmp_path, monkeypatch):
-    import audit
-    import main
-    import memory_lifecycle
+    import archivist.app.main as main
+    import archivist.core.audit as audit
+    import archivist.lifecycle.memory_lifecycle as memory_lifecycle
 
     export_path = tmp_path / "inv.jsonl"
     monkeypatch.setattr(main, "ARCHIVIST_INVALIDATION_EXPORT_PATH", str(export_path))

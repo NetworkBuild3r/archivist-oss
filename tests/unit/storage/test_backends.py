@@ -613,8 +613,9 @@ class TestGetDbDeprecation:
     def test_warns_when_postgres(self, tmp_path, monkeypatch, caplog):
         import logging
 
-        monkeypatch.setattr("archivist.storage.graph.SQLITE_PATH", str(tmp_path / "test.db"))
-        # get_db() imports GRAPH_BACKEND from archivist.core.config at call time
+        # get_db() imports SQLITE_PATH/GRAPH_BACKEND from archivist.core.config
+        # at call time (INIT-001/SPEC-003 split), so patch the config source.
+        monkeypatch.setattr("archivist.core.config.SQLITE_PATH", str(tmp_path / "test.db"))
         with patch("archivist.core.config.GRAPH_BACKEND", "postgres"):
             from archivist.storage.graph import get_db
 
@@ -627,7 +628,7 @@ class TestGetDbDeprecation:
     def test_no_warning_when_sqlite(self, tmp_path, monkeypatch, caplog):
         import logging
 
-        monkeypatch.setattr("archivist.storage.graph.SQLITE_PATH", str(tmp_path / "test.db"))
+        monkeypatch.setattr("archivist.core.config.SQLITE_PATH", str(tmp_path / "test.db"))
         with patch("archivist.core.config.GRAPH_BACKEND", "sqlite"):
             from archivist.storage.graph import get_db
 
@@ -655,7 +656,7 @@ class TestFtsBackendDispatch:
             return []
 
         monkeypatch.setattr("archivist.core.config.GRAPH_BACKEND", "")
-        monkeypatch.setattr("archivist.storage.graph._search_fts_sqlite", _fake_sqlite_search)
+        monkeypatch.setattr("archivist.storage.graph_fts._search_fts_sqlite", _fake_sqlite_search)
 
         from archivist.storage.graph import search_fts
 
@@ -673,7 +674,7 @@ class TestFtsBackendDispatch:
             return []
 
         monkeypatch.setattr("archivist.core.config.GRAPH_BACKEND", "postgres")
-        monkeypatch.setattr("archivist.storage.graph._search_fts_postgres", _fake_pg_search)
+        monkeypatch.setattr("archivist.storage.graph_fts._search_fts_postgres", _fake_pg_search)
 
         from archivist.storage.graph import search_fts
 
@@ -691,7 +692,9 @@ class TestFtsBackendDispatch:
             return []
 
         monkeypatch.setattr("archivist.core.config.GRAPH_BACKEND", "sqlite")
-        monkeypatch.setattr("archivist.storage.graph._search_fts_exact_sqlite", _fake_sqlite_exact)
+        monkeypatch.setattr(
+            "archivist.storage.graph_fts._search_fts_exact_sqlite", _fake_sqlite_exact
+        )
 
         from archivist.storage.graph import search_fts_exact
 
@@ -706,7 +709,9 @@ class TestFtsBackendDispatch:
             return []
 
         monkeypatch.setattr("archivist.core.config.GRAPH_BACKEND", "postgres")
-        monkeypatch.setattr("archivist.storage.graph._search_fts_exact_postgres", _fake_pg_exact)
+        monkeypatch.setattr(
+            "archivist.storage.graph_fts._search_fts_exact_postgres", _fake_pg_exact
+        )
 
         from archivist.storage.graph import search_fts_exact
 
@@ -728,8 +733,8 @@ class TestUpsertFtsChunkNoopOnPostgres:
             sqlite_calls.append(kwargs)
 
         monkeypatch.setattr("archivist.core.config.GRAPH_BACKEND", "postgres")
-        monkeypatch.setattr("archivist.storage.graph._upsert_fts_chunk_postgres", _fake_pg)
-        monkeypatch.setattr("archivist.storage.graph._upsert_fts_chunk_sqlite", _fake_sqlite)
+        monkeypatch.setattr("archivist.storage.graph_fts._upsert_fts_chunk_postgres", _fake_pg)
+        monkeypatch.setattr("archivist.storage.graph_fts._upsert_fts_chunk_sqlite", _fake_sqlite)
 
         from archivist.storage.graph import upsert_fts_chunk
 
@@ -755,8 +760,8 @@ class TestUpsertFtsChunkNoopOnPostgres:
             sqlite_calls.append(kwargs)
 
         monkeypatch.setattr("archivist.core.config.GRAPH_BACKEND", "sqlite")
-        monkeypatch.setattr("archivist.storage.graph._upsert_fts_chunk_postgres", _fake_pg)
-        monkeypatch.setattr("archivist.storage.graph._upsert_fts_chunk_sqlite", _fake_sqlite)
+        monkeypatch.setattr("archivist.storage.graph_fts._upsert_fts_chunk_postgres", _fake_pg)
+        monkeypatch.setattr("archivist.storage.graph_fts._upsert_fts_chunk_sqlite", _fake_sqlite)
 
         from archivist.storage.graph import upsert_fts_chunk
 
@@ -784,8 +789,8 @@ class TestUpsertFtsChunkTierFields:
             pass
 
         monkeypatch.setattr("archivist.core.config.GRAPH_BACKEND", "postgres")
-        monkeypatch.setattr("archivist.storage.graph._upsert_fts_chunk_postgres", _fake_pg)
-        monkeypatch.setattr("archivist.storage.graph._upsert_fts_chunk_sqlite", _fake_sqlite)
+        monkeypatch.setattr("archivist.storage.graph_fts._upsert_fts_chunk_postgres", _fake_pg)
+        monkeypatch.setattr("archivist.storage.graph_fts._upsert_fts_chunk_sqlite", _fake_sqlite)
 
         from archivist.storage.graph import upsert_fts_chunk
 
@@ -812,8 +817,8 @@ class TestUpsertFtsChunkTierFields:
             sqlite_calls.append(kwargs)
 
         monkeypatch.setattr("archivist.core.config.GRAPH_BACKEND", "sqlite")
-        monkeypatch.setattr("archivist.storage.graph._upsert_fts_chunk_postgres", _fake_pg)
-        monkeypatch.setattr("archivist.storage.graph._upsert_fts_chunk_sqlite", _fake_sqlite)
+        monkeypatch.setattr("archivist.storage.graph_fts._upsert_fts_chunk_postgres", _fake_pg)
+        monkeypatch.setattr("archivist.storage.graph_fts._upsert_fts_chunk_sqlite", _fake_sqlite)
 
         from archivist.storage.graph import upsert_fts_chunk
 
@@ -840,8 +845,8 @@ class TestUpsertFtsChunkTierFields:
             pass
 
         monkeypatch.setattr("archivist.core.config.GRAPH_BACKEND", "sqlite")
-        monkeypatch.setattr("archivist.storage.graph._upsert_fts_chunk_postgres", _fake_pg)
-        monkeypatch.setattr("archivist.storage.graph._upsert_fts_chunk_sqlite", _fake_sqlite)
+        monkeypatch.setattr("archivist.storage.graph_fts._upsert_fts_chunk_postgres", _fake_pg)
+        monkeypatch.setattr("archivist.storage.graph_fts._upsert_fts_chunk_sqlite", _fake_sqlite)
 
         from archivist.storage.graph import upsert_fts_chunk
 

@@ -2,7 +2,7 @@
 
 import pytest
 
-from retrieval_filters import apply_retrieval_threshold
+from archivist.retrieval.retrieval_filters import apply_retrieval_threshold
 
 pytestmark = [pytest.mark.unit, pytest.mark.retrieval]
 

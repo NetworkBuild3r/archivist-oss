@@ -6,7 +6,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.storage]
 
 class TestEntityOperations:
     async def test_upsert_entity_creates(self, async_pool):
-        from graph import search_entities, upsert_entity
+        from archivist.storage.graph import search_entities, upsert_entity
 
         eid = await upsert_entity("Kubernetes", "tool")
         assert eid > 0
@@ -16,7 +16,7 @@ class TestEntityOperations:
         assert results[0]["name"] == "Kubernetes"
 
     async def test_upsert_entity_increments_mention_count(self, async_pool):
-        from graph import get_db, upsert_entity
+        from archivist.storage.graph import get_db, upsert_entity
 
         eid1 = await upsert_entity("ArgoCD", "tool")
         eid2 = await upsert_entity("ArgoCD", "tool")
@@ -28,7 +28,7 @@ class TestEntityOperations:
         assert row["mention_count"] == 2
 
     async def test_upsert_entity_case_insensitive(self, async_pool):
-        from graph import upsert_entity
+        from archivist.storage.graph import upsert_entity
 
         eid1 = await upsert_entity("grafana")
         eid2 = await upsert_entity("Grafana")
@@ -37,7 +37,7 @@ class TestEntityOperations:
 
 class TestFactOperations:
     async def test_add_and_retrieve_fact(self, async_pool):
-        from graph import add_fact, get_entity_facts, upsert_entity
+        from archivist.storage.graph import add_fact, get_entity_facts, upsert_entity
 
         eid = await upsert_entity("PostgreSQL", "database")
         fid = await add_fact(eid, "Migration approved for Q2 2026", "test.md", "chief")
@@ -48,7 +48,7 @@ class TestFactOperations:
         assert "Migration approved" in facts[0]["fact_text"]
 
     async def test_multiple_facts_for_entity(self, async_pool):
-        from graph import add_fact, get_entity_facts, upsert_entity
+        from archivist.storage.graph import add_fact, get_entity_facts, upsert_entity
 
         eid = await upsert_entity("Redis")
         await add_fact(eid, "Used for caching", "a.md", "chief")
@@ -60,7 +60,11 @@ class TestFactOperations:
 
 class TestRelationshipOperations:
     async def test_add_relationship(self, async_pool):
-        from graph import add_relationship, get_entity_relationships, upsert_entity
+        from archivist.storage.graph import (
+            add_relationship,
+            get_entity_relationships,
+            upsert_entity,
+        )
 
         eid1 = await upsert_entity("ArgoCD")
         eid2 = await upsert_entity("Kubernetes")
@@ -71,7 +75,7 @@ class TestRelationshipOperations:
         assert rels[0]["relation_type"] == "deploys_to"
 
     async def test_relationship_upsert_updates_evidence(self, async_pool):
-        from graph import add_relationship, get_db, upsert_entity
+        from archivist.storage.graph import add_relationship, get_db, upsert_entity
 
         eid1 = await upsert_entity("A")
         eid2 = await upsert_entity("B")
@@ -90,14 +94,14 @@ class TestRelationshipOperations:
 
 class TestSearchEntities:
     async def test_search_by_partial_name(self, async_pool):
-        from graph import search_entities, upsert_entity
+        from archivist.storage.graph import search_entities, upsert_entity
 
         await upsert_entity("GitLab CI/CD", "tool")
         results = await search_entities("gitlab")
         assert len(results) >= 1
 
     async def test_search_limit(self, async_pool):
-        from graph import search_entities, upsert_entity
+        from archivist.storage.graph import search_entities, upsert_entity
 
         for i in range(20):
             await upsert_entity(f"entity_{i}", "test")
@@ -105,7 +109,7 @@ class TestSearchEntities:
         assert len(results) == 5
 
     async def test_search_empty_query(self, async_pool):
-        from graph import search_entities
+        from archivist.storage.graph import search_entities
 
         results = await search_entities("")
         assert isinstance(results, list)
@@ -113,27 +117,27 @@ class TestSearchEntities:
 
 class TestCuratorState:
     async def test_set_and_get(self, async_pool):
-        from graph import get_curator_state, set_curator_state
+        from archivist.storage.graph import get_curator_state, set_curator_state
 
         await set_curator_state("test_key", "test_value")
         assert await get_curator_state("test_key") == "test_value"
 
     async def test_overwrite(self, async_pool):
-        from graph import get_curator_state, set_curator_state
+        from archivist.storage.graph import get_curator_state, set_curator_state
 
         await set_curator_state("k", "v1")
         await set_curator_state("k", "v2")
         assert await get_curator_state("k") == "v2"
 
     async def test_missing_key(self, async_pool):
-        from graph import get_curator_state
+        from archivist.storage.graph import get_curator_state
 
         assert await get_curator_state("nonexistent") is None
 
 
 class TestFTS5:
     async def test_upsert_and_search(self, async_pool):
-        from graph import search_fts, upsert_fts_chunk
+        from archivist.storage.graph import search_fts, upsert_fts_chunk
 
         await upsert_fts_chunk(
             qdrant_id="abc-123",
@@ -149,7 +153,7 @@ class TestFTS5:
         assert results[0]["qdrant_id"] == "abc-123"
 
     async def test_search_with_namespace_filter(self, async_pool):
-        from graph import search_fts, upsert_fts_chunk
+        from archivist.storage.graph import search_fts, upsert_fts_chunk
 
         await upsert_fts_chunk("id1", "kubernetes cluster health", "a.md", 0, "argo", "deployer")
         await upsert_fts_chunk(
@@ -160,7 +164,7 @@ class TestFTS5:
         assert all(r["namespace"] == "deployer" for r in results)
 
     async def test_delete_by_file(self, async_pool):
-        from graph import delete_fts_chunks_by_file, search_fts, upsert_fts_chunk
+        from archivist.storage.graph import delete_fts_chunks_by_file, search_fts, upsert_fts_chunk
 
         await upsert_fts_chunk("id1", "some text content", "file_a.md", 0)
         await upsert_fts_chunk("id2", "other text content", "file_a.md", 1)

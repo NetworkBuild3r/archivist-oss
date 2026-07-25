@@ -453,7 +453,7 @@ class TestMigrateSchemaExceptionNarrowing:
         conn = _FakeMigrateConn(
             raise_on_prefix="ALTER TABLE", raise_exc=sqlite3.OperationalError("duplicate column")
         )
-        monkeypatch.setattr("archivist.storage.graph.get_db", lambda: conn)
+        monkeypatch.setattr("archivist.storage.graph_schema.get_db", lambda: conn)
 
         _migrate_schema()  # must not raise
 
@@ -467,7 +467,7 @@ class TestMigrateSchemaExceptionNarrowing:
         from archivist.storage.graph import _migrate_schema
 
         conn = _FakeMigrateConn(raise_on_prefix="ALTER TABLE", raise_exc=TypeError("boom"))
-        monkeypatch.setattr("archivist.storage.graph.get_db", lambda: conn)
+        monkeypatch.setattr("archivist.storage.graph_schema.get_db", lambda: conn)
 
         with pytest.raises(TypeError, match="boom"):
             _migrate_schema()
@@ -478,7 +478,7 @@ class TestMigrateSchemaExceptionNarrowing:
         conn = _FakeMigrateConn(
             raise_on_prefix="CREATE INDEX", raise_exc=Exception("index already exists")
         )
-        monkeypatch.setattr("archivist.storage.graph.get_db", lambda: conn)
+        monkeypatch.setattr("archivist.storage.graph_schema.get_db", lambda: conn)
 
         with caplog.at_level(logging.DEBUG, logger="archivist.graph"):
             _migrate_schema()  # must not raise
@@ -493,7 +493,7 @@ class TestMigrateSchemaExceptionNarrowing:
         conn = _FakeMigrateConn(
             raise_on_prefix="CREATE INDEX", raise_exc=Exception("no such column: bogus")
         )
-        monkeypatch.setattr("archivist.storage.graph.get_db", lambda: conn)
+        monkeypatch.setattr("archivist.storage.graph_schema.get_db", lambda: conn)
 
         with caplog.at_level(logging.DEBUG, logger="archivist.graph"):
             _migrate_schema()  # must not raise — index loop only logs, never re-raises

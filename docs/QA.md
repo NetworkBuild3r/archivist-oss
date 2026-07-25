@@ -50,7 +50,21 @@ ruff check . --fix && ruff format .
 python -m mypy src/archivist/ --config-file pyproject.toml
 ```
 
-Mypy uses a ratchet in CI; do not increase the error budget without fixing real issues.
+Mypy uses a hard-fail ratchet in CI (`MYPY_MAX_ERRORS`, currently 175 real
+errors, excluding `[import-not-found]`/`[import-untyped]`) — the job fails the
+build if the count exceeds the ceiling; it no longer runs with
+`continue-on-error`. `[tool.mypy] python_version` is pinned to `3.12` to match
+the CI/Docker interpreter floor (INIT-001/SPEC-005) — a lower target previously
+made mypy abort after ~3 errors on numpy's PEP 695 stub syntax, silently
+disabling the ratchet against the full codebase. Do not raise the ceiling
+without fixing real issues; lower it as errors are cleaned up.
+
+Coverage floor (`[tool.coverage.report] fail_under` in `pyproject.toml`) is
+49% as of INIT-001/SPEC-005 (up from 46%), based on a measured 53.3%
+combined unit+regression+integration+system run. The `test` CI job overrides
+this to `--cov-fail-under=0` because it only runs the fast unit+regression
+subset (~24% by design); the floor is the full-suite target, raised roughly
+2–5 points per quarter as coverage grows.
 
 ## Manual and fleet QA
 

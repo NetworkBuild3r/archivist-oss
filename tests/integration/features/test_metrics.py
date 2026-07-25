@@ -13,7 +13,7 @@ async def _noop_startup():
 
 
 def _clear_metrics():
-    import metrics as m
+    import archivist.core.metrics as m
 
     m._counters.clear()
     m._gauges.clear()
@@ -22,9 +22,9 @@ def _clear_metrics():
 
 
 def test_metrics_disabled_noop(monkeypatch):
-    import metrics as m
+    import archivist.core.metrics as m
 
-    monkeypatch.setattr("config.METRICS_ENABLED", False)
+    monkeypatch.setattr("archivist.core.config.METRICS_ENABLED", False)
     _clear_metrics()
     m.inc(m.SEARCH_TOTAL)
     m.observe(m.SEARCH_DURATION, 50.0)
@@ -36,7 +36,7 @@ def test_metrics_disabled_noop(monkeypatch):
 
 
 def test_metrics_disabled_endpoint_404(monkeypatch):
-    import main
+    import archivist.app.main as main
 
     monkeypatch.setattr(main, "_startup", _noop_startup)
     monkeypatch.setattr(main, "METRICS_ENABLED", False)
@@ -46,7 +46,7 @@ def test_metrics_disabled_endpoint_404(monkeypatch):
 
 
 def test_storage_gauge_constants_exist():
-    from metrics import (
+    from archivist.core.metrics import (
         EMBED_CACHE_HIT,
         EMBED_CACHE_MISS,
         QDRANT_AVAILABLE,
@@ -71,14 +71,14 @@ def test_storage_gauge_constants_exist():
 
 
 def test_embed_cache_metric_prefix():
-    from metrics import EMBED_CACHE_HIT, EMBED_CACHE_MISS
+    from archivist.core.metrics import EMBED_CACHE_HIT, EMBED_CACHE_MISS
 
     assert EMBED_CACHE_HIT == "archivist_embed_cache_hit_total"
     assert EMBED_CACHE_MISS == "archivist_embed_cache_miss_total"
 
 
 def test_search_results_histogram():
-    import metrics as m
+    import archivist.core.metrics as m
 
     _clear_metrics()
     m.observe(m.SEARCH_RESULTS, 0.0, {"namespace": "ns1"})
@@ -91,7 +91,7 @@ def test_search_results_histogram():
 
 
 def test_metrics_auth_exempt_allows_unauthenticated_scrape(monkeypatch):
-    import main
+    import archivist.app.main as main
 
     monkeypatch.setattr(main, "_startup", _noop_startup)
     monkeypatch.setattr(main, "ARCHIVIST_API_KEY", "secret-key")
@@ -104,7 +104,7 @@ def test_metrics_auth_exempt_allows_unauthenticated_scrape(monkeypatch):
 
 
 def test_metrics_requires_auth_when_not_exempt(monkeypatch):
-    import main
+    import archivist.app.main as main
 
     monkeypatch.setattr(main, "_startup", _noop_startup)
     monkeypatch.setattr(main, "ARCHIVIST_API_KEY", "secret-key")
@@ -116,7 +116,11 @@ def test_metrics_requires_auth_when_not_exempt(monkeypatch):
 
 
 def test_config_metrics_flags():
-    from config import METRICS_AUTH_EXEMPT, METRICS_COLLECT_INTERVAL_SECONDS, METRICS_ENABLED
+    from archivist.core.config import (
+        METRICS_AUTH_EXEMPT,
+        METRICS_COLLECT_INTERVAL_SECONDS,
+        METRICS_ENABLED,
+    )
 
     assert isinstance(METRICS_ENABLED, bool)
     assert isinstance(METRICS_AUTH_EXEMPT, bool)

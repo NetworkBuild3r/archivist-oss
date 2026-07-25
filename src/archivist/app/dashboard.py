@@ -4,6 +4,9 @@ across memory, skills, retrieval, and conflicts for a single-pane view.
 The batch heuristic: when memory health degrades (high conflict rate, stale
 memories, low retrieval quality), recommend smaller batches / more frequent
 checkpoints.
+
+Cost estimates (INIT-001/SPEC-011): token counters × configured TOKEN_USD_PER_1K.
+When the rate is unset, estimated_usd_* fields are null — not a billing system.
 """
 
 import logging
@@ -11,11 +14,43 @@ import time
 from datetime import UTC, datetime
 
 import archivist.core.health as health
-from archivist.core.config import QDRANT_COLLECTION
+from archivist.core.config import QDRANT_COLLECTION, TOKEN_USD_PER_1K
 from archivist.storage.qdrant import qdrant_client
 from archivist.storage.sqlite_pool import pool
 
 logger = logging.getLogger("archivist.dashboard")
+
+
+def estimate_token_usd(
+    tokens: int | float | None,
+    rate_per_1k: float | None = None,
+) -> float | None:
+    """Estimate USD cost: ``tokens / 1000 * rate``. ``None`` when rate unset."""
+    rate = TOKEN_USD_PER_1K if rate_per_1k is None else rate_per_1k
+    if rate is None or tokens is None:
+        return None
+    try:
+        return round(float(tokens) / 1000.0 * float(rate), 6)
+    except (TypeError, ValueError):
+        return None
+
+
+def attach_cost_estimates(
+    token_stats: dict,
+    rate_per_1k: float | None = None,
+) -> dict:
+    """Enrich a token-savings stats dict with metrics-friendly USD fields.
+
+    Adds ``token_usd_per_1k``, ``estimated_usd_saved``, ``estimated_usd_returned``,
+    and ``estimated_usd_naive``. Values are ``null`` when the rate is not configured.
+    """
+    rate = TOKEN_USD_PER_1K if rate_per_1k is None else rate_per_1k
+    out = dict(token_stats)
+    out["token_usd_per_1k"] = rate
+    out["estimated_usd_saved"] = estimate_token_usd(out.get("total_tokens_saved"), rate)
+    out["estimated_usd_returned"] = estimate_token_usd(out.get("total_tokens_returned"), rate)
+    out["estimated_usd_naive"] = estimate_token_usd(out.get("total_tokens_naive"), rate)
+    return out
 
 
 async def build_dashboard(window_days: int = 7) -> dict:
@@ -325,16 +360,20 @@ async def _token_savings_stats(conn, window_days: int) -> dict:
             if stats.get(key) is not None:
                 stats[key] = int(stats[key])
 
-        return stats
+        return attach_cost_estimates(stats)
     except Exception as e:
         logger.warning("dashboard._token_savings_stats failed: %s", e, exc_info=True)
-        return {
-            "total_queries": 0,
-            "queries_with_savings_data": 0,
-            "avg_savings_pct": None,
-            "total_tokens_saved": 0,
-            "per_policy": [],
-        }
+        return attach_cost_estimates(
+            {
+                "total_queries": 0,
+                "queries_with_savings_data": 0,
+                "avg_savings_pct": None,
+                "total_tokens_saved": 0,
+                "total_tokens_returned": 0,
+                "total_tokens_naive": 0,
+                "per_policy": [],
+            }
+        )
 
 
 async def _tier_distribution_stats(conn, window_days: int) -> dict:

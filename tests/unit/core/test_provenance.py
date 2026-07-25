@@ -2,7 +2,7 @@
 
 import pytest
 
-from provenance import ActorType, SourceTrace, default_confidence
+from archivist.core.provenance import ActorType, SourceTrace, default_confidence
 
 pytestmark = [pytest.mark.unit]
 
@@ -77,7 +77,7 @@ def test_default_confidence_unknown_falls_back_to_agent():
 
 
 def test_result_candidate_from_qdrant_payload_provenance():
-    from result_types import ResultCandidate, RetrievalSource
+    from archivist.core.result_types import ResultCandidate, RetrievalSource
 
     payload = {
         "text": "hello world",
@@ -96,7 +96,7 @@ def test_result_candidate_from_qdrant_payload_provenance():
 
 
 def test_result_candidate_from_bm25_hit_provenance():
-    from result_types import ResultCandidate, RetrievalSource
+    from archivist.core.result_types import ResultCandidate, RetrievalSource
 
     hit = {
         "qdrant_id": "q1",
@@ -113,7 +113,7 @@ def test_result_candidate_from_bm25_hit_provenance():
 
 
 def test_result_candidate_from_registry_hit_provenance():
-    from result_types import ResultCandidate, RetrievalSource
+    from archivist.core.result_types import ResultCandidate, RetrievalSource
 
     hit = {
         "memory_id": "m1",
@@ -130,7 +130,7 @@ def test_result_candidate_from_registry_hit_provenance():
 
 
 def test_result_candidate_to_dict_includes_provenance():
-    from result_types import ResultCandidate
+    from archivist.core.result_types import ResultCandidate
 
     rc = ResultCandidate(
         id="p1",
@@ -148,7 +148,7 @@ def test_result_candidate_to_dict_includes_provenance():
 
 
 def test_result_candidate_update_from_payload_provenance():
-    from result_types import ResultCandidate
+    from archivist.core.result_types import ResultCandidate
 
     rc = ResultCandidate(id="p1", text="old")
     rc.update_from_payload(
@@ -167,7 +167,7 @@ def test_result_candidate_update_from_payload_provenance():
 
 
 def test_resolve_actor_defaults_to_agent_id():
-    from handlers._common import resolve_actor
+    from archivist.app.handlers._common import resolve_actor
 
     actor_id, actor_type = resolve_actor({"agent_id": "alice"})
     assert actor_id == "alice"
@@ -175,7 +175,7 @@ def test_resolve_actor_defaults_to_agent_id():
 
 
 def test_resolve_actor_explicit():
-    from handlers._common import resolve_actor
+    from archivist.app.handlers._common import resolve_actor
 
     actor_id, actor_type = resolve_actor(
         {
@@ -189,7 +189,7 @@ def test_resolve_actor_explicit():
 
 
 def test_reranker_build_pair_includes_provenance():
-    from reranker import _build_pair
+    from archivist.retrieval.reranker import _build_pair
 
     candidate = {
         "text": "hello world",
@@ -202,7 +202,7 @@ def test_reranker_build_pair_includes_provenance():
 
 
 def test_reranker_build_pair_no_provenance():
-    from reranker import _build_pair
+    from archivist.retrieval.reranker import _build_pair
 
     candidate = {"text": "hello world"}
     passage = _build_pair("query", candidate)
@@ -211,7 +211,7 @@ def test_reranker_build_pair_no_provenance():
 
 
 def test_augment_chunk_uses_actor_over_agent():
-    from contextual_augment import augment_chunk
+    from archivist.write.contextual_augment import augment_chunk
 
     result = augment_chunk("test text", agent_id="alice", actor_id="bob", actor_type="human")
     assert "Actor: bob (human)" in result
@@ -219,7 +219,7 @@ def test_augment_chunk_uses_actor_over_agent():
 
 
 def test_augment_chunk_falls_back_to_agent():
-    from contextual_augment import augment_chunk
+    from archivist.write.contextual_augment import augment_chunk
 
     result = augment_chunk("test text", agent_id="alice")
     assert "Agent: alice" in result
@@ -250,7 +250,7 @@ async def test_build_entity_fact_results_filters_low_confidence(monkeypatch):
     """Facts below MIN_FACT_CONFIDENCE should be excluded from results."""
     from unittest.mock import AsyncMock
 
-    import graph_retrieval as gr
+    import archivist.storage.graph_retrieval as gr
 
     monkeypatch.setattr(gr, "MIN_FACT_CONFIDENCE", 0.5)
 

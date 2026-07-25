@@ -8,7 +8,7 @@ Reads from:
 Produces a lightweight XGBoost LambdaMART model at models/ranker.xgb.
 
 Usage:
-    python -m ranker_train [--output models/ranker.xgb] [--min-samples 50]
+    python -m archivist.retrieval.ranker_train [--output models/ranker.xgb] [--min-samples 50]
 
 Can also be invoked from the curator loop or an admin tool.
 """

@@ -17,7 +17,7 @@ pytestmark = [pytest.mark.unit]
 
 
 def test_warns_when_both_unset(monkeypatch, caplog):
-    import main
+    import archivist.app.main as main
 
     monkeypatch.setattr(main, "ARCHIVIST_API_KEY", "", raising=False)
     monkeypatch.setattr(main, "NAMESPACES_CONFIG_PATH", "", raising=False)
@@ -31,7 +31,7 @@ def test_warns_when_both_unset(monkeypatch, caplog):
 
 
 def test_does_not_warn_when_api_key_set(monkeypatch, caplog):
-    import main
+    import archivist.app.main as main
 
     monkeypatch.setattr(main, "ARCHIVIST_API_KEY", "some-real-key", raising=False)
     monkeypatch.setattr(main, "NAMESPACES_CONFIG_PATH", "", raising=False)
@@ -43,7 +43,7 @@ def test_does_not_warn_when_api_key_set(monkeypatch, caplog):
 
 
 def test_does_not_warn_when_namespaces_config_set(monkeypatch, caplog):
-    import main
+    import archivist.app.main as main
 
     monkeypatch.setattr(main, "ARCHIVIST_API_KEY", "", raising=False)
     monkeypatch.setattr(
@@ -57,7 +57,7 @@ def test_does_not_warn_when_namespaces_config_set(monkeypatch, caplog):
 
 
 def test_does_not_warn_when_both_set(monkeypatch, caplog):
-    import main
+    import archivist.app.main as main
 
     monkeypatch.setattr(main, "ARCHIVIST_API_KEY", "some-real-key", raising=False)
     monkeypatch.setattr(
@@ -74,7 +74,7 @@ def test_warning_does_not_leak_credential_values(monkeypatch, caplog):
     """Security AC: the warning states *that* auth/RBAC are permissive, never a
     credential value — this test would fail if a future edit accidentally
     interpolated ARCHIVIST_API_KEY into the message."""
-    import main
+    import archivist.app.main as main
 
     monkeypatch.setattr(main, "ARCHIVIST_API_KEY", "", raising=False)
     monkeypatch.setattr(main, "NAMESPACES_CONFIG_PATH", "", raising=False)
@@ -92,8 +92,8 @@ def test_permissive_mode_server_still_starts_and_serves_requests(monkeypatch):
     successfully and serve requests when both are unset."""
     from starlette.testclient import TestClient
 
+    import archivist.app.main as main
     import archivist.core.health as health
-    import main
 
     async def _noop_startup():
         # Exercise the real warning function as part of startup, but skip the

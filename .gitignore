@@ -33,6 +33,9 @@ docker-compose.override.yml
 _git_sync_log.txt
 _agent_git_out.txt
 
+# Spec-Driven Development working area (initiatives, specs, assessments)
+sdd/
+
 # Testing
 .pytest_cache/
 htmlcov/

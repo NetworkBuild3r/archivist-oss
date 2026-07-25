@@ -10,25 +10,25 @@ pytestmark = [pytest.mark.unit, pytest.mark.retrieval]
 
 class TestTiering:
     def test_select_tier_l0(self):
-        from tiering import select_tier
+        from archivist.write.tiering import select_tier
 
         hit = {"text": "full text here", "l0": "short", "l1": "medium overview"}
         assert select_tier(hit, "l0") == "short"
 
     def test_select_tier_l1(self):
-        from tiering import select_tier
+        from archivist.write.tiering import select_tier
 
         hit = {"text": "full text here", "l0": "short", "l1": "medium overview"}
         assert select_tier(hit, "l1") == "medium overview"
 
     def test_select_tier_l2(self):
-        from tiering import select_tier
+        from archivist.write.tiering import select_tier
 
         hit = {"text": "full text here", "l0": "short", "l1": "medium overview"}
         assert select_tier(hit, "l2") == "full text here"
 
     def test_select_tier_missing_l0_falls_back(self):
-        from tiering import select_tier
+        from archivist.write.tiering import select_tier
 
         hit = {"text": "full text here"}
         result = select_tier(hit, "l0")
@@ -37,7 +37,7 @@ class TestTiering:
 
 class TestTemporalDecay:
     def test_temporal_decay_recent_scores_higher(self):
-        from graph_retrieval import apply_temporal_decay
+        from archivist.storage.graph_retrieval import apply_temporal_decay
 
         today = datetime.now(UTC).strftime("%Y-%m-%d")
         results = [
@@ -48,7 +48,7 @@ class TestTemporalDecay:
         assert decayed[0]["score"] > decayed[1]["score"]
 
     def test_temporal_decay_preserves_original(self):
-        from graph_retrieval import apply_temporal_decay
+        from archivist.storage.graph_retrieval import apply_temporal_decay
 
         results = [{"score": 0.8, "date": "2025-06-01", "content_date": "2025-06-01"}]
         decayed = apply_temporal_decay(results, halflife_days=30)
@@ -57,7 +57,7 @@ class TestTemporalDecay:
 
     def test_temporal_decay_skips_without_content_date(self):
         """Results without content_date (inferred index date) should not be decayed."""
-        from graph_retrieval import apply_temporal_decay
+        from archivist.storage.graph_retrieval import apply_temporal_decay
 
         results = [{"score": 0.9, "date": "2020-01-01"}]
         decayed = apply_temporal_decay(results, halflife_days=30)
@@ -67,7 +67,7 @@ class TestTemporalDecay:
 
 class TestContradictionDetection:
     async def test_detect_contradictions_opposing_keywords(self):
-        import graph_retrieval
+        import archivist.storage.graph_retrieval as graph_retrieval
 
         mock_facts = [
             {
@@ -91,7 +91,7 @@ class TestContradictionDetection:
             graph_retrieval.get_entity_facts = original_fn
 
     async def test_detect_contradictions_same_agent_skipped(self):
-        import graph_retrieval
+        import archivist.storage.graph_retrieval as graph_retrieval
 
         mock_facts = [
             {
@@ -116,7 +116,7 @@ class TestContradictionDetection:
 
 class TestRetrievalTraceV05:
     def test_retrieval_trace_v05_fields(self):
-        from rlm_retriever import _retrieval_trace
+        from archivist.retrieval.rlm_retriever import _retrieval_trace
 
         trace = _retrieval_trace(
             vector_limit=64,
@@ -142,7 +142,7 @@ class TestRetrievalTraceV05:
 class TestCompressedIndex:
     @pytest.mark.asyncio
     async def test_compressed_index_empty_namespace(self, async_pool):
-        from compressed_index import build_namespace_index
+        from archivist.storage.compressed_index import build_namespace_index
 
         result = await build_namespace_index("test-ns-empty-xyz-unique")
         assert "No indexed knowledge" in result

@@ -1,0 +1,2 @@
+﻿# Keep AI access to SDD working area despite .gitignore
+!sdd/

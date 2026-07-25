@@ -15,7 +15,7 @@ import sqlite3
 
 import pytest
 
-from retry import retry, retry_call
+from archivist.utils.retry import retry, retry_call
 
 pytestmark = [pytest.mark.unit]
 

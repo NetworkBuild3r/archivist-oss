@@ -11,7 +11,7 @@ Archivist is a memory service for multi-agent fleets. It combines:
 | **Durability boundary** | Transactional outbox + `MemoryTransaction` | Atomic commit of graph/FTS artefacts with queued Qdrant work (Phase 3 + 3.5) |
 | **Source of truth (optional)** | File system | Markdown under `MEMORY_ROOT` for ingestion |
 
-Retrieval uses the **RLM** (recursive layered memory) pipeline in `rlm_retriever.py`. Writes on hot paths use **`MemoryTransaction`** so FTS, needle rows, `memory_points`, entity/facts (where applicable), and outbox rows commit together when `OUTBOX_ENABLED=true`. The graph backend is selected at startup via `GRAPH_BACKEND` (`sqlite` default, `postgres` for production scale). See [`docs/rearchitect_storage_phase3.md`](rearchitect_storage_phase3.md) for the outbox design and [`docs/DOCKER.md`](DOCKER.md) for Postgres setup.
+Retrieval uses the **RLM** (recursive layered memory) pipeline in `rlm_retriever.py`. Writes on hot paths use **`MemoryTransaction`** so FTS, needle rows, `memory_points`, entity/facts (where applicable), and outbox rows commit together when `OUTBOX_ENABLED=true` (**default** as of INIT-001/SPEC-004). The graph backend is selected at startup via `GRAPH_BACKEND` (`sqlite` default, `postgres` for production scale). See [`docs/rearchitect_storage_phase3.md`](rearchitect_storage_phase3.md) for the outbox design and [`docs/DOCKER.md`](DOCKER.md) for Postgres setup.
 
 ---
 
@@ -28,7 +28,7 @@ Qdrant and SQLite are different stores; true distributed transactions are not av
 
 **Why `conn=` matters:** `pool.write()` is backed by a non-reentrant `asyncio.Lock`. Helpers that call `pool.write()` internally would deadlock if invoked from inside an open `MemoryTransaction`. Passing `conn=` avoids nested lock acquisition.
 
-**Default:** `OUTBOX_ENABLED=false` keeps legacy behaviour: Qdrant writes run inline in handlers; enqueue methods are no-ops.
+**Default:** `OUTBOX_ENABLED=true` — hot-path store/index/merge/delete writes go through the outbox. Opt out with `OUTBOX_ENABLED=false` during the deprecation window; that legacy inline Qdrant path logs a single process-wide warning when used and will be removed in a future release.
 
 ```mermaid
 sequenceDiagram
@@ -90,7 +90,7 @@ flowchart TB
     OB -.->|OutboxProcessor| Q
 ```
 
-When `OUTBOX_ENABLED=false`, the indexer still uses SQLite transaction boundaries where implemented; Qdrant upsert runs inline after SQLite work (same as pre–Phase 3 behaviour for that flag).
+When `OUTBOX_ENABLED=false` (explicit opt-out), the indexer still uses SQLite transaction boundaries where implemented; Qdrant upsert runs inline after SQLite work (deprecated legacy behaviour — prefer the default outbox path).
 
 ### Retrieval (RLM pipeline)
 
@@ -105,12 +105,21 @@ Code lives under `src/archivist/`.
 | Area | Modules |
 |------|---------|
 | **App** | `app/main.py`, `app/mcp_server.py`, `app/handlers/*.py` — MCP tools, REST, startup |
-| **Storage** | `storage/graph.py`, `storage/sqlite_pool.py`, `storage/asyncpg_backend.py`, `storage/backend_factory.py`, `storage/fts_search.py`, `storage/transaction.py`, `storage/outbox.py`, `storage/backends.py`, `storage/collection_router.py`, `storage/backup_manager.py` |
+| **Storage** | `storage/graph.py` (thin facade — see below), `storage/graph_schema.py`, `storage/graph_entities.py`, `storage/graph_fts.py`, `storage/graph_needles.py`, `storage/graph_points.py`, `storage/checkpoints.py`, `storage/memory_product.py`, `storage/versioning.py`, `storage/sqlite_pool.py`, `storage/asyncpg_backend.py`, `storage/backend_factory.py`, `storage/fts_search.py`, `storage/transaction.py`, `storage/outbox.py`, `storage/backends.py`, `storage/collection_router.py`, `storage/backup_manager.py` |
 | **Retrieval** | `retrieval/rlm_retriever.py`, `retrieval/graph_retrieval.py`, `retrieval/reranker.py`, `retrieval/context_packer.py`, `retrieval/context_api.py`, `retrieval/session_store.py`, `retrieval/retrieval_log.py` |
 | **Write** | `write/indexer.py`, `write/chunking.py` |
-| **Lifecycle** | `lifecycle/memory_lifecycle.py`, `lifecycle/merge.py`, `lifecycle/cascade.py`, `lifecycle/curator_queue.py` |
+| **Lifecycle** | `lifecycle/memory_lifecycle.py`, `lifecycle/merge.py`, `lifecycle/cascade.py`, `lifecycle/curator_queue.py`, `lifecycle/contradiction_resolve.py`, `lifecycle/reflection.py` (Phase 8 wedge — INIT-001/SPEC-006) |
 | **Features** | `features/embeddings.py`, `features/llm.py`, … |
 | **Core** | `core/config.py`, `core/rbac.py`, `core/audit.py`, `core/metrics.py`, … |
+
+`storage/graph.py` (INIT-001/SPEC-003) was decomposed from a ~1800 LOC
+monolith into `graph_schema.py` (DDL/migrations/connection helpers),
+`graph_entities.py` (entity/relationship/fact CRUD), `graph_fts.py`
+(FTS5/tsvector upsert, delete, BM25 search), `graph_needles.py`
+(deterministic needle-token registry), and `graph_points.py` (hotness
+cleanup, Qdrant point tracking). `graph.py` itself is now a thin facade that
+re-exports every name from the focused modules so existing
+`from archivist.storage.graph import X` call sites are unaffected.
 
 ---
 
@@ -144,6 +153,8 @@ Additional fields (`source_memory_id`, `is_reverse_hyde`, `thought_type`, actor 
 - **Search** — `memory_chunks` (and FTS5 / `tsvector` virtual tables / GIN indexes), `needle_registry`
 - **Routing** — `memory_points` (primary / micro_chunk / reverse_hyde linkage)
 - **Outbox** — `outbox` (`id`, `event_type`, `payload`, `status`, `retry_count`, …)
+- **Agent checkpoints (Phase 7)** — `agent_checkpoints` (`id`, `agent_id`, `session_id`, `namespace`, `parent_checkpoint_id`, in-row JSON `payload`, optional `blob_ref`, `metadata`, `created_at`). This is **agent-state / time-travel storage**, not `memory_chunks.tier_label` (L0–L2). Repository helpers: `storage/checkpoints.py`. MCP: `archivist_checkpoint_save|list|get|resume|replay` (`app/handlers/tools_checkpoint.py`, INIT-001/SPEC-008). **Rollback:** `DROP TABLE IF EXISTS agent_checkpoints;` and unregister/disable checkpoint MCP tools.
+- **Memory-as-Product (INIT-001/SPEC-009)** — `memory_scope_versions` tracks namespace/agent-scoped **snapshot / fork / export** lineage (`parent_version_id`, `archive_id`, counts). Service APIs in `storage/memory_product.py` (`create_scope_snapshot`, `fork_from_snapshot`, `export_scope`); per-memory history remains in `memory_versions` via `storage/versioning.py`. Archives live under `BACKUP_DIR` and **must** resolve through `backup_manager._snapshot_dir` / `SnapshotPathError` (PR #39). Forks mutate vectors via `MemoryTransaction` + outbox. Distinct from Phase-7 checkpoints. **Rollback:** `DROP TABLE IF EXISTS memory_scope_versions;` and remove/disable Memory-as-Product callers.
 - **Operations** — `audit_log`, `memory_versions`, `curator_queue`, `retrieval_logs`, `trajectories`, `skills`, …
 
 Full table inventory: see the Archivist storage-schema skill (`.cursor/skills/archivist-storage-schema/SKILL.md`) when working on schema changes. Postgres DDL: [`storage/schema_postgres.sql`](../src/archivist/storage/schema_postgres.sql).
@@ -231,6 +242,10 @@ The following sections record behaviour and operational guidance by release (con
 - **Progressive dereference** — `archivist_deref` for L2 drill-down.
 - **Compressed index** — `archivist_index` navigational summary.
 - **Contradiction surfacing** — `archivist_contradictions`.
+- **Contradiction resolution + reflection (Phase 8 wedge)** — service APIs in
+  `lifecycle/contradiction_resolve.py` and `lifecycle/reflection.py`; curator
+  optionally runs them when `CONTRADICTION_RESOLVE_ENABLED` /
+  `REFLECTION_ENABLED` are on (dry-run defaults true).
 - **Date range filters** — `date_from` / `date_to` on search.
 
 ### v0.6.0
@@ -284,5 +299,7 @@ The following sections record behaviour and operational guidance by release (con
 - **Ephemeral tier** — `SessionStore` (`session_store.py`) with TTL and `archivist_session_end` flush.
 - **High-level API** — `get_relevant_context()` in `context_api.py`; `RelevantContext`, `HandoffPacket`, `ContextChunk` dataclasses.
 - **Multi-agent handoff** — `archivist_handoff` / `archivist_receive_handoff` MCP tools.
+- **Selective share + consensus v1** — `archivist_share_*` MCP tools (propose/accept/reject + SPEC-006 conflict outcomes; extends handoff, does not replace it).
+- **Agent checkpoint resume/replay** — `archivist_checkpoint_*` MCP tools (namespace RBAC; resume injects SessionStore for the caller session only).
 - **Token savings observability** — `retrieval_logs` extended with `tokens_returned`, `tokens_naive`, `savings_pct`, `pack_policy`; `archivist_savings_dashboard` MCP tool; hotness heatmap in dashboard.
 - **Token efficiency benchmark** — `benchmarks/token_efficiency.py` with 49 queries across 3 packing policies.

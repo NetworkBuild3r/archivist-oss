@@ -21,7 +21,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.storage]
 
 class TestHNSWConfig:
     def test_hnsw_defaults(self):
-        from config import QDRANT_HNSW_EF_CONSTRUCT, QDRANT_HNSW_M, QDRANT_SEARCH_EF
+        from archivist.core.config import QDRANT_HNSW_EF_CONSTRUCT, QDRANT_HNSW_M, QDRANT_SEARCH_EF
 
         assert QDRANT_HNSW_M == 32
         assert QDRANT_HNSW_EF_CONSTRUCT == 256
@@ -39,31 +39,31 @@ class TestHNSWConfig:
 
 class TestCollectionRouter:
     def test_single_collection_mode(self):
-        from collection_router import collection_for
-        from config import QDRANT_COLLECTION
+        from archivist.core.config import QDRANT_COLLECTION
+        from archivist.storage.collection_router import collection_for
 
         assert collection_for("") == QDRANT_COLLECTION
         # When sharding is disabled (default), all namespaces map to primary
         assert collection_for("some-namespace") == QDRANT_COLLECTION
 
     def test_collections_for_query_default(self):
-        from collection_router import collections_for_query
-        from config import QDRANT_COLLECTION
+        from archivist.core.config import QDRANT_COLLECTION
+        from archivist.storage.collection_router import collections_for_query
 
         result = collections_for_query("")
         assert result == [QDRANT_COLLECTION]
 
     def test_collections_for_query_with_namespace(self):
-        from collection_router import collections_for_query
-        from config import QDRANT_COLLECTION
+        from archivist.core.config import QDRANT_COLLECTION
+        from archivist.storage.collection_router import collections_for_query
 
         result = collections_for_query("my-ns")
         assert result == [QDRANT_COLLECTION]
 
     def test_collection_name_sanitization(self):
         """Namespace names with special chars should be sanitized."""
-        from collection_router import collection_for
-        from config import QDRANT_COLLECTION
+        from archivist.core.config import QDRANT_COLLECTION
+        from archivist.storage.collection_router import collection_for
 
         # When sharding is disabled, this just returns the primary collection
         name = collection_for("test/namespace with spaces")
@@ -76,7 +76,7 @@ class TestCollectionRouter:
 
 class TestCacheBackendMemory:
     def test_put_and_get(self):
-        from cache_backend import MemoryBackend
+        from archivist.storage.cache_backend import MemoryBackend
 
         cache = MemoryBackend()
         cache.put("key1", {"data": "hello"}, ttl_seconds=60)
@@ -84,13 +84,13 @@ class TestCacheBackendMemory:
         assert result == {"data": "hello"}
 
     def test_miss(self):
-        from cache_backend import MemoryBackend
+        from archivist.storage.cache_backend import MemoryBackend
 
         cache = MemoryBackend()
         assert cache.get("nonexistent") is None
 
     def test_ttl_expiry(self):
-        from cache_backend import MemoryBackend
+        from archivist.storage.cache_backend import MemoryBackend
 
         cache = MemoryBackend()
         cache.put("expire_me", "val", ttl_seconds=60)
@@ -101,7 +101,7 @@ class TestCacheBackendMemory:
         assert cache.get("expire_me") is None
 
     def test_lru_eviction(self):
-        from cache_backend import MemoryBackend
+        from archivist.storage.cache_backend import MemoryBackend
 
         cache = MemoryBackend(max_entries=5)
         for i in range(10):
@@ -112,7 +112,7 @@ class TestCacheBackendMemory:
         assert cache.get("key9") is not None
 
     def test_delete(self):
-        from cache_backend import MemoryBackend
+        from archivist.storage.cache_backend import MemoryBackend
 
         cache = MemoryBackend()
         cache.put("del_me", "val")
@@ -120,7 +120,7 @@ class TestCacheBackendMemory:
         assert cache.get("del_me") is None
 
     def test_delete_pattern(self):
-        from cache_backend import MemoryBackend
+        from archivist.storage.cache_backend import MemoryBackend
 
         cache = MemoryBackend()
         cache.put("agent:a:1", "v1")
@@ -131,7 +131,7 @@ class TestCacheBackendMemory:
         assert cache.get("agent:b:1") is not None
 
     def test_clear(self):
-        from cache_backend import MemoryBackend
+        from archivist.storage.cache_backend import MemoryBackend
 
         cache = MemoryBackend()
         for i in range(5):
@@ -141,7 +141,7 @@ class TestCacheBackendMemory:
         assert cache.size() == 0
 
     def test_get_backend_returns_memory_default(self):
-        from cache_backend import MemoryBackend, get_cache_backend
+        from archivist.storage.cache_backend import MemoryBackend, get_cache_backend
 
         backend = get_cache_backend()
         assert isinstance(backend, MemoryBackend)
@@ -152,7 +152,7 @@ class TestCacheBackendMemory:
 
 class TestLatencyBudget:
     def test_initial_state(self):
-        from latency_budget import LatencyBudget
+        from archivist.core.latency_budget import LatencyBudget
 
         b = LatencyBudget(max_ms=500)
         assert b.remaining_ms() > 490
@@ -160,14 +160,14 @@ class TestLatencyBudget:
         assert not b.is_expired()
 
     def test_can_afford(self):
-        from latency_budget import LatencyBudget
+        from archivist.core.latency_budget import LatencyBudget
 
         b = LatencyBudget(max_ms=500)
         assert b.can_afford(100)
         assert b.can_afford(490)  # tiny elapsed time since construction
 
     def test_cannot_afford_over_budget(self):
-        from latency_budget import LatencyBudget
+        from archivist.core.latency_budget import LatencyBudget
 
         b = LatencyBudget(max_ms=50)
         # Sleep briefly to consume some budget
@@ -175,21 +175,21 @@ class TestLatencyBudget:
         assert not b.can_afford(100)
 
     def test_reserve(self):
-        from latency_budget import LatencyBudget
+        from archivist.core.latency_budget import LatencyBudget
 
         b = LatencyBudget(max_ms=500)
         assert b.reserve("embed", 80)
         assert "embed" in b.summary()["reservations"]
 
     def test_elapsed_tracking(self):
-        from latency_budget import LatencyBudget
+        from archivist.core.latency_budget import LatencyBudget
 
         b = LatencyBudget(max_ms=500)
         time.sleep(0.02)
         assert b.elapsed_ms() >= 15
 
     def test_summary(self):
-        from latency_budget import LatencyBudget
+        from archivist.core.latency_budget import LatencyBudget
 
         b = LatencyBudget(max_ms=500)
         s = b.summary()
@@ -199,7 +199,7 @@ class TestLatencyBudget:
         assert s["budget_ms"] == 500
 
     def test_is_expired_after_timeout(self):
-        from latency_budget import LatencyBudget
+        from archivist.core.latency_budget import LatencyBudget
 
         b = LatencyBudget(max_ms=10)
         time.sleep(0.02)
@@ -215,7 +215,7 @@ class TestSearchParamsIntegration:
         # The import should not raise
 
     def test_qdrant_search_ef_config(self):
-        from config import QDRANT_SEARCH_EF
+        from archivist.core.config import QDRANT_SEARCH_EF
 
         assert isinstance(QDRANT_SEARCH_EF, int)
         assert QDRANT_SEARCH_EF > 0
@@ -226,27 +226,27 @@ class TestSearchParamsIntegration:
 
 class TestEnterpriseConfig:
     def test_namespace_sharding_default_off(self):
-        from config import NAMESPACE_SHARDING_ENABLED
+        from archivist.core.config import NAMESPACE_SHARDING_ENABLED
 
         assert not NAMESPACE_SHARDING_ENABLED
 
     def test_single_collection_mode_default_on(self):
-        from config import SINGLE_COLLECTION_MODE
+        from archivist.core.config import SINGLE_COLLECTION_MODE
 
         assert SINGLE_COLLECTION_MODE
 
     def test_cache_backend_default_memory(self):
-        from config import CACHE_BACKEND
+        from archivist.core.config import CACHE_BACKEND
 
         assert CACHE_BACKEND == "memory"
 
     def test_latency_budget_default(self):
-        from config import LATENCY_BUDGET_MS
+        from archivist.core.config import LATENCY_BUDGET_MS
 
         assert LATENCY_BUDGET_MS == 500
 
     def test_redis_url_default(self):
-        from config import REDIS_URL
+        from archivist.core.config import REDIS_URL
 
         assert "localhost" in REDIS_URL or "redis" in REDIS_URL
 
@@ -265,7 +265,7 @@ class TestParallelPipeline:
         """BM25 search is async (awaits aiosqlite) — called directly in concurrent gather."""
         import inspect
 
-        from fts_search import search_bm25
+        from archivist.storage.fts_search import search_bm25
 
         assert inspect.iscoroutinefunction(search_bm25)
 
@@ -278,7 +278,7 @@ class TestCollectionRoutingIntegration:
         """search_vectors should import collection_for for routing."""
         import inspect
 
-        from rlm_retriever import search_vectors
+        from archivist.retrieval.rlm_retriever import search_vectors
 
         source = inspect.getsource(search_vectors)
         assert "collection_for" in source
@@ -287,7 +287,7 @@ class TestCollectionRoutingIntegration:
         """parent_text should be stored at index time, not fetched at runtime."""
         import inspect
 
-        from rlm_retriever import search_vectors
+        from archivist.retrieval.rlm_retriever import search_vectors
 
         source = inspect.getsource(search_vectors)
         assert "parent_text" in source, (
@@ -296,12 +296,12 @@ class TestCollectionRoutingIntegration:
 
     def test_collection_router_refresh(self):
         """refresh_known_collections should return 0 when sharding disabled."""
-        from collection_router import refresh_known_collections
+        from archivist.storage.collection_router import refresh_known_collections
 
         assert refresh_known_collections() == 0
 
     def test_drop_collection_noop_for_primary(self):
         """drop_collection should refuse to drop the primary collection."""
-        from collection_router import drop_collection
+        from archivist.storage.collection_router import drop_collection
 
         assert drop_collection("") is False

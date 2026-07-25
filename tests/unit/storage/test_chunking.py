@@ -15,33 +15,33 @@ class TestNeedlePatternsConsistency:
     """NEEDLE_PATTERNS in chunking.py is the single source of truth."""
 
     def test_graph_imports_from_chunking(self):
-        from chunking import NEEDLE_PATTERNS
-        from graph import NEEDLE_PATTERNS as graph_patterns
+        from archivist.storage.graph import NEEDLE_PATTERNS as graph_patterns
+        from archivist.utils.chunking import NEEDLE_PATTERNS
 
         assert NEEDLE_PATTERNS is graph_patterns
 
     def test_patterns_are_public(self):
-        import chunking
+        import archivist.utils.chunking as chunking
 
         assert hasattr(chunking, "NEEDLE_PATTERNS")
         assert not hasattr(chunking, "_NEEDLE_PATTERNS")
 
     def test_pre_extractor_reuses_chunking_patterns(self):
-        from chunking import NEEDLE_PATTERNS
-        from pre_extractor import _NEEDLE_ENTITY_PATTERNS
+        from archivist.utils.chunking import NEEDLE_PATTERNS
+        from archivist.write.pre_extractor import _NEEDLE_ENTITY_PATTERNS
 
         chunking_ip_pat = NEEDLE_PATTERNS[0]
         extractor_ip_pat = _NEEDLE_ENTITY_PATTERNS[0][0]
         assert chunking_ip_pat is extractor_ip_pat
 
     def test_port_pattern_rejects_timestamps(self):
-        from chunking import NEEDLE_PATTERNS
+        from archivist.utils.chunking import NEEDLE_PATTERNS
 
         port_pat = NEEDLE_PATTERNS[7]
         assert not port_pat.search("meeting at 12:30 today")
 
     def test_port_pattern_matches_real_ports(self):
-        from chunking import NEEDLE_PATTERNS
+        from archivist.utils.chunking import NEEDLE_PATTERNS
 
         port_pat = NEEDLE_PATTERNS[7]
         assert port_pat.search("listening on :8443")
@@ -51,7 +51,7 @@ class TestHostnameOvermatch:
     """Hostname pattern must not match common English hyphenated phrases."""
 
     def test_rejects_english_phrases(self):
-        from pre_extractor import extract_needle_entities
+        from archivist.write.pre_extractor import extract_needle_entities
 
         false_positives = [
             "well-known-fact",
@@ -65,7 +65,7 @@ class TestHostnameOvermatch:
             assert not hostnames, f"'{phrase}' should NOT be extracted as a hostname"
 
     def test_accepts_real_hostnames(self):
-        from pre_extractor import extract_needle_entities
+        from archivist.write.pre_extractor import extract_needle_entities
 
         entities = extract_needle_entities("connected to prod-web-01 via SSH")
         hostnames = [e for e in entities if e["type"] == "hostname"]
@@ -100,20 +100,20 @@ class TestHydeConfigFromConfigPy:
     def test_no_direct_env_reads_in_hyde(self):
         import inspect
 
-        import hyde
+        import archivist.write.hyde as hyde
 
         source = inspect.getsource(hyde)
         assert "os.getenv" not in source
 
     def test_imports_config_values(self):
-        import hyde  # noqa: F401 — import compiles without error
+        import archivist.write.hyde  # noqa: F401 — import compiles without error
 
 
 class TestNeedleRegistrySchema:
     """Needle registry must have composite index on (token, namespace)."""
 
     def test_composite_index_exists(self, graph_db):
-        from graph import _ensure_needle_registry, get_db
+        from archivist.storage.graph import _ensure_needle_registry, get_db
 
         _ensure_needle_registry()
         conn = get_db()
@@ -131,7 +131,7 @@ class TestDeleteNeedleTokensLogsError:
     """delete_needle_tokens_by_memory must log errors, not silently pass."""
 
     async def test_returns_count(self, async_pool):
-        from graph import delete_needle_tokens_by_memory, register_needle_tokens
+        from archivist.storage.graph import delete_needle_tokens_by_memory, register_needle_tokens
 
         await register_needle_tokens(
             "mem-1", "Server 192.168.1.1 on :8443", namespace="ns1", agent_id="a1"
@@ -140,7 +140,7 @@ class TestDeleteNeedleTokensLogsError:
         assert count >= 1
 
     async def test_returns_zero_for_missing(self, async_pool):
-        from graph import delete_needle_tokens_by_memory
+        from archivist.storage.graph import delete_needle_tokens_by_memory
 
         count = await delete_needle_tokens_by_memory("nonexistent-id")
         assert count == 0
@@ -152,7 +152,7 @@ class TestRlmRetrieverNoShadow:
     def test_no_m_loop_variable(self):
         import inspect
 
-        import rlm_retriever
+        import archivist.retrieval.rlm_retriever as rlm_retriever
 
         source = inspect.getsource(rlm_retriever._extract_literal_tokens)
         assert "for m in" not in source
@@ -160,7 +160,7 @@ class TestRlmRetrieverNoShadow:
     def test_no_duplicate_metrics_import(self):
         import inspect
 
-        import rlm_retriever
+        import archivist.retrieval.rlm_retriever as rlm_retriever
 
         source = inspect.getsource(rlm_retriever)
         import_lines = [

@@ -2,7 +2,7 @@
 
 import pytest
 
-from rlm_retriever import _retrieval_trace
+from archivist.retrieval.rlm_retriever import _retrieval_trace
 
 pytestmark = [pytest.mark.unit, pytest.mark.retrieval]
 

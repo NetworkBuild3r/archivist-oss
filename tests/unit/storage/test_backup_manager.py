@@ -71,9 +71,9 @@ class TestRestoreThroughHandlerPath:
         from archivist.app.handlers import tools_admin
 
         dest_db = tmp_path / "dest_graph.db"
-        monkeypatch.setattr("backup_manager.BACKUP_DIR", str(tmp_path))
-        monkeypatch.setattr("backup_manager.SQLITE_PATH", str(dest_db))
-        monkeypatch.setattr("backup_manager.VECTOR_DIM", 768)
+        monkeypatch.setattr("archivist.storage.backup_manager.BACKUP_DIR", str(tmp_path))
+        monkeypatch.setattr("archivist.storage.backup_manager.SQLITE_PATH", str(dest_db))
+        monkeypatch.setattr("archivist.storage.backup_manager.VECTOR_DIM", 768)
 
         snapshot_id = "20260723T191500Z_handler_test"
         snap_dir = tmp_path / snapshot_id
@@ -130,8 +130,10 @@ class TestToThreadOffload:
             release.wait(timeout=5)
             return {"snapshot_id": "fake-snapshot", "label": label}
 
-        monkeypatch.setattr("backup_manager.create_snapshot", blocking_create_snapshot)
-        monkeypatch.setattr("backup_manager.prune_snapshots", list)
+        monkeypatch.setattr(
+            "archivist.storage.backup_manager.create_snapshot", blocking_create_snapshot
+        )
+        monkeypatch.setattr("archivist.storage.backup_manager.prune_snapshots", list)
 
         other_call_completed = []
 
@@ -181,7 +183,9 @@ class TestToThreadOffload:
             release.wait(timeout=5)
             return {"snapshot_id": snapshot_id, "errors": []}
 
-        monkeypatch.setattr("backup_manager.restore_snapshot", blocking_restore_snapshot)
+        monkeypatch.setattr(
+            "archivist.storage.backup_manager.restore_snapshot", blocking_restore_snapshot
+        )
 
         other_call_completed = []
 
@@ -239,12 +243,14 @@ class TestFTSUpsertBatching:
             return None
 
         with (
-            patch("config.BM25_ENABLED", True),
-            patch("collection_router.ensure_collection", return_value="test_coll"),
-            patch("qdrant.qdrant_client", return_value=mock_client),
+            patch("archivist.core.config.BM25_ENABLED", True),
+            patch(
+                "archivist.storage.collection_router.ensure_collection", return_value="test_coll"
+            ),
+            patch("archivist.storage.qdrant.qdrant_client", return_value=mock_client),
             patch("asyncio.run", side_effect=_closing_run) as mock_run,
         ):
-            from backup_manager import import_agent
+            from archivist.storage.backup_manager import import_agent
 
             result = import_agent(str(ndjson_path))
 
@@ -262,10 +268,10 @@ class TestFTSUpsertBatching:
         ndjson_path.write_text("")
 
         with (
-            patch("config.BM25_ENABLED", True),
+            patch("archivist.core.config.BM25_ENABLED", True),
             patch("asyncio.run") as mock_run,
         ):
-            from backup_manager import import_agent
+            from archivist.storage.backup_manager import import_agent
 
             result = import_agent(str(ndjson_path))
 

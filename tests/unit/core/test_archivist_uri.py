@@ -6,7 +6,13 @@ pytestmark = [pytest.mark.unit]
 
 
 def test_uri_roundtrip():
-    from archivist_uri import entity_uri, memory_uri, namespace_uri, parse_uri, skill_uri
+    from archivist.core.archivist_uri import (
+        entity_uri,
+        memory_uri,
+        namespace_uri,
+        parse_uri,
+        skill_uri,
+    )
 
     m = memory_uri("agents-nova", "abc-123")
     assert m == "archivist://agents-nova/memory/abc-123"
@@ -34,7 +40,7 @@ def test_uri_roundtrip():
 
 
 def test_uri_parse_invalid():
-    from archivist_uri import parse_uri
+    from archivist.core.archivist_uri import parse_uri
 
     assert parse_uri("http://not-archivist/foo") is None
     assert parse_uri("archivist://ns/bad_type/123") is None
@@ -42,7 +48,7 @@ def test_uri_parse_invalid():
 
 
 def test_cache_put_get():
-    import hot_cache
+    import archivist.retrieval.hot_cache as hot_cache
 
     hot_cache.invalidate_all()
 
@@ -63,12 +69,12 @@ def test_cache_put_get():
 
 
 def test_cache_lru_eviction():
-    import hot_cache
+    import archivist.retrieval.hot_cache as hot_cache
 
     hot_cache.invalidate_all()
 
     original_max = hot_cache.HOT_CACHE_MAX_PER_AGENT
-    import config
+    import archivist.core.config as config
 
     old_val = config.HOT_CACHE_MAX_PER_AGENT
     try:
@@ -91,7 +97,7 @@ def test_cache_lru_eviction():
 
 
 def test_cache_namespace_invalidation():
-    import hot_cache
+    import archivist.retrieval.hot_cache as hot_cache
 
     hot_cache.invalidate_all()
 
@@ -107,7 +113,7 @@ def test_cache_namespace_invalidation():
 
 
 def test_cache_stats():
-    import hot_cache
+    import archivist.retrieval.hot_cache as hot_cache
 
     hot_cache.invalidate_all()
 
@@ -121,7 +127,7 @@ def test_cache_stats():
 
 
 async def test_retrieval_log_roundtrip(async_pool):
-    from retrieval_log import get_retrieval_logs, log_retrieval
+    from archivist.retrieval.retrieval_log import get_retrieval_logs, log_retrieval
 
     lid = await log_retrieval(
         agent_id="agent-x",
@@ -145,7 +151,7 @@ async def test_retrieval_log_roundtrip(async_pool):
 
 
 async def test_retrieval_stats(async_pool):
-    from retrieval_log import get_retrieval_stats, log_retrieval
+    from archivist.retrieval.retrieval_log import get_retrieval_stats, log_retrieval
 
     for i in range(5):
         await log_retrieval(
@@ -169,6 +175,6 @@ async def test_retrieval_stats(async_pool):
 
 
 def test_default_consistency_config():
-    from config import DEFAULT_CONSISTENCY
+    from archivist.core.config import DEFAULT_CONSISTENCY
 
     assert DEFAULT_CONSISTENCY in ("eventual", "session", "strong")

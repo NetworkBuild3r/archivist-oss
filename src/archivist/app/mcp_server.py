@@ -14,7 +14,7 @@ The registry in handlers/_registry.py aggregates all tools and dispatches by nam
 from mcp.server import Server
 from mcp.types import TextContent, Tool
 
-from handlers._registry import dispatch_tool, get_all_tools
+from archivist.app.handlers._registry import dispatch_tool, get_all_tools
 
 server = Server("archivist")
 

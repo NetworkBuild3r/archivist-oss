@@ -73,6 +73,7 @@ context = await archivist_get_context(
 | **Auto-compression** | When results overflow the budget, dropped chunks are LLM-summarized and injected as a synthetic L1 result (opt-in via `AUTO_COMPRESS_ENABLED=true`). |
 | **Ephemeral session tier** | `SessionStore` holds per-session scratch notes in-process, flushed to durable memory at session end. |
 | **Multi-agent handoff** | `archivist_handoff` packages goals + memories + knowledge snapshot; `archivist_receive_handoff` injects them into the new agent's session. |
+| **Selective share + consensus** | `archivist_share_propose` / `accept` / `reject` for audited grants; conflict outcomes use `supersede` / `merge` / `keep_both` (extends handoff). |
 | **Token savings observability** | Every retrieval logs `tokens_returned` / `tokens_naive` / `savings_pct`; view trends via `archivist_savings_dashboard`. |
 
 ### Measured token savings
@@ -142,7 +143,7 @@ await archivist_receive_handoff(
 | **Dual database backends** | SQLite (default, zero-config) or PostgreSQL (`GRAPH_BACKEND=postgres`) — hot paths, backups, and tests work on both. See [docs/DOCKER.md](docs/DOCKER.md#postgresql-backend-production-grade). |
 | **Transactional outbox** | Optional `OUTBOX_ENABLED=true`: SQLite/Postgres FTS, needle registry, `memory_points`, graph rows, and outbox events commit atomically; Qdrant work is drained by a background processor with retries. Default `false` keeps legacy inline Qdrant writes. |
 | **Hybrid retrieval** | Vector + BM25 fusion, graph augmentation, hotness-weighted FTS, tier-aware packing, reranking — see [How It Works](#how-it-works). |
-| **MCP tool surface** | 41 tools for search, storage, trajectories, skills, admin, cache, context, handoff, and docs — stable signatures. |
+| **MCP tool surface** | 52 tools for search, storage, trajectories, skills, admin, cache, context, handoff, checkpoints, selective share, and docs — stable signatures. |
 | **RBAC** | Namespace-level ACLs via optional `namespaces.yaml`. |
 | **Active curation** | Background curator, queue, compaction, hotness — configurable. |
 
@@ -174,7 +175,7 @@ Config variables added: `CONTEXT_PACK_POLICY`, `CONTEXT_L0_BUDGET_SHARE`, `CONTE
 
 ## What's New in v2.0
 
-**Archivist 2.0** — The codebase is now a first-class Python package under [`src/archivist/`](src/archivist/): `core`, `storage`, `lifecycle`, `retrieval`, `write`, `features`, `utils`, and `app`. Legacy `src/*.py` module names still work via compatibility shims. **Mypy** is configured for the new layout (`mypy_path` + `explicit_package_bases` in [`pyproject.toml`](pyproject.toml)).
+**Archivist 2.0** — The codebase is now a first-class Python package under [`src/archivist/`](src/archivist/): `core`, `storage`, `lifecycle`, `retrieval`, `write`, `features`, `utils`, and `app`. (The temporary top-level `src/*.py` compatibility shims shipped with 2.0 have since been removed — import from `archivist.*` only.) **Mypy** is configured for the new layout (`mypy_path` + `explicit_package_bases` in [`pyproject.toml`](pyproject.toml)).
 
 **Benchmarks** — Phase 5 pipeline evaluation (`clean_reranker` vs `vector_plus_synth`, small corpus, 108 queries per variant) is summarized in [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md). Formal release notes: [`docs/RELEASE_NOTES_v2.0.md`](docs/RELEASE_NOTES_v2.0.md).
 
@@ -435,7 +436,7 @@ http://localhost:3100/mcp
 
 Legacy SSE clients can continue using `http://localhost:3100/mcp/sse`.
 
-That's it. Your agents can now `archivist_store`, `archivist_search`, `archivist_recall`, and use all 37 tools.
+That's it. Your agents can now `archivist_store`, `archivist_search`, `archivist_recall`, and use all 47 tools.
 
 ### 5. Optional: add RBAC
 
@@ -578,6 +579,16 @@ Raw MD trees **do not scale**: they blow the context window, repeat facts, and d
 | `archivist_get_context` | Single-call token-budgeted context: answer + tier-packed sources + graph facts + tips. Replaces `archivist_search` + `archivist_tips` + `archivist_context_check`. Supports `max_tokens`, `tier_policy`, `namespace`, `extra_memory_ids`. |
 | `archivist_handoff` | Package a session's goals, progress, key memories, and ephemeral notes into a typed `HandoffPacket` for transfer to another agent. |
 | `archivist_receive_handoff` | Inject a `HandoffPacket` into the receiving agent's ephemeral session memory so it is immediately available to `archivist_get_context`. |
+
+### Coordination Beyond Handoff (5)
+
+| Tool | What it does |
+|------|-------------|
+| `archivist_share_propose` | Propose a selective share of memory IDs and/or scope to another agent (pending grant; proposer needs namespace read). |
+| `archivist_share_accept` | Recipient accepts (audited, idempotent). Optional `materialize_namespace` requires write RBAC. |
+| `archivist_share_reject` | Recipient rejects (audited, idempotent). |
+| `archivist_share_attach_conflict` | Attach conflict/consensus outcome using SPEC-006 actions: `supersede` / `merge` / `keep_both`. |
+| `archivist_share_get` | Fetch one grant by id + namespace (proposer or recipient). |
 
 ### Cache Management (2)
 
@@ -803,6 +814,7 @@ All configuration is via environment variables. See [`.env.example`](.env.exampl
 | `AUTO_COMPRESS_THRESHOLD` | `0.85` | Budget utilization fraction (0–1) that triggers auto-compression when enabled |
 | `SESSION_STORE_MAX_ENTRIES` | `512` | Maximum in-process entries across all sessions in the `SessionStore` ephemeral tier |
 | `SESSION_STORE_TTL_SECONDS` | `3600` | Default TTL for `SessionStore` entries (1 hour) |
+| `TOKEN_USD_PER_1K` | *(unset)* | Optional USD per 1k tokens for savings/cost dashboard estimates; when unset, `estimated_usd_*` fields are `null` (not a billing system) |
 
 ### Curation & Intelligence
 
@@ -988,7 +1000,7 @@ Archivist is integration and execution on top of public work from the agent-memo
 | [`docs/DOCKER.md`](docs/DOCKER.md) | Docker Compose stack, PostgreSQL backend, host vLLM + cloud LLM, volume overrides |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Storage transaction model, module map, diagrams, historical release notes |
 | [`docs/rearchitect_storage_phase3.md`](docs/rearchitect_storage_phase3.md) | Phase 3 + 3.5 outbox design reference |
-| [`docs/CURSOR_SKILL.md`](docs/CURSOR_SKILL.md) | Full parameter schemas and examples for all 37 MCP tools |
+| [`docs/CURSOR_SKILL.md`](docs/CURSOR_SKILL.md) | Full parameter schemas and examples for all 47 MCP tools |
 | [`docs/REFERENCE.md`](docs/REFERENCE.md) | Condensed tool reference table |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | Phased roadmap and differentiation goals |
 | [`docs/INSPIRATION.md`](docs/INSPIRATION.md) | Credits, research lineage, ReMe comparison |

@@ -5,7 +5,7 @@ pytestmark = [pytest.mark.integration]
 
 
 async def test_register_and_find_skill(async_pool):
-    from skills import find_skill, list_skills, register_skill
+    from archivist.features.skills import find_skill, list_skills, register_skill
 
     result = await register_skill(
         name="web_search",
@@ -37,7 +37,7 @@ async def test_register_and_find_skill(async_pool):
 
 
 async def test_lessons_crud(async_pool):
-    from skills import add_lesson, get_lessons, register_skill
+    from archivist.features.skills import add_lesson, get_lessons, register_skill
 
     reg = await register_skill(name="code_exec", provider="internal", registered_by="a1")
     sid = reg["skill_id"]
@@ -65,7 +65,7 @@ async def test_lessons_crud(async_pool):
 
 
 async def test_skill_events_and_health(async_pool):
-    from skills import get_skill_health, log_skill_event, register_skill
+    from archivist.features.skills import get_skill_health, log_skill_event, register_skill
 
     reg = await register_skill(name="calculator", provider="builtin", registered_by="a1")
     sid = reg["skill_id"]
@@ -85,7 +85,12 @@ async def test_skill_events_and_health(async_pool):
 
 
 async def test_health_grades(async_pool):
-    from skills import get_skill_health, log_skill_event, register_skill, update_skill_status
+    from archivist.features.skills import (
+        get_skill_health,
+        log_skill_event,
+        register_skill,
+        update_skill_status,
+    )
 
     reg = await register_skill(name="good_tool", provider="x", registered_by="a1")
     for _ in range(10):
@@ -107,7 +112,7 @@ async def test_health_grades(async_pool):
 
 
 async def test_version_tracking(async_pool):
-    from skills import get_skill_health, record_version, register_skill
+    from archivist.features.skills import get_skill_health, record_version, register_skill
 
     reg = await register_skill(
         name="api_tool", provider="acme", version="1.0.0", registered_by="a1"

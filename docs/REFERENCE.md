@@ -1,6 +1,6 @@
 # Archivist MCP tool reference
 
-Quick reference for **41** MCP tools exposed by the Archivist server. For full parameter schemas, defaults, and examples, see [`CURSOR_SKILL.md`](CURSOR_SKILL.md).
+Quick reference for **47** MCP tools exposed by the Archivist server. For full parameter schemas, defaults, and examples, see [`CURSOR_SKILL.md`](CURSOR_SKILL.md).
 
 ## Search & Retrieval (9)
 
@@ -48,16 +48,37 @@ Quick reference for **41** MCP tools exposed by the Archivist server. For full p
 | `archivist_skill_relate` | Create relations between skills (similar_to, depend_on, compose_with, replaced_by) |
 | `archivist_skill_dependencies` | Get skill dependency/relation graph |
 
-## Context Assembly & Handoff (4)
+## Context Assembly & Handoff (3)
 
 | Tool | Purpose |
 |------|---------|
 | `archivist_get_context` | High-level token-budgeted context assembly — tiers, graph facts, procedural tips in one call. Replaces multi-step search patterns. |
 | `archivist_handoff` | Package a session's summary, goals, tips, hottest memories, and knowledge snapshot into a structured `HandoffPacket`. |
 | `archivist_receive_handoff` | Inject a `HandoffPacket` into the receiving agent's ephemeral `SessionStore`. |
-| `archivist_savings_dashboard` | Token savings stats: avg/min/max savings %, total tokens saved, per-policy breakdown, hotness heatmap (top-N memories). |
 
-## Admin & Context Management (8)
+## Agent Checkpoints (5)
+
+| Tool | Purpose |
+|------|---------|
+| `archivist_checkpoint_save` | Persist agent-state checkpoint (payload + optional parent) scoped to namespace. |
+| `archivist_checkpoint_list` | List session checkpoints in a namespace (oldest first). |
+| `archivist_checkpoint_get` | Fetch one checkpoint by id **and** namespace (no cross-tenant get by id alone). |
+| `archivist_checkpoint_resume` | Inject resume packet into the caller's `SessionStore` for that session only. |
+| `archivist_checkpoint_replay` | Read-only parent-chain reconstruction (metadata + payloads). |
+
+## Coordination Beyond Handoff (5)
+
+Selective share + consensus v1 (explicit accept/reject + audit). Extends — does not replace — `archivist_handoff` / `archivist_receive_handoff` (GR-003). Conflict outcomes use SPEC-006 actions: `supersede` \| `merge` \| `keep_both`.
+
+| Tool | Purpose |
+|------|---------|
+| `archivist_share_propose` | Propose a selective share of memory IDs and/or scope to another agent (pending grant). Proposer needs namespace read. |
+| `archivist_share_accept` | Recipient accepts a grant (audited; idempotent). Optional `materialize_namespace` requires write RBAC. |
+| `archivist_share_reject` | Recipient rejects a grant (audited; idempotent). |
+| `archivist_share_attach_conflict` | Attach a conflict/consensus outcome using SPEC-006 resolution types. |
+| `archivist_share_get` | Fetch one grant by id + namespace (proposer or recipient). |
+
+## Admin & Context Management (10)
 
 | Tool | Purpose |
 |------|---------|
@@ -68,7 +89,21 @@ Quick reference for **41** MCP tools exposed by the Archivist server. For full p
 | `archivist_retrieval_logs` | Export/analyze retrieval pipeline execution traces |
 | `archivist_health_dashboard` | Single-pane health: memory counts, stale %, conflict rate, skills, cache |
 | `archivist_batch_heuristic` | Recommended batch size (1-10) from health signals |
+| `archivist_savings_dashboard` | Token savings stats: avg/min/max savings %, total tokens saved, per-policy breakdown, estimated USD (`null` if `TOKEN_USD_PER_1K` unset), hotness heatmap (top-N memories). |
+| `archivist_memory_lineage` | Lineage edges for a memory/entity (provenance, versions, audit, retrieval mentions). RBAC on namespace reads; no secrets/full text. |
 | `archivist_backup` | Create, list, restore, or delete memory snapshots (Qdrant + SQLite/Postgres). Supports `export_agent` / `import_agent` for portable agent migration. |
+
+### Memory-as-Product (service layer)
+
+Service APIs in `archivist.storage.memory_product` (INIT-001/SPEC-009) — not MCP tools yet:
+
+| API | Purpose |
+|-----|---------|
+| `create_scope_snapshot` | Versioned snapshot of a namespace (optional `agent_id` filter); archive under `BACKUP_DIR` |
+| `fork_from_snapshot` | Copy snapshot into a target namespace with `parent_version_id` lineage; vectors via outbox |
+| `export_scope` | Export archive path + manifest (counts/versions); paths confined by `SnapshotPathError` / `_snapshot_dir` |
+
+All three require `caller_agent_id` and enforce namespace RBAC. Distinct from Phase-7 `agent_checkpoints`.
 
 ## Cache Management (2)
 
@@ -95,7 +130,11 @@ Quick reference for **41** MCP tools exposed by the Archivist server. For full p
 - Log trajectories so future searches benefit from outcome-aware retrieval scoring.
 - Pin critical facts (host IPs, credentials, ownership) with `archivist_pin` so the curator never forgets them.
 - Use `archivist_handoff` + `archivist_receive_handoff` to transfer session context between agents with minimal token overhead.
-- Check `archivist_savings_dashboard` to measure how much token waste the Answer Finder is eliminating.
+- Use `archivist_share_propose` / `accept` / `reject` for selective memory grants between agents (consensus v1 = explicit decision + audit; does not replace handoff).
+- Use `archivist_share_attach_conflict` to record conflict outcomes with SPEC-006 actions (`supersede` / `merge` / `keep_both`).
+- Use `archivist_checkpoint_save` / `resume` / `replay` for Phase-7 agent-state time-travel (namespace-scoped; distinct from handoff and from L0–L2 tiers).
+- Check `archivist_savings_dashboard` to measure how much token waste the Answer Finder is eliminating (set `TOKEN_USD_PER_1K` for estimated USD fields).
+- Use `archivist_memory_lineage` to inspect provenance/version/audit/retrieval edges for a memory or entity (requires namespace read access).
 
 ## REST Endpoints (non-MCP)
 

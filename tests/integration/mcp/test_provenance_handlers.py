@@ -19,10 +19,10 @@ def _isolate_sqlite(tmp_path, monkeypatch):
     """Point SQLite at a temp dir so tests don't mutate the real DB."""
     db_path = str(tmp_path / "test_graph.db")
     monkeypatch.setenv("SQLITE_PATH", db_path)
-    import config
+    import archivist.core.config as config
 
     monkeypatch.setattr(config, "SQLITE_PATH", db_path)
-    import graph
+    import archivist.storage.graph as graph
 
     monkeypatch.setattr(graph, "SQLITE_PATH", db_path)
     graph.init_schema()
@@ -32,30 +32,39 @@ def _store_patches(mock_client):
     """Return a stack of context managers that mock all external dependencies."""
     return [
         patch(
-            "handlers.tools_storage.embed_text", new_callable=AsyncMock, return_value=[0.1] * 1024
+            "archivist.app.handlers.tools_storage.embed_text",
+            new_callable=AsyncMock,
+            return_value=[0.1] * 1024,
         ),
         patch(
-            "handlers.tools_storage.embed_batch",
+            "archivist.app.handlers.tools_storage.embed_batch",
             new_callable=AsyncMock,
             return_value=[[0.1] * 1024] * 20,
         ),
-        patch("conflict_detection.embed_text", new_callable=AsyncMock, return_value=[0.1] * 1024),
         patch(
-            "handlers.tools_storage.check_for_conflicts",
+            "archivist.write.conflict_detection.embed_text",
+            new_callable=AsyncMock,
+            return_value=[0.1] * 1024,
+        ),
+        patch(
+            "archivist.app.handlers.tools_storage.check_for_conflicts",
             new_callable=AsyncMock,
             return_value=MagicMock(has_conflict=False),
         ),
         patch(
-            "handlers.tools_storage.llm_adjudicated_dedup",
+            "archivist.app.handlers.tools_storage.llm_adjudicated_dedup",
             new_callable=AsyncMock,
             return_value=None,
         ),
-        patch("handlers.tools_storage.qdrant_client", return_value=mock_client),
-        patch("handlers.tools_storage.ensure_collection", return_value="test_coll"),
-        patch("handlers.tools_storage.register_memory_points_batch", new_callable=AsyncMock),
-        patch("handlers.tools_storage.get_namespace_config", return_value=None),
-        patch("handlers.tools_storage.require_rbac", return_value=None),
-        patch("audit.log_memory_event", new_callable=AsyncMock),
+        patch("archivist.app.handlers.tools_storage.qdrant_client", return_value=mock_client),
+        patch("archivist.app.handlers.tools_storage.ensure_collection", return_value="test_coll"),
+        patch(
+            "archivist.app.handlers.tools_storage.register_memory_points_batch",
+            new_callable=AsyncMock,
+        ),
+        patch("archivist.app.handlers.tools_storage.get_namespace_config", return_value=None),
+        patch("archivist.app.handlers.tools_storage.require_rbac", return_value=None),
+        patch("archivist.core.audit.log_memory_event", new_callable=AsyncMock),
     ]
 
 
@@ -64,10 +73,10 @@ def _store_patches(mock_client):
 
 async def test_store_with_provenance_sets_payload(async_pool, monkeypatch):
     """archivist_store with provenance fields propagates to primary Qdrant point."""
-    monkeypatch.setattr("config.REVERSE_HYDE_ENABLED", False)
-    monkeypatch.setattr("config.SYNTHETIC_QUESTIONS_ENABLED", False)
-    monkeypatch.setattr("config.BM25_ENABLED", False)
-    monkeypatch.setattr("config.CONTEXTUAL_AUGMENTATION_ENABLED", False)
+    monkeypatch.setattr("archivist.core.config.REVERSE_HYDE_ENABLED", False)
+    monkeypatch.setattr("archivist.core.config.SYNTHETIC_QUESTIONS_ENABLED", False)
+    monkeypatch.setattr("archivist.core.config.BM25_ENABLED", False)
+    monkeypatch.setattr("archivist.core.config.CONTEXTUAL_AUGMENTATION_ENABLED", False)
 
     captured = []
     mock_client = MagicMock()
@@ -87,7 +96,7 @@ async def test_store_with_provenance_sets_payload(async_pool, monkeypatch):
         patches[9],
         patches[10],
     ):
-        from handlers.tools_storage import _handle_store
+        from archivist.app.handlers.tools_storage import _handle_store
 
         await _handle_store(
             {
@@ -113,10 +122,10 @@ async def test_store_with_provenance_sets_payload(async_pool, monkeypatch):
 
 async def test_store_provenance_defaults(async_pool, monkeypatch):
     """When no provenance fields provided, defaults are applied."""
-    monkeypatch.setattr("config.REVERSE_HYDE_ENABLED", False)
-    monkeypatch.setattr("config.SYNTHETIC_QUESTIONS_ENABLED", False)
-    monkeypatch.setattr("config.BM25_ENABLED", False)
-    monkeypatch.setattr("config.CONTEXTUAL_AUGMENTATION_ENABLED", False)
+    monkeypatch.setattr("archivist.core.config.REVERSE_HYDE_ENABLED", False)
+    monkeypatch.setattr("archivist.core.config.SYNTHETIC_QUESTIONS_ENABLED", False)
+    monkeypatch.setattr("archivist.core.config.BM25_ENABLED", False)
+    monkeypatch.setattr("archivist.core.config.CONTEXTUAL_AUGMENTATION_ENABLED", False)
 
     captured = []
     mock_client = MagicMock()
@@ -136,7 +145,7 @@ async def test_store_provenance_defaults(async_pool, monkeypatch):
         patches[9],
         patches[10],
     ):
-        from handlers.tools_storage import _handle_store
+        from archivist.app.handlers.tools_storage import _handle_store
 
         await _handle_store(
             {
@@ -159,10 +168,10 @@ async def test_store_provenance_defaults(async_pool, monkeypatch):
 
 async def test_store_propagates_to_sqlite(async_pool, monkeypatch):
     """Verify provenance reaches SQLite tables (facts, memory_chunks)."""
-    monkeypatch.setattr("config.REVERSE_HYDE_ENABLED", False)
-    monkeypatch.setattr("config.SYNTHETIC_QUESTIONS_ENABLED", False)
-    monkeypatch.setattr("config.BM25_ENABLED", True)
-    monkeypatch.setattr("config.CONTEXTUAL_AUGMENTATION_ENABLED", False)
+    monkeypatch.setattr("archivist.core.config.REVERSE_HYDE_ENABLED", False)
+    monkeypatch.setattr("archivist.core.config.SYNTHETIC_QUESTIONS_ENABLED", False)
+    monkeypatch.setattr("archivist.core.config.BM25_ENABLED", True)
+    monkeypatch.setattr("archivist.core.config.CONTEXTUAL_AUGMENTATION_ENABLED", False)
 
     mock_client = MagicMock()
     mock_client.upsert = MagicMock()
@@ -181,7 +190,7 @@ async def test_store_propagates_to_sqlite(async_pool, monkeypatch):
         patches[9],
         patches[10],
     ):
-        from handlers.tools_storage import _handle_store
+        from archivist.app.handlers.tools_storage import _handle_store
 
         await _handle_store(
             {
@@ -193,7 +202,7 @@ async def test_store_propagates_to_sqlite(async_pool, monkeypatch):
             }
         )
 
-    import graph
+    import archivist.storage.graph as graph
 
     conn = graph.get_db()
     try:
@@ -217,7 +226,7 @@ async def test_store_propagates_to_sqlite(async_pool, monkeypatch):
 
 def test_result_candidate_qdrant_round_trip():
     """Provenance survives payload → ResultCandidate → dict → back."""
-    from result_types import ResultCandidate
+    from archivist.core.result_types import ResultCandidate
 
     payload = {
         "text": "test",
@@ -242,7 +251,7 @@ def test_result_candidate_qdrant_round_trip():
 
 def test_reranker_passage_includes_provenance_from_candidate():
     """The cross-encoder passage text includes provenance context."""
-    from reranker import _build_pair
+    from archivist.retrieval.reranker import _build_pair
 
     candidate = {
         "text": "Server 10.0.0.1 is the gateway",
@@ -262,11 +271,11 @@ def test_reranker_passage_includes_provenance_from_candidate():
 
 async def test_micro_chunks_inherit_provenance(async_pool, monkeypatch):
     """Micro-chunk Qdrant points carry the same provenance as the parent."""
-    monkeypatch.setattr("config.REVERSE_HYDE_ENABLED", False)
-    monkeypatch.setattr("config.SYNTHETIC_QUESTIONS_ENABLED", False)
-    monkeypatch.setattr("config.BM25_ENABLED", False)
-    monkeypatch.setattr("config.CONTEXTUAL_AUGMENTATION_ENABLED", False)
-    monkeypatch.setattr("config.MAX_MICRO_CHUNKS_PER_MEMORY", 5)
+    monkeypatch.setattr("archivist.core.config.REVERSE_HYDE_ENABLED", False)
+    monkeypatch.setattr("archivist.core.config.SYNTHETIC_QUESTIONS_ENABLED", False)
+    monkeypatch.setattr("archivist.core.config.BM25_ENABLED", False)
+    monkeypatch.setattr("archivist.core.config.CONTEXTUAL_AUGMENTATION_ENABLED", False)
+    monkeypatch.setattr("archivist.core.config.MAX_MICRO_CHUNKS_PER_MEMORY", 5)
 
     captured = []
     mock_client = MagicMock()
@@ -286,7 +295,7 @@ async def test_micro_chunks_inherit_provenance(async_pool, monkeypatch):
         patches[9],
         patches[10],
     ):
-        from handlers.tools_storage import _handle_store
+        from archivist.app.handlers.tools_storage import _handle_store
 
         await _handle_store(
             {

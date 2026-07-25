@@ -128,7 +128,7 @@ def _apply_variant(variant_name: str):
     env_overrides = VARIANTS[variant_name]
     for key, value in env_overrides.items():
         os.environ[key] = value
-    import config
+    import archivist.core.config as config
 
     importlib.reload(config)
 
@@ -274,8 +274,8 @@ def _sessions_to_markdown(
 
 async def _run_curator_on_files(mem_root: str) -> None:
     """Run curator entity extraction on all indexed files."""
-    from curator import extract_knowledge, process_extraction
-    from graph import init_schema
+    from archivist.lifecycle.curator import extract_knowledge, process_extraction
+    from archivist.storage.graph import init_schema
 
     init_schema()
     md_files = sorted(Path(mem_root).rglob("*.md"))
@@ -303,8 +303,8 @@ async def _llm_judge(
     optional ``BENCHMARK_JUDGE_LLM_API_KEY`` (omit to reuse ``LLM_API_KEY``;
     set to empty for no ``Authorization`` header). Base URL must not include ``/v1``.
     """
-    import config as cfg
-    from llm import llm_query
+    import archivist.core.config as cfg
+    from archivist.features.llm import llm_query
 
     prompt = _get_judge_prompt(
         task=question_type,
@@ -379,7 +379,7 @@ async def run_longmemeval_benchmark(
     mem_root = os.path.join(work_dir, "memories")
     os.makedirs(mem_root, exist_ok=True)
 
-    import config
+    import archivist.core.config as config
 
     original_memory_root = config.MEMORY_ROOT
     original_sqlite = config.SQLITE_PATH
@@ -394,9 +394,9 @@ async def run_longmemeval_benchmark(
         from qdrant_client import QdrantClient
         from qdrant_client.models import Distance, VectorParams
 
-        from graph import init_schema
-        from indexer import full_index
-        from rlm_retriever import recursive_retrieve
+        from archivist.retrieval.rlm_retriever import recursive_retrieve
+        from archivist.storage.graph import init_schema
+        from archivist.write.indexer import full_index
 
         qclient = QdrantClient(url=config.QDRANT_URL, timeout=30)
         init_schema()

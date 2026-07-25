@@ -4,7 +4,7 @@
 
 **Goal** — Be the most **trustworthy and production-ready** open multi-agent memory layer in 2026: observable, RBAC-aware, safe under fleet load, and the best answer finder in the industry.
 
-**Next milestones (engineering)** — **Pydantic v2–style config validation** (single source of truth for env + invalid combinations); **Phase 8** intelligent lifecycle management.
+**Next milestones (engineering)** — **Pydantic v2 config validation is mostly done**: `ArchivistSettings` (`core/config.py`) is the single validated source of truth for env + invalid combinations; the remaining work is **Phase B** — removing the ~51 module-level `UPPER_CASE` backward-compat aliases once call-sites migrate to `settings.foo` (tracked as INIT-001/SPEC-002, not greenfield). Next differentiator work is **Phase 8** intelligent lifecycle management, sequenced in [ADR-001](adr/ADR-001-platform-coherence-sequencing.md) after the platform-debt specs (shim removal, `graph.py` split, outbox default-on).
 
 ---
 
@@ -29,7 +29,7 @@ We now shift from “great retrieval” to “great memory system for collaborat
 | 1 | **Full Provenance & Actor-Aware Memory** | Every fact knows *who* said it, when, and with what confidence | Done (Phase 6) |
 | 2 | **Answer Finder — Token-Efficient Context** | Hierarchical tiers + token-budgeted packing + auto-compress; ≥60% token reduction vs naive retrieval | Done (v2.3.0) |
 | 3 | **Multi-Agent Handoff Protocol** | Typed `HandoffPacket` transfers session summary, goals, tips, and knowledge snapshot between agents | Done (v2.3.0) |
-| 4 | **Memory as a Product** | Versioned, exportable, forkable, auditable memory graphs (Git for agent knowledge) | Not started |
+| 4 | **Memory as a Product** | Versioned, exportable, forkable, auditable memory graphs (Git for agent knowledge) | In progress (service core — INIT-001/SPEC-009) |
 | 5 | **Native Multi-Agent Coordination** | Built-in shared/institutional memory with selective sharing, conflict resolution, and negotiation | Not started |
 | 6 | **Intelligent Self-Curation** | Automatic summarization, relevance-based forgetting, contradiction detection | Partial |
 | 7 | **Full Checkpointing + Time-Travel** | LangGraph-style resume, replay, branch, human-in-the-loop | Not started |
@@ -54,24 +54,75 @@ These six features combined will make Archivist the **most trustworthy and produ
 
 ## Immediate Next Steps (Recommended)
 
-1. **Phase 7** (Multi-Tier Memory + Checkpointing) — next highest differentiation.
-2. Optional: add a **domain-specific long-document fixture** (your own docs + questions) locally to tune retrieval beyond the public toy corpus — keep private data out of the public repo.
+Sequencing below matches [ADR-001: Platform coherence sequencing](adr/ADR-001-platform-coherence-sequencing.md)
+(INIT-001), which locks in the order after ASMT-001 found doc/inspiration
+thrash and compounding platform debt (import shims, `graph.py` monolith,
+outbox dual-path):
+
+1. **Platform coherence + debt (P0–P1)** — this doc/ADR sync, then shim
+   removal, `graph.py` decomposition, and transactional-outbox-as-default.
+   Compounding debt first so later phases build on a clean surface.
+2. **Phase 8** (Intelligent Lifecycle Management) — contradiction resolution
+   + reflection hooks on top of existing detect/decay/compress. Chosen ahead
+   of Phase 7 because self-curation de-risks the checkpoint/time-travel data
+   model (GR-002: keep it out of the L0–L2 Answer Finder taxonomy).
+3. **Phase 7** (Multi-Tier Memory + Checkpointing) — data model + resume/replay
+   MCP API, as a store distinct from L0–L2 delivery tiers.
+4. **Memory as a Product** (fork/export/version) — builds on `versioning.py`
+   + backup fragments once checkpoint storage patterns exist.
+5. **Phase 10** (Coordination beyond handoff) — selective share + conflict/
+   consensus primitives, after both lifecycle (step 2) and Memory-as-Product
+   (step 4) land.
+6. **Phase 9** (Observability depth) — lineage + cost/token-dollar signals;
+   independent of the product track, parallelizable after CI ratchet (P1).
+7. Optional: add a **domain-specific long-document fixture** (your own docs +
+   questions) locally to tune retrieval beyond the public toy corpus — keep
+   private data out of the public repo.
 
 ---
 
-## Phase 6.5 — OpenClaw Compatibility Fix (April 2026)
+## Phase 6.5 — OpenClaw Compatibility Fix (April 2026, revised by PR #39)
 
-**Status**: Done
-**Motivation**: OpenClaw v2026.4.8 uses the deprecated SSE MCP transport and has a client-side env-var interpolation bug in the `mcp.servers` headers config — it sends the literal string `"Bearer ${ARCHIVIST_API_KEY}"` rather than the resolved key.
+**Status**: Done — **security-revised**. The original fix (below the line)
+accepted a known-broken auth value; PR #39 (Security Hardening) reverted that
+acceptance. This section reflects the **current, correct** behavior.
+<!-- INIT-001/SPEC-001: rewritten per PR #39; do not reintroduce the
+     bypass this section used to document. -->
 
-**Changes**:
+**Motivation**: OpenClaw v2026.4.8 uses the deprecated SSE MCP transport and
+has a client-side env-var interpolation bug in the `mcp.servers` headers
+config — it sends the literal string `"Bearer ${ARCHIVIST_API_KEY}"` rather
+than the resolved key.
 
-| Area | Change | Effect |
-|------|--------|--------|
-| `MCP_SSE_ENABLED` default | `false` → `true` | Both transports mount on startup; no config change needed for legacy clients |
-| Auth middleware | Accept literal `Bearer ${ARCHIVIST_API_KEY}` with a WARNING log | OpenClaw connects without reconfiguration; operators see the misconfiguration in logs |
+**Current behavior (post-PR #39)**:
 
-**Transport summary after fix**:
+| Area | Behavior | Effect |
+|------|----------|--------|
+| `MCP_SSE_ENABLED` default | `true` | Both transports mount on startup; no config change needed for legacy clients |
+| Auth middleware | Literal `Bearer ${ARCHIVIST_API_KEY}` is **rejected with `401`** | Closes the auth-bypass surface a client-side templating bug could otherwise create; no key value is ever treated as valid by pattern-matching its literal placeholder form |
+| Startup warning | Emitted when no API key **and** no namespaces config are set | Operators see missing-auth misconfiguration at boot, independent of the OpenClaw case |
+
+**Why the original fix was rejected:** Accepting the literal placeholder
+string as "close enough" to a real key means any client that fails to
+interpolate its config (not just OpenClaw) authenticates with a fixed,
+publicly-known string. That is a bypass, not a compatibility shim. Fix the
+client config instead — see below.
+
+**Supported fix for OpenClaw (and any client with the same templating bug):**
+Use `X-API-Key` instead of the `Authorization: Bearer` header — it is not
+subject to the Bearer-interpolation bug and was always supported:
+
+```json
+"headers": { "X-API-Key": "${ARCHIVIST_API_KEY}" }
+```
+
+If the client only supports `Authorization: Bearer`, confirm the client
+actually resolves the `${...}` template to the real key value before startup
+(fixed in later OpenClaw releases) — a **resolved** `Bearer <real-key>` header
+continues to work exactly as it always has. Only the literal, unresolved
+placeholder string is rejected.
+
+**Transport summary (unchanged)**:
 
 | Endpoint | Transport | Client |
 |----------|-----------|--------|
@@ -79,13 +130,8 @@ These six features combined will make Archivist the **most trustworthy and produ
 | `GET /mcp/sse` | Legacy SSE | OpenClaw ≤v2026.4.8 and any other SSE-only client |
 | `POST /mcp/messages/` | Legacy SSE message channel | Same (paired with `GET /mcp/sse`) |
 
-**Upgrading OpenClaw** (when the client-side bug is fixed): Remove the `Authorization` header from `mcp.servers` config and add:
-```json
-"headers": { "X-API-Key": "${ARCHIVIST_API_KEY}" }
-```
-`X-API-Key` is always supported and is not subject to the Bearer interpolation bug.
-
-Set `MCP_SSE_ENABLED=false` once all clients are on the modern transport to reclaim the two extra routes.
+Set `MCP_SSE_ENABLED=false` once all clients are on the modern transport to
+reclaim the two extra routes.
 
 ---
 
@@ -100,7 +146,7 @@ Set `MCP_SSE_ENABLED=false` once all clients are on the modern transport to recl
 - [ ] Phase 7 — Multi-tier memory + checkpointing
 - [ ] Phase 8 — Intelligent Lifecycle Management
 - [ ] Phase 9 — Observability & Control Plane
-- [ ] Phase 10 — Multi-Agent Coordination Primitives
+- [x] Phase 10 — Multi-Agent Coordination Primitives (`archivist_share_*`; INIT-001/SPEC-010)
 
 ---
 
@@ -116,5 +162,5 @@ Expected console flow: `Encoding Batch …` → tqdm batch bar → nDCG / MAP / 
 
 _Add new rows when you change default embed models, BEIR limits, or the thin harness._
 
-**Last Updated**: April 25, 2026
+**Last Updated**: April 25, 2026 (content); doc-coherence pass 2026-07-24 (INIT-001/SPEC-001 — Phase 6.5 revised per PR #39, sequencing cross-linked to ADR-001)
 **Goal**: Become the most trustworthy, observable, and production-ready multi-agent memory system in 2026.

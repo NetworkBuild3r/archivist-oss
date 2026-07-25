@@ -552,3 +552,93 @@ BEGIN
     END IF;
 END
 $$;
+
+
+-- ---------------------------------------------------------------------------
+-- Agent-state checkpoints (Phase 7 / INIT-001/SPEC-007)
+-- Distinct from memory_chunks.tier_label (L0–L2 delivery tiers; GR-002).
+-- payload is JSON text in-row for v1; blob_ref reserved for large payloads later.
+-- Rollback: DROP TABLE IF EXISTS agent_checkpoints; disable checkpoint writers.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS agent_checkpoints (
+    id                   TEXT PRIMARY KEY,
+    agent_id             TEXT NOT NULL,
+    session_id           TEXT NOT NULL,
+    namespace             TEXT NOT NULL DEFAULT 'global',
+    parent_checkpoint_id TEXT REFERENCES agent_checkpoints (id),
+    payload              TEXT NOT NULL DEFAULT '{}',
+    blob_ref             TEXT,
+    metadata             TEXT NOT NULL DEFAULT '{}',
+    created_at           TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_checkpoints_agent_session_time
+    ON agent_checkpoints (agent_id, session_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_checkpoints_session_time
+    ON agent_checkpoints (session_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_checkpoints_namespace
+    ON agent_checkpoints (namespace);
+CREATE INDEX IF NOT EXISTS idx_checkpoints_parent
+    ON agent_checkpoints (parent_checkpoint_id);
+
+
+-- ---------------------------------------------------------------------------
+-- Memory-as-Product scope version lineage (INIT-001/SPEC-009)
+-- Tracks namespace/agent-scoped snapshots, forks, and export records.
+-- Distinct from per-memory_id memory_versions and from agent_checkpoints.
+-- Rollback: DROP TABLE IF EXISTS memory_scope_versions;
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS memory_scope_versions (
+    id                TEXT PRIMARY KEY,
+    source_namespace  TEXT NOT NULL,
+    source_agent_id   TEXT NOT NULL DEFAULT '',
+    version           INTEGER NOT NULL,
+    label             TEXT NOT NULL DEFAULT '',
+    parent_version_id TEXT,
+    chunk_count       INTEGER NOT NULL DEFAULT 0,
+    point_count       INTEGER NOT NULL DEFAULT 0,
+    archive_id        TEXT NOT NULL DEFAULT '',
+    operation         TEXT NOT NULL,
+    created_by        TEXT NOT NULL DEFAULT '',
+    created_at        TEXT NOT NULL,
+    lineage_json      TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_msv_namespace_version
+    ON memory_scope_versions (source_namespace, version);
+CREATE INDEX IF NOT EXISTS idx_msv_parent
+    ON memory_scope_versions (parent_version_id);
+CREATE INDEX IF NOT EXISTS idx_msv_archive
+    ON memory_scope_versions (archive_id);
+
+
+-- ---------------------------------------------------------------------------
+-- Selective share grants (Phase 10 / INIT-001/SPEC-010)
+-- Consensus v1 = explicit accept/reject + audit; extends handoff (GR-003).
+-- Rollback: DROP TABLE IF EXISTS memory_share_grants; disable share MCP tools.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS memory_share_grants (
+    id                  TEXT PRIMARY KEY,
+    proposer_agent_id   TEXT NOT NULL,
+    recipient_agent_id  TEXT NOT NULL,
+    namespace            TEXT NOT NULL,
+    memory_ids          TEXT NOT NULL DEFAULT '[]',
+    scope               TEXT NOT NULL DEFAULT '',
+    status              TEXT NOT NULL DEFAULT 'pending',
+    conflict_outcome    TEXT,
+    reason              TEXT NOT NULL DEFAULT '',
+    metadata            TEXT NOT NULL DEFAULT '{}',
+    created_at          TEXT NOT NULL,
+    decided_at          TEXT,
+    decided_by          TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_share_grants_recipient_status
+    ON memory_share_grants (recipient_agent_id, status);
+CREATE INDEX IF NOT EXISTS idx_share_grants_proposer
+    ON memory_share_grants (proposer_agent_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_share_grants_namespace
+    ON memory_share_grants (namespace);
