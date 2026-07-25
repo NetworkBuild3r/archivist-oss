@@ -5,13 +5,13 @@ pytestmark = [pytest.mark.integration]
 
 
 async def test_outcome_adjustments_empty(async_pool):
-    from trajectory import get_outcome_adjustments
+    from archivist.core.trajectory import get_outcome_adjustments
 
     assert await get_outcome_adjustments([]) == {}
 
 
 async def test_add_annotation_and_retrieve(async_pool):
-    from trajectory import _ensure_trajectory_schema, add_annotation, get_annotations
+    from archivist.core.trajectory import _ensure_trajectory_schema, add_annotation, get_annotations
 
     _ensure_trajectory_schema()
 
@@ -26,7 +26,7 @@ async def test_add_annotation_and_retrieve(async_pool):
 
 
 async def test_add_rating_and_summary(async_pool):
-    from trajectory import _ensure_trajectory_schema, add_rating, get_rating_summary
+    from archivist.core.trajectory import _ensure_trajectory_schema, add_rating, get_rating_summary
 
     _ensure_trajectory_schema()
 
@@ -41,7 +41,7 @@ async def test_add_rating_and_summary(async_pool):
 
 
 async def test_search_tips_empty(async_pool):
-    from trajectory import _ensure_trajectory_schema, search_tips
+    from archivist.core.trajectory import _ensure_trajectory_schema, search_tips
 
     _ensure_trajectory_schema()
     tips = await search_tips("agent-x", category="strategy")
@@ -49,7 +49,7 @@ async def test_search_tips_empty(async_pool):
 
 
 def test_retrieval_trace_v06_fields():
-    from rlm_retriever import _retrieval_trace
+    from archivist.retrieval.rlm_retriever import _retrieval_trace
 
     trace = _retrieval_trace(
         vector_limit=64,
@@ -71,7 +71,7 @@ def test_retrieval_trace_v06_fields():
 
 
 async def test_rating_clamp(async_pool):
-    from trajectory import _ensure_trajectory_schema, add_rating, get_rating_summary
+    from archivist.core.trajectory import _ensure_trajectory_schema, add_rating, get_rating_summary
 
     _ensure_trajectory_schema()
     await add_rating("mem-2", "agent-a", 5)  # clamps to 1

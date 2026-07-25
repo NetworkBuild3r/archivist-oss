@@ -12,7 +12,7 @@ class TestLogTaskException:
     """Verify _log_task_exception callback in main.py."""
 
     def test_logs_on_exception(self, caplog):
-        from main import _log_task_exception
+        from archivist.app.main import _log_task_exception
 
         async def _boom():
             raise RuntimeError("simulated crash")
@@ -32,7 +32,7 @@ class TestLogTaskException:
         loop.close()
 
     def test_silent_on_cancelled(self, caplog):
-        from main import _log_task_exception
+        from archivist.app.main import _log_task_exception
 
         async def _forever():
             await asyncio.sleep(3600)
@@ -52,7 +52,7 @@ class TestLogTaskException:
         loop.close()
 
     def test_silent_on_success(self, caplog):
-        from main import _log_task_exception
+        from archivist.app.main import _log_task_exception
 
         async def _ok():
             return 42
@@ -68,7 +68,7 @@ class TestLogTaskException:
         loop.close()
 
     def test_background_tasks_list_populated(self):
-        from main import _background_tasks
+        from archivist.app.main import _background_tasks
 
         assert isinstance(_background_tasks, list)
 
@@ -77,7 +77,7 @@ class TestWebhookPendingFires:
     """Verify _pending_fires tracking and _log_fire_exception in webhooks.py."""
 
     def test_log_fire_exception_on_error(self, caplog):
-        from webhooks import _log_fire_exception
+        from archivist.features.webhooks import _log_fire_exception
 
         async def _boom():
             raise ValueError("webhook kaboom")
@@ -97,7 +97,7 @@ class TestWebhookPendingFires:
         loop.close()
 
     def test_log_fire_exception_silent_on_cancel(self, caplog):
-        from webhooks import _log_fire_exception
+        from archivist.features.webhooks import _log_fire_exception
 
         async def _forever():
             await asyncio.sleep(3600)
@@ -117,15 +117,15 @@ class TestWebhookPendingFires:
         loop.close()
 
     def test_pending_fires_is_set(self):
-        from webhooks import _pending_fires
+        from archivist.features.webhooks import _pending_fires
 
         assert isinstance(_pending_fires, set)
 
     async def test_fire_background_tracks_task(self, monkeypatch):
-        from webhooks import _pending_fires, fire_background
+        from archivist.features.webhooks import _pending_fires, fire_background
 
         monkeypatch.setenv("WEBHOOK_URL", "http://localhost:9999/hook")
-        import webhooks
+        import archivist.features.webhooks as webhooks
 
         monkeypatch.setattr(webhooks, "WEBHOOK_URL", "http://localhost:9999/hook")
         monkeypatch.setattr(webhooks, "WEBHOOK_EVENTS", set())
@@ -141,8 +141,8 @@ class TestWebhookPendingFires:
 
     async def test_fire_background_cleans_up_after_completion(self, monkeypatch):
         """Task should be removed from _pending_fires once it completes."""
-        import webhooks
-        from webhooks import _pending_fires
+        import archivist.features.webhooks as webhooks
+        from archivist.features.webhooks import _pending_fires
 
         async def _fake_fire(event, payload):
             return True

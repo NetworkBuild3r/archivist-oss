@@ -347,6 +347,9 @@ async def _persist_background_points(
             )
             txn.enqueue_qdrant_upsert(coll, points, memory_id=memory_id)
     else:
+        from archivist.storage.outbox import warn_legacy_inline_qdrant_once
+
+        warn_legacy_inline_qdrant_once()
         qdrant_client().upsert(collection_name=coll, points=points)
         await register_memory_points_batch(mp_records)
 
@@ -864,6 +867,9 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
 
     # When the outbox is disabled, apply Qdrant writes inline (legacy behaviour).
     if not OUTBOX_ENABLED:
+        from archivist.storage.outbox import warn_legacy_inline_qdrant_once
+
+        warn_legacy_inline_qdrant_once()
         client.upsert(
             collection_name=_coll,
             points=[_primary_point],

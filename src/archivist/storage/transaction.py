@@ -27,9 +27,10 @@ Usage::
     # On clean exit: SQLite artefacts + outbox rows committed together.
     # The OutboxProcessor will pick up the outbox row and upsert to Qdrant.
 
-When ``OUTBOX_ENABLED=False`` (default for rollout safety) the context manager
-falls through: ``enqueue_*`` calls are no-ops and callers are expected to
-perform the Qdrant operations inline as they did before Phase 3.
+When ``OUTBOX_ENABLED=False`` (explicit opt-out; default is ``True`` as of
+INIT-001/SPEC-004) the context manager falls through: ``enqueue_*`` calls are
+no-ops and callers are expected to perform the Qdrant operations inline via the
+deprecated legacy path (emits a once-per-process warning).
 
 Internal design
 ---------------

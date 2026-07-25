@@ -5,7 +5,110 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- **Selective share + consensus MCP tools (INIT-001/SPEC-010)** — five new tools
+  (`archivist_share_propose|accept|reject|attach_conflict|get`) in
+  `app/handlers/tools_coordination.py` with `memory_share_grants` persistence
+  (SQLite + Postgres idempotent DDL). Propose requires namespace read; accept/
+  reject are recipient-only and audited; optional `materialize_namespace` on
+  accept requires write RBAC; conflict outcomes use SPEC-006 actions
+  (`supersede` / `merge` / `keep_both`). Existing handoff tools unchanged
+  (GR-003). Docs: REFERENCE / README / CURSOR_SKILL; tool count → 52.
+
+- **Memory-as-Product fork/export/version core (INIT-001/SPEC-009)** — service
+  APIs in `storage/memory_product.py` (`create_scope_snapshot`,
+  `fork_from_snapshot`, `export_scope`) with `memory_scope_versions` lineage
+  (SQLite + Postgres DDL). Archives confined to `BACKUP_DIR` via
+  `SnapshotPathError` / `_snapshot_dir`. Forks use `MemoryTransaction` + outbox;
+  namespace RBAC enforced at the service layer. Distinct from Phase-7 checkpoints.
+
+- **Checkpoint resume/replay MCP tools (INIT-001/SPEC-008)** — five new tools
+  (`archivist_checkpoint_save|list|get|resume|replay`) in
+  `app/handlers/tools_checkpoint.py` with `require_rbac`, namespace-scoped get,
+  payload size limits, SessionStore injection on resume (caller session only),
+  and read-only parent-chain replay. Existing handoff tools unchanged (GR-003).
+  Docs: `REFERENCE.md` / `CURSOR_SKILL.md` / README tool count → 47.
+
+- **Agent checkpoint store schema (INIT-001/SPEC-007)** — new `agent_checkpoints`
+  table (SQLite `init_schema` + `schema_postgres.sql`) with namespace-scoped fields,
+  parent links, and in-row JSON payload for v1. Repository helpers in
+  `storage/checkpoints.py` (`create` / `get` / `list_by_session` / `link_parent`).
+  Distinct from L0–L2 `tier_label`. Rollback: drop `agent_checkpoints` and disable
+  writers.
+
+- **Phase 8 contradiction resolution + reflection hooks (INIT-001/SPEC-006)** —
+  service-layer resolver (`lifecycle/contradiction_resolve.py`) proposes
+  supersede/merge/keep-both with audit trail; deterministic rules run first,
+  optional LLM behind `CONTRADICTION_RESOLVE_LLM_ENABLED`. Reflection hook
+  (`lifecycle/reflection.py`) writes structured tip artifacts from trajectory
+  outcomes. Curator cycle optionally invokes both behind safe defaults
+  (`CONTRADICTION_RESOLVE_ENABLED` / `REFLECTION_ENABLED` off;
+  dry-run flags default true). See `.env.example`.
+
+### Changed
+
+- **Transactional outbox enabled by default (INIT-001/SPEC-004)** — `OUTBOX_ENABLED`
+  now defaults to `true`, so store/index/merge/delete hot paths commit SQLite
+  artefacts with outbox rows and drain Qdrant asynchronously. Opt out with
+  `OUTBOX_ENABLED=false` during the deprecation window; the legacy inline Qdrant
+  path logs a single process-wide warning when used. Documented in `.env.example`,
+  `docs/DOCKER.md`, and `docs/ARCHITECTURE.md`.
+
+- **CI quality ratchet hardened (INIT-001/SPEC-005)** — the mypy job no longer
+  runs with `continue-on-error`; it now hard-fails when the real error count
+  exceeds `MYPY_MAX_ERRORS` (175). Fixed `[tool.mypy] python_version` from
+  `3.11` to `3.12` (matching the CI/Docker interpreter floor) — the mismatch
+  previously made mypy abort after ~3 errors on numpy's PEP 695 stub syntax,
+  which meant the "ratchet" was silently checking almost nothing. Raised the
+  coverage floor (`fail_under`) from 46% to 49% based on a measured 53.3%
+  combined unit+regression+integration+system run. Removed three ruff ignore
+  codes (`S607`, `SIM103`, `B008`) confirmed to have zero current violations.
+  Bandit and pip-audit security jobs are unchanged.
+
+- **`storage/graph.py` split into focused modules (INIT-001/SPEC-003)** — the
+  ~1800 LOC monolith (schema init, entity/fact CRUD, FTS helpers, needle
+  registry, Qdrant-point bookkeeping) is now decomposed into
+  `storage/graph_schema.py`, `storage/graph_entities.py`,
+  `storage/graph_fts.py`, `storage/graph_needles.py`, and
+  `storage/graph_points.py`. `storage/graph.py` is now a ~150 LOC facade that
+  re-exports every public and internal name, so existing
+  `from archivist.storage.graph import X` / `import archivist.storage.graph
+  as graph` call sites are unaffected. No behavior change; both SQLite and
+  Postgres paths preserved.
+
+### Removed
+
+- **Phase-5 compatibility shims removed (INIT-001/SPEC-002)** — the ~71 flat
+  top-level modules under `src/*.py` and `src/handlers/*.py` that re-exported
+  `archivist.*` symbols via `sys.modules` aliasing (each marked "Compatibility
+  shim — remove in Phase 5") have been deleted. `src/` now contains only the
+  canonical `archivist` package (plus its `__init__.py`). All internal package
+  imports, tests, and benchmarks were rewritten to import from `archivist.*`
+  directly (e.g. `archivist.storage.graph`, `archivist.app.handlers.tools_storage`).
+  Breaking for any external code still importing the flat module names
+  (e.g. `import graph`, `from handlers import ...`) — switch to the `archivist.*`
+  package paths. The Docker entrypoint (`python -m archivist.app.main`) and
+  `pythonpath=src` test configuration are unaffected.
+
+### Docs
+
+- **Doc/version coherence (INIT-001/SPEC-001)** — `docs/INSPIRATION.md` extended
+  past v1.3.0 with a v2.0–v2.3 summary and path/tool-count corrections;
+  `docs/ROADMAP.md` updated to reflect Pydantic Settings (`ArchivistSettings`)
+  as mostly done (Phase B alias removal remaining) and Phase 6.5 rewritten to
+  match PR #39's rejection of the literal `Bearer ${ARCHIVIST_API_KEY}`
+  placeholder (now `401`; `X-API-Key` or a resolved Bearer header documented
+  as the supported fix); added `docs/adr/ADR-001-platform-coherence-sequencing.md`
+  recording the P0/P1 → Phase 8 → Phase 7 → Memory-as-Product → coordination →
+  observability sequencing decision; `__version__`
+  (`src/archivist/__init__.py`) and `ARCHIVIST_VERSION`
+  (`src/archivist/storage/backup_manager.py`) synced to `2.3.0` to match this
+  CHANGELOG/README, plus the previously-hardcoded health-endpoint version
+  string in `src/archivist/app/main.py`.
+
 ### Fixed
+
 - `GET /admin/dashboard` and the `archivist_health_dashboard` / `archivist_savings_dashboard` MCP tools
   raised `RuntimeError: SQLitePool is not initialized` on every call against the default SQLite backend.
   `dashboard.py` and `tools_admin.py` imported the connection-pool singleton at module scope, binding to

@@ -510,6 +510,35 @@ async def curator_loop():
             except Exception as e:
                 logger.warning("Tip consolidation failed (non-fatal): %s", e)
 
+            # Phase 8 wedge (INIT-001/SPEC-006): resolve + reflect behind safe flags.
+            try:
+                from archivist.lifecycle.contradiction_resolve import resolve_contradictions_cycle
+
+                resolve_stats = await resolve_contradictions_cycle()
+                if resolve_stats.get("enabled") and resolve_stats.get("proposed"):
+                    logger.info(
+                        "Contradiction resolve: proposed=%d applied=%d dry_run=%s",
+                        resolve_stats.get("proposed", 0),
+                        resolve_stats.get("applied", 0),
+                        resolve_stats.get("dry_run", True),
+                    )
+            except Exception as e:
+                logger.warning("Contradiction resolve failed (non-fatal): %s", e)
+
+            try:
+                from archivist.lifecycle.reflection import reflection_cycle
+
+                reflect_stats = await reflection_cycle()
+                if reflect_stats.get("enabled") and reflect_stats.get("proposed"):
+                    logger.info(
+                        "Reflection: proposed=%d applied=%d dry_run=%s",
+                        reflect_stats.get("proposed", 0),
+                        reflect_stats.get("applied", 0),
+                        reflect_stats.get("dry_run", True),
+                    )
+            except Exception as e:
+                logger.warning("Reflection cycle failed (non-fatal): %s", e)
+
             wake_pairs = 0
             try:
                 wake_pairs = await _refresh_wake_up_caches()

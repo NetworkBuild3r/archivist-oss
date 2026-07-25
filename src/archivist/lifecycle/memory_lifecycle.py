@@ -157,8 +157,9 @@ async def _delete_qdrant_points(
     table atomically with the SQLite artefact cleanup in ``delete_memory_complete``.
     Pass an open ``MemoryTransaction`` via *txn* so both writes share one commit.
 
-    When ``OUTBOX_ENABLED=False`` (default), behaviour is identical to Phase 2
-    (synchronous delete with retry, failures appended to *failed_steps*).
+    When ``OUTBOX_ENABLED=False`` (opt-out during the INIT-001/SPEC-004
+    deprecation window), behaviour is identical to Phase 2 (synchronous delete
+    with retry, failures appended to *failed_steps*).
     """
     from archivist.core.config import OUTBOX_ENABLED
 
@@ -176,7 +177,10 @@ async def _delete_qdrant_points(
                 _txn.enqueue_qdrant_delete(col, all_ids, memory_id=memory_id)
         return 1, len(hyde_ids), len(micro_ids)
 
-    # Legacy synchronous path (OUTBOX_ENABLED=False).
+    # Legacy synchronous path (OUTBOX_ENABLED=False) — deprecated INIT-001/SPEC-004.
+    from archivist.storage.outbox import warn_legacy_inline_qdrant_once
+
+    warn_legacy_inline_qdrant_once()
     primary_count = await _qdrant_delete(
         client,
         col,
@@ -545,7 +549,8 @@ async def delete_memory_complete(
         result.registry_tokens = needle_count
         result.entity_facts = facts_count
     else:
-        # Legacy path: synchronous Qdrant deletes then independent SQLite steps.
+        # Legacy path: synchronous Qdrant deletes then independent SQLite steps
+        # (deprecated INIT-001/SPEC-004 — warn once inside _delete_qdrant_points).
         (
             result.qdrant_primary,
             result.qdrant_reverse_hyde,

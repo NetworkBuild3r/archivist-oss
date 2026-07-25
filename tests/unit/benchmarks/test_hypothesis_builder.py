@@ -65,18 +65,7 @@ def build_fn():
         if p not in sys.path:
             sys.path.insert(0, p)
 
-    # Import strip_augmentation_header from its real location so the helper works
-    # Inject it into the 'contextual_augment' namespace the adapter uses
-    import types
-
-    from archivist.write.contextual_augment import strip_augmentation_header
-
-    if "contextual_augment" not in sys.modules:
-        ca_mod = types.ModuleType("contextual_augment")
-        ca_mod.strip_augmentation_header = strip_augmentation_header  # type: ignore[attr-defined]
-        sys.modules["contextual_augment"] = ca_mod
-
-    # Now define the function under test inline to avoid triggering adapter
+    # Define the function under test inline to avoid triggering adapter
     # module-level side effects (load_repo_env, etc.).  This mirrors the
     # adapter's implementation exactly and ensures test/prod parity.
     import logging
@@ -88,7 +77,7 @@ def build_fn():
         max_sources: int = 5,
         max_chars_per_source: int = 1000,
     ) -> str:
-        from contextual_augment import strip_augmentation_header
+        from archivist.write.contextual_augment import strip_augmentation_header
 
         sources = result.get("sources", [])[:max_sources]
         parts: list[str] = []

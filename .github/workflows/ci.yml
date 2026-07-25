@@ -69,7 +69,7 @@ jobs:
 
 # ─── Type check (ratchet — error count may only decrease) ────────────────────
   typecheck:
-    name: Type Check (mypy ratchet ≤ 90 errors)
+    name: Type Check (mypy ratchet ≤ 175 errors, hard fail)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -82,26 +82,33 @@ jobs:
       - name: Install deps
         run: |
           pip install --upgrade pip
-          pip install -r requirements.txt mypy types-PyYAML types-tqdm
+          # Pin mypy to match local baseline (INIT-002/SPEC-005). Unpinned installs
+          # pulled 2.3.0 and broke the ratchet with version skew vs developers on 1.19.1.
+          pip install -r requirements.txt "mypy==1.19.1" types-PyYAML types-tqdm
 
       - name: mypy — ratchet gate (count may not increase above baseline)
         # Only real type errors count — import-not-found / import-untyped are
         # excluded because they vary by environment.
-        # Baseline: 90 real type errors measured locally (qdrant-client 1.17.1).
+        # Baseline: 170 real type errors measured on Python 3.12 (matching this
+        # job and the Dockerfile floor) via `pyproject.toml`'s
+        # `[tool.mypy] python_version = "3.12"`. The previous "3.11" setting
+        # made mypy abort after ~3 errors (numpy's bundled .pyi stubs need 3.12+
+        # syntax support), so the old "≤ 90"/"≤ 120" ceilings were never
+        # actually exercised against the full codebase — this job is now a
+        # real hard gate. INIT-001/SPEC-005.
         # grep is anchored to ^src/archivist/ to avoid matching note: lines
         # that quote type names containing the word "error".
-        # TODO: once CI count is stable, remove continue-on-error and set
-        #       MYPY_MAX_ERRORS to 5 above that value.
-        continue-on-error: true
         env:
-          MYPY_MAX_ERRORS: "120"
+          MYPY_MAX_ERRORS: "175"
         run: |
-          OUTPUT=$(python -m mypy src/archivist/ --config-file pyproject.toml 2>&1)
+          # mypy exits 1 when any errors exist — capture under `|| true` so
+          # `bash -e` does not abort before the ratchet count (INIT-002).
+          OUTPUT=$(python -m mypy src/archivist/ --config-file pyproject.toml 2>&1) || true
           echo "$OUTPUT"
-          COUNT=$(echo "$OUTPUT" | grep "^src/archivist/.*: error:" | grep -v "\[import-not-found\]\|\[import-untyped\]" | wc -l || true)
+          COUNT=$(echo "$OUTPUT" | grep "^src/archivist/.*: error:" | grep -v "\[import-not-found\]\|\[import-untyped\]" | wc -l | tr -d ' ' || true)
           echo ""
           echo "::notice::mypy type errors (real, excl. import stubs): $COUNT / ceiling: $MYPY_MAX_ERRORS"
-          if [ "$COUNT" -gt "$MYPY_MAX_ERRORS" ]; then
+          if [ "${COUNT:-0}" -gt "$MYPY_MAX_ERRORS" ]; then
             echo "::error::mypy error count ($COUNT) exceeds ratchet ceiling ($MYPY_MAX_ERRORS). Fix errors before merging."
             exit 1
           fi
@@ -133,7 +140,7 @@ jobs:
       - name: Run unit + regression tests
         # unit: pure logic — no I/O, no SQLite, no Qdrant — fastest feedback loop
         # regression: specific bug guards — also no external services
-        # --cov-fail-under=0: overrides pyproject.toml fail_under (46%) which is
+        # --cov-fail-under=0: overrides pyproject.toml fail_under (49%) which is
         # calibrated for the full suite; unit+regression alone cover ~24% by design.
         run: |
           python -m pytest \

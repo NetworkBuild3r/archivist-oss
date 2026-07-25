@@ -19,12 +19,17 @@ Optional extras (not required for the default server image or CI unit tests):
 
 ## Checks before you open a PR
 
-Run the same checks CI enforces (adjust paths if you use a different venv):
+Run the same checks CI enforces (adjust paths if you use a different venv).
+The authoritative job→command matrix is in [`docs/QA.md`](docs/QA.md) §
+**Reproduce CI locally (INIT-002)** — use that before every push.
 
 ```bash
-ruff check . --fix && ruff format .
-python -m mypy src/archivist/ --config-file pyproject.toml
-python -m pytest tests/ -q --tb=no
+pre-commit run --all-files
+ruff format --check src/ tests/
+ruff check src/ tests/
+# mypy: install the pinned version from docs/QA.md, then run the ratchet snippet there
+python -m pytest tests/unit tests/regression -q
+python -m pytest tests/integration tests/system -q
 ```
 
 **Storage / outbox changes** — also run the focused QA package:
@@ -35,9 +40,15 @@ python -m pytest tests/qa/ -q --tb=no
 
 See [`docs/QA.md`](docs/QA.md) and [`tests/qa/README.md`](tests/qa/README.md).
 
+CI's mypy job hard-fails over its error budget (`MYPY_MAX_ERRORS` in
+`.github/workflows/ci.yml`) — no `continue-on-error`. Never widen the budget or
+weaken `[tool.coverage.report] fail_under` in `pyproject.toml` to make a PR
+pass; fix the regression instead. See [`docs/QA.md`](docs/QA.md) for current
+values and rationale (INIT-001/SPEC-005).
+
 ## Code layout
 
-Production code lives under **`src/archivist/`** (`app/`, `storage/`, `lifecycle/`, `retrieval/`, `write/`, `features/`, `core/`, `utils/`). Legacy top-level `src/*.py` shims may still re-export symbols; new code should use the package paths.
+Production code lives under **`src/archivist/`** (`app/`, `storage/`, `lifecycle/`, `retrieval/`, `write/`, `features/`, `core/`, `utils/`). The legacy top-level `src/*.py` re-export shims were removed in INIT-001/SPEC-002 — always import from the canonical `archivist.*` package paths (e.g. `from archivist.storage.graph import ...`, `from archivist.app.handlers.tools_storage import ...`).
 
 When you touch chunking, retrieval thresholds, or the transactional write path, update or add **focused tests** in `tests/` (and `tests/qa/` if the outbox or `MemoryTransaction` contract changes).
 

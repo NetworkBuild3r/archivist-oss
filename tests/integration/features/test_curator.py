@@ -18,19 +18,19 @@ pytestmark = [pytest.mark.integration]
 
 class TestCuratorQueue:
     async def test_enqueue_returns_uuid(self, async_pool):
-        from curator_queue import enqueue
+        from archivist.lifecycle.curator_queue import enqueue
 
         op_id = await enqueue("merge_memory", {"ids": ["a", "b"]})
         assert len(op_id) == 36  # UUID format
 
     async def test_enqueue_invalid_op_type(self, async_pool):
-        from curator_queue import enqueue
+        from archivist.lifecycle.curator_queue import enqueue
 
         with pytest.raises(ValueError, match="Invalid op_type"):
             await enqueue("invalid_op", {})
 
     async def test_stats_counts_pending(self, async_pool):
-        from curator_queue import enqueue, stats
+        from archivist.lifecycle.curator_queue import enqueue, stats
 
         await enqueue("merge_memory", {})
         await enqueue("archive_memory", {})
@@ -39,7 +39,7 @@ class TestCuratorQueue:
         assert s["total"] >= 2
 
     async def test_drain_applies_ops(self, async_pool):
-        from curator_queue import drain, enqueue, stats
+        from archivist.lifecycle.curator_queue import drain, enqueue, stats
 
         await enqueue("skip_store", {"reason": "test"})
         applied = await drain(limit=10)
@@ -49,7 +49,7 @@ class TestCuratorQueue:
         assert s["pending"] == 0
 
     async def test_drain_empty_returns_empty(self, async_pool):
-        from curator_queue import drain
+        from archivist.lifecycle.curator_queue import drain
 
         applied = await drain(limit=10)
         assert applied == []
@@ -60,7 +60,7 @@ class TestCuratorQueue:
 
 class TestDedupResult:
     def test_dedup_result_dataclass(self):
-        from conflict_detection import DedupResult
+        from archivist.write.conflict_detection import DedupResult
 
         r = DedupResult(
             action="skip",
@@ -77,26 +77,26 @@ class TestDedupResult:
 
 class TestHotnessScoring:
     def test_compute_hotness_fresh(self):
-        from hotness import compute_hotness
+        from archivist.core.hotness import compute_hotness
 
         score = compute_hotness(retrieval_count=10, days_since_last_access=0, halflife=7)
         assert 0.0 < score <= 1.0
 
     def test_compute_hotness_decays(self):
-        from hotness import compute_hotness
+        from archivist.core.hotness import compute_hotness
 
         fresh = compute_hotness(retrieval_count=10, days_since_last_access=0, halflife=7)
         old = compute_hotness(retrieval_count=10, days_since_last_access=30, halflife=7)
         assert fresh > old
 
     def test_compute_hotness_zero_count(self):
-        from hotness import compute_hotness
+        from archivist.core.hotness import compute_hotness
 
         score = compute_hotness(retrieval_count=0, days_since_last_access=0, halflife=7)
         assert 0.4 < score < 0.6  # sigmoid(log1p(0)) = sigmoid(0) = 0.5
 
     def test_sigmoid_bounds(self):
-        from hotness import _sigmoid
+        from archivist.core.hotness import _sigmoid
 
         assert _sigmoid(0) == 0.5
         assert _sigmoid(100) > 0.99
@@ -108,7 +108,11 @@ class TestHotnessScoring:
 
 class TestSkillRelations:
     async def test_add_and_get_relation(self, async_pool):
-        from skills import add_skill_relation, get_skill_relations, register_skill
+        from archivist.features.skills import (
+            add_skill_relation,
+            get_skill_relations,
+            register_skill,
+        )
 
         r1 = await register_skill(name="kubectl", provider="k8s", registered_by="test")
         r2 = await register_skill(name="helm", provider="k8s", registered_by="test")
@@ -128,13 +132,17 @@ class TestSkillRelations:
         assert rels[0]["relation_type"] == "compose_with"
 
     async def test_invalid_relation_type(self, async_pool):
-        from skills import add_skill_relation
+        from archivist.features.skills import add_skill_relation
 
         with pytest.raises(ValueError, match="Invalid relation_type"):
             await add_skill_relation("a", "b", "invalid_type", created_by="test")
 
     async def test_get_substitutes(self, async_pool):
-        from skills import add_skill_relation, get_skill_substitutes, register_skill
+        from archivist.features.skills import (
+            add_skill_relation,
+            get_skill_substitutes,
+            register_skill,
+        )
 
         r1 = await register_skill(name="docker", provider="oci", registered_by="test")
         r2 = await register_skill(name="podman", provider="oci", registered_by="test")
@@ -157,11 +165,11 @@ class TestSkillRelations:
 
 class TestTipConsolidationSchema:
     def test_tips_table_has_negative_example_column(self):
-        from trajectory import _ensure_trajectory_schema
+        from archivist.core.trajectory import _ensure_trajectory_schema
 
         _ensure_trajectory_schema()
 
-        from graph import get_db
+        from archivist.storage.graph import get_db
 
         conn = get_db()
         info = conn.execute("PRAGMA table_info(tips)").fetchall()
@@ -170,8 +178,8 @@ class TestTipConsolidationSchema:
         assert "archived" in columns
 
     async def test_search_tips_excludes_archived(self, async_pool):
-        from graph import get_db
-        from trajectory import _ensure_trajectory_schema, search_tips
+        from archivist.core.trajectory import _ensure_trajectory_schema, search_tips
+        from archivist.storage.graph import get_db
 
         _ensure_trajectory_schema()
 
@@ -204,7 +212,7 @@ class TestTipConsolidationSchema:
 
 class TestCuratorMetrics:
     def test_curator_metric_names_exist(self):
-        import metrics as m
+        import archivist.core.metrics as m
 
         assert hasattr(m, "CURATOR_QUEUE_DEPTH")
         assert hasattr(m, "CURATOR_DEDUP_DECISION")
@@ -213,7 +221,7 @@ class TestCuratorMetrics:
         assert hasattr(m, "CURATOR_DRAIN_DURATION")
 
     def test_curator_metrics_emit(self):
-        import metrics as m
+        import archivist.core.metrics as m
 
         m.inc(m.CURATOR_LLM_CALLS)
         m.inc(m.CURATOR_DEDUP_DECISION, {"decision": "skip"})
@@ -232,7 +240,7 @@ class TestCuratorMetrics:
 
 class TestCuratorConfig:
     def test_config_defaults(self):
-        from config import (
+        from archivist.core.config import (
             CURATOR_QUEUE_DRAIN_INTERVAL,
             CURATOR_TIP_BUDGET,
             DEDUP_LLM_ENABLED,

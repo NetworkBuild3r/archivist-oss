@@ -44,7 +44,7 @@ class TestDeleteResult:
     """DeleteResult dataclass behaves correctly."""
 
     def test_total_sums_all_fields(self):
-        from memory_lifecycle import DeleteResult
+        from archivist.lifecycle.memory_lifecycle import DeleteResult
 
         r = DeleteResult(
             memory_id="abc",
@@ -59,7 +59,7 @@ class TestDeleteResult:
         assert r.total == 15
 
     def test_defaults_are_zero(self):
-        from memory_lifecycle import DeleteResult
+        from archivist.lifecycle.memory_lifecycle import DeleteResult
 
         r = DeleteResult()
         assert r.total == 0
@@ -72,7 +72,7 @@ class TestArchiveResult:
     """ArchiveResult dataclass behaves correctly."""
 
     def test_total_counts_booleans(self):
-        from memory_lifecycle import ArchiveResult
+        from archivist.lifecycle.memory_lifecycle import ArchiveResult
 
         r = ArchiveResult(
             memory_id="abc",
@@ -83,7 +83,7 @@ class TestArchiveResult:
         assert r.total == 2
 
     def test_defaults(self):
-        from memory_lifecycle import ArchiveResult
+        from archivist.lifecycle.memory_lifecycle import ArchiveResult
 
         r = ArchiveResult()
         assert r.total == 0
@@ -112,32 +112,45 @@ def _make_mock_client(scroll_side_effect=None, children=None):
 
 
 class TestDeleteMemoryComplete:
-    """delete_memory_complete cleans ALL artifact types."""
+    """delete_memory_complete cleans ALL artifact types.
+
+    INIT-002/SPEC-004: outbox default-on requires an initialized SQLitePool
+    (MemoryTransaction). Qdrant deletes are durable via outbox enqueue + drain.
+    """
+
+    @pytest.fixture(autouse=True)
+    async def _require_pool(self, async_pool):
+        """Ensure SQLitePool is initialized for OUTBOX_ENABLED MemoryTransaction."""
+        yield async_pool
 
     @pytest.fixture
     def mock_qdrant(self):
         client = _make_mock_client()
-        with patch("memory_lifecycle.qdrant_client", return_value=client):
+        with patch("archivist.lifecycle.memory_lifecycle.qdrant_client", return_value=client):
             yield client
 
     @pytest.fixture
     def mock_fts(self):
         with patch(
-            "memory_lifecycle.delete_fts_chunks_batch", new_callable=AsyncMock, return_value=1
+            "archivist.lifecycle.memory_lifecycle.delete_fts_chunks_batch",
+            new_callable=AsyncMock,
+            return_value=1,
         ) as m:
             yield m
 
     @pytest.fixture
     def mock_needle(self):
         with patch(
-            "memory_lifecycle.delete_needle_tokens_batch", new_callable=AsyncMock, return_value=3
+            "archivist.lifecycle.memory_lifecycle.delete_needle_tokens_batch",
+            new_callable=AsyncMock,
+            return_value=3,
         ) as m:
             yield m
 
     @pytest.fixture
     def mock_entity_facts(self):
         with patch(
-            "memory_lifecycle._delete_entity_facts_for_memory",
+            "archivist.lifecycle.memory_lifecycle._delete_entity_facts_for_memory",
             new_callable=AsyncMock,
             return_value=2,
         ) as m:
@@ -145,18 +158,26 @@ class TestDeleteMemoryComplete:
 
     @pytest.fixture
     def mock_hotness(self):
-        with patch("memory_lifecycle.delete_hotness", new_callable=AsyncMock, return_value=1) as m:
+        with patch(
+            "archivist.lifecycle.memory_lifecycle.delete_hotness",
+            new_callable=AsyncMock,
+            return_value=1,
+        ) as m:
             yield m
 
     @pytest.fixture
     def mock_audit(self):
-        with patch("memory_lifecycle.log_memory_event", new_callable=AsyncMock) as m:
+        with patch(
+            "archivist.lifecycle.memory_lifecycle.log_memory_event", new_callable=AsyncMock
+        ) as m:
             yield m
 
     async def test_calls_all_cleanup_steps(
-        self, mock_qdrant, mock_fts, mock_needle, mock_entity_facts, mock_audit
+        self, async_pool, mock_qdrant, mock_fts, mock_needle, mock_entity_facts, mock_audit
     ):
-        from memory_lifecycle import delete_memory_complete
+        from tests.fixtures.mocks import count_outbox
+
+        from archivist.lifecycle.memory_lifecycle import delete_memory_complete
 
         result = await delete_memory_complete("mem-123", "test-ns")
 
@@ -169,11 +190,11 @@ class TestDeleteMemoryComplete:
 
         mock_fts.assert_called_once()
         mock_needle.assert_called_once()
-        # INIT-022/SPEC-004: _delete_sqlite_artifacts now always passes an
-        # explicit conn= kwarg (None on the non-outbox path) so it can be
-        # reused with a real MemoryTransaction.conn from the OUTBOX_ENABLED
-        # branch — this is intentional post-fix behavior, not a regression.
-        mock_entity_facts.assert_called_once_with("mem-123", conn=None)
+        # Outbox path threads MemoryTransaction.conn into SQLite cleanup.
+        mock_entity_facts.assert_called_once()
+        assert mock_entity_facts.call_args[0][0] == "mem-123"
+        assert mock_entity_facts.call_args.kwargs.get("conn") is not None
+        assert await count_outbox(async_pool, "pending") >= 1
 
     async def test_cleans_up_child_fts_and_needle(
         self, mock_fts, mock_needle, mock_entity_facts, mock_audit
@@ -193,10 +214,10 @@ class TestDeleteMemoryComplete:
             }
         )
 
-        with patch("memory_lifecycle.qdrant_client", return_value=client):
-            from memory_lifecycle import delete_memory_complete
+        with patch("archivist.lifecycle.memory_lifecycle.qdrant_client", return_value=client):
+            from archivist.lifecycle.memory_lifecycle import delete_memory_complete
 
-            result = await delete_memory_complete("mem-parent", "ns")
+            await delete_memory_complete("mem-parent", "ns")
 
         fts_ids = mock_fts.call_args[0][0]
         assert "mem-parent" in fts_ids
@@ -208,56 +229,91 @@ class TestDeleteMemoryComplete:
         assert set(needle_ids) == {"mem-parent", "micro-1", "micro-2", "rhyde-1"}
 
     async def test_qdrant_failure_tracked_in_failed_steps(
-        self, mock_fts, mock_needle, mock_entity_facts, mock_audit
+        self, async_pool, mock_fts, mock_needle, mock_entity_facts, mock_audit, monkeypatch
     ):
-        """If Qdrant primary delete fails, failed_steps records it and PartialDeletionError is raised."""
-        from cascade import PartialDeletionError
+        """Durable path: enqueue succeeds; persistent drain failure → dead-letter."""
+        from tests.fixtures.mocks import (
+            count_outbox,
+            drain_outbox_to_terminal,
+            make_vector_backend_mock,
+        )
+
+        import archivist.core.config as _cfg
+
+        monkeypatch.setattr(_cfg, "OUTBOX_MAX_RETRIES", 2)
 
         client = MagicMock()
-        client.delete.side_effect = Exception("Qdrant connection refused")
-        client.scroll.side_effect = Exception("Qdrant connection refused")
+        client.scroll.return_value = ([], None)
         client.count.return_value = MagicMock(count=0)
 
-        with patch("memory_lifecycle.qdrant_client", return_value=client):
-            from memory_lifecycle import delete_memory_complete
+        with patch("archivist.lifecycle.memory_lifecycle.qdrant_client", return_value=client):
+            from archivist.lifecycle.memory_lifecycle import delete_memory_complete
 
-            with pytest.raises(PartialDeletionError) as exc_info:
-                await delete_memory_complete("mem-fail", "ns")
+            result = await delete_memory_complete("mem-fail", "ns")
 
-            result = exc_info.value.result
-            assert "qdrant_primary" in result.failed_steps
-            assert result.qdrant_primary == 1  # pre-count preserved on failure
+        # Enqueue path does not call Qdrant synchronously — no PartialDeletionError here.
+        assert "qdrant_primary" not in result.failed_steps
+        assert result.qdrant_primary == 1
+        assert await count_outbox(async_pool, "pending") >= 1
 
         mock_fts.assert_called_once()
         mock_needle.assert_called_once()
-        # INIT-022/SPEC-004: conn= is now always explicit (None here) — see
-        # test_calls_all_cleanup_steps for the full rationale.
-        mock_entity_facts.assert_called_once_with("mem-fail", conn=None)
+        mock_entity_facts.assert_called_once()
+        assert mock_entity_facts.call_args[0][0] == "mem-fail"
+        assert mock_entity_facts.call_args.kwargs.get("conn") is not None
 
-    async def test_partial_deletion_error_on_many_failures(self, mock_audit):
-        """PartialDeletionError raised when qdrant_primary or qdrant_children fail."""
-        from cascade import PartialDeletionError
+        backend = make_vector_backend_mock()
+        backend.delete = AsyncMock(side_effect=Exception("Qdrant connection refused"))
+        await drain_outbox_to_terminal(async_pool, backend)
+        assert await count_outbox(async_pool, "dead") >= 1
+
+    async def test_partial_deletion_error_on_many_failures(
+        self, async_pool, mock_audit, monkeypatch
+    ):
+        """SQLite cleanup failures are recorded; Qdrant failure lands in outbox DLQ."""
+        from tests.fixtures.mocks import (
+            count_outbox,
+            drain_outbox_to_terminal,
+            make_vector_backend_mock,
+        )
+
+        import archivist.core.config as _cfg
+
+        monkeypatch.setattr(_cfg, "OUTBOX_MAX_RETRIES", 2)
 
         client = MagicMock()
-        client.delete.side_effect = Exception("down")
         client.scroll.side_effect = Exception("down")
         client.count.return_value = MagicMock(count=0)
 
         with (
-            patch("memory_lifecycle.qdrant_client", return_value=client),
+            patch("archivist.lifecycle.memory_lifecycle.qdrant_client", return_value=client),
             patch(
-                "memory_lifecycle.delete_fts_chunks_batch",
+                "archivist.lifecycle.memory_lifecycle.delete_fts_chunks_batch",
                 side_effect=sqlite3.OperationalError("db locked"),
             ),
-            patch("memory_lifecycle.delete_needle_tokens_batch", return_value=0),
-            patch("memory_lifecycle._delete_entity_facts_for_memory", return_value=0),
+            patch(
+                "archivist.lifecycle.memory_lifecycle.delete_needle_tokens_batch",
+                new_callable=AsyncMock,
+                return_value=0,
+            ),
+            patch(
+                "archivist.lifecycle.memory_lifecycle._delete_entity_facts_for_memory",
+                new_callable=AsyncMock,
+                return_value=0,
+            ),
         ):
-            from memory_lifecycle import delete_memory_complete
+            from archivist.lifecycle.memory_lifecycle import delete_memory_complete
 
-            with pytest.raises(PartialDeletionError) as exc_info:
-                await delete_memory_complete("mem-x", "ns")
+            result = await delete_memory_complete("mem-x", "ns")
 
-            assert "qdrant_primary" in exc_info.value.result.failed_steps
+        assert "fts_batch" in result.failed_steps
+        assert "qdrant_primary" not in result.failed_steps
+        assert await count_outbox(async_pool, "pending") >= 1
+
+        backend = make_vector_backend_mock()
+        backend.delete = AsyncMock(side_effect=Exception("down"))
+        await drain_outbox_to_terminal(async_pool, backend)
+        assert await count_outbox(async_pool, "dead") >= 1
 
     async def test_uses_collection_router(
         self, mock_fts, mock_needle, mock_entity_facts, mock_audit
@@ -265,30 +321,38 @@ class TestDeleteMemoryComplete:
         """Respects namespace-to-collection routing."""
         client = _make_mock_client()
         with (
-            patch("memory_lifecycle.qdrant_client", return_value=client),
-            patch("memory_lifecycle.collection_for", return_value="archivist_custom") as cf,
+            patch("archivist.lifecycle.memory_lifecycle.qdrant_client", return_value=client),
+            patch(
+                "archivist.lifecycle.memory_lifecycle.collection_for",
+                return_value="archivist_custom",
+            ) as cf,
         ):
-            from memory_lifecycle import delete_memory_complete
+            from archivist.lifecycle.memory_lifecycle import delete_memory_complete
 
             await delete_memory_complete("m1", "custom-ns")
 
         cf.assert_called_once_with("custom-ns")
 
     async def test_collection_override(
-        self, mock_qdrant, mock_fts, mock_needle, mock_entity_facts, mock_audit
+        self, async_pool, mock_qdrant, mock_fts, mock_needle, mock_entity_facts, mock_audit
     ):
-        """Explicit collection= kwarg overrides routing."""
-        from memory_lifecycle import delete_memory_complete
+        """Explicit collection= kwarg overrides routing (verified after outbox drain)."""
+        from tests.fixtures.mocks import count_outbox, drain_outbox
+
+        from archivist.lifecycle.memory_lifecycle import delete_memory_complete
+        from archivist.storage.backends import QdrantVectorBackend
 
         await delete_memory_complete("m1", "ns", collection="override_col")
 
+        assert await count_outbox(async_pool, "pending") >= 1
+        await drain_outbox(QdrantVectorBackend(mock_qdrant))
         assert mock_qdrant.delete.call_args_list[0][1]["collection_name"] == "override_col"
 
     async def test_audit_logging_called(
         self, mock_qdrant, mock_fts, mock_needle, mock_entity_facts, mock_audit
     ):
         """log_memory_event is called with action='delete' and full metadata."""
-        from memory_lifecycle import delete_memory_complete
+        from archivist.lifecycle.memory_lifecycle import delete_memory_complete
 
         result = await delete_memory_complete("m-audit", "ns")
 
@@ -308,7 +372,7 @@ class TestPaginatedScroll:
         """Scroll with two pages discovers all children."""
         from qdrant_client.models import FieldCondition, Filter, MatchValue
 
-        from cascade import _scroll_all
+        from archivist.lifecycle.cascade import _scroll_all
 
         p1 = MagicMock()
         p1.id = "child-1"
@@ -342,7 +406,7 @@ class TestPaginatedScroll:
         """Scroll failure is tracked in failed_steps."""
         from qdrant_client.models import FieldCondition, Filter, MatchValue
 
-        from cascade import _scroll_all
+        from archivist.lifecycle.cascade import _scroll_all
 
         client = MagicMock()
         client.scroll.side_effect = Exception("timeout")
@@ -362,11 +426,11 @@ class TestArchiveMemoryComplete:
         client = MagicMock()
         client.scroll.return_value = ([], None)  # no child points to enumerate
         with (
-            patch("memory_lifecycle.qdrant_client", return_value=client),
-            patch("memory_lifecycle.collection_for", return_value="test_col"),
-            patch("memory_lifecycle.log_memory_event", new_callable=AsyncMock),
+            patch("archivist.lifecycle.memory_lifecycle.qdrant_client", return_value=client),
+            patch("archivist.lifecycle.memory_lifecycle.collection_for", return_value="test_col"),
+            patch("archivist.lifecycle.memory_lifecycle.log_memory_event", new_callable=AsyncMock),
         ):
-            from memory_lifecycle import archive_memory_complete
+            from archivist.lifecycle.memory_lifecycle import archive_memory_complete
 
             result = await archive_memory_complete("m1", "ns")
 
@@ -386,11 +450,11 @@ class TestArchiveMemoryComplete:
         client.scroll.return_value = ([], None)
         client.set_payload.side_effect = [None, Exception("nope"), None]
         with (
-            patch("memory_lifecycle.qdrant_client", return_value=client),
-            patch("memory_lifecycle.collection_for", return_value="test_col"),
-            patch("memory_lifecycle.log_memory_event", new_callable=AsyncMock),
+            patch("archivist.lifecycle.memory_lifecycle.qdrant_client", return_value=client),
+            patch("archivist.lifecycle.memory_lifecycle.collection_for", return_value="test_col"),
+            patch("archivist.lifecycle.memory_lifecycle.log_memory_event", new_callable=AsyncMock),
         ):
-            from memory_lifecycle import archive_memory_complete
+            from archivist.lifecycle.memory_lifecycle import archive_memory_complete
 
             result = await archive_memory_complete("m2", "ns")
 
@@ -404,11 +468,11 @@ class TestArchiveMemoryComplete:
         client.scroll.return_value = ([], None)
         mock_audit = AsyncMock()
         with (
-            patch("memory_lifecycle.qdrant_client", return_value=client),
-            patch("memory_lifecycle.collection_for", return_value="test_col"),
-            patch("memory_lifecycle.log_memory_event", mock_audit),
+            patch("archivist.lifecycle.memory_lifecycle.qdrant_client", return_value=client),
+            patch("archivist.lifecycle.memory_lifecycle.collection_for", return_value="test_col"),
+            patch("archivist.lifecycle.memory_lifecycle.log_memory_event", mock_audit),
         ):
-            from memory_lifecycle import archive_memory_complete
+            from archivist.lifecycle.memory_lifecycle import archive_memory_complete
 
             await archive_memory_complete("m-audit", "ns")
 
@@ -421,7 +485,7 @@ class TestDeleteFtsChunksByQdrantId:
     """graph.delete_fts_chunks_by_qdrant_id works correctly."""
 
     async def test_deletes_matching_rows(self, async_pool):
-        from graph import delete_fts_chunks_by_qdrant_id, get_db, upsert_fts_chunk
+        from archivist.storage.graph import delete_fts_chunks_by_qdrant_id, get_db, upsert_fts_chunk
 
         await upsert_fts_chunk("qid-1", "some text", "test.md", 0, "agent", "ns")
         await upsert_fts_chunk("qid-2", "other text", "test.md", 1, "agent", "ns")
@@ -437,12 +501,12 @@ class TestDeleteFtsChunksByQdrantId:
         assert remaining == 0
 
     async def test_returns_zero_for_missing_id(self, async_pool):
-        from graph import delete_fts_chunks_by_qdrant_id
+        from archivist.storage.graph import delete_fts_chunks_by_qdrant_id
 
         assert await delete_fts_chunks_by_qdrant_id("nonexistent") == 0
 
     async def test_leaves_other_rows_intact(self, async_pool):
-        from graph import delete_fts_chunks_by_qdrant_id, get_db, upsert_fts_chunk
+        from archivist.storage.graph import delete_fts_chunks_by_qdrant_id, get_db, upsert_fts_chunk
 
         await upsert_fts_chunk("keep-me", "important text", "f.md", 0, "a", "ns")
         await upsert_fts_chunk("delete-me", "trash text", "f.md", 1, "a", "ns")
@@ -461,7 +525,7 @@ class TestBatchFtsDelete:
     """delete_fts_chunks_batch handles chunking correctly."""
 
     async def test_batch_deletes_multiple_ids(self, async_pool):
-        from graph import delete_fts_chunks_batch, get_db, upsert_fts_chunk
+        from archivist.storage.graph import delete_fts_chunks_batch, get_db, upsert_fts_chunk
 
         for i in range(5):
             await upsert_fts_chunk(f"batch-{i}", f"text {i}", "f.md", i, "a", "ns")
@@ -477,13 +541,13 @@ class TestBatchFtsDelete:
         assert remaining == 0
 
     async def test_batch_empty_list(self, async_pool):
-        from graph import delete_fts_chunks_batch
+        from archivist.storage.graph import delete_fts_chunks_batch
 
         assert await delete_fts_chunks_batch([]) == 0
 
     async def test_batch_chunking_under_parameter_limit(self, async_pool):
         """Passing >999 IDs doesn't crash sqlite3 thanks to internal chunking."""
-        from graph import delete_fts_chunks_batch, upsert_fts_chunk
+        from archivist.storage.graph import delete_fts_chunks_batch, upsert_fts_chunk
 
         ids = [f"chunk-test-{i}" for i in range(1200)]
         for qid in ids[:5]:
@@ -497,7 +561,7 @@ class TestBatchNeedleDelete:
     """delete_needle_tokens_batch handles chunking correctly."""
 
     async def test_batch_empty_list(self, async_pool):
-        from graph import delete_needle_tokens_batch
+        from archivist.storage.graph import delete_needle_tokens_batch
 
         assert await delete_needle_tokens_batch([]) == 0
 
@@ -506,8 +570,8 @@ class TestDeleteEntityFactsForMemory:
     """_delete_entity_facts_for_memory soft-deactivates linked facts."""
 
     async def test_deactivates_matching_facts(self, async_pool):
-        from graph import add_fact, get_db, upsert_entity
-        from memory_lifecycle import _delete_entity_facts_for_memory
+        from archivist.lifecycle.memory_lifecycle import _delete_entity_facts_for_memory
+        from archivist.storage.graph import add_fact, get_db, upsert_entity
 
         eid = await upsert_entity("test-entity")
         await add_fact(eid, "some fact", source_file="explicit/mem-xyz-agent", agent_id="agent")
@@ -525,8 +589,8 @@ class TestDeleteEntityFactsForMemory:
         assert active == 0
 
     async def test_does_not_affect_unrelated_facts(self, async_pool):
-        from graph import add_fact, get_db, upsert_entity
-        from memory_lifecycle import _delete_entity_facts_for_memory
+        from archivist.lifecycle.memory_lifecycle import _delete_entity_facts_for_memory
+        from archivist.storage.graph import add_fact, get_db, upsert_entity
 
         eid = await upsert_entity("test-entity-2")
         await add_fact(eid, "safe fact", source_file="explicit/safe-agent", agent_id="safe")
@@ -546,7 +610,7 @@ class TestOrphanSweeper:
 
     async def test_cleans_orphaned_fts_rows(self, async_pool):
         """FTS rows with no corresponding Qdrant point are cleaned."""
-        from graph import get_db, upsert_fts_chunk
+        from archivist.storage.graph import get_db, upsert_fts_chunk
 
         await upsert_fts_chunk("exists-in-qdrant", "text", "f.md", 0, "a", "ns")
         await upsert_fts_chunk("orphaned-id", "text2", "f.md", 1, "a", "ns")
@@ -558,10 +622,10 @@ class TestOrphanSweeper:
         mock_client.get_collections.return_value = MagicMock()
 
         with (
-            patch("cascade.qdrant_client", return_value=mock_client),
-            patch("cascade.collections_for_query", return_value=["test_col"]),
+            patch("archivist.lifecycle.cascade.qdrant_client", return_value=mock_client),
+            patch("archivist.lifecycle.cascade.collections_for_query", return_value=["test_col"]),
         ):
-            from cascade import sweep_orphans
+            from archivist.lifecycle.cascade import sweep_orphans
 
             result = await sweep_orphans()
 
@@ -576,7 +640,7 @@ class TestOrphanSweeper:
 
     async def test_does_not_clean_existing_points(self, async_pool):
         """FTS rows with matching Qdrant points are kept."""
-        from graph import get_db, upsert_fts_chunk
+        from archivist.storage.graph import get_db, upsert_fts_chunk
 
         await upsert_fts_chunk("keep-this", "text", "f.md", 0, "a", "ns")
 
@@ -587,10 +651,10 @@ class TestOrphanSweeper:
         mock_client.get_collections.return_value = MagicMock()
 
         with (
-            patch("cascade.qdrant_client", return_value=mock_client),
-            patch("cascade.collections_for_query", return_value=["test_col"]),
+            patch("archivist.lifecycle.cascade.qdrant_client", return_value=mock_client),
+            patch("archivist.lifecycle.cascade.collections_for_query", return_value=["test_col"]),
         ):
-            from cascade import sweep_orphans
+            from archivist.lifecycle.cascade import sweep_orphans
 
             result = await sweep_orphans()
 
@@ -603,19 +667,21 @@ class TestOrphanSweeper:
 
 
 class TestCuratorQueueDrainAsync:
-    """curator_queue.drain() is async and calls lifecycle functions."""
+    """archivist.lifecycle.curator_queue.drain() is async and calls lifecycle functions."""
 
     async def test_drain_is_async_coroutine(self):
         import inspect
 
-        from curator_queue import drain
+        from archivist.lifecycle.curator_queue import drain
 
         assert inspect.iscoroutinefunction(drain)
 
     async def test_delete_op_calls_lifecycle(self, async_pool):
-        from curator_queue import drain, enqueue
+        from archivist.lifecycle.curator_queue import drain, enqueue
 
-        with patch("curator_queue._apply_delete", new_callable=AsyncMock) as mock_del:
+        with patch(
+            "archivist.lifecycle.curator_queue._apply_delete", new_callable=AsyncMock
+        ) as mock_del:
             await enqueue("delete_memory", {"memory_ids": ["m1"], "namespace": "ns"})
             result = await drain(limit=10)
 
@@ -624,9 +690,11 @@ class TestCuratorQueueDrainAsync:
         mock_del.assert_called_once()
 
     async def test_archive_op_calls_lifecycle(self, async_pool):
-        from curator_queue import drain, enqueue
+        from archivist.lifecycle.curator_queue import drain, enqueue
 
-        with patch("curator_queue._apply_archive", new_callable=AsyncMock) as mock_arc:
+        with patch(
+            "archivist.lifecycle.curator_queue._apply_archive", new_callable=AsyncMock
+        ) as mock_arc:
             await enqueue("archive_memory", {"memory_ids": ["m1"], "namespace": "ns"})
             result = await drain(limit=10)
 
@@ -635,10 +703,12 @@ class TestCuratorQueueDrainAsync:
         mock_arc.assert_called_once()
 
     async def test_failed_op_marked_failed(self, async_pool):
-        from curator_queue import drain, enqueue
+        from archivist.lifecycle.curator_queue import drain, enqueue
 
         with patch(
-            "curator_queue._apply_delete", new_callable=AsyncMock, side_effect=Exception("boom")
+            "archivist.lifecycle.curator_queue._apply_delete",
+            new_callable=AsyncMock,
+            side_effect=Exception("boom"),
         ):
             await enqueue("delete_memory", {"memory_ids": ["m1"]})
             result = await drain(limit=10)
@@ -647,7 +717,7 @@ class TestCuratorQueueDrainAsync:
 
 
 class TestMergeUsesLifecycle:
-    """merge.py uses delete_memory_complete for each original memory."""
+    """archivist.lifecycle.merge.py uses delete_memory_complete for each original memory."""
 
     async def test_merge_calls_delete_per_id(self):
         mock_client = MagicMock()
@@ -670,15 +740,25 @@ class TestMergeUsesLifecycle:
         mock_del = AsyncMock()
 
         with (
-            patch("merge.qdrant_client", return_value=mock_client),
-            patch("merge.embed_text", new_callable=AsyncMock, return_value=[0.1] * 1024),
-            patch("merge.llm_query", new_callable=AsyncMock, return_value="merged text"),
-            patch("merge.record_version", new_callable=AsyncMock, return_value=2),
+            patch("archivist.lifecycle.merge.qdrant_client", return_value=mock_client),
+            patch(
+                "archivist.lifecycle.merge.embed_text",
+                new_callable=AsyncMock,
+                return_value=[0.1] * 1024,
+            ),
+            patch(
+                "archivist.lifecycle.merge.llm_query",
+                new_callable=AsyncMock,
+                return_value="merged text",
+            ),
+            patch(
+                "archivist.lifecycle.merge.record_version", new_callable=AsyncMock, return_value=2
+            ),
             patch("archivist.storage.transaction.MemoryTransaction", _mock_txn_ctx()),
-            patch("merge.log_memory_event", new_callable=AsyncMock),
-            patch("memory_lifecycle.delete_memory_complete", mock_del),
+            patch("archivist.lifecycle.merge.log_memory_event", new_callable=AsyncMock),
+            patch("archivist.lifecycle.memory_lifecycle.delete_memory_complete", mock_del),
         ):
-            from merge import merge_memories
+            from archivist.lifecycle.merge import merge_memories
 
             result = await merge_memories(["id1", "id2"], "semantic", "agent", "ns")
 
@@ -692,7 +772,7 @@ class TestQdrantRetry:
         """First delete raises a transient error, second attempt succeeds."""
         from qdrant_client.http.exceptions import ResponseHandlingException
 
-        from cascade import _qdrant_delete
+        from archivist.lifecycle.cascade import _qdrant_delete
 
         client = MagicMock()
         client.count.return_value = MagicMock(count=5)
@@ -713,7 +793,7 @@ class TestQdrantRetry:
         """A non-transient error (e.g. 404) fails immediately without retry."""
         from qdrant_client.http.exceptions import UnexpectedResponse
 
-        from cascade import _qdrant_delete
+        from archivist.lifecycle.cascade import _qdrant_delete
 
         client = MagicMock()
         err = UnexpectedResponse.__new__(UnexpectedResponse)
@@ -733,7 +813,7 @@ class TestQdrantRetry:
         """Both attempts fail with transient errors; pre-count is still returned."""
         from qdrant_client.http.exceptions import ResponseHandlingException
 
-        from cascade import _qdrant_delete
+        from archivist.lifecycle.cascade import _qdrant_delete
 
         client = MagicMock()
         client.delete.side_effect = ResponseHandlingException("network")
@@ -749,7 +829,7 @@ class TestQdrantRetry:
         """_qdrant_set_payload retries on transient error and succeeds."""
         from qdrant_client.http.exceptions import ResponseHandlingException
 
-        from cascade import _qdrant_set_payload
+        from archivist.lifecycle.cascade import _qdrant_set_payload
 
         client = MagicMock()
         client.set_payload.side_effect = [ResponseHandlingException("timeout"), None]
@@ -773,7 +853,7 @@ class TestQdrantRetry:
         """_qdrant_set_payload does not retry permanent errors."""
         from qdrant_client.http.exceptions import UnexpectedResponse
 
-        from cascade import _qdrant_set_payload
+        from archivist.lifecycle.cascade import _qdrant_set_payload
 
         client = MagicMock()
         err = UnexpectedResponse.__new__(UnexpectedResponse)
@@ -806,8 +886,8 @@ class TestOrphanSweeperAdvanced:
         mock_client = MagicMock()
         mock_client.get_collections.side_effect = ConnectionError("refused")
 
-        with patch("cascade.qdrant_client", return_value=mock_client):
-            from cascade import sweep_orphans
+        with patch("archivist.lifecycle.cascade.qdrant_client", return_value=mock_client):
+            from archivist.lifecycle.cascade import sweep_orphans
 
             result = await sweep_orphans()
 
@@ -817,7 +897,7 @@ class TestOrphanSweeperAdvanced:
 
     async def test_needle_orphan_cleanup_primary(self, async_pool):
         """Needle rows keyed on a primary memory_id with no Qdrant point are cleaned."""
-        from graph import _ensure_needle_registry, get_db
+        from archivist.storage.graph import _ensure_needle_registry, get_db
 
         _ensure_needle_registry()
         conn = get_db()
@@ -834,10 +914,10 @@ class TestOrphanSweeperAdvanced:
         mock_client.retrieve.return_value = []
 
         with (
-            patch("cascade.qdrant_client", return_value=mock_client),
-            patch("cascade.collections_for_query", return_value=["test_col"]),
+            patch("archivist.lifecycle.cascade.qdrant_client", return_value=mock_client),
+            patch("archivist.lifecycle.cascade.collections_for_query", return_value=["test_col"]),
         ):
-            from cascade import sweep_orphans
+            from archivist.lifecycle.cascade import sweep_orphans
 
             result = await sweep_orphans()
 
@@ -852,7 +932,7 @@ class TestOrphanSweeperAdvanced:
 
     async def test_needle_orphan_cleanup_child(self, async_pool):
         """Needle rows where memory_id is a micro-chunk Qdrant ID are cleaned when orphaned."""
-        from graph import _ensure_needle_registry, get_db
+        from archivist.storage.graph import _ensure_needle_registry, get_db
 
         _ensure_needle_registry()
         conn = get_db()
@@ -869,10 +949,10 @@ class TestOrphanSweeperAdvanced:
         mock_client.retrieve.return_value = []
 
         with (
-            patch("cascade.qdrant_client", return_value=mock_client),
-            patch("cascade.collections_for_query", return_value=["test_col"]),
+            patch("archivist.lifecycle.cascade.qdrant_client", return_value=mock_client),
+            patch("archivist.lifecycle.cascade.collections_for_query", return_value=["test_col"]),
         ):
-            from cascade import sweep_orphans
+            from archivist.lifecycle.cascade import sweep_orphans
 
             result = await sweep_orphans()
 
@@ -887,7 +967,7 @@ class TestOrphanSweeperAdvanced:
 
     async def test_retrieve_failure_skips_subbatch(self, async_pool):
         """If client.retrieve fails for one collection, sub-batch is conservatively kept."""
-        from graph import get_db, upsert_fts_chunk
+        from archivist.storage.graph import get_db, upsert_fts_chunk
 
         await upsert_fts_chunk("maybe-orphan", "text", "f.md", 0, "a", "ns")
 
@@ -896,10 +976,12 @@ class TestOrphanSweeperAdvanced:
         mock_client.retrieve.side_effect = Exception("retrieve error")
 
         with (
-            patch("cascade.qdrant_client", return_value=mock_client),
-            patch("cascade.collections_for_query", return_value=["col_a", "col_b"]),
+            patch("archivist.lifecycle.cascade.qdrant_client", return_value=mock_client),
+            patch(
+                "archivist.lifecycle.cascade.collections_for_query", return_value=["col_a", "col_b"]
+            ),
         ):
-            from cascade import sweep_orphans
+            from archivist.lifecycle.cascade import sweep_orphans
 
             result = await sweep_orphans()
 
@@ -914,7 +996,7 @@ class TestOrphanSweeperAdvanced:
 
     async def test_keyset_pagination_processes_all_pages(self, async_pool):
         """Sweeper uses keyset pagination (WHERE id > ?) to process multiple pages."""
-        from graph import get_db, upsert_fts_chunk
+        from archivist.storage.graph import get_db, upsert_fts_chunk
 
         ids_to_insert = [f"ks-{i:04d}" for i in range(3)]
         for qid in ids_to_insert:
@@ -925,11 +1007,11 @@ class TestOrphanSweeperAdvanced:
         mock_client.retrieve.return_value = []
 
         with (
-            patch("cascade.qdrant_client", return_value=mock_client),
-            patch("cascade.collections_for_query", return_value=["test_col"]),
-            patch("cascade._SWEEP_PAGE_SIZE", 2),
+            patch("archivist.lifecycle.cascade.qdrant_client", return_value=mock_client),
+            patch("archivist.lifecycle.cascade.collections_for_query", return_value=["test_col"]),
+            patch("archivist.lifecycle.cascade._SWEEP_PAGE_SIZE", 2),
         ):
-            from cascade import sweep_orphans
+            from archivist.lifecycle.cascade import sweep_orphans
 
             result = await sweep_orphans()
 
@@ -947,7 +1029,7 @@ class TestDeleteHotness:
     """graph.delete_hotness removes memory_hotness rows."""
 
     async def test_deletes_existing_row(self, async_pool):
-        from graph import delete_hotness, get_db
+        from archivist.storage.graph import delete_hotness, get_db
 
         conn = get_db()
         conn.execute(
@@ -975,7 +1057,7 @@ class TestDeleteHotness:
         assert remaining == 0
 
     async def test_returns_zero_for_missing_id(self, async_pool):
-        from graph import delete_hotness, get_db
+        from archivist.storage.graph import delete_hotness, get_db
 
         conn = get_db()
         conn.execute(
@@ -991,7 +1073,7 @@ class TestDeleteHotness:
 
     async def test_returns_zero_when_table_missing(self, async_pool):
         """Silently returns 0 if memory_hotness table doesn't exist yet."""
-        from graph import delete_hotness, get_db
+        from archivist.storage.graph import delete_hotness, get_db
 
         conn = get_db()
         conn.execute("DROP TABLE IF EXISTS memory_hotness")
@@ -1008,7 +1090,7 @@ class TestBatchSqliteRetry:
         """delete_fts_chunks_batch retries once when the pool raises a locked error."""
         import sqlite3 as _sqlite3
 
-        from graph import delete_fts_chunks_batch, upsert_fts_chunk
+        from archivist.storage.graph import delete_fts_chunks_batch, upsert_fts_chunk
 
         await upsert_fts_chunk("retry-id", "text", "f.md", 0, "a", "ns")
 
@@ -1039,7 +1121,11 @@ class TestBatchSqliteRetry:
         """delete_needle_tokens_batch retries once when the pool raises a locked error."""
         import sqlite3 as _sqlite3
 
-        from graph import _ensure_needle_registry, delete_needle_tokens_batch, get_db
+        from archivist.storage.graph import (
+            _ensure_needle_registry,
+            delete_needle_tokens_batch,
+            get_db,
+        )
 
         _ensure_needle_registry()
         conn = get_db()
@@ -1079,19 +1165,19 @@ class TestMetricsExist:
     """New lifecycle metrics are defined."""
 
     def test_delete_complete_metric(self):
-        import metrics as m
+        import archivist.core.metrics as m
 
         assert hasattr(m, "DELETE_COMPLETE")
         assert "delete" in m.DELETE_COMPLETE.lower()
 
     def test_archive_complete_metric(self):
-        import metrics as m
+        import archivist.core.metrics as m
 
         assert hasattr(m, "ARCHIVE_COMPLETE")
         assert "archive" in m.ARCHIVE_COMPLETE.lower()
 
     def test_orphan_sweep_metric(self):
-        import metrics as m
+        import archivist.core.metrics as m
 
         assert hasattr(m, "ORPHAN_SWEEP")
         assert "orphan" in m.ORPHAN_SWEEP.lower()
@@ -1102,7 +1188,7 @@ class TestEntityFactsMemoryId:
 
     async def _insert_fact(self, async_pool, memory_id: str, source_file: str = "") -> int:
         """Insert a test fact row and return its id."""
-        from graph import get_db, upsert_entity
+        from archivist.storage.graph import get_db, upsert_entity
 
         eid = await upsert_entity("test-entity", "concept", namespace="global")
         from datetime import datetime
@@ -1127,8 +1213,8 @@ class TestEntityFactsMemoryId:
 
     async def test_exact_match_deactivates_by_memory_id(self, async_pool):
         """Primary path: rows with matching memory_id are deactivated."""
-        from graph import get_db
-        from memory_lifecycle import _delete_entity_facts_for_memory
+        from archivist.lifecycle.memory_lifecycle import _delete_entity_facts_for_memory
+        from archivist.storage.graph import get_db
 
         mid = "mem-exact-test-001"
         await self._insert_fact(async_pool, mid, source_file="explicit/agent")
@@ -1144,8 +1230,8 @@ class TestEntityFactsMemoryId:
 
     async def test_like_fallback_for_pre_migration_rows(self, async_pool):
         """Fallback: rows with memory_id='' but matching source_file are deactivated."""
-        from graph import get_db
-        from memory_lifecycle import _delete_entity_facts_for_memory
+        from archivist.lifecycle.memory_lifecycle import _delete_entity_facts_for_memory
+        from archivist.storage.graph import get_db
 
         mid = "mem-fallback-test-002"
         # Pre-migration row: memory_id is empty, but source_file contains the UUID
@@ -1164,7 +1250,7 @@ class TestEntityFactsMemoryId:
 
     async def test_like_fallback_does_not_touch_rows_with_memory_id_set(self, async_pool):
         """LIKE fallback is scoped to memory_id='' only — does not double-deactivate."""
-        from memory_lifecycle import _delete_entity_facts_for_memory
+        from archivist.lifecycle.memory_lifecycle import _delete_entity_facts_for_memory
 
         mid = "mem-scope-test-003"
         # Row already has memory_id set correctly
@@ -1176,8 +1262,8 @@ class TestEntityFactsMemoryId:
 
     async def test_non_matching_rows_untouched(self, async_pool):
         """Facts belonging to a different memory are not deactivated."""
-        from graph import get_db
-        from memory_lifecycle import _delete_entity_facts_for_memory
+        from archivist.lifecycle.memory_lifecycle import _delete_entity_facts_for_memory
+        from archivist.storage.graph import get_db
 
         mid_target = "mem-target-004"
         mid_other = "mem-other-004"
@@ -1196,7 +1282,7 @@ class TestEntityFactsMemoryId:
 
     async def test_returns_zero_for_unknown_memory(self, async_pool):
         """Returns 0 and does not crash for a memory_id with no matching facts."""
-        from memory_lifecycle import _delete_entity_facts_for_memory
+        from archivist.lifecycle.memory_lifecycle import _delete_entity_facts_for_memory
 
         assert await _delete_entity_facts_for_memory("completely-unknown-id") == 0
 
@@ -1205,7 +1291,7 @@ class TestAddFactMemoryId:
     """add_fact stores memory_id and it can be queried."""
 
     async def test_stores_memory_id(self, async_pool):
-        from graph import add_fact, get_db, upsert_entity
+        from archivist.storage.graph import add_fact, get_db, upsert_entity
 
         eid = await upsert_entity("test-entity-af", "concept", namespace="global")
         mid = "mem-add-fact-test-001"
@@ -1221,7 +1307,7 @@ class TestAddFactMemoryId:
 
     async def test_default_memory_id_is_empty(self, async_pool):
         """Existing call sites that don't pass memory_id get empty string."""
-        from graph import add_fact, get_db, upsert_entity
+        from archivist.storage.graph import add_fact, get_db, upsert_entity
 
         eid = await upsert_entity("entity-no-mid", "concept", namespace="global")
         fact_id = await add_fact(
@@ -1242,7 +1328,7 @@ class TestScrollAllMaxPages:
         """When max_pages is hit, step_name is appended to failed_steps."""
         from qdrant_client.models import Filter
 
-        from cascade import _scroll_all
+        from archivist.lifecycle.cascade import _scroll_all
 
         call_count = 0
 
@@ -1278,7 +1364,7 @@ class TestScrollAllMaxPages:
         """When pagination ends naturally, failed_steps is not appended."""
         from qdrant_client.models import Filter
 
-        from cascade import _scroll_all
+        from archivist.lifecycle.cascade import _scroll_all
 
         def fake_scroll(**kwargs):
             pt = MagicMock()
@@ -1309,14 +1395,14 @@ class TestPartialDeletionErrorThreshold:
     """PartialDeletionError is raised on qdrant_primary or qdrant_children failures."""
 
     def test_raises_on_qdrant_primary_failure(self):
-        from memory_lifecycle import DeleteResult
+        from archivist.lifecycle.memory_lifecycle import DeleteResult
 
         result = DeleteResult(memory_id="mid", failed_steps=["qdrant_primary"])
         _critical = {"qdrant_primary", "qdrant_children"}
         assert bool(_critical & set(result.failed_steps))
 
     def test_raises_on_qdrant_children_failure(self):
-        from memory_lifecycle import DeleteResult
+        from archivist.lifecycle.memory_lifecycle import DeleteResult
 
         result = DeleteResult(memory_id="mid", failed_steps=["qdrant_children"])
         _critical = {"qdrant_primary", "qdrant_children"}
@@ -1324,7 +1410,7 @@ class TestPartialDeletionErrorThreshold:
 
     def test_does_not_raise_on_fts_only_failure(self):
         """FTS failure alone does not trigger PartialDeletionError."""
-        from memory_lifecycle import DeleteResult
+        from archivist.lifecycle.memory_lifecycle import DeleteResult
 
         result = DeleteResult(memory_id="mid", failed_steps=["fts_batch"])
         _critical = {"qdrant_primary", "qdrant_children"}
@@ -1332,7 +1418,7 @@ class TestPartialDeletionErrorThreshold:
 
     def test_does_not_raise_on_needle_only_failure(self):
         """needle_batch failure alone does not trigger PartialDeletionError."""
-        from memory_lifecycle import DeleteResult
+        from archivist.lifecycle.memory_lifecycle import DeleteResult
 
         result = DeleteResult(memory_id="mid", failed_steps=["needle_batch"])
         _critical = {"qdrant_primary", "qdrant_children"}
@@ -1369,7 +1455,7 @@ class TestSearchVectorsMustNotFilter:
 
     async def test_must_not_always_set(self, monkeypatch):
         """Filter(must_not=...) is always constructed, not conditional."""
-        import rlm_retriever
+        import archivist.retrieval.rlm_retriever as rlm_retriever
 
         captured_filter = None
 
@@ -1383,9 +1469,13 @@ class TestSearchVectorsMustNotFilter:
         mock_client = MagicMock()
         mock_client.query_points.side_effect = _fake_query_points
 
-        monkeypatch.setattr("rlm_retriever.qdrant_client", lambda: mock_client)
-        monkeypatch.setattr("rlm_retriever.collection_for", lambda ns: "test-coll")
-        monkeypatch.setattr("rlm_retriever.embed_text", AsyncMock(return_value=[0.0] * 1024))
+        monkeypatch.setattr("archivist.retrieval.rlm_retriever.qdrant_client", lambda: mock_client)
+        monkeypatch.setattr(
+            "archivist.retrieval.rlm_retriever.collection_for", lambda ns: "test-coll"
+        )
+        monkeypatch.setattr(
+            "archivist.retrieval.rlm_retriever.embed_text", AsyncMock(return_value=[0.0] * 1024)
+        )
 
         await rlm_retriever.search_vectors("some query", namespace="test-ns")
 
@@ -1398,7 +1488,7 @@ class TestSearchVectorsMustNotFilter:
 
     async def test_must_not_values_are_true(self, monkeypatch):
         """The must_not conditions match value=True."""
-        import rlm_retriever
+        import archivist.retrieval.rlm_retriever as rlm_retriever
 
         captured_filter = None
 
@@ -1412,9 +1502,13 @@ class TestSearchVectorsMustNotFilter:
         mock_client = MagicMock()
         mock_client.query_points.side_effect = _fake_query_points
 
-        monkeypatch.setattr("rlm_retriever.qdrant_client", lambda: mock_client)
-        monkeypatch.setattr("rlm_retriever.collection_for", lambda ns: "test-coll")
-        monkeypatch.setattr("rlm_retriever.embed_text", AsyncMock(return_value=[0.0] * 1024))
+        monkeypatch.setattr("archivist.retrieval.rlm_retriever.qdrant_client", lambda: mock_client)
+        monkeypatch.setattr(
+            "archivist.retrieval.rlm_retriever.collection_for", lambda ns: "test-coll"
+        )
+        monkeypatch.setattr(
+            "archivist.retrieval.rlm_retriever.embed_text", AsyncMock(return_value=[0.0] * 1024)
+        )
 
         await rlm_retriever.search_vectors("some query", namespace="test-ns")
 
@@ -1427,7 +1521,7 @@ class TestLiteralSearchMustNotFilter:
     """_literal_search_sync() includes must_not for archived/deleted."""
 
     def test_literal_search_excludes_archived_deleted(self, monkeypatch):
-        import rlm_retriever
+        import archivist.retrieval.rlm_retriever as rlm_retriever
 
         captured_filter = None
 
@@ -1438,8 +1532,10 @@ class TestLiteralSearchMustNotFilter:
 
         mock_client = MagicMock()
         mock_client.scroll.side_effect = _fake_scroll
-        monkeypatch.setattr("rlm_retriever.qdrant_client", lambda: mock_client)
-        monkeypatch.setattr("rlm_retriever.collection_for", lambda ns: "test-coll")
+        monkeypatch.setattr("archivist.retrieval.rlm_retriever.qdrant_client", lambda: mock_client)
+        monkeypatch.setattr(
+            "archivist.retrieval.rlm_retriever.collection_for", lambda ns: "test-coll"
+        )
 
         rlm_retriever._literal_search_sync(["192.168.1.1"], namespace="test-ns")
 
@@ -1461,7 +1557,7 @@ class TestNeedleRegistryArchivedFilter:
     @staticmethod
     def _is_stale(payload: dict) -> bool:
         """Mirror the exact predicate used in rlm_retriever's registry loop."""
-        import rlm_retriever  # noqa: F401 – ensures module is importable
+        import archivist.retrieval.rlm_retriever  # noqa: F401 – ensures module is importable
 
         # The condition lives at: if p.get("archived") or p.get("deleted"): continue
         # We expose it here so tests depend on the module existing and the semantic.
@@ -1487,7 +1583,7 @@ class TestNeedleRegistryArchivedFilter:
 
     def test_stale_metric_incremented_for_archived(self, monkeypatch):
         """NEEDLE_REGISTRY_STALE is incremented when a stale payload is encountered."""
-        import metrics as m
+        import archivist.core.metrics as m
 
         counter: list[int] = [0]
         monkeypatch.setattr(
@@ -1516,7 +1612,7 @@ class TestNeedleRegistryArchivedFilter:
         }
 
         kept = []
-        import metrics as m
+        import archivist.core.metrics as m
 
         for cand in [live_cand, stale_cand]:
             p = payloads.get(cand.id)
@@ -1546,7 +1642,7 @@ class TestNeedleTokenRegistration:
     # ── Token type coverage ─────────────────────────────────────────────────
 
     async def test_ip_address_registered_and_found(self, async_pool):
-        import graph
+        import archivist.storage.graph as graph
 
         await graph.register_needle_tokens(
             "mem-ip", "Gateway is at 192.168.10.1 for subnet", namespace="ns1"
@@ -1556,7 +1652,7 @@ class TestNeedleTokenRegistration:
         assert "mem-ip" in ids
 
     async def test_cidr_block_registered_and_found(self, async_pool):
-        import graph
+        import archivist.storage.graph as graph
 
         await graph.register_needle_tokens(
             "mem-cidr", "VPC range is 10.0.0.0/16 for prod", namespace="ns1"
@@ -1565,7 +1661,7 @@ class TestNeedleTokenRegistration:
         assert any(h["memory_id"] == "mem-cidr" for h in hits)
 
     async def test_uuid_registered_and_found(self, async_pool):
-        import graph
+        import archivist.storage.graph as graph
 
         uid = "550e8400-e29b-41d4-a716-446655440000"
         await graph.register_needle_tokens(
@@ -1575,7 +1671,7 @@ class TestNeedleTokenRegistration:
         assert any(h["memory_id"] == "mem-uuid" for h in hits)
 
     async def test_cron_expression_registered_and_found(self, async_pool):
-        import graph
+        import archivist.storage.graph as graph
 
         await graph.register_needle_tokens(
             "mem-cron", "Backup runs on schedule: 0 3 * * 0", namespace="ns1"
@@ -1584,7 +1680,7 @@ class TestNeedleTokenRegistration:
         assert any(h["memory_id"] == "mem-cron" for h in hits)
 
     async def test_key_value_registered_and_found(self, async_pool):
-        import graph
+        import archivist.storage.graph as graph
 
         await graph.register_needle_tokens(
             "mem-kv", "Set ENV_TOKEN=abc123XYZ in the env", namespace="ns1"
@@ -1596,7 +1692,7 @@ class TestNeedleTokenRegistration:
         assert any(h["memory_id"] == "mem-kv" for h in hits)
 
     async def test_ticket_id_registered_and_found(self, async_pool):
-        import graph
+        import archivist.storage.graph as graph
 
         await graph.register_needle_tokens(
             "mem-ticket", "Tracked in JIRA-10042 for the backend team", namespace="ns1"
@@ -1605,7 +1701,7 @@ class TestNeedleTokenRegistration:
         assert any(h["memory_id"] == "mem-ticket" for h in hits)
 
     async def test_datetime_stamp_registered_and_found(self, async_pool):
-        import graph
+        import archivist.storage.graph as graph
 
         await graph.register_needle_tokens(
             "mem-dt",
@@ -1618,7 +1714,7 @@ class TestNeedleTokenRegistration:
         assert any(h["memory_id"] == "mem-dt" for h in hits)
 
     async def test_plain_prose_yields_no_tokens(self, async_pool):
-        import graph
+        import archivist.storage.graph as graph
 
         await graph.register_needle_tokens(
             "mem-prose",
@@ -1634,14 +1730,14 @@ class TestNeedleTokenRegistration:
     # ── Namespace isolation ─────────────────────────────────────────────────
 
     async def test_namespace_isolation_different_ns_returns_nothing(self, async_pool):
-        import graph
+        import archivist.storage.graph as graph
 
         await graph.register_needle_tokens("mem-nsA", "internal addr 172.16.0.5", namespace="ns-A")
         hits = await graph.lookup_needle_tokens("172.16.0.5", namespace="ns-B")
         assert hits == [], "Token registered in ns-A must not appear in ns-B lookup"
 
     async def test_namespace_isolation_same_ns_returns_match(self, async_pool):
-        import graph
+        import archivist.storage.graph as graph
 
         await graph.register_needle_tokens("mem-nsX", "service ip 172.16.1.1", namespace="ns-X")
         hits = await graph.lookup_needle_tokens("172.16.1.1", namespace="ns-X")
@@ -1649,7 +1745,7 @@ class TestNeedleTokenRegistration:
 
     async def test_empty_namespace_query_skips_ns_filter(self, async_pool):
         """Passing namespace='' returns matches regardless of stored namespace."""
-        import graph
+        import archivist.storage.graph as graph
 
         await graph.register_needle_tokens("mem-open", "address 10.1.2.3", namespace="some-ns")
         hits = await graph.lookup_needle_tokens("10.1.2.3", namespace="")
@@ -1659,7 +1755,7 @@ class TestNeedleTokenRegistration:
 
     async def test_multi_token_memory_all_tokens_find_same_memory(self, async_pool):
         """A memory containing IP + UUID + ticket — each token resolves to that memory."""
-        import graph
+        import archivist.storage.graph as graph
 
         uid = "aaaabbbb-cccc-dddd-eeee-ffffffffffff"
         text = f"Host 10.20.30.40 with id {uid} tracked in ENG-9999"
@@ -1673,7 +1769,7 @@ class TestNeedleTokenRegistration:
 
     async def test_multi_token_no_duplicates_per_lookup(self, async_pool):
         """When a query matches multiple tokens in the same memory, it appears once."""
-        import graph
+        import archivist.storage.graph as graph
 
         text = "Hosts: 10.0.0.1 and 10.0.0.2 in the same cluster"
         await graph.register_needle_tokens("mem-dedup", text, namespace="ns1")
@@ -1686,7 +1782,7 @@ class TestNeedleTokenRegistration:
 
     async def test_token_collision_both_memories_returned(self, async_pool):
         """Two memories sharing the same IP are both returned for that IP query."""
-        import graph
+        import archivist.storage.graph as graph
 
         await graph.register_needle_tokens("mem-A", "Primary node at 192.0.2.1", namespace="ns1")
         await graph.register_needle_tokens("mem-B", "Replica node at 192.0.2.1", namespace="ns1")
@@ -1736,7 +1832,7 @@ class TestNeedleHaystackIsolation:
 
     async def _populate(self, conn, ns: str = "ns-test"):
         """Insert haystack + needle FTS rows and needle registry entry."""
-        import graph
+        import archivist.storage.graph as graph
 
         for qid, text in self._HAYSTACK:
             conn.execute(
@@ -1770,8 +1866,8 @@ class TestNeedleHaystackIsolation:
 
     async def test_needle_found_in_fts_before_exclusion(self, async_pool):
         """Needle unique word appears in search_fts results before archive."""
-        import config
-        import graph
+        import archivist.core.config as config
+        import archivist.storage.graph as graph
 
         conn = sqlite3.connect(config.SQLITE_PATH)
         await self._populate(conn, "ns-test")
@@ -1783,8 +1879,8 @@ class TestNeedleHaystackIsolation:
 
     async def test_needle_absent_from_fts_after_exclusion(self, async_pool):
         """After is_excluded=1, the needle word no longer appears in search_fts."""
-        import config
-        import graph
+        import archivist.core.config as config
+        import archivist.storage.graph as graph
 
         conn = sqlite3.connect(config.SQLITE_PATH)
         await self._populate(conn, "ns-test")
@@ -1797,8 +1893,8 @@ class TestNeedleHaystackIsolation:
 
     async def test_needle_found_in_fts_exact_before_exclusion(self, async_pool):
         """Needle unique word appears in search_fts_exact results before archive."""
-        import config
-        import graph
+        import archivist.core.config as config
+        import archivist.storage.graph as graph
 
         conn = sqlite3.connect(config.SQLITE_PATH)
         await self._populate(conn, "ns-test")
@@ -1810,8 +1906,8 @@ class TestNeedleHaystackIsolation:
 
     async def test_needle_absent_from_fts_exact_after_exclusion(self, async_pool):
         """After is_excluded=1, the needle word no longer appears in search_fts_exact."""
-        import config
-        import graph
+        import archivist.core.config as config
+        import archivist.storage.graph as graph
 
         conn = sqlite3.connect(config.SQLITE_PATH)
         await self._populate(conn, "ns-test")
@@ -1826,8 +1922,8 @@ class TestNeedleHaystackIsolation:
 
     async def test_haystack_unaffected_by_needle_exclusion(self, async_pool):
         """Excluding the needle does not remove haystack chunks from FTS."""
-        import config
-        import graph
+        import archivist.core.config as config
+        import archivist.storage.graph as graph
 
         conn = sqlite3.connect(config.SQLITE_PATH)
         await self._populate(conn, "ns-test")
@@ -1847,8 +1943,8 @@ class TestNeedleHaystackIsolation:
 
     async def test_only_needle_ns_excluded_not_sibling_ns(self, async_pool):
         """Excluding needle in ns-A does not touch chunks in ns-B."""
-        import config
-        import graph
+        import archivist.core.config as config
+        import archivist.storage.graph as graph
 
         conn = sqlite3.connect(config.SQLITE_PATH)
         # Populate needle in ns-A and a generic chunk in ns-B
@@ -1882,8 +1978,8 @@ class TestNeedleHaystackIsolation:
         lookup_needle_tokens still returns the row after FTS exclusion.  The
         registry payload filter (archived/deleted check) is the second gate.
         """
-        import config
-        import graph
+        import archivist.core.config as config
+        import archivist.storage.graph as graph
 
         conn = sqlite3.connect(config.SQLITE_PATH)
         await self._populate(conn, "ns-test")
@@ -1899,8 +1995,8 @@ class TestNeedleHaystackIsolation:
         """When the Qdrant payload for a registry hit carries deleted=True, the
         rlm_retriever filter predicate drops it even though the registry row exists.
         """
-        import config
-        import graph
+        import archivist.core.config as config
+        import archivist.storage.graph as graph
 
         conn = sqlite3.connect(config.SQLITE_PATH)
         await self._populate(conn, "ns-test")
@@ -1929,8 +2025,8 @@ class TestFTSExcludedFilter:
 
     async def test_search_fts_excludes_is_excluded_rows(self, async_pool):
         """Rows with is_excluded=1 do not appear in search_fts results."""
-        import config
-        import graph
+        import archivist.core.config as config
+        import archivist.storage.graph as graph
 
         # Insert an active chunk and an excluded chunk
         conn = sqlite3.connect(config.SQLITE_PATH)
@@ -1953,8 +2049,8 @@ class TestFTSExcludedFilter:
 
     async def test_search_fts_exact_excludes_is_excluded_rows(self, async_pool):
         """Rows with is_excluded=1 do not appear in search_fts_exact results."""
-        import config
-        import graph
+        import archivist.core.config as config
+        import archivist.storage.graph as graph
 
         conn = sqlite3.connect(config.SQLITE_PATH)
         conn.row_factory = sqlite3.Row
@@ -1983,8 +2079,8 @@ class TestSetFtsExcludedBatch:
     """set_fts_excluded_batch marks and restores memory_chunks rows."""
 
     async def test_marks_rows_excluded(self, async_pool):
-        import config
-        import graph
+        import archivist.core.config as config
+        import archivist.storage.graph as graph
 
         conn = sqlite3.connect(config.SQLITE_PATH)
         conn.execute(
@@ -2005,8 +2101,8 @@ class TestSetFtsExcludedBatch:
         assert excluded["qid-2"] == 1
 
     async def test_restores_rows(self, async_pool):
-        import config
-        import graph
+        import archivist.core.config as config
+        import archivist.storage.graph as graph
 
         conn = sqlite3.connect(config.SQLITE_PATH)
         conn.execute(
@@ -2026,15 +2122,15 @@ class TestSetFtsExcludedBatch:
         assert row[0] == 0
 
     async def test_empty_list_is_noop(self, async_pool):
-        import graph
+        import archivist.storage.graph as graph
 
         count = await graph.set_fts_excluded_batch([])
         assert count == 0
 
     async def test_chunks_large_batches(self, async_pool):
         """Works with >500 IDs without sqlite3 parameter overflow."""
-        import config
-        import graph
+        import archivist.core.config as config
+        import archivist.storage.graph as graph
 
         ids = [f"qid-{i}" for i in range(600)]
         conn = sqlite3.connect(config.SQLITE_PATH)
@@ -2060,8 +2156,8 @@ class TestArchiveMemoryCompleteFTSExclusion:
     """archive_memory_complete marks related FTS rows as excluded."""
 
     async def test_archive_marks_fts_excluded(self, async_pool):
-        import config
-        from memory_lifecycle import archive_memory_complete
+        import archivist.core.config as config
+        from archivist.lifecycle.memory_lifecycle import archive_memory_complete
 
         memory_id = "mem-arch-1"
 
@@ -2078,9 +2174,9 @@ class TestArchiveMemoryCompleteFTSExclusion:
         mock_client = _make_qdrant_client(scroll_return=([], None))
 
         with (
-            patch("memory_lifecycle.qdrant_client", return_value=mock_client),
-            patch("memory_lifecycle.collection_for", return_value="test-coll"),
-            patch("memory_lifecycle.log_memory_event", new_callable=AsyncMock),
+            patch("archivist.lifecycle.memory_lifecycle.qdrant_client", return_value=mock_client),
+            patch("archivist.lifecycle.memory_lifecycle.collection_for", return_value="test-coll"),
+            patch("archivist.lifecycle.memory_lifecycle.log_memory_event", new_callable=AsyncMock),
         ):
             await archive_memory_complete(memory_id, namespace="test-ns")
 
@@ -2103,16 +2199,16 @@ class TestSoftDeleteMemory:
 
     async def test_sets_deleted_payload_on_primary(self):
         """Primary Qdrant point gets deleted=True immediately."""
-        from memory_lifecycle import soft_delete_memory
+        from archivist.lifecycle.memory_lifecycle import soft_delete_memory
 
         mock_client = _make_qdrant_client()
 
         with (
-            patch("memory_lifecycle.qdrant_client", return_value=mock_client),
-            patch("memory_lifecycle.collection_for", return_value="test-coll"),
-            patch("memory_lifecycle.curator_queue") as mock_cq,
-            patch("memory_lifecycle.log_memory_event", new_callable=AsyncMock),
-            patch("memory_lifecycle.set_fts_excluded_batch"),
+            patch("archivist.lifecycle.memory_lifecycle.qdrant_client", return_value=mock_client),
+            patch("archivist.lifecycle.memory_lifecycle.collection_for", return_value="test-coll"),
+            patch("archivist.lifecycle.memory_lifecycle.curator_queue") as mock_cq,
+            patch("archivist.lifecycle.memory_lifecycle.log_memory_event", new_callable=AsyncMock),
+            patch("archivist.lifecycle.memory_lifecycle.set_fts_excluded_batch"),
         ):
             mock_cq.enqueue = AsyncMock(return_value="op-123")
             await soft_delete_memory("mem-1", "test-ns")
@@ -2133,14 +2229,17 @@ class TestSoftDeleteMemory:
 
     async def test_enqueues_delete_memory_job(self):
         """A delete_memory job is enqueued in curator_queue."""
-        from memory_lifecycle import soft_delete_memory
+        from archivist.lifecycle.memory_lifecycle import soft_delete_memory
 
         with (
-            patch("memory_lifecycle.qdrant_client", return_value=_make_qdrant_client()),
-            patch("memory_lifecycle.collection_for", return_value="test-coll"),
-            patch("memory_lifecycle.curator_queue") as mock_cq,
-            patch("memory_lifecycle.log_memory_event", new_callable=AsyncMock),
-            patch("memory_lifecycle.set_fts_excluded_batch"),
+            patch(
+                "archivist.lifecycle.memory_lifecycle.qdrant_client",
+                return_value=_make_qdrant_client(),
+            ),
+            patch("archivist.lifecycle.memory_lifecycle.collection_for", return_value="test-coll"),
+            patch("archivist.lifecycle.memory_lifecycle.curator_queue") as mock_cq,
+            patch("archivist.lifecycle.memory_lifecycle.log_memory_event", new_callable=AsyncMock),
+            patch("archivist.lifecycle.memory_lifecycle.set_fts_excluded_batch"),
         ):
             mock_cq.enqueue = AsyncMock(return_value="op-456")
             result = await soft_delete_memory("mem-2", "test-ns")
@@ -2154,7 +2253,7 @@ class TestSoftDeleteMemory:
 
     async def test_logs_audit_event(self):
         """audit log is written with action=soft_delete."""
-        from memory_lifecycle import soft_delete_memory
+        from archivist.lifecycle.memory_lifecycle import soft_delete_memory
 
         log_calls = []
 
@@ -2162,11 +2261,14 @@ class TestSoftDeleteMemory:
             log_calls.append(kwargs)
 
         with (
-            patch("memory_lifecycle.qdrant_client", return_value=_make_qdrant_client()),
-            patch("memory_lifecycle.collection_for", return_value="test-coll"),
-            patch("memory_lifecycle.curator_queue") as mock_cq,
-            patch("memory_lifecycle.log_memory_event", side_effect=_fake_log),
-            patch("memory_lifecycle.set_fts_excluded_batch"),
+            patch(
+                "archivist.lifecycle.memory_lifecycle.qdrant_client",
+                return_value=_make_qdrant_client(),
+            ),
+            patch("archivist.lifecycle.memory_lifecycle.collection_for", return_value="test-coll"),
+            patch("archivist.lifecycle.memory_lifecycle.curator_queue") as mock_cq,
+            patch("archivist.lifecycle.memory_lifecycle.log_memory_event", side_effect=_fake_log),
+            patch("archivist.lifecycle.memory_lifecycle.set_fts_excluded_batch"),
         ):
             mock_cq.enqueue = AsyncMock(return_value="op-789")
             await soft_delete_memory("mem-3", "test-ns")
@@ -2179,8 +2281,8 @@ class TestSoftDeleteMemory:
         """The primary memory_chunk row is marked is_excluded=1."""
         import sqlite3
 
-        import config
-        from memory_lifecycle import soft_delete_memory
+        import archivist.core.config as config
+        from archivist.lifecycle.memory_lifecycle import soft_delete_memory
 
         conn = sqlite3.connect(config.SQLITE_PATH)
         conn.execute(
@@ -2191,10 +2293,13 @@ class TestSoftDeleteMemory:
         conn.close()
 
         with (
-            patch("memory_lifecycle.qdrant_client", return_value=_make_qdrant_client()),
-            patch("memory_lifecycle.collection_for", return_value="test-coll"),
-            patch("memory_lifecycle.curator_queue") as mock_cq,
-            patch("memory_lifecycle.log_memory_event", new_callable=AsyncMock),
+            patch(
+                "archivist.lifecycle.memory_lifecycle.qdrant_client",
+                return_value=_make_qdrant_client(),
+            ),
+            patch("archivist.lifecycle.memory_lifecycle.collection_for", return_value="test-coll"),
+            patch("archivist.lifecycle.memory_lifecycle.curator_queue") as mock_cq,
+            patch("archivist.lifecycle.memory_lifecycle.log_memory_event", new_callable=AsyncMock),
         ):
             mock_cq.enqueue = AsyncMock(return_value="op-0")
             await soft_delete_memory("mem-fts", "test-ns")
@@ -2209,17 +2314,17 @@ class TestSoftDeleteMemory:
 
     async def test_raises_if_primary_set_payload_fails(self):
         """RuntimeError raised if primary Qdrant set_payload fails."""
-        from memory_lifecycle import soft_delete_memory
+        from archivist.lifecycle.memory_lifecycle import soft_delete_memory
 
         mock_client = _make_qdrant_client()
         mock_client.set_payload.side_effect = Exception("Qdrant down")
 
         with (
-            patch("memory_lifecycle.qdrant_client", return_value=mock_client),
-            patch("memory_lifecycle.collection_for", return_value="test-coll"),
-            patch("memory_lifecycle.curator_queue") as mock_cq,
-            patch("memory_lifecycle.log_memory_event", new_callable=AsyncMock),
-            patch("memory_lifecycle.set_fts_excluded_batch"),
+            patch("archivist.lifecycle.memory_lifecycle.qdrant_client", return_value=mock_client),
+            patch("archivist.lifecycle.memory_lifecycle.collection_for", return_value="test-coll"),
+            patch("archivist.lifecycle.memory_lifecycle.curator_queue") as mock_cq,
+            patch("archivist.lifecycle.memory_lifecycle.log_memory_event", new_callable=AsyncMock),
+            patch("archivist.lifecycle.memory_lifecycle.set_fts_excluded_batch"),
         ):
             mock_cq.enqueue = AsyncMock(return_value="op-err")
             with pytest.raises((RuntimeError, Exception)):
@@ -2235,8 +2340,8 @@ class TestRegisterMemoryPointsBatch:
     """register_memory_points_batch inserts correct rows."""
 
     async def test_registers_primary_and_children(self, async_pool):
-        import config
-        import graph
+        import archivist.core.config as config
+        import archivist.storage.graph as graph
 
         points = [
             {"memory_id": "m1", "qdrant_id": "m1", "point_type": "primary"},
@@ -2257,8 +2362,8 @@ class TestRegisterMemoryPointsBatch:
         assert by_id["rh-1"] == "reverse_hyde"
 
     async def test_idempotent_on_duplicate(self, async_pool):
-        import config
-        import graph
+        import archivist.core.config as config
+        import archivist.storage.graph as graph
 
         points = [{"memory_id": "m2", "qdrant_id": "m2", "point_type": "primary"}]
         await graph.register_memory_points_batch(points)
@@ -2270,13 +2375,13 @@ class TestRegisterMemoryPointsBatch:
         assert n == 1
 
     async def test_empty_list_noop(self, async_pool):
-        import graph
+        import archivist.storage.graph as graph
 
         count = await graph.register_memory_points_batch([])
         assert count == 0
 
     async def test_large_batch_no_parameter_overflow(self, async_pool):
-        import graph
+        import archivist.storage.graph as graph
 
         points = [
             {"memory_id": "big-m", "qdrant_id": f"qid-{i}", "point_type": "micro_chunk"}
@@ -2290,7 +2395,7 @@ class TestLookupMemoryPoints:
     """lookup_memory_points returns correct rows or empty list."""
 
     async def test_returns_rows_for_known_memory(self, async_pool):
-        import graph
+        import archivist.storage.graph as graph
 
         await graph.register_memory_points_batch(
             [
@@ -2306,7 +2411,7 @@ class TestLookupMemoryPoints:
         assert "micro_chunk" in types
 
     async def test_returns_empty_for_unknown_memory(self, async_pool):
-        import graph
+        import archivist.storage.graph as graph
 
         rows = await graph.lookup_memory_points("nonexistent-id")
         assert rows == []
@@ -2316,7 +2421,7 @@ class TestDeleteMemoryPoints:
     """delete_memory_points removes rows for a memory_id."""
 
     async def test_removes_all_rows(self, async_pool):
-        import graph
+        import archivist.storage.graph as graph
 
         await graph.register_memory_points_batch(
             [
@@ -2331,7 +2436,7 @@ class TestDeleteMemoryPoints:
         assert rows == []
 
     async def test_noop_for_unknown(self, async_pool):
-        import graph
+        import archivist.storage.graph as graph
 
         count = await graph.delete_memory_points("does-not-exist")
         assert count == 0
@@ -2342,8 +2447,8 @@ class TestDeleteMemoryCompleteUsesMemoryPoints:
 
     async def test_uses_table_when_rows_present(self, async_pool, graph_db):
         """No Qdrant scroll when memory_points has rows."""
-        import graph
-        from memory_lifecycle import delete_memory_complete
+        import archivist.storage.graph as graph
+        from archivist.lifecycle.memory_lifecycle import delete_memory_complete
 
         memory_id = "mem-table-1"
         micro_id = "micro-table-1"
@@ -2359,9 +2464,9 @@ class TestDeleteMemoryCompleteUsesMemoryPoints:
         mock_client = _make_qdrant_client()
 
         with (
-            patch("memory_lifecycle.qdrant_client", return_value=mock_client),
-            patch("memory_lifecycle.collection_for", return_value="test-coll"),
-            patch("memory_lifecycle.log_memory_event", new_callable=AsyncMock),
+            patch("archivist.lifecycle.memory_lifecycle.qdrant_client", return_value=mock_client),
+            patch("archivist.lifecycle.memory_lifecycle.collection_for", return_value="test-coll"),
+            patch("archivist.lifecycle.memory_lifecycle.log_memory_event", new_callable=AsyncMock),
         ):
             result = await delete_memory_complete(memory_id, "test-ns")
 
@@ -2371,15 +2476,15 @@ class TestDeleteMemoryCompleteUsesMemoryPoints:
 
     async def test_falls_back_to_scroll_when_no_rows(self, async_pool):
         """Falls back to Qdrant scroll for legacy memories."""
-        from memory_lifecycle import delete_memory_complete
+        from archivist.lifecycle.memory_lifecycle import delete_memory_complete
 
         memory_id = "mem-legacy-1"
         mock_client = _make_qdrant_client(scroll_return=([], None))
 
         with (
-            patch("memory_lifecycle.qdrant_client", return_value=mock_client),
-            patch("memory_lifecycle.collection_for", return_value="test-coll"),
-            patch("memory_lifecycle.log_memory_event", new_callable=AsyncMock),
+            patch("archivist.lifecycle.memory_lifecycle.qdrant_client", return_value=mock_client),
+            patch("archivist.lifecycle.memory_lifecycle.collection_for", return_value="test-coll"),
+            patch("archivist.lifecycle.memory_lifecycle.log_memory_event", new_callable=AsyncMock),
         ):
             await delete_memory_complete(memory_id, "test-ns")
 
@@ -2388,8 +2493,8 @@ class TestDeleteMemoryCompleteUsesMemoryPoints:
 
     async def test_cleans_up_memory_points_rows(self, async_pool, graph_db):
         """delete_memory_complete removes the memory_points rows on success."""
-        import graph
-        from memory_lifecycle import delete_memory_complete
+        import archivist.storage.graph as graph
+        from archivist.lifecycle.memory_lifecycle import delete_memory_complete
 
         memory_id = "mem-cleanup-1"
         await graph.register_memory_points_batch(
@@ -2401,9 +2506,9 @@ class TestDeleteMemoryCompleteUsesMemoryPoints:
         mock_client = _make_qdrant_client()
 
         with (
-            patch("memory_lifecycle.qdrant_client", return_value=mock_client),
-            patch("memory_lifecycle.collection_for", return_value="test-coll"),
-            patch("memory_lifecycle.log_memory_event", new_callable=AsyncMock),
+            patch("archivist.lifecycle.memory_lifecycle.qdrant_client", return_value=mock_client),
+            patch("archivist.lifecycle.memory_lifecycle.collection_for", return_value="test-coll"),
+            patch("archivist.lifecycle.memory_lifecycle.log_memory_event", new_callable=AsyncMock),
         ):
             await delete_memory_complete(memory_id, "test-ns")
 
@@ -2417,8 +2522,8 @@ class TestLogDeleteFailure:
     async def test_writes_failure_record(self, async_pool):
         import json
 
-        import config
-        import graph
+        import archivist.core.config as config
+        import archivist.storage.graph as graph
 
         await graph.log_delete_failure("mem-fail", ["qid-1", "qid-2"], "connection refused")
 
@@ -2437,24 +2542,41 @@ class TestLogDeleteFailure:
 class TestDeadLetterOnCascadeFailure:
     """Dead-letter table is populated when a Qdrant delete fails."""
 
-    async def test_delete_failure_logged_to_dead_letter(self, async_pool):
-        """When Qdrant primary delete fails, delete_failures is written."""
-        import config
-        from cascade import PartialDeletionError
-        from memory_lifecycle import delete_memory_complete
+    async def test_delete_failure_logged_to_dead_letter(self, async_pool, monkeypatch):
+        """Outbox drain exhausts retries → delete_failures row (durable path).
+
+        INIT-002/SPEC-004: with OUTBOX_ENABLED default-on, delete_memory_complete
+        enqueues rather than raising PartialDeletionError on Qdrant failure.
+        """
+        from tests.fixtures.mocks import (
+            count_outbox,
+            drain_outbox_to_terminal,
+            make_vector_backend_mock,
+        )
+
+        import archivist.core.config as _cfg
+        import archivist.core.config as config
+        from archivist.lifecycle.memory_lifecycle import delete_memory_complete
+
+        monkeypatch.setattr(_cfg, "OUTBOX_MAX_RETRIES", 2)
 
         memory_id = "mem-dlq-1"
         mock_client = _make_qdrant_client()
-        mock_client.delete.side_effect = Exception("Qdrant unavailable")
 
         with (
-            patch("memory_lifecycle.qdrant_client", return_value=mock_client),
-            patch("memory_lifecycle.collection_for", return_value="test-coll"),
-            patch("memory_lifecycle.log_memory_event", new_callable=AsyncMock),
+            patch("archivist.lifecycle.memory_lifecycle.qdrant_client", return_value=mock_client),
+            patch("archivist.lifecycle.memory_lifecycle.collection_for", return_value="test-coll"),
+            patch("archivist.lifecycle.memory_lifecycle.log_memory_event", new_callable=AsyncMock),
         ):
-            with pytest.raises(PartialDeletionError):
-                await delete_memory_complete(memory_id, "test-ns")
+            await delete_memory_complete(memory_id, "test-ns")
 
+        assert await count_outbox(async_pool, "pending") >= 1
+
+        backend = make_vector_backend_mock()
+        backend.delete = AsyncMock(side_effect=Exception("Qdrant unavailable"))
+        await drain_outbox_to_terminal(async_pool, backend)
+
+        assert await count_outbox(async_pool, "dead") >= 1
         conn = sqlite3.connect(config.SQLITE_PATH)
         rows = conn.execute("SELECT memory_id FROM delete_failures").fetchall()
         conn.close()

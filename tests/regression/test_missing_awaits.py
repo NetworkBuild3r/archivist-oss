@@ -15,7 +15,7 @@ class TestEntityAndFactWrite:
 
     async def test_entity_persists_when_awaited(self, async_pool):
         """Directly verify that await upsert_entity writes a row — the core regression."""
-        from graph import get_db, upsert_entity
+        from archivist.storage.graph import get_db, upsert_entity
 
         eid = await upsert_entity(
             "AlicePersistTest",
@@ -34,7 +34,7 @@ class TestEntityAndFactWrite:
 
     async def test_fact_persists_when_awaited(self, async_pool):
         """Directly verify that await add_fact writes a row."""
-        from graph import add_fact, get_db, upsert_entity
+        from archivist.storage.graph import add_fact, get_db, upsert_entity
 
         eid = await upsert_entity("FactEntity", "service", namespace="test-ns")
         fact_id = await add_fact(
@@ -61,7 +61,7 @@ class TestMemoryPointsWrite:
 
     async def test_memory_points_row_persists_when_awaited(self, async_pool):
         """Directly verify that await register_memory_points_batch writes a row."""
-        from graph import get_db, register_memory_points_batch
+        from archivist.storage.graph import get_db, register_memory_points_batch
 
         await register_memory_points_batch(
             [
@@ -87,7 +87,7 @@ class TestFtsWrite:
 
     async def test_fts_chunk_persists_when_awaited(self, async_pool):
         """Directly verify that await upsert_fts_chunk writes a memory_chunks row."""
-        from graph import get_db, upsert_fts_chunk
+        from archivist.storage.graph import get_db, upsert_fts_chunk
 
         await upsert_fts_chunk(
             qdrant_id="fts-regression-001",
@@ -111,7 +111,7 @@ class TestNeedleTokensWrite:
 
     async def test_needle_tokens_persist_when_awaited(self, async_pool):
         """Directly verify that await register_needle_tokens writes needle_registry rows."""
-        from graph import _ensure_needle_registry, get_db, register_needle_tokens
+        from archivist.storage.graph import _ensure_needle_registry, get_db, register_needle_tokens
 
         _ensure_needle_registry()
 

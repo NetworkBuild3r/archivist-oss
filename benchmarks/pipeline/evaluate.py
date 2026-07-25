@@ -225,7 +225,7 @@ def _apply_variant(variant_name: str):
 
     import importlib
 
-    import config
+    import archivist.core.config as config
 
     importlib.reload(config)
 
@@ -383,7 +383,7 @@ def _benchmark_collection_name(memory_scale: str | None) -> str:
 
 async def index_corpus(corpus_dir: str, memory_scale: str | None = None):
     """Index the seed corpus files into Qdrant and FTS5."""
-    import config
+    import archivist.core.config as config
 
     config.MEMORY_ROOT = corpus_dir
 
@@ -461,8 +461,8 @@ async def index_corpus(corpus_dir: str, memory_scale: str | None = None):
     if _db_path:
         os.makedirs(os.path.dirname(_db_path), exist_ok=True)
 
-    from graph import init_schema
-    from indexer import full_index
+    from archivist.storage.graph import init_schema
+    from archivist.write.indexer import full_index
 
     init_schema()
     from archivist.storage.sqlite_pool import initialize_pool
@@ -493,14 +493,14 @@ async def run_variant(
     # invalidate_all() is a no-op when HOT_CACHE_ENABLED=false, but the PREVIOUS
     # variant may have populated the cache while it was enabled.  We must clear
     # the raw data structures to prevent cross-variant leakage.
-    import hot_cache as _hc
+    import archivist.retrieval.hot_cache as _hc
 
     _hc.force_invalidate_all()
 
     # Re-import recursive_retrieve from the freshly-reloaded rlm_retriever
     # (_apply_variant already reloaded it with the new config).
-    from rlm_retriever import recursive_retrieve
-    from tokenizer import count_tokens
+    from archivist.retrieval.rlm_retriever import recursive_retrieve
+    from archivist.utils.tokenizer import count_tokens
 
     results = []
     latencies = []
@@ -929,7 +929,7 @@ _FIXTURE_GLOSSARY = {
 
 def _seed_graph_from_fixtures(corpus_dir: str):
     """Deterministic graph population from a known glossary — no LLM calls."""
-    from graph import add_fact, init_schema, upsert_entity
+    from archivist.storage.graph import add_fact, init_schema, upsert_entity
 
     init_schema()
 
@@ -978,7 +978,7 @@ async def _run_benchmark_session(
     """
     import importlib
 
-    import config
+    import archivist.core.config as config
 
     corpus_dir = os.path.abspath(corpus_dir)
     os.environ["MEMORY_ROOT"] = corpus_dir
@@ -1011,7 +1011,7 @@ async def _run_benchmark_session(
         await index_corpus(corpus_dir, memory_scale=memory_scale)
 
     if run_curator:
-        import curator
+        import archivist.lifecycle.curator as curator
 
         importlib.reload(config)
         importlib.reload(curator)

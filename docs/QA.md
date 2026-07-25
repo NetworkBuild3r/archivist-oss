@@ -50,7 +50,52 @@ ruff check . --fix && ruff format .
 python -m mypy src/archivist/ --config-file pyproject.toml
 ```
 
-Mypy uses a ratchet in CI; do not increase the error budget without fixing real issues.
+Mypy uses a hard-fail ratchet in CI (`MYPY_MAX_ERRORS`, currently 175 real
+errors, excluding `[import-not-found]`/`[import-untyped]`) — the job fails the
+build if the count exceeds the ceiling; it no longer runs with
+`continue-on-error`. `[tool.mypy] python_version` is pinned to `3.12` to match
+the CI/Docker interpreter floor (INIT-001/SPEC-005) — a lower target previously
+made mypy abort after ~3 errors on numpy's PEP 695 stub syntax, silently
+disabling the ratchet against the full codebase. Do not raise the ceiling
+without fixing real issues; lower it as errors are cleaned up.
+
+Coverage floor (`[tool.coverage.report] fail_under` in `pyproject.toml`) is
+49% as of INIT-001/SPEC-005 (up from 46%), based on a measured 53.3%
+combined unit+regression+integration+system run. The `test` CI job overrides
+this to `--cov-fail-under=0` because it only runs the fast unit+regression
+subset (~24% by design); the floor is the full-suite target, raised roughly
+2–5 points per quarter as coverage grows.
+
+### Reproduce CI locally (INIT-002)
+
+Use these commands before pushing to a PR. They mirror
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml). Do **not** treat a
+narrow derived-scope pytest run as sufficient for Mode D completion.
+
+| CI job | Local reproduction | INIT-002 owner |
+|--------|-------------------|----------------|
+| Pre-commit Hooks | `pre-commit run --all-files` | SPEC-002 |
+| Lint & Format (Ruff) | `ruff format --check src/ tests/` then `ruff check src/ tests/` | SPEC-002 |
+| Type Check (mypy) | Install the **same pinned mypy** as CI (see below), then run the ratchet snippet | SPEC-005 |
+| Unit & Regression | `python -m pytest tests/unit tests/regression -q` (CI also runs coverage flags on this job) | SPEC-003, SPEC-004 |
+| Integration & System | `python -m pytest tests/integration tests/system -q` | SPEC-004 |
+| Chaos | `python -m pytest tests/qa/test_chaos_fault_injection.py -q` | keep green |
+
+**Mypy ratchet (match CI):**
+
+```bash
+# Pin must match CI after INIT-002/SPEC-005 (do not `pip install mypy` unpinned).
+pip install "mypy==1.19.1" types-PyYAML types-tqdm
+OUTPUT=$(python -m mypy src/archivist/ --config-file pyproject.toml 2>&1) || true
+echo "$OUTPUT"
+COUNT=$(echo "$OUTPUT" | grep "^src/archivist/.*: error:" | grep -v "\[import-not-found\]\|\[import-untyped\]" | wc -l | tr -d ' ' || true)
+echo "mypy real errors: $COUNT / ceiling 175"
+test "${COUNT:-0}" -le 175
+```
+
+**Hard rules:** no new ruff ignores, no raising `MYPY_MAX_ERRORS`, no reintroducing
+Phase-5 shims (`import graph`), no flipping `OUTBOX_ENABLED` default back to
+false to green tests — fix fixtures/asserts for the durable outbox path.
 
 ## Manual and fleet QA
 

@@ -51,14 +51,14 @@ def _make_manifest(snap_dir: Path, snapshot_id: str) -> None:
 @pytest.fixture
 def backup_dir(monkeypatch):
     tmpdir = tempfile.mkdtemp()
-    monkeypatch.setattr("backup_manager.BACKUP_DIR", tmpdir)
+    monkeypatch.setattr("archivist.storage.backup_manager.BACKUP_DIR", tmpdir)
     yield Path(tmpdir)
     shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 @pytest.fixture
 def client(monkeypatch):
-    import main
+    import archivist.app.main as main
 
     monkeypatch.setattr(main, "_startup", _noop_startup)
     monkeypatch.setattr(main, "ARCHIVIST_API_KEY", "", raising=False)
@@ -74,7 +74,7 @@ class TestDeleteBackupRouteContainment:
         unencoded '..' segment is collapsed by URL normalization before the request
         is even sent, so it never reaches the server at all; the encoded form is
         what an actual attacker would send."""
-        with patch("backup_manager.shutil.rmtree") as mock_rmtree:
+        with patch("archivist.storage.backup_manager.shutil.rmtree") as mock_rmtree:
             resp = client.delete("/admin/backup/%2e%2e")
             assert 400 <= resp.status_code < 500, resp.text
             mock_rmtree.assert_not_called()
@@ -85,7 +85,7 @@ class TestDeleteBackupRouteContainment:
         itself returns 404 before our handler runs. This is defense-in-depth on top
         of the explicit containment check exercised by the other tests here; still
         asserted to be a 4xx (never a 5xx or a successful delete)."""
-        with patch("backup_manager.shutil.rmtree") as mock_rmtree:
+        with patch("archivist.storage.backup_manager.shutil.rmtree") as mock_rmtree:
             resp = client.delete("/admin/backup/%2e%2e%2f%2e%2e%2fetc")
             assert 400 <= resp.status_code < 500, resp.text
             mock_rmtree.assert_not_called()
@@ -113,7 +113,7 @@ class TestRestoreRouteContainment:
 
     def test_traversal_id_never_reaches_manifest_read(self, client, backup_dir):
         """The rejection must happen before any manifest.json read is attempted."""
-        with patch("backup_manager.json.load") as mock_json_load:
+        with patch("archivist.storage.backup_manager.json.load") as mock_json_load:
             resp = client.post("/admin/restore", json={"snapshot_id": "../../etc/passwd"})
             assert 400 <= resp.status_code < 500, resp.text
             mock_json_load.assert_not_called()
@@ -124,7 +124,7 @@ class TestRestoreRouteContainment:
         containment check into the real restore logic (here there is no graph.db
         file in the snapshot, so it reports that as a per-component error in a
         200 response rather than being blocked by the security check)."""
-        monkeypatch.setattr("backup_manager.VECTOR_DIM", 768)
+        monkeypatch.setattr("archivist.storage.backup_manager.VECTOR_DIM", 768)
         snap_dir = backup_dir / "20260723T191500Z_nightly"
         _make_manifest(snap_dir, "20260723T191500Z_nightly")
 

@@ -117,6 +117,9 @@ async def merge_memories(
 
     # When the outbox is disabled, apply the Qdrant write inline (legacy behaviour).
     if not OUTBOX_ENABLED:
+        from archivist.storage.outbox import warn_legacy_inline_qdrant_once
+
+        warn_legacy_inline_qdrant_once()
         client.upsert(
             collection_name=_coll,
             points=[_merged_point],

@@ -106,3 +106,49 @@ async def reset_outbox_backoff(pool) -> None:
         await conn.execute(
             "UPDATE outbox SET last_attempt='2000-01-01T00:00:00+00:00' WHERE status='pending'"
         )
+
+
+async def drain_outbox(backend: MagicMock | None = None, *, cycles: int = 1) -> int:
+    """Drain pending outbox events via ``OutboxProcessor``.
+
+    INIT-002/SPEC-004: shared helper for durable-path asserts under outbox
+    default-on. Prefer this (or ``count_outbox`` + drain) over disabling
+    ``OUTBOX_ENABLED`` in product-path tests.
+
+    Args:
+        backend: VectorBackend-compatible mock. Defaults to a no-op mock.
+        cycles: Number of ``drain()`` calls (use >1 with ``reset_outbox_backoff``
+            when exercising retries / dead-letter).
+
+    Returns:
+        Total events successfully applied across all cycles.
+    """
+    from archivist.storage.outbox import OutboxProcessor
+
+    processor = OutboxProcessor(backend or make_vector_backend_mock())
+    applied = 0
+    for _ in range(cycles):
+        applied += await processor.drain()
+    return applied
+
+
+async def drain_outbox_to_terminal(
+    pool,
+    backend: MagicMock,
+    *,
+    max_cycles: int = 8,
+) -> int:
+    """Drain until no pending rows remain, resetting back-off between cycles.
+
+    Useful for dead-letter tests where ``OUTBOX_MAX_RETRIES`` must be exhausted.
+    Returns the number of drain cycles executed.
+    """
+    cycles = 0
+    for _ in range(max_cycles):
+        pending = await count_outbox(pool, "pending")
+        if pending == 0:
+            break
+        await reset_outbox_backoff(pool)
+        await drain_outbox(backend)
+        cycles += 1
+    return cycles

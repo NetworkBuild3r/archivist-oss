@@ -8,7 +8,11 @@ is integration and execution; the ideas came from many places.
 
 **Credits:** [Sources & inspiration](#sources--inspiration) (short entries). The
 long **version notes** below are the ReMe-alignment paper trail for what shipped
-when.
+when, from v1.0.0 through v1.3.0. Post-v1.3 releases (v2.0–v2.3) built on this
+foundation but are no longer ReMe-comparison-driven — their detailed release
+notes live in [`CHANGELOG.md`](../CHANGELOG.md); see
+[Post-v1.3: v2.0–v2.3](#post-v13-v20v23) below for the short summary and the
+current package-layout / tool-count corrections.
 
 ---
 
@@ -405,3 +409,37 @@ SQLite locked) would hammer the failing service every interval.
 **Fix:** Exponential backoff on failure (double the interval, capped at
 1 hour), reset to base interval on success. This reduces load on failing
 dependencies while preserving normal cycle timing when healthy.
+
+---
+
+## Post-v1.3: v2.0–v2.3
+
+<!-- INIT-001/SPEC-001 -->
+
+This doc froze at v1.3.0 while four releases shipped. They are not part of
+the ReMe-comparison paper trail above — full detail lives in
+[`CHANGELOG.md`](../CHANGELOG.md); this is the short pointer plus two path/
+count corrections that had gone stale.
+
+| Version | Headline |
+|---|---|
+| **v2.0.0** | Package layout moved to `src/archivist/` (`core/`, `storage/`, `lifecycle/`, `retrieval/`, `write/`, `features/`, `utils/`, `app/`); top-level `src/*.py` shims kept for backward-compatible imports. |
+| **v2.0.1** | Async write-path fixes (awaited fire-and-forget coroutines), `merge.py` correctness, Dockerfile `CMD` fix. |
+| **v2.1.0** | Transactional outbox + `MemoryTransaction`; conn-passing shims so `graph.py` helpers can join an open transaction. |
+| **v2.2.0 / v2.2.1** | PostgreSQL first-class backend (`GRAPH_BACKEND=postgres`); dual-backend integration tests; rowcount/async correctness fixes. |
+| **v2.3.0** | Answer Finder: tiered `memory_chunks` schema, `context_packer.py` token-budgeted packing, `SessionStore` ephemeral tier, `get_relevant_context()` / `HandoffPacket` multi-agent handoff, token-savings observability. |
+
+**Path/count corrections (stale as of the v1.0.1 note above, current as of
+v2.3.0):**
+
+- The MCP tool handler package now lives at `src/archivist/app/handlers/`
+  (not the pre-2.0 flat `src/handlers/` this doc's v1.0.1 entry describes —
+  that entry is left unedited as history of the *original* refactor).
+- The **29 tools** / **8-file** counts in the v1.0.1 entry describe that
+  point in time only. The registry has grown since (new `tools_context.py`,
+  `tools_docs.py` modules; see [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) for
+  the current module map and [`CHANGELOG.md`](../CHANGELOG.md) for the
+  current tool inventory) — do not cite the v1.0.1 numbers as current.
+
+See [ADR-001](adr/ADR-001-platform-coherence-sequencing.md) for how this
+initiative sequences the next platform + product work on top of v2.3.

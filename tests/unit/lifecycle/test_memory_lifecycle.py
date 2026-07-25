@@ -30,7 +30,13 @@ class _FakeTxn:
 
 async def _seed_artifacts(memory_id: str, all_ids: list[str]) -> None:
     """Seed FTS chunk rows, needle registry rows, and one active fact for *memory_id*."""
-    from graph import _ensure_needle_registry, add_fact, get_db, upsert_entity, upsert_fts_chunk
+    from archivist.storage.graph import (
+        _ensure_needle_registry,
+        add_fact,
+        get_db,
+        upsert_entity,
+        upsert_fts_chunk,
+    )
 
     for i, qid in enumerate(all_ids):
         await upsert_fts_chunk(qid, f"text {i}", "f.md", i, "agent", "ns")
@@ -61,7 +67,7 @@ class TestDeleteSqliteArtifactsParity:
     """_delete_sqlite_artifacts behaves identically standalone vs. via an open txn."""
 
     async def test_standalone_and_txn_paths_produce_identical_counts(self, async_pool):
-        from memory_lifecycle import _delete_sqlite_artifacts
+        from archivist.lifecycle.memory_lifecycle import _delete_sqlite_artifacts
 
         ids_standalone = ["standalone-primary", "standalone-child"]
         ids_txn = ["txn-primary", "txn-child"]
@@ -91,8 +97,8 @@ class TestDeleteSqliteArtifactsParity:
 
     async def test_txn_path_commits_before_returning(self, async_pool):
         """Rows deleted via the txn path are actually gone once pool.write() exits (auto-commit)."""
-        from graph import get_db
-        from memory_lifecycle import _delete_sqlite_artifacts
+        from archivist.lifecycle.memory_lifecycle import _delete_sqlite_artifacts
+        from archivist.storage.graph import get_db
 
         ids = ["commit-check-primary", "commit-check-child"]
         await _seed_artifacts("mem-commit-check", ids)
@@ -125,7 +131,7 @@ class TestDeleteSqliteArtifactsParity:
 
     async def test_conn_none_does_not_reuse_a_stale_connection(self, async_pool):
         """conn=None must acquire a fresh pool.write() lock, not silently reuse txn state."""
-        from memory_lifecycle import _delete_sqlite_artifacts
+        from archivist.lifecycle.memory_lifecycle import _delete_sqlite_artifacts
 
         ids = ["fresh-lock-primary"]
         await _seed_artifacts("mem-fresh-lock", ids)

@@ -2,7 +2,7 @@
 
 import pytest
 
-from reranker import rerank_results
+from archivist.retrieval.reranker import rerank_results
 
 pytestmark = [pytest.mark.unit, pytest.mark.retrieval]
 

@@ -8,16 +8,20 @@ Uses repo root = parent of scripts/.
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
+_GIT = shutil.which("git")
 
 
 def git(*args: str) -> subprocess.CompletedProcess[str]:
+    if _GIT is None:
+        raise FileNotFoundError("git executable not found on PATH")
     return subprocess.run(
-        ["git", "-c", "safe.directory=*", "-C", str(REPO), *args],
+        [_GIT, "-c", "safe.directory=*", "-C", str(REPO), *args],
         capture_output=True,
         text=True,
     )

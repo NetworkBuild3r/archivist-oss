@@ -120,7 +120,7 @@ class TestSubsystemHealthyGauge:
 
 
 class TestHealthRegisterLatency:
-    """health.register() stores latency_ms in the status entry."""
+    """archivist.core.health.register() stores latency_ms in the status entry."""
 
     def test_latency_ms_stored(self):
         import archivist.core.health as health

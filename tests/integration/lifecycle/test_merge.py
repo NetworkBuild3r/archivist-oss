@@ -3,7 +3,7 @@ import pytest
 """Tests for memory_fusion deduplication."""
 
 
-from memory_fusion import dedupe_vector_hits
+from archivist.retrieval.memory_fusion import dedupe_vector_hits
 
 pytestmark = [pytest.mark.integration, pytest.mark.lifecycle]
 

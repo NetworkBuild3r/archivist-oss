@@ -21,7 +21,7 @@ class TestMaxMicroChunksConfig:
     """MAX_MICRO_CHUNKS_PER_MEMORY config exists with correct default."""
 
     def test_config_exists(self):
-        from config import MAX_MICRO_CHUNKS_PER_MEMORY
+        from archivist.core.config import MAX_MICRO_CHUNKS_PER_MEMORY
 
         assert isinstance(MAX_MICRO_CHUNKS_PER_MEMORY, int)
         assert MAX_MICRO_CHUNKS_PER_MEMORY == 5
@@ -30,7 +30,7 @@ class TestMaxMicroChunksConfig:
         monkeypatch.setenv("MAX_MICRO_CHUNKS_PER_MEMORY", "10")
         import importlib
 
-        import config
+        import archivist.core.config as config
 
         importlib.reload(config)
         assert config.MAX_MICRO_CHUNKS_PER_MEMORY == 10
@@ -45,45 +45,55 @@ class TestMicroChunkCap:
         many_chunks = [f"chunk-{i}: 192.168.1.{i}" for i in range(20)]
 
         with (
-            patch("handlers.tools_storage._extract_needle_micro_chunks", return_value=many_chunks),
             patch(
-                "handlers.tools_storage.embed_text",
+                "archivist.app.handlers.tools_storage._extract_needle_micro_chunks",
+                return_value=many_chunks,
+            ),
+            patch(
+                "archivist.app.handlers.tools_storage.embed_text",
                 new_callable=AsyncMock,
                 return_value=[0.1] * 1024,
             ),
             patch(
-                "conflict_detection.embed_text", new_callable=AsyncMock, return_value=[0.1] * 1024
+                "archivist.write.conflict_detection.embed_text",
+                new_callable=AsyncMock,
+                return_value=[0.1] * 1024,
             ),
             patch(
-                "handlers.tools_storage.embed_batch",
+                "archivist.app.handlers.tools_storage.embed_batch",
                 new_callable=AsyncMock,
                 return_value=[[0.1] * 1024] * 5,
             ),
             patch(
-                "handlers.tools_storage.check_for_conflicts",
+                "archivist.app.handlers.tools_storage.check_for_conflicts",
                 new_callable=AsyncMock,
                 return_value=MagicMock(has_conflict=False),
             ),
             patch(
-                "handlers.tools_storage.llm_adjudicated_dedup",
+                "archivist.app.handlers.tools_storage.llm_adjudicated_dedup",
                 new_callable=AsyncMock,
                 return_value=None,
             ),
-            patch("handlers.tools_storage.qdrant_client") as mock_qc,
-            patch("handlers.tools_storage.ensure_collection", return_value="test_col"),
-            patch("audit.log_memory_event", new_callable=AsyncMock),
-            patch("handlers.tools_storage.get_namespace_for_agent", return_value="test-ns"),
-            patch("handlers.tools_storage.get_namespace_config", return_value=None),
-            patch("handlers.tools_storage.require_rbac", return_value=None),
+            patch("archivist.app.handlers.tools_storage.qdrant_client") as mock_qc,
+            patch(
+                "archivist.app.handlers.tools_storage.ensure_collection", return_value="test_col"
+            ),
+            patch("archivist.core.audit.log_memory_event", new_callable=AsyncMock),
+            patch(
+                "archivist.app.handlers.tools_storage.get_namespace_for_agent",
+                return_value="test-ns",
+            ),
+            patch("archivist.app.handlers.tools_storage.get_namespace_config", return_value=None),
+            patch("archivist.app.handlers.tools_storage.require_rbac", return_value=None),
         ):
-            monkeypatch.setattr("config.REVERSE_HYDE_ENABLED", False)
-            monkeypatch.setattr("config.BM25_ENABLED", False)
-            monkeypatch.setattr("config.MAX_MICRO_CHUNKS_PER_MEMORY", 3)
+            monkeypatch.setattr("archivist.core.config.REVERSE_HYDE_ENABLED", False)
+            monkeypatch.setattr("archivist.core.config.BM25_ENABLED", False)
+            monkeypatch.setattr("archivist.core.config.MAX_MICRO_CHUNKS_PER_MEMORY", 3)
 
             mock_client = MagicMock()
             mock_qc.return_value = mock_client
 
-            from handlers.tools_storage import _handle_store
+            from archivist.app.handlers.tools_storage import _handle_store
 
             await _handle_store({"text": "test text with 10.0.0.1", "agent_id": "test"})
 
@@ -111,44 +121,53 @@ class TestReverseHydeFireAndForget:
 
         with (
             patch(
-                "handlers.tools_storage.embed_text",
+                "archivist.app.handlers.tools_storage.embed_text",
                 new_callable=AsyncMock,
                 return_value=[0.1] * 1024,
             ),
             patch(
-                "conflict_detection.embed_text", new_callable=AsyncMock, return_value=[0.1] * 1024
+                "archivist.write.conflict_detection.embed_text",
+                new_callable=AsyncMock,
+                return_value=[0.1] * 1024,
             ),
             patch(
-                "handlers.tools_storage.embed_batch",
+                "archivist.app.handlers.tools_storage.embed_batch",
                 new_callable=AsyncMock,
                 return_value=[[0.1] * 1024],
             ),
             patch(
-                "handlers.tools_storage.check_for_conflicts",
+                "archivist.app.handlers.tools_storage.check_for_conflicts",
                 new_callable=AsyncMock,
                 return_value=MagicMock(has_conflict=False),
             ),
             patch(
-                "handlers.tools_storage.llm_adjudicated_dedup",
+                "archivist.app.handlers.tools_storage.llm_adjudicated_dedup",
                 new_callable=AsyncMock,
                 return_value=None,
             ),
-            patch("handlers.tools_storage.qdrant_client") as mock_qc,
-            patch("handlers.tools_storage.ensure_collection", return_value="test_col"),
-            patch("audit.log_memory_event", new_callable=AsyncMock),
-            patch("handlers.tools_storage._extract_needle_micro_chunks", return_value=[]),
-            patch("handlers.tools_storage.get_namespace_for_agent", return_value="test-ns"),
-            patch("handlers.tools_storage.get_namespace_config", return_value=None),
-            patch("handlers.tools_storage.require_rbac", return_value=None),
-            patch("hyde.generate_reverse_hyde_questions", side_effect=slow_hyde),
+            patch("archivist.app.handlers.tools_storage.qdrant_client") as mock_qc,
+            patch(
+                "archivist.app.handlers.tools_storage.ensure_collection", return_value="test_col"
+            ),
+            patch("archivist.core.audit.log_memory_event", new_callable=AsyncMock),
+            patch(
+                "archivist.app.handlers.tools_storage._extract_needle_micro_chunks", return_value=[]
+            ),
+            patch(
+                "archivist.app.handlers.tools_storage.get_namespace_for_agent",
+                return_value="test-ns",
+            ),
+            patch("archivist.app.handlers.tools_storage.get_namespace_config", return_value=None),
+            patch("archivist.app.handlers.tools_storage.require_rbac", return_value=None),
+            patch("archivist.write.hyde.generate_reverse_hyde_questions", side_effect=slow_hyde),
         ):
-            monkeypatch.setattr("config.REVERSE_HYDE_ENABLED", True)
-            monkeypatch.setattr("config.BM25_ENABLED", False)
+            monkeypatch.setattr("archivist.core.config.REVERSE_HYDE_ENABLED", True)
+            monkeypatch.setattr("archivist.core.config.BM25_ENABLED", False)
 
             mock_client = MagicMock()
             mock_qc.return_value = mock_client
 
-            from handlers.tools_storage import _handle_store
+            from archivist.app.handlers.tools_storage import _handle_store
 
             result = await _handle_store({"text": "test text", "agent_id": "test"})
 
@@ -177,40 +196,49 @@ class TestReverseHydeFireAndForget:
 
         with (
             patch(
-                "handlers.tools_storage.embed_text",
+                "archivist.app.handlers.tools_storage.embed_text",
                 new_callable=AsyncMock,
                 return_value=[0.1] * 1024,
             ),
             patch(
-                "conflict_detection.embed_text", new_callable=AsyncMock, return_value=[0.1] * 1024
+                "archivist.write.conflict_detection.embed_text",
+                new_callable=AsyncMock,
+                return_value=[0.1] * 1024,
             ),
             patch(
-                "handlers.tools_storage.check_for_conflicts",
+                "archivist.app.handlers.tools_storage.check_for_conflicts",
                 new_callable=AsyncMock,
                 return_value=MagicMock(has_conflict=False),
             ),
             patch(
-                "handlers.tools_storage.llm_adjudicated_dedup",
+                "archivist.app.handlers.tools_storage.llm_adjudicated_dedup",
                 new_callable=AsyncMock,
                 return_value=None,
             ),
-            patch("handlers.tools_storage.qdrant_client") as mock_qc,
-            patch("handlers.tools_storage.ensure_collection", return_value="test_col"),
-            patch("audit.log_memory_event", new_callable=AsyncMock),
-            patch("handlers.tools_storage._extract_needle_micro_chunks", return_value=[]),
-            patch("handlers.tools_storage.get_namespace_for_agent", return_value="test-ns"),
-            patch("handlers.tools_storage.get_namespace_config", return_value=None),
-            patch("handlers.tools_storage.require_rbac", return_value=None),
-            patch("hyde.generate_reverse_hyde_questions", side_effect=failing_hyde),
+            patch("archivist.app.handlers.tools_storage.qdrant_client") as mock_qc,
+            patch(
+                "archivist.app.handlers.tools_storage.ensure_collection", return_value="test_col"
+            ),
+            patch("archivist.core.audit.log_memory_event", new_callable=AsyncMock),
+            patch(
+                "archivist.app.handlers.tools_storage._extract_needle_micro_chunks", return_value=[]
+            ),
+            patch(
+                "archivist.app.handlers.tools_storage.get_namespace_for_agent",
+                return_value="test-ns",
+            ),
+            patch("archivist.app.handlers.tools_storage.get_namespace_config", return_value=None),
+            patch("archivist.app.handlers.tools_storage.require_rbac", return_value=None),
+            patch("archivist.write.hyde.generate_reverse_hyde_questions", side_effect=failing_hyde),
             patch.object(test_logger, "warning", side_effect=capture_warning),
         ):
-            monkeypatch.setattr("config.REVERSE_HYDE_ENABLED", True)
-            monkeypatch.setattr("config.BM25_ENABLED", False)
+            monkeypatch.setattr("archivist.core.config.REVERSE_HYDE_ENABLED", True)
+            monkeypatch.setattr("archivist.core.config.BM25_ENABLED", False)
 
             mock_client = MagicMock()
             mock_qc.return_value = mock_client
 
-            from handlers.tools_storage import _handle_store
+            from archivist.app.handlers.tools_storage import _handle_store
 
             await _handle_store({"text": "test text", "agent_id": "test"})
 
@@ -226,13 +254,13 @@ class TestIndexerParallelReverseHyde:
     """Indexer uses asyncio.gather with semaphore for reverse HyDE."""
 
     def test_indexer_imports_asyncio(self):
-        import indexer
+        import archivist.write.indexer as indexer
 
         assert hasattr(indexer, "asyncio"), "indexer must import asyncio for gather/semaphore"
 
     def test_gather_uses_return_exceptions(self):
         """asyncio.gather call must have return_exceptions=True for resilience."""
-        import indexer
+        import archivist.write.indexer as indexer
 
         source = inspect.getsource(indexer.index_file)
         assert "return_exceptions=True" in source, (
@@ -257,25 +285,29 @@ class TestIndexerParallelReverseHyde:
         test_file.parent.mkdir(parents=True, exist_ok=True)
         test_file.write_text("Parent chunk 1. " * 50 + "\n\n" + "Parent chunk 2. " * 50)
 
-        monkeypatch.setattr("config.REVERSE_HYDE_ENABLED", True)
-        monkeypatch.setattr("config.BM25_ENABLED", False)
-        monkeypatch.setattr("config.TIERED_CONTEXT_ENABLED", False)
-        monkeypatch.setattr("config.TOPIC_ROUTING_ENABLED", False)
-        monkeypatch.setattr("config.CONTEXTUAL_AUGMENTATION_ENABLED", False)
-        monkeypatch.setattr("config.MEMORY_ROOT", str(tmp_path / "memories"))
+        monkeypatch.setattr("archivist.core.config.REVERSE_HYDE_ENABLED", True)
+        monkeypatch.setattr("archivist.core.config.BM25_ENABLED", False)
+        monkeypatch.setattr("archivist.core.config.TIERED_CONTEXT_ENABLED", False)
+        monkeypatch.setattr("archivist.core.config.TOPIC_ROUTING_ENABLED", False)
+        monkeypatch.setattr("archivist.core.config.CONTEXTUAL_AUGMENTATION_ENABLED", False)
+        monkeypatch.setattr("archivist.core.config.MEMORY_ROOT", str(tmp_path / "memories"))
 
-        import indexer
+        import archivist.write.indexer as indexer
 
         monkeypatch.setattr(indexer, "MEMORY_ROOT", str(tmp_path / "memories"))
 
         with (
-            patch("indexer.embed_batch", new_callable=AsyncMock, return_value=[[0.1] * 1024] * 50),
-            patch("indexer.qdrant_client") as mock_qc,
-            patch("indexer.ensure_collection", return_value="test_col"),
-            patch("indexer.delete_file_points", new_callable=AsyncMock),
-            patch("indexer.get_namespace_for_agent", return_value="test-ns"),
-            patch("indexer.get_namespace_config", return_value=None),
-            patch("hyde.generate_reverse_hyde_questions", side_effect=tracked_hyde),
+            patch(
+                "archivist.write.indexer.embed_batch",
+                new_callable=AsyncMock,
+                return_value=[[0.1] * 1024] * 50,
+            ),
+            patch("archivist.write.indexer.qdrant_client") as mock_qc,
+            patch("archivist.write.indexer.ensure_collection", return_value="test_col"),
+            patch("archivist.write.indexer.delete_file_points", new_callable=AsyncMock),
+            patch("archivist.write.indexer.get_namespace_for_agent", return_value="test-ns"),
+            patch("archivist.write.indexer.get_namespace_config", return_value=None),
+            patch("archivist.write.hyde.generate_reverse_hyde_questions", side_effect=tracked_hyde),
         ):
             mock_client = MagicMock()
             mock_qc.return_value = mock_client

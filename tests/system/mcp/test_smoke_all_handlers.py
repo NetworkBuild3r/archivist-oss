@@ -1,4 +1,4 @@
-"""Smoke tests for all 37 MCP tool handlers across all 7 handler modules.
+"""Smoke tests for all 47 MCP tool handlers across handler modules.
 
 Each test calls the handler directly (no MCP transport), mocks all external I/O,
 and asserts the response is a valid ``list[TextContent]`` with:
@@ -74,7 +74,7 @@ _ALL_EXPECTED_TOOLS = [
     "archivist_skill_health",
     "archivist_skill_relate",
     "archivist_skill_dependencies",
-    # tools_admin (8)
+    # tools_admin (10)
     "archivist_context_check",
     "archivist_namespaces",
     "archivist_audit_trail",
@@ -82,10 +82,28 @@ _ALL_EXPECTED_TOOLS = [
     "archivist_retrieval_logs",
     "archivist_health_dashboard",
     "archivist_batch_heuristic",
+    "archivist_savings_dashboard",
+    "archivist_memory_lineage",
     "archivist_backup",
     # tools_cache (2)
     "archivist_cache_stats",
     "archivist_cache_invalidate",
+    # tools_context (3)
+    "archivist_get_context",
+    "archivist_handoff",
+    "archivist_receive_handoff",
+    # tools_checkpoint (5) — INIT-001/SPEC-008
+    "archivist_checkpoint_save",
+    "archivist_checkpoint_list",
+    "archivist_checkpoint_get",
+    "archivist_checkpoint_resume",
+    "archivist_checkpoint_replay",
+    # tools_coordination (5) — INIT-001/SPEC-010
+    "archivist_share_propose",
+    "archivist_share_accept",
+    "archivist_share_reject",
+    "archivist_share_attach_conflict",
+    "archivist_share_get",
     # tools_docs (1)
     "archivist_get_reference_docs",
 ]
@@ -97,6 +115,9 @@ def test_tool_registered_in_handlers(tool_name: str) -> None:
     from archivist.app.handlers import (
         tools_admin,
         tools_cache,
+        tools_checkpoint,
+        tools_context,
+        tools_coordination,
         tools_docs,
         tools_search,
         tools_skills,
@@ -112,6 +133,9 @@ def test_tool_registered_in_handlers(tool_name: str) -> None:
         tools_skills,
         tools_admin,
         tools_cache,
+        tools_context,
+        tools_checkpoint,
+        tools_coordination,
         tools_docs,
     ):
         all_handlers.update(mod.HANDLERS)  # type: ignore[arg-type]
@@ -250,6 +274,39 @@ class TestAdminHandlers:
             return_value={"recommended_batch": 10},
         ):
             result = await _handle_batch_heuristic({})
+        _assert_text_response(result)
+
+    async def test_memory_lineage_returns_text(self) -> None:
+        from archivist.app.handlers.tools_admin import _handle_memory_lineage
+
+        with (
+            patch(
+                "archivist.app.handlers.tools_admin.require_caller",
+                return_value=None,
+            ),
+            patch(
+                "archivist.app.handlers.tools_admin.resolve_caller",
+                return_value="agent-smoke",
+            ),
+            patch(
+                "archivist.core.rbac.is_permissive_mode",
+                return_value=True,
+            ),
+            patch(
+                "archivist.app.lineage.build_memory_lineage",
+                new=AsyncMock(
+                    return_value={
+                        "resource_type": "memory",
+                        "resource_id": "mem-1",
+                        "namespace": "default",
+                        "edge_count": 0,
+                        "edges": [],
+                        "sources": [],
+                    }
+                ),
+            ),
+        ):
+            result = await _handle_memory_lineage({"agent_id": "agent-smoke", "memory_id": "mem-1"})
         _assert_text_response(result)
 
     async def test_backup_list_returns_text(self) -> None:
@@ -494,7 +551,7 @@ _MOCK_RELS: list = []
 
 
 def _search_patches():
-    """Common patches for graph functions used in search handlers."""
+    """Common patches for graph functions used in search archivist.app.handlers."""
     return [
         patch(
             "archivist.app.handlers.tools_search.search_entities",

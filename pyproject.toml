@@ -47,7 +47,7 @@ select = [
 ignore = [
     # Existing codebase baseline — tighten these over time
     "E501",   # line too long — formatter handles most; rest needs per-file review
-    "E402",   # module-level import not at top — shim files legitimately use this
+    "E402",   # module-level import not at top — intentional mid-file imports in some modules
     "S101",   # assert used — fine in tests
     "S110",   # try-except-pass — legacy error-swallowing; tracked separately
     "S112",   # try-except-continue — same
@@ -55,7 +55,6 @@ ignore = [
     "S608",   # hardcoded SQL expressions — parameterised elsewhere, FTS5 OK
     "S104",   # hardcoded bind-all — intentional MCP server behaviour
     "S603",   # subprocess without shell=True — not a risk in our context
-    "S607",   # partial executable path — same
     "T201",   # print — allowed in CLI / benchmark entry points
     "B007",   # unused loop variable — common in retry/backoff loops
     "B905",   # zip without strict — intentional in zip-shortest uses
@@ -66,7 +65,6 @@ ignore = [
     "RUF005", # collection literal concat — intentional in some list builds
     "RUF059", # unused unpacked variable — used for side-effect unpacking
     "SIM102", # collapsible-if — readability preference
-    "SIM103", # return-negated-condition — readability preference
     "SIM105", # suppressible-exception — contextlib.suppress refactor deferred
     "SIM108", # ternary refactor — readability preference
     "SIM117", # multiple-with — readability preference
@@ -76,8 +74,12 @@ ignore = [
     "F841",   # local variable assigned but never used — review manually
     "E741",   # ambiguous variable name — isolated; review manually
     "C401",   # unnecessary generator → set() — minor
-    "B008",   # function calls in defaults — common FastAPI pattern
     "RUF012", # mutable class vars — dataclass fields
+    # INIT-001/SPEC-005: S607 (partial executable path), SIM103
+    # (return-negated-condition), and B008 (function calls in defaults) were
+    # removed — 0 current violations across src/ and tests/, confirmed via
+    # `ruff check --select <code>`. Re-add with a justification comment if a
+    # future change legitimately needs one of them.
 ]
 
 [tool.ruff.lint.per-file-ignores]
@@ -99,7 +101,11 @@ indent-style = "space"
 line-ending = "auto"
 
 [tool.mypy]
-python_version = "3.11"
+# Matches the minimum Python CI/Dockerfile target (3.12). Pinning this below the
+# interpreter's actual floor made mypy abort after ~3 errors (numpy's bundled
+# .pyi stubs use PEP 695 `type` statements that need 3.12+ syntax support),
+# which silently reduced the "ratchet" to a near no-op. INIT-001/SPEC-005.
+python_version = "3.12"
 mypy_path = "src"
 explicit_package_bases = true
 
@@ -148,7 +154,9 @@ omit = ["tests/*", "benchmarks/*", "src/*/__init__.py"]
 show_missing = true
 skip_covered = false
 precision = 1
-fail_under = 46  # baseline 51.4% (2026-04-17) — raise by 2-5 pts each quarter
+fail_under = 49  # measured 53.3% (2026-07-25, unit+regression+integration+system);
+                  # step +3 from prior 46 floor (baseline 51.4%, 2026-04-17) — INIT-001/SPEC-005.
+                  # Raise by 2-5 pts each quarter as coverage grows.
 
 [tool.pytest-benchmark]
 disable_gc = true

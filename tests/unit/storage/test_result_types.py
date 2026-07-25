@@ -18,7 +18,7 @@ class TestRetrievalSource:
     """RetrievalSource enum has all expected values."""
 
     def test_all_sources(self):
-        from result_types import RetrievalSource
+        from archivist.core.result_types import RetrievalSource
 
         assert RetrievalSource.VECTOR == "vector"
         assert RetrievalSource.BM25 == "bm25"
@@ -31,7 +31,7 @@ class TestResultCandidate:
     """ResultCandidate dataclass and factory methods."""
 
     def test_to_dict_has_all_keys(self):
-        from result_types import ResultCandidate, RetrievalSource
+        from archivist.core.result_types import ResultCandidate, RetrievalSource
 
         rc = ResultCandidate(id="abc", score=0.9, text="hello", source=RetrievalSource.VECTOR)
         d = rc.to_dict()
@@ -56,7 +56,7 @@ class TestResultCandidate:
         assert d["retrieval_source"] == "vector"
 
     def test_from_qdrant_payload(self):
-        from result_types import ResultCandidate, RetrievalSource
+        from archivist.core.result_types import ResultCandidate, RetrievalSource
 
         payload = {
             "text": "server runs on 10.0.0.1",
@@ -76,7 +76,7 @@ class TestResultCandidate:
         assert rc.source == RetrievalSource.VECTOR
 
     def test_from_registry_hit(self):
-        from result_types import ResultCandidate, RetrievalSource
+        from archivist.core.result_types import ResultCandidate, RetrievalSource
 
         hit = {
             "memory_id": "mem-abc",
@@ -93,7 +93,7 @@ class TestResultCandidate:
         assert rc.source == RetrievalSource.REGISTRY
 
     def test_from_bm25_hit(self):
-        from result_types import ResultCandidate, RetrievalSource
+        from archivist.core.result_types import ResultCandidate, RetrievalSource
 
         hit = {
             "qdrant_id": "qid-1",
@@ -108,7 +108,7 @@ class TestResultCandidate:
         assert rc.source == RetrievalSource.BM25
 
     def test_update_from_payload(self):
-        from result_types import ResultCandidate
+        from archivist.core.result_types import ResultCandidate
 
         rc = ResultCandidate(id="x", text="stale", agent_id="old")
         rc.update_from_payload(
@@ -131,7 +131,7 @@ class TestRegistryNoHardcodedScore:
         """The retriever must not set score=0.95 for registry hits."""
         import inspect
 
-        from rlm_retriever import recursive_retrieve
+        from archivist.retrieval.rlm_retriever import recursive_retrieve
 
         source = inspect.getsource(recursive_retrieve)
         assert "0.95" not in source, "Hardcoded 0.95 score for registry hits must be removed"
@@ -140,7 +140,7 @@ class TestRegistryNoHardcodedScore:
         """Registry hits should be built via ResultCandidate.from_registry_hit."""
         import inspect
 
-        from rlm_retriever import recursive_retrieve
+        from archivist.retrieval.rlm_retriever import recursive_retrieve
 
         source = inspect.getsource(recursive_retrieve)
         assert "ResultCandidate.from_registry_hit" in source
@@ -152,7 +152,7 @@ class TestLiteralSearchNoHardcodedScore:
     def test_no_hardcoded_085(self):
         import inspect
 
-        from rlm_retriever import _literal_search_sync
+        from archivist.retrieval.rlm_retriever import _literal_search_sync
 
         source = inspect.getsource(_literal_search_sync)
         assert "0.85" not in source, "Hardcoded 0.85 score for literal hits must be removed"
@@ -165,7 +165,7 @@ class TestRegistryRRFIntegration:
         """The RRF merge call should include registry hits as a ranking."""
         import inspect
 
-        from rlm_retriever import recursive_retrieve
+        from archivist.retrieval.rlm_retriever import recursive_retrieve
 
         source = inspect.getsource(recursive_retrieve)
         assert "_registry_hits" in source
@@ -177,7 +177,7 @@ class TestStaleRegistryDrop:
     """Stale registry entries (deleted memories) are dropped."""
 
     def test_stale_entries_dropped(self):
-        from result_types import ResultCandidate
+        from archivist.core.result_types import ResultCandidate
 
         rc1 = ResultCandidate.from_registry_hit(
             {
@@ -216,7 +216,7 @@ class TestFleetRegistryLookup:
     def test_per_agent_lookup(self):
         import inspect
 
-        from rlm_retriever import recursive_retrieve
+        from archivist.retrieval.rlm_retriever import recursive_retrieve
 
         source = inspect.getsource(recursive_retrieve)
         assert "for aid in agent_ids:" in source, "Fleet registry lookup must iterate agent_ids"

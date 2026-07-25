@@ -63,15 +63,17 @@ class TestConfigDefaults:
         assert s.vector_dim == 1024
 
     def test_outbox_defaults(self):
-        import archivist.core.config as cfg
-
-        assert cfg.OUTBOX_ENABLED is False
-        assert cfg.OUTBOX_DRAIN_INTERVAL == 2
-        assert cfg.OUTBOX_BATCH_SIZE == 50
-        assert cfg.OUTBOX_MAX_RETRIES == 5
-        assert cfg.OUTBOX_ORPHAN_TIMEOUT_SECONDS == 60
-        assert cfg.OUTBOX_ORPHAN_SWEEP_EVERY_N == 30
-        assert cfg.OUTBOX_RETENTION_DAYS == 7
+        # Coded defaults (independent of a local .env that may set OUTBOX_ENABLED).
+        # INIT-001/SPEC-004 flipped the production default to True.
+        s = ArchivistSettings.model_construct()
+        assert s.outbox_enabled is True
+        assert s.outbox_drain_interval == 2
+        assert s.outbox_batch_size == 50
+        assert s.outbox_max_retries == 5
+        assert s.outbox_orphan_timeout_seconds == 60
+        assert s.outbox_orphan_sweep_every_n == 30
+        assert s.outbox_retention_days == 7
+        assert ArchivistSettings.model_fields["outbox_enabled"].default is True
 
     def test_bm25_disabled_by_default(self):
         import archivist.core.config as cfg
@@ -175,6 +177,11 @@ class TestEnvVarOverrides:
         s = _fresh(monkeypatch, {"SQLITE_PATH": str(tmp_path), "OUTBOX_ENABLED": "true"})
         assert s.outbox_enabled is True
 
+    def test_outbox_enabled_opt_out(self, monkeypatch, tmp_path):
+        """OUTBOX_ENABLED=false remains a supported opt-out (INIT-001/SPEC-004)."""
+        s = _fresh(monkeypatch, {"SQLITE_PATH": str(tmp_path), "OUTBOX_ENABLED": "false"})
+        assert s.outbox_enabled is False
+
     def test_bm25_enabled_override(self, monkeypatch, tmp_path):
         s = _fresh(monkeypatch, {"SQLITE_PATH": str(tmp_path), "BM25_ENABLED": "1"})
         assert s.bm25_enabled is True
@@ -214,6 +221,8 @@ class TestFeatureFlagsProperty:
             "RERANKER_ENABLED",
             "PROVENANCE_ENABLED",
             "METRICS_ENABLED",
+            "CONTRADICTION_RESOLVE_ENABLED",
+            "REFLECTION_ENABLED",
         ):
             assert key in flags, f"Missing flag: {key}"
 

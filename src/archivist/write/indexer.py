@@ -211,6 +211,9 @@ async def _persist_points(
             )
             raise
         if not OUTBOX_ENABLED:
+            from archivist.storage.outbox import warn_legacy_inline_qdrant_once
+
+            warn_legacy_inline_qdrant_once()
             qdrant_client().upsert(collection_name=coll, points=points)
         return
 
@@ -225,6 +228,9 @@ async def _persist_points(
             )
             raise
     else:
+        from archivist.storage.outbox import warn_legacy_inline_qdrant_once
+
+        warn_legacy_inline_qdrant_once()
         qdrant_client().upsert(collection_name=coll, points=points)
         try:
             await register_memory_points_batch(mp_records)
@@ -666,6 +672,9 @@ async def delete_file_points(filepath: str) -> None:
                     extra={"collection": _coll, "file_path": rel, "error": str(_e)},
                 )
         else:
+            from archivist.storage.outbox import warn_legacy_inline_qdrant_once
+
+            warn_legacy_inline_qdrant_once()
             try:
                 client.delete(
                     collection_name=_coll,

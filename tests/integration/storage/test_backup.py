@@ -20,14 +20,20 @@ class TestManifest(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
         self.patches = [
-            patch("backup_manager.BACKUP_DIR", self.tmpdir),
-            patch("backup_manager.QDRANT_URL", "http://localhost:6333"),
-            patch("backup_manager.QDRANT_COLLECTION", "test_memories"),
-            patch("backup_manager.SQLITE_PATH", os.path.join(self.tmpdir, "graph.db")),
-            patch("backup_manager.MEMORY_ROOT", os.path.join(self.tmpdir, "memories")),
-            patch("backup_manager.VECTOR_DIM", 768),
-            patch("backup_manager.BACKUP_INCLUDE_FILES", False),
-            patch("backup_manager.BACKUP_RETENTION_COUNT", 5),
+            patch("archivist.storage.backup_manager.BACKUP_DIR", self.tmpdir),
+            patch("archivist.storage.backup_manager.QDRANT_URL", "http://localhost:6333"),
+            patch("archivist.storage.backup_manager.QDRANT_COLLECTION", "test_memories"),
+            patch(
+                "archivist.storage.backup_manager.SQLITE_PATH",
+                os.path.join(self.tmpdir, "graph.db"),
+            ),
+            patch(
+                "archivist.storage.backup_manager.MEMORY_ROOT",
+                os.path.join(self.tmpdir, "memories"),
+            ),
+            patch("archivist.storage.backup_manager.VECTOR_DIM", 768),
+            patch("archivist.storage.backup_manager.BACKUP_INCLUDE_FILES", False),
+            patch("archivist.storage.backup_manager.BACKUP_RETENTION_COUNT", 5),
         ]
         for p in self.patches:
             p.start()
@@ -45,8 +51,8 @@ class TestManifest(unittest.TestCase):
 
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    @patch("backup_manager.collections_for_query")
-    @patch("backup_manager._qdrant_http")
+    @patch("archivist.storage.backup_manager.collections_for_query")
+    @patch("archivist.storage.backup_manager._qdrant_http")
     def test_create_snapshot_writes_manifest(self, mock_http, mock_colls):
         mock_colls.return_value = ["test_memories"]
         snap_content = b"\x00" * 100
@@ -65,7 +71,7 @@ class TestManifest(unittest.TestCase):
 
         mock_http.side_effect = http_side_effect
 
-        from backup_manager import create_snapshot
+        from archivist.storage.backup_manager import create_snapshot
 
         result = create_snapshot(label="test-backup")
 
@@ -84,10 +90,10 @@ class TestManifest(unittest.TestCase):
         with open(manifest_path) as f:
             on_disk = json.load(f)
         assert on_disk["snapshot_id"] == snap_id
-        assert on_disk["archivist_version"] == "2.0.1"
+        assert on_disk["archivist_version"] == "2.3.0"
 
-    @patch("backup_manager.collections_for_query")
-    @patch("backup_manager._qdrant_http")
+    @patch("archivist.storage.backup_manager.collections_for_query")
+    @patch("archivist.storage.backup_manager._qdrant_http")
     def test_list_snapshots_returns_sorted(self, mock_http, mock_colls):
         mock_colls.return_value = ["test_memories"]
         snap_content = b"\x00" * 50
@@ -106,7 +112,7 @@ class TestManifest(unittest.TestCase):
 
         mock_http.side_effect = http_side_effect
 
-        from backup_manager import create_snapshot, list_snapshots
+        from archivist.storage.backup_manager import create_snapshot, list_snapshots
 
         create_snapshot(label="first")
         time.sleep(0.05)
@@ -160,8 +166,8 @@ class TestSnapshotDeleteAndPrune(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
         self.patches = [
-            patch("backup_manager.BACKUP_DIR", self.tmpdir),
-            patch("backup_manager.BACKUP_RETENTION_COUNT", 2),
+            patch("archivist.storage.backup_manager.BACKUP_DIR", self.tmpdir),
+            patch("archivist.storage.backup_manager.BACKUP_RETENTION_COUNT", 2),
         ]
         for p in self.patches:
             p.start()
@@ -191,7 +197,7 @@ class TestSnapshotDeleteAndPrune(unittest.TestCase):
             json.dump(manifest, f)
 
     def test_delete_snapshot(self):
-        from backup_manager import delete_snapshot
+        from archivist.storage.backup_manager import delete_snapshot
 
         self._make_fake_snapshot("snap_001")
         assert (Path(self.tmpdir) / "snap_001").is_dir()
@@ -199,12 +205,12 @@ class TestSnapshotDeleteAndPrune(unittest.TestCase):
         assert not (Path(self.tmpdir) / "snap_001").is_dir()
 
     def test_delete_nonexistent(self):
-        from backup_manager import delete_snapshot
+        from archivist.storage.backup_manager import delete_snapshot
 
         assert delete_snapshot("nonexistent") is False
 
     def test_prune_keeps_n_most_recent(self):
-        from backup_manager import list_snapshots, prune_snapshots
+        from archivist.storage.backup_manager import list_snapshots, prune_snapshots
 
         self._make_fake_snapshot("20250101T000000Z_a", "a")
         self._make_fake_snapshot("20250102T000000Z_b", "b")
@@ -226,8 +232,8 @@ class TestRestoreValidation(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
         self.patches = [
-            patch("backup_manager.BACKUP_DIR", self.tmpdir),
-            patch("backup_manager.VECTOR_DIM", 768),
+            patch("archivist.storage.backup_manager.BACKUP_DIR", self.tmpdir),
+            patch("archivist.storage.backup_manager.VECTOR_DIM", 768),
         ]
         for p in self.patches:
             p.start()
@@ -240,13 +246,13 @@ class TestRestoreValidation(unittest.TestCase):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_restore_missing_snapshot(self):
-        from backup_manager import restore_snapshot
+        from archivist.storage.backup_manager import restore_snapshot
 
         with self.assertRaises(FileNotFoundError):
             restore_snapshot("nonexistent_snapshot")
 
     def test_restore_dimension_mismatch(self):
-        from backup_manager import restore_snapshot
+        from archivist.storage.backup_manager import restore_snapshot
 
         snap_dir = Path(self.tmpdir) / "dim_mismatch"
         snap_dir.mkdir()
@@ -328,7 +334,7 @@ class TestNDJSONExportImport(unittest.TestCase):
         assert lines[0]["vector"] == [0.1, 0.2, 0.3]
         assert lines[1]["payload"]["text"] == "world"
 
-    @patch("backup_manager.collections_for_query")
+    @patch("archivist.storage.backup_manager.collections_for_query")
     def test_export_agent_calls_scroll(self, mock_colls):
         mock_colls.return_value = ["test_memories"]
 
@@ -341,11 +347,11 @@ class TestNDJSONExportImport(unittest.TestCase):
         mock_client.scroll.return_value = ([mock_point], None)
 
         with (
-            patch("backup_manager.BACKUP_DIR", self.tmpdir),
-            patch("backup_manager.SQLITE_PATH", self.db_path),
-            patch("qdrant.qdrant_client", return_value=mock_client),
+            patch("archivist.storage.backup_manager.BACKUP_DIR", self.tmpdir),
+            patch("archivist.storage.backup_manager.SQLITE_PATH", self.db_path),
+            patch("archivist.storage.qdrant.qdrant_client", return_value=mock_client),
         ):
-            from backup_manager import export_agent
+            from archivist.storage.backup_manager import export_agent
 
             result = export_agent("test-agent")
 
@@ -370,7 +376,7 @@ class TestNDJSONExportImport(unittest.TestCase):
             for r in records:
                 f.write(json.dumps(r) + "\n")
 
-        from backup_manager import import_agent
+        from archivist.storage.backup_manager import import_agent
 
         result = import_agent(ndjson_path, dry_run=True)
 
@@ -379,7 +385,7 @@ class TestNDJSONExportImport(unittest.TestCase):
         assert result["dry_run"] is True
 
     def test_import_missing_file(self):
-        from backup_manager import import_agent
+        from archivist.storage.backup_manager import import_agent
 
         with self.assertRaises(FileNotFoundError):
             import_agent("/nonexistent/path.ndjson")
@@ -389,7 +395,7 @@ class TestPrePruneHook(unittest.TestCase):
     """Test that the pre-prune hook debounces correctly."""
 
     def test_debounce_prevents_rapid_snapshots(self):
-        import curator_queue as cq
+        import archivist.lifecycle.curator_queue as cq
 
         cq._last_pre_prune_snapshot = 0.0
 
@@ -402,14 +408,14 @@ class TestPrePruneHook(unittest.TestCase):
             return {"snapshot_id": "test"}
 
         with (
-            patch("curator_queue.BACKUP_PRE_PRUNE", True, create=True),
+            patch("archivist.lifecycle.curator_queue.BACKUP_PRE_PRUNE", True, create=True),
             patch.dict("sys.modules", {"backup_manager": MagicMock()}),
         ):
             import importlib
 
             importlib.reload(cq)
 
-            with patch("config.BACKUP_PRE_PRUNE", True):
+            with patch("archivist.core.config.BACKUP_PRE_PRUNE", True):
                 mock_bm = MagicMock()
                 mock_bm.create_snapshot = mock_create_snapshot
                 mock_bm.prune_snapshots = MagicMock()
@@ -440,8 +446,8 @@ class TestBackupMemoryFiles(unittest.TestCase):
             snap_dir = Path(tmpdir) / "snap"
             snap_dir.mkdir()
 
-            with patch("backup_manager.MEMORY_ROOT", mem_dir):
-                from backup_manager import _backup_memory_files
+            with patch("archivist.storage.backup_manager.MEMORY_ROOT", mem_dir):
+                from archivist.storage.backup_manager import _backup_memory_files
 
                 _backup_memory_files(snap_dir)
 

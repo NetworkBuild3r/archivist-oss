@@ -18,7 +18,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.mcp]
 
 
 def test_app_registers_streamable_http_route():
-    import main
+    import archivist.app.main as main
 
     route = next(
         (route for route in main.app.routes if isinstance(route, Route) and route.path == "/mcp"),
@@ -31,7 +31,7 @@ def test_app_registers_streamable_http_route():
 
 
 async def test_streamable_http_app_delegates_to_session_manager(monkeypatch):
-    import main
+    import archivist.app.main as main
 
     called = {}
 
@@ -58,7 +58,7 @@ async def test_streamable_http_app_delegates_to_session_manager(monkeypatch):
 
 
 async def test_sse_app_connects_transport_and_runs_server(monkeypatch):
-    import main
+    import archivist.app.main as main
 
     called = []
 
@@ -90,7 +90,7 @@ async def test_sse_app_connects_transport_and_runs_server(monkeypatch):
 
 
 async def test_lifespan_initializes_and_clears_session_manager(monkeypatch):
-    import main
+    import archivist.app.main as main
 
     events = []
 
@@ -127,7 +127,7 @@ async def test_lifespan_initializes_and_clears_session_manager(monkeypatch):
 
 def test_app_registers_sse_get_route():
     """Legacy SSE GET /mcp/sse must be registered (MCP_SSE_ENABLED defaults true)."""
-    import main
+    import archivist.app.main as main
 
     route = next(
         (r for r in main.app.routes if isinstance(r, Route) and r.path == "/mcp/sse"),
@@ -140,7 +140,7 @@ def test_app_registers_sse_get_route():
 
 def test_app_registers_sse_messages_mount():
     """Legacy SSE POST /mcp/messages/ must be mounted for the SSE transport."""
-    import main
+    import archivist.app.main as main
 
     mount = next(
         (r for r in main.app.routes if isinstance(r, Mount) and r.path == "/mcp/messages"),
@@ -151,7 +151,7 @@ def test_app_registers_sse_messages_mount():
 
 def test_sse_transport_is_not_none_when_enabled():
     """When MCP_SSE_ENABLED is true, sse_transport must be a real SseServerTransport."""
-    import main
+    import archivist.app.main as main
 
     assert main.sse_transport is not None, (
         "sse_transport is None — expected a live SseServerTransport when MCP_SSE_ENABLED=true"
@@ -161,10 +161,10 @@ def test_sse_transport_is_not_none_when_enabled():
 async def test_auth_middleware_accepts_actual_key(monkeypatch):
     """Standard Bearer token with the actual key must be accepted."""
 
-    import main
+    import archivist.app.main as main
 
     monkeypatch.setattr(main, "ARCHIVIST_API_KEY", "correct-key", raising=False)
-    monkeypatch.setattr("main.ARCHIVIST_API_KEY", "correct-key", raising=False)
+    monkeypatch.setattr("archivist.app.main.ARCHIVIST_API_KEY", "correct-key", raising=False)
 
     middleware = main.ArchivistAuthMiddleware(app=None)
 
@@ -205,7 +205,7 @@ async def test_auth_middleware_rejects_openclaw_placeholder_with_warning(monkeyp
     """
     import logging
 
-    import main
+    import archivist.app.main as main
 
     monkeypatch.setattr(main, "ARCHIVIST_API_KEY", "some-secret-key", raising=False)
 
@@ -248,7 +248,7 @@ async def test_auth_middleware_rejects_openclaw_placeholder_with_warning(monkeyp
 async def test_auth_middleware_placeholder_rejected_even_without_real_key(monkeypatch):
     """Edge case: the placeholder must never authenticate, even if it happens to
     equal what a misconfigured deployment might expect."""
-    import main
+    import archivist.app.main as main
 
     monkeypatch.setattr(main, "ARCHIVIST_API_KEY", "real-secret-key", raising=False)
 
@@ -282,7 +282,7 @@ async def test_auth_middleware_placeholder_rejected_even_without_real_key(monkey
 
 async def test_auth_middleware_rejects_unknown_token(monkeypatch):
     """An unrecognized Bearer token must still return 401."""
-    import main
+    import archivist.app.main as main
 
     monkeypatch.setattr(main, "ARCHIVIST_API_KEY", "real-secret", raising=False)
 

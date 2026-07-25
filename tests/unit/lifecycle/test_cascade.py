@@ -67,7 +67,7 @@ class TestQdrantDeleteOffload:
 
     async def test_concurrent_task_progresses_during_slow_delete(self):
         """A slow client.delete() must not block a concurrently-scheduled coroutine."""
-        from cascade import _qdrant_delete
+        from archivist.lifecycle.cascade import _qdrant_delete
 
         client = MagicMock()
         client.count.return_value = MagicMock(count=0)
@@ -102,7 +102,7 @@ class TestQdrantDeleteOffload:
         blocking call in this test harness does suppress ticks — so the
         healthy-offload assertion above is meaningful and not a tautology.
         """
-        from cascade import _qdrant_delete_sync
+        from archivist.lifecycle.cascade import _qdrant_delete_sync
 
         client = MagicMock()
         client.count.return_value = MagicMock(count=0)
@@ -163,10 +163,10 @@ class TestSweepOrphansOffload:
         client.get_collections.side_effect = _slow_get_collections
 
         with (
-            patch("cascade.qdrant_client", return_value=client),
-            patch("cascade.collections_for_query", return_value=[]),
+            patch("archivist.lifecycle.cascade.qdrant_client", return_value=client),
+            patch("archivist.lifecycle.cascade.collections_for_query", return_value=[]),
         ):
-            from cascade import sweep_orphans
+            from archivist.lifecycle.cascade import sweep_orphans
 
             result, tick_count = await _run_with_ticker(sweep_orphans())
 
@@ -214,12 +214,12 @@ class TestSweepOrphansOffload:
         client.retrieve.side_effect = _slow_retrieve
 
         with (
-            patch("cascade.qdrant_client", return_value=client),
-            patch("cascade.collections_for_query", return_value=["test_col"]),
-            patch("cascade.delete_fts_chunks_batch", return_value=0),
-            patch("cascade.delete_needle_tokens_batch", return_value=0),
+            patch("archivist.lifecycle.cascade.qdrant_client", return_value=client),
+            patch("archivist.lifecycle.cascade.collections_for_query", return_value=["test_col"]),
+            patch("archivist.lifecycle.cascade.delete_fts_chunks_batch", return_value=0),
+            patch("archivist.lifecycle.cascade.delete_needle_tokens_batch", return_value=0),
         ):
-            from cascade import sweep_orphans
+            from archivist.lifecycle.cascade import sweep_orphans
 
             _, tick_count = await _run_with_ticker(sweep_orphans())
 

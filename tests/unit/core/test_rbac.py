@@ -97,7 +97,7 @@ class TestListAccessible:
 
 class TestPermissiveMode:
     def test_permissive_when_path_empty(self, monkeypatch):
-        import rbac
+        import archivist.core.rbac as rbac
 
         monkeypatch.setenv("NAMESPACES_CONFIG_PATH", "")
         rbac._config = None
@@ -109,7 +109,7 @@ class TestPermissiveMode:
         assert pol.allowed is True
 
     def test_permissive_when_config_missing(self, tmp_path, monkeypatch):
-        import rbac
+        import archivist.core.rbac as rbac
 
         rbac._config = None
         rbac._permissive_fallback = False

@@ -51,7 +51,7 @@ async def dashboard_pool(tmp_path, monkeypatch):
     """
     import archivist.app.dashboard as dashboard_module
     import archivist.app.handlers.tools_admin as tools_admin_module
-    import graph
+    import archivist.storage.graph as graph
     from archivist.storage import sqlite_pool as _pool_mod
 
     monkeypatch.setattr(_pool_mod, "pool", _pool_mod.SQLiteGraphBackend())
@@ -62,6 +62,9 @@ async def dashboard_pool(tmp_path, monkeypatch):
     real_backend = _pool_mod.SQLiteGraphBackend()
     await real_backend.initialize(db_path)
     monkeypatch.setattr(_pool_mod, "pool", real_backend)
+    # get_db()/init_schema() import SQLITE_PATH from config at call time — patching
+    # only graph.SQLITE_PATH (a re-export) does not redirect DDL (INIT-002/SPEC-003).
+    monkeypatch.setattr("archivist.core.config.SQLITE_PATH", db_path)
     monkeypatch.setattr(graph, "SQLITE_PATH", db_path)
     graph.init_schema()
 

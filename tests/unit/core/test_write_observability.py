@@ -12,13 +12,13 @@ class TestConfigFeatureFlagLogging:
     """config.py logs all feature flags at module load."""
 
     def test_log_feature_flags_function_exists(self):
-        import config
+        import archivist.core.config as config
 
         assert hasattr(config, "_log_feature_flags")
         assert callable(config._log_feature_flags)
 
     def test_log_feature_flags_emits_info(self, caplog):
-        import config
+        import archivist.core.config as config
 
         with caplog.at_level(logging.INFO, logger="archivist.config"):
             config._log_feature_flags()
@@ -31,7 +31,7 @@ class TestConfigFeatureFlagLogging:
         assert hasattr(rec, "disabled_count")
 
     def test_log_feature_flags_covers_key_flags(self, caplog):
-        import config
+        import archivist.core.config as config
 
         with caplog.at_level(logging.INFO, logger="archivist.config"):
             config._log_feature_flags()
@@ -53,7 +53,7 @@ class TestStorePipelineLog:
     """tools_storage._handle_store emits store_pipeline.complete."""
 
     def test_store_log_contains_required_fields(self):
-        import handlers.tools_storage as ts
+        import archivist.app.handlers.tools_storage as ts
 
         source = inspect.getsource(ts._handle_store)
         assert "store_pipeline.complete" in source
@@ -70,17 +70,17 @@ class TestStorePipelineLog:
             assert field in source
 
     def test_store_log_uses_time_import(self):
-        import handlers.tools_storage as ts
+        import archivist.app.handlers.tools_storage as ts
 
         source = inspect.getsource(ts)
         assert "import time" in source
 
 
 class TestRetrievalPipelineLog:
-    """rlm_retriever.recursive_retrieve emits retrieval_pipeline.complete."""
+    """archivist.retrieval.rlm_retriever.recursive_retrieve emits retrieval_pipeline.complete."""
 
     def test_retrieval_log_contains_required_fields(self):
-        import rlm_retriever
+        import archivist.retrieval.rlm_retriever as rlm_retriever
 
         source = inspect.getsource(rlm_retriever.recursive_retrieve)
         assert "retrieval_pipeline.complete" in source
@@ -108,13 +108,13 @@ class TestDocstringsAndTypeHints:
     @pytest.mark.parametrize(
         "module_name,func_name",
         [
-            ("memory_lifecycle", "delete_memory_complete"),
-            ("memory_lifecycle", "archive_memory_complete"),
-            ("contextual_augment", "strip_augmentation_header"),
-            ("contextual_augment", "augment_chunk"),
-            ("graph", "delete_fts_chunks_by_qdrant_id"),
-            ("graph", "delete_needle_tokens_by_memory"),
-            ("chunking", "_extract_needle_micro_chunks"),
+            ("archivist.lifecycle.memory_lifecycle", "delete_memory_complete"),
+            ("archivist.lifecycle.memory_lifecycle", "archive_memory_complete"),
+            ("archivist.write.contextual_augment", "strip_augmentation_header"),
+            ("archivist.write.contextual_augment", "augment_chunk"),
+            ("archivist.storage.graph", "delete_fts_chunks_by_qdrant_id"),
+            ("archivist.storage.graph", "delete_needle_tokens_by_memory"),
+            ("archivist.utils.chunking", "_extract_needle_micro_chunks"),
         ],
     )
     def test_has_docstring(self, module_name, func_name):
@@ -128,12 +128,12 @@ class TestDocstringsAndTypeHints:
     @pytest.mark.parametrize(
         "module_name,func_name",
         [
-            ("memory_lifecycle", "delete_memory_complete"),
-            ("memory_lifecycle", "archive_memory_complete"),
-            ("contextual_augment", "strip_augmentation_header"),
-            ("contextual_augment", "augment_chunk"),
-            ("graph", "delete_fts_chunks_by_qdrant_id"),
-            ("graph", "delete_needle_tokens_by_memory"),
+            ("archivist.lifecycle.memory_lifecycle", "delete_memory_complete"),
+            ("archivist.lifecycle.memory_lifecycle", "archive_memory_complete"),
+            ("archivist.write.contextual_augment", "strip_augmentation_header"),
+            ("archivist.write.contextual_augment", "augment_chunk"),
+            ("archivist.storage.graph", "delete_fts_chunks_by_qdrant_id"),
+            ("archivist.storage.graph", "delete_needle_tokens_by_memory"),
         ],
     )
     def test_has_return_annotation(self, module_name, func_name):
@@ -145,7 +145,7 @@ class TestDocstringsAndTypeHints:
         assert sig.return_annotation is not inspect.Parameter.empty
 
     def test_result_candidate_factory_docstrings(self):
-        from result_types import ResultCandidate
+        from archivist.core.result_types import ResultCandidate
 
         for method in [
             "from_qdrant_payload",
@@ -158,7 +158,7 @@ class TestDocstringsAndTypeHints:
             assert func.__doc__ is not None
 
     def test_delete_result_has_total_property(self):
-        from memory_lifecycle import DeleteResult
+        from archivist.lifecycle.memory_lifecycle import DeleteResult
 
         dr = DeleteResult(qdrant_primary=1, fts_entries=2, registry_tokens=3)
         assert dr.total == 6

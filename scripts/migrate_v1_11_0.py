@@ -115,10 +115,7 @@ def _needs_unique_constraint_rebuild(conn: sqlite3.Connection) -> bool:
     idx_rows = conn.execute(
         "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='entities' AND sql IS NOT NULL"
     ).fetchall()
-    if any("namespace" in (r[0] or "") for r in idx_rows):
-        return False
-
-    return True
+    return not any("namespace" in (r[0] or "") for r in idx_rows)
 
 
 def _check_pending(conn: sqlite3.Connection) -> dict[str, list[str]]:

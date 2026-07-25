@@ -166,6 +166,28 @@ Remove `GRAPH_BACKEND` and `DATABASE_URL` from `.env`. SQLite resumes on next re
 
 ---
 
+## Transactional outbox (default on)
+
+Hot-path writes (store, index, merge, delete) commit SQLite/FTS/needle/`memory_points` artefacts together with an outbox row, then a background `OutboxProcessor` applies Qdrant mutations idempotently. **`OUTBOX_ENABLED` defaults to `true`.**
+
+```bash
+# Default — durable transactional writes (recommended)
+# OUTBOX_ENABLED=true
+
+# Opt out during the legacy inline-Qdrant deprecation window only
+# OUTBOX_ENABLED=false
+
+# Drain tuning (optional)
+# OUTBOX_DRAIN_INTERVAL=2
+# OUTBOX_BATCH_SIZE=50
+# OUTBOX_MAX_RETRIES=5
+# OUTBOX_RETENTION_DAYS=7
+```
+
+Setting `OUTBOX_ENABLED=false` restores pre-outbox inline Qdrant writes and emits a once-per-process deprecation warning when that path is used. Prefer leaving the default on in Docker and production.
+
+---
+
 ## Answer Finder configuration (v2.3)
 
 Archivist v2.3 ships an Answer Finder layer that assembles token-budgeted context for every agent query. The defaults work out-of-the-box; tune the variables below when you need different behavior.

@@ -184,7 +184,7 @@ class TestPhase1QueryExpansionKill:
         return evaluate
 
     def test_config_default_expansion_disabled(self):
-        from config import QUERY_EXPANSION_ENABLED
+        from archivist.core.config import QUERY_EXPANSION_ENABLED
 
         assert QUERY_EXPANSION_ENABLED is False
 

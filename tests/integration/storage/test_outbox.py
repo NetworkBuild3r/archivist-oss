@@ -152,6 +152,43 @@ def test_enqueue_accumulates_when_enabled():
     assert txn._events[1].event_type == EventType.QDRANT_DELETE
 
 
+def test_memory_transaction_defaults_to_outbox_enabled(monkeypatch):
+    """MemoryTransaction() without enabled= follows OUTBOX_ENABLED (default True).
+
+    INIT-001/SPEC-004 — ac-1: default settings yield outbox-enabled writes.
+    """
+    import archivist.core.config as cfg
+    from archivist.storage.transaction import MemoryTransaction
+
+    monkeypatch.setattr(cfg, "OUTBOX_ENABLED", True)
+    txn = MemoryTransaction()
+    assert txn._enabled is True
+    txn.enqueue_qdrant_upsert("col", [], memory_id="default-on")
+    assert len(txn._events) == 1
+
+
+def test_legacy_inline_warns_once_per_process(caplog, monkeypatch):
+    """Legacy inline path emits a single deprecation warning per process.
+
+    INIT-001/SPEC-004 — ac-4.
+    """
+    import logging
+
+    from archivist.storage import outbox as outbox_mod
+
+    monkeypatch.setattr(outbox_mod, "_legacy_inline_warned", False)
+    outbox_mod.reset_legacy_inline_warning_for_tests()
+
+    with caplog.at_level(logging.WARNING, logger="archivist.outbox"):
+        outbox_mod.warn_legacy_inline_qdrant_once()
+        outbox_mod.warn_legacy_inline_qdrant_once()
+        outbox_mod.warn_legacy_inline_qdrant_once()
+
+    matching = [r for r in caplog.records if "deprecated legacy inline Qdrant" in r.getMessage()]
+    assert len(matching) == 1
+    assert "INIT-001/SPEC-004" in matching[0].getMessage()
+
+
 # ---------------------------------------------------------------------------
 # Integration tests (require async_pool fixture with outbox schema)
 # ---------------------------------------------------------------------------

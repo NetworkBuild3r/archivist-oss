@@ -50,40 +50,54 @@ class TestMergeCollectionRouting:
     """merge_memories routes to collection_for(ns), not QDRANT_COLLECTION."""
 
     async def test_upsert_uses_collection_for_ns(self, async_pool):
-        """Qdrant upsert must use collection_for(ns), not the global constant."""
+        """Qdrant upsert must use collection_for(ns), not the global constant.
+
+        INIT-002/SPEC-004: outbox default-on — collection routing is asserted on
+        ``enqueue_qdrant_upsert`` (durable path), not a synchronous client.upsert.
+        """
         mock_client = MagicMock()
         mock_client.retrieve.return_value = [
             _make_mock_point("id1"),
             _make_mock_point("id2"),
         ]
 
-        upsert_calls = []
-
-        def capture_upsert(**kwargs):
-            upsert_calls.append(kwargs.get("collection_name"))
-            return MagicMock(operation_id=1)
-
-        mock_client.upsert.side_effect = capture_upsert
+        txn_cm = _mock_txn_ctx()
+        # _mock_txn_ctx returns a MagicMock factory; capture the txn instance.
+        txn_instance = txn_cm.return_value
+        txn_instance.__aenter__ = AsyncMock(return_value=txn_instance)
+        txn_instance.__aexit__ = AsyncMock(return_value=False)
 
         with (
-            patch("merge.qdrant_client", return_value=mock_client),
-            patch("merge.embed_text", new_callable=AsyncMock, return_value=[0.1] * 1024),
-            patch("merge.record_version", new_callable=AsyncMock, return_value=2),
-            patch("archivist.storage.transaction.MemoryTransaction", _mock_txn_ctx()),
-            patch("merge.log_memory_event", new_callable=AsyncMock),
-            patch("memory_lifecycle.delete_memory_complete", new_callable=AsyncMock),
+            patch("archivist.lifecycle.merge.qdrant_client", return_value=mock_client),
             patch(
-                "merge.collection_for",
+                "archivist.lifecycle.merge.embed_text",
+                new_callable=AsyncMock,
+                return_value=[0.1] * 1024,
+            ),
+            patch(
+                "archivist.lifecycle.merge.record_version", new_callable=AsyncMock, return_value=2
+            ),
+            patch("archivist.storage.transaction.MemoryTransaction", txn_cm),
+            patch("archivist.lifecycle.merge.log_memory_event", new_callable=AsyncMock),
+            patch(
+                "archivist.lifecycle.memory_lifecycle.delete_memory_complete",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "archivist.lifecycle.merge.collection_for",
                 return_value="archivist_test_ns",
-            ) as mock_coll_for,
+            ),
         ):
-            from merge import merge_memories
+            from archivist.lifecycle.merge import merge_memories
 
             await merge_memories(["id1", "id2"], "latest", "agent1", "test-ns")
 
-        assert upsert_calls, "Qdrant upsert was never called"
-        assert upsert_calls[0] == "archivist_test_ns", (
-            f"upsert used wrong collection: {upsert_calls[0]!r} — "
+        assert txn_instance.enqueue_qdrant_upsert.called, (
+            "enqueue_qdrant_upsert was never called — durable write path missing"
+        )
+        enqueued_collection = txn_instance.enqueue_qdrant_upsert.call_args[0][0]
+        assert enqueued_collection == "archivist_test_ns", (
+            f"upsert enqueued to wrong collection: {enqueued_collection!r} — "
             "should be collection_for(ns), not the hardcoded constant"
         )
 
@@ -102,14 +116,23 @@ class TestMergeSQLiteArtifacts:
         txn_mock = _mock_txn_ctx()
 
         with (
-            patch("merge.qdrant_client", return_value=mock_client),
-            patch("merge.embed_text", new_callable=AsyncMock, return_value=[0.1] * 1024),
-            patch("merge.record_version", new_callable=AsyncMock, return_value=2),
+            patch("archivist.lifecycle.merge.qdrant_client", return_value=mock_client),
+            patch(
+                "archivist.lifecycle.merge.embed_text",
+                new_callable=AsyncMock,
+                return_value=[0.1] * 1024,
+            ),
+            patch(
+                "archivist.lifecycle.merge.record_version", new_callable=AsyncMock, return_value=2
+            ),
             patch("archivist.storage.transaction.MemoryTransaction", txn_mock),
-            patch("merge.log_memory_event", new_callable=AsyncMock),
-            patch("memory_lifecycle.delete_memory_complete", new_callable=AsyncMock),
+            patch("archivist.lifecycle.merge.log_memory_event", new_callable=AsyncMock),
+            patch(
+                "archivist.lifecycle.memory_lifecycle.delete_memory_complete",
+                new_callable=AsyncMock,
+            ),
         ):
-            from merge import merge_memories
+            from archivist.lifecycle.merge import merge_memories
 
             result = await merge_memories(["src1", "src2"], "latest", "agent1", "test-ns")
 
@@ -132,14 +155,23 @@ class TestMergeSQLiteArtifacts:
         txn_mock = _mock_txn_ctx()
 
         with (
-            patch("merge.qdrant_client", return_value=mock_client),
-            patch("merge.embed_text", new_callable=AsyncMock, return_value=[0.1] * 1024),
-            patch("merge.record_version", new_callable=AsyncMock, return_value=2),
+            patch("archivist.lifecycle.merge.qdrant_client", return_value=mock_client),
+            patch(
+                "archivist.lifecycle.merge.embed_text",
+                new_callable=AsyncMock,
+                return_value=[0.1] * 1024,
+            ),
+            patch(
+                "archivist.lifecycle.merge.record_version", new_callable=AsyncMock, return_value=2
+            ),
             patch("archivist.storage.transaction.MemoryTransaction", txn_mock),
-            patch("merge.log_memory_event", new_callable=AsyncMock),
-            patch("memory_lifecycle.delete_memory_complete", new_callable=AsyncMock),
+            patch("archivist.lifecycle.merge.log_memory_event", new_callable=AsyncMock),
+            patch(
+                "archivist.lifecycle.memory_lifecycle.delete_memory_complete",
+                new_callable=AsyncMock,
+            ),
         ):
-            from merge import merge_memories
+            from archivist.lifecycle.merge import merge_memories
 
             result = await merge_memories(["fts1", "fts2"], "concat", "agent1", "test-ns")
 
@@ -167,14 +199,23 @@ class TestMergeSQLiteArtifacts:
         txn_mock = _mock_txn_ctx()
 
         with (
-            patch("merge.qdrant_client", return_value=mock_client),
-            patch("merge.embed_text", new_callable=AsyncMock, return_value=[0.1] * 1024),
-            patch("merge.record_version", new_callable=AsyncMock, return_value=2),
+            patch("archivist.lifecycle.merge.qdrant_client", return_value=mock_client),
+            patch(
+                "archivist.lifecycle.merge.embed_text",
+                new_callable=AsyncMock,
+                return_value=[0.1] * 1024,
+            ),
+            patch(
+                "archivist.lifecycle.merge.record_version", new_callable=AsyncMock, return_value=2
+            ),
             patch("archivist.storage.transaction.MemoryTransaction", txn_mock),
-            patch("merge.log_memory_event", new_callable=AsyncMock),
-            patch("memory_lifecycle.delete_memory_complete", new_callable=AsyncMock),
+            patch("archivist.lifecycle.merge.log_memory_event", new_callable=AsyncMock),
+            patch(
+                "archivist.lifecycle.memory_lifecycle.delete_memory_complete",
+                new_callable=AsyncMock,
+            ),
         ):
-            from merge import merge_memories
+            from archivist.lifecycle.merge import merge_memories
 
             result = await merge_memories(["nee1", "nee2"], "latest", "agent1", "test-ns")
 
@@ -210,14 +251,21 @@ class TestMergeVersionTracking:
             return 42
 
         with (
-            patch("merge.qdrant_client", return_value=mock_client),
-            patch("merge.embed_text", new_callable=AsyncMock, return_value=[0.1] * 1024),
-            patch("merge.record_version", side_effect=capture_version),
+            patch("archivist.lifecycle.merge.qdrant_client", return_value=mock_client),
+            patch(
+                "archivist.lifecycle.merge.embed_text",
+                new_callable=AsyncMock,
+                return_value=[0.1] * 1024,
+            ),
+            patch("archivist.lifecycle.merge.record_version", side_effect=capture_version),
             patch("archivist.storage.transaction.MemoryTransaction", _mock_txn_ctx()),
-            patch("merge.log_memory_event", new_callable=AsyncMock),
-            patch("memory_lifecycle.delete_memory_complete", new_callable=AsyncMock),
+            patch("archivist.lifecycle.merge.log_memory_event", new_callable=AsyncMock),
+            patch(
+                "archivist.lifecycle.memory_lifecycle.delete_memory_complete",
+                new_callable=AsyncMock,
+            ),
         ):
-            from merge import merge_memories
+            from archivist.lifecycle.merge import merge_memories
 
             result = await merge_memories(["v1", "v2"], "latest", "agent1", "test-ns")
 
@@ -234,8 +282,8 @@ class TestMergePartialDeletionGuard:
 
     async def test_partial_deletion_error_does_not_abort_merge(self, async_pool):
         """merge_memories catches PartialDeletionError from delete loop, returns result."""
-        from cascade import PartialDeletionError
-        from memory_lifecycle import DeleteResult
+        from archivist.lifecycle.cascade import PartialDeletionError
+        from archivist.lifecycle.memory_lifecycle import DeleteResult
 
         mock_client = MagicMock()
         mock_client.retrieve.return_value = [
@@ -253,14 +301,23 @@ class TestMergePartialDeletionGuard:
                 raise PartialDeletionError(failed_result)
 
         with (
-            patch("merge.qdrant_client", return_value=mock_client),
-            patch("merge.embed_text", new_callable=AsyncMock, return_value=[0.1] * 1024),
-            patch("merge.record_version", new_callable=AsyncMock, return_value=3),
+            patch("archivist.lifecycle.merge.qdrant_client", return_value=mock_client),
+            patch(
+                "archivist.lifecycle.merge.embed_text",
+                new_callable=AsyncMock,
+                return_value=[0.1] * 1024,
+            ),
+            patch(
+                "archivist.lifecycle.merge.record_version", new_callable=AsyncMock, return_value=3
+            ),
             patch("archivist.storage.transaction.MemoryTransaction", _mock_txn_ctx()),
-            patch("merge.log_memory_event", new_callable=AsyncMock),
-            patch("memory_lifecycle.delete_memory_complete", side_effect=partial_fail),
+            patch("archivist.lifecycle.merge.log_memory_event", new_callable=AsyncMock),
+            patch(
+                "archivist.lifecycle.memory_lifecycle.delete_memory_complete",
+                side_effect=partial_fail,
+            ),
         ):
-            from merge import merge_memories
+            from archivist.lifecycle.merge import merge_memories
 
             # Should NOT raise — partial failure is caught and logged
             result = await merge_memories(["del1", "del2"], "latest", "agent1", "test-ns")

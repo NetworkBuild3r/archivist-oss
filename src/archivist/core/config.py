@@ -158,6 +158,17 @@ class ArchivistSettings(BaseSettings):
     curator_tip_budget: int = Field(default=20, ge=0)
     curator_max_parallel: int = Field(default=4, ge=1)
     curator_queue_drain_interval: int = Field(default=30, ge=1)
+
+    # ── Phase 8 lifecycle resolve + reflection (INIT-001/SPEC-006) ───────────
+    # Safe defaults: master switches off; when enabled, dry-run stays on until
+    # explicitly disabled. LLM adjudication is optional and off by default.
+    contradiction_resolve_enabled: bool = False
+    contradiction_resolve_dry_run: bool = True
+    contradiction_resolve_llm_enabled: bool = False
+    contradiction_resolve_max_per_cycle: int = Field(default=20, ge=0)
+    reflection_enabled: bool = False
+    reflection_dry_run: bool = True
+    reflection_max_per_cycle: int = Field(default=20, ge=0)
     hotness_weight: float = 0.15
     hotness_halflife_days: int = Field(default=7, ge=1)
     importance_weight: float = 0.10
@@ -266,8 +277,10 @@ class ArchivistSettings(BaseSettings):
     pg_pool_min: int = Field(default=5, ge=1)
     pg_pool_max: int = Field(default=20, ge=1)
 
-    # ── Transactional outbox (v2.1 — Phase 3) ────────────────────────────────
-    outbox_enabled: bool = False
+    # ── Transactional outbox (v2.1 — Phase 3; default-on INIT-001/SPEC-004) ──
+    # Production default is True (durable SQLite+outbox commits). Opt out with
+    # OUTBOX_ENABLED=false during the legacy inline-Qdrant deprecation window.
+    outbox_enabled: bool = True
     outbox_drain_interval: int = Field(default=2, ge=1)
     outbox_batch_size: int = Field(default=50, ge=1)
     outbox_max_retries: int = Field(default=5, ge=1)
@@ -277,6 +290,11 @@ class ArchivistSettings(BaseSettings):
 
     # ── Context window management (v1.1) ─────────────────────────────────────
     default_context_budget: int = Field(default=128000, ge=1)
+
+    # ── Token USD cost estimates (INIT-001/SPEC-011 — observability only) ─────
+    # Optional USD-per-1k-tokens rate for savings/cost dashboards. When unset,
+    # estimated_usd_* fields are null (not a billing system).
+    token_usd_per_1k: float | None = Field(default=None, ge=0.0)
 
     # ── Tier-aware context packing (Phase 2 — answer-finder) ─────────────────
     # CONTEXT_PACK_POLICY: controls how the tier-aware packer allocates budget.
@@ -482,6 +500,11 @@ class ArchivistSettings(BaseSettings):
             "METRICS_AUTH_EXEMPT": self.metrics_auth_exempt,
             "MCP_SSE_ENABLED": self.mcp_sse_enabled,
             "OUTBOX_ENABLED": self.outbox_enabled,
+            "CONTRADICTION_RESOLVE_ENABLED": self.contradiction_resolve_enabled,
+            "CONTRADICTION_RESOLVE_DRY_RUN": self.contradiction_resolve_dry_run,
+            "CONTRADICTION_RESOLVE_LLM_ENABLED": self.contradiction_resolve_llm_enabled,
+            "REFLECTION_ENABLED": self.reflection_enabled,
+            "REFLECTION_DRY_RUN": self.reflection_dry_run,
         }
 
     def _load_team_map(self) -> dict[str, str]:
@@ -692,6 +715,14 @@ DEDUP_LLM_THRESHOLD = _settings.dedup_llm_threshold
 CURATOR_TIP_BUDGET = _settings.curator_tip_budget
 CURATOR_MAX_PARALLEL = _settings.curator_max_parallel
 CURATOR_QUEUE_DRAIN_INTERVAL = _settings.curator_queue_drain_interval
+
+CONTRADICTION_RESOLVE_ENABLED = _settings.contradiction_resolve_enabled
+CONTRADICTION_RESOLVE_DRY_RUN = _settings.contradiction_resolve_dry_run
+CONTRADICTION_RESOLVE_LLM_ENABLED = _settings.contradiction_resolve_llm_enabled
+CONTRADICTION_RESOLVE_MAX_PER_CYCLE = _settings.contradiction_resolve_max_per_cycle
+REFLECTION_ENABLED = _settings.reflection_enabled
+REFLECTION_DRY_RUN = _settings.reflection_dry_run
+REFLECTION_MAX_PER_CYCLE = _settings.reflection_max_per_cycle
 HOTNESS_WEIGHT = _settings.hotness_weight
 HOTNESS_HALFLIFE_DAYS = _settings.hotness_halflife_days
 IMPORTANCE_WEIGHT = _settings.importance_weight
@@ -782,6 +813,7 @@ OUTBOX_ORPHAN_SWEEP_EVERY_N = _settings.outbox_orphan_sweep_every_n
 OUTBOX_RETENTION_DAYS = _settings.outbox_retention_days
 
 DEFAULT_CONTEXT_BUDGET = _settings.default_context_budget
+TOKEN_USD_PER_1K = _settings.token_usd_per_1k
 
 CONTEXT_PACK_POLICY = _settings.context_pack_policy
 CONTEXT_L0_BUDGET_SHARE = _settings.context_l0_budget_share
