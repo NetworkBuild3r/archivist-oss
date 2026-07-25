@@ -93,7 +93,7 @@ class TestStoreBaselineCharacterization:
                 return_value=None,
             ),
             patch(
-                "archivist.app.handlers.tools_storage._rbac_gate",
+                "archivist.app.handlers.tools_storage.require_rbac",
                 return_value=None,
             ),
             patch("archivist.core.config.REVERSE_HYDE_ENABLED", False),
@@ -163,7 +163,7 @@ class TestStoreBackgroundFeaturesEnabledCharacterization:
                 return_value=None,
             ),
             patch(
-                "archivist.app.handlers.tools_storage._rbac_gate",
+                "archivist.app.handlers.tools_storage.require_rbac",
                 return_value=None,
             ),
             patch("archivist.core.config.REVERSE_HYDE_ENABLED", True),
@@ -245,7 +245,7 @@ class TestStoreEntityExtractionCharacterization:
                 return_value=None,
             ),
             patch(
-                "archivist.app.handlers.tools_storage._rbac_gate",
+                "archivist.app.handlers.tools_storage.require_rbac",
                 return_value=None,
             ),
             patch("archivist.core.config.REVERSE_HYDE_ENABLED", False),
