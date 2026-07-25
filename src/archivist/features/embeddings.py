@@ -82,6 +82,19 @@ def _get_embed_client() -> httpx.AsyncClient:
     return _embed_client
 
 
+async def aclose_embed_client() -> None:
+    """Close the module-level embedding HTTP client, releasing pooled sockets.
+
+    Idempotent — safe to call during app shutdown even when no embedding call
+    was ever made (client stays ``None``) or when the client is already closed
+    (INIT-022/SPEC-007, M6).
+    """
+    global _embed_client
+    if _embed_client is not None and not _embed_client.is_closed:
+        await _embed_client.aclose()
+    _embed_client = None
+
+
 async def embed_text(text: str, model: str = EMBED_MODEL) -> list[float]:
     """Embed a single text string, returning a float vector.
 

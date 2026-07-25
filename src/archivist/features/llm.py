@@ -79,6 +79,19 @@ def _get_llm_client() -> httpx.AsyncClient:
     return _llm_client
 
 
+async def aclose_llm_client() -> None:
+    """Close the module-level LLM HTTP client, releasing pooled sockets.
+
+    Idempotent — safe to call during app shutdown even when no LLM call was
+    ever made (client stays ``None``) or when the client is already closed
+    (INIT-022/SPEC-007, M6).
+    """
+    global _llm_client
+    if _llm_client is not None and not _llm_client.is_closed:
+        await _llm_client.aclose()
+    _llm_client = None
+
+
 async def llm_query(
     prompt: str,
     system: str = "",
