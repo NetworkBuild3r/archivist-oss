@@ -310,6 +310,47 @@ TOOLS: list[Tool] = [
 # ---------------------------------------------------------------------------
 
 
+async def _persist_background_points(
+    coll: str,
+    points: list[PointStruct],
+    mp_records: list[dict],
+    memory_id: str,
+) -> None:
+    """Persist background-task points (reverse-HyDE / synthetic-questions) plus
+    their ``memory_points`` rows.
+
+    Extracted from ``_reverse_hyde_background`` and
+    ``_synthetic_questions_background``, which each duplicated this ~30-line
+    branch inline (INIT-022/SPEC-008, M8). Modeled on the equivalent
+    ``_persist_points`` helper in ``archivist.write.indexer``
+    (INIT-022/SPEC-001, M13) — same ``OUTBOX_ENABLED`` branching, but without
+    that helper's ``force_transaction``/``extra_txn_work`` options, which
+    neither background task needs.
+    """
+    from archivist.core.config import OUTBOX_ENABLED
+
+    if OUTBOX_ENABLED:
+        async with MemoryTransaction() as txn:
+            await txn.executemany(
+                """INSERT OR IGNORE INTO memory_points
+                       (memory_id, qdrant_id, point_type, created_at)
+                   VALUES (?, ?, ?, ?)""",
+                [
+                    (
+                        r["memory_id"],
+                        r["qdrant_id"],
+                        r["point_type"],
+                        datetime.now(UTC).isoformat(),
+                    )
+                    for r in mp_records
+                ],
+            )
+            txn.enqueue_qdrant_upsert(coll, points, memory_id=memory_id)
+    else:
+        qdrant_client().upsert(collection_name=coll, points=points)
+        await register_memory_points_batch(mp_records)
+
+
 async def _handle_store(arguments: dict) -> list[TextContent]:
     _t_store = time.monotonic()
     text = arguments["text"]
@@ -707,34 +748,11 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
                     )
                 )
             if _rh_points:
-                from archivist.core.config import OUTBOX_ENABLED
-
                 _rh_mp_records = [
                     {"memory_id": pid, "qdrant_id": str(rp.id), "point_type": "reverse_hyde"}
                     for rp in _rh_points
                 ]
-                if OUTBOX_ENABLED:
-                    from datetime import UTC, datetime
-
-                    async with MemoryTransaction() as txn:
-                        await txn.executemany(
-                            """INSERT OR IGNORE INTO memory_points
-                                   (memory_id, qdrant_id, point_type, created_at)
-                               VALUES (?, ?, ?, ?)""",
-                            [
-                                (
-                                    r["memory_id"],
-                                    r["qdrant_id"],
-                                    r["point_type"],
-                                    datetime.now(UTC).isoformat(),
-                                )
-                                for r in _rh_mp_records
-                            ],
-                        )
-                        txn.enqueue_qdrant_upsert(_coll, _rh_points, memory_id=pid)
-                else:
-                    client.upsert(collection_name=_coll, points=_rh_points)
-                    await register_memory_points_batch(_rh_mp_records)
+                await _persist_background_points(_coll, _rh_points, _rh_mp_records, pid)
             logger.info(
                 "reverse_hyde.background_complete",
                 extra={"memory_id": pid, "question_count": len(_rh_questions)},
@@ -784,8 +802,6 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
                 base_payload=base_payload,
             )
             if sq_points:
-                from archivist.core.config import OUTBOX_ENABLED
-
                 _sq_mp_records = [
                     {
                         "memory_id": pid,
@@ -794,28 +810,7 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
                     }
                     for sp in sq_points
                 ]
-                if OUTBOX_ENABLED:
-                    from datetime import UTC, datetime
-
-                    async with MemoryTransaction() as txn:
-                        await txn.executemany(
-                            """INSERT OR IGNORE INTO memory_points
-                                   (memory_id, qdrant_id, point_type, created_at)
-                               VALUES (?, ?, ?, ?)""",
-                            [
-                                (
-                                    r["memory_id"],
-                                    r["qdrant_id"],
-                                    r["point_type"],
-                                    datetime.now(UTC).isoformat(),
-                                )
-                                for r in _sq_mp_records
-                            ],
-                        )
-                        txn.enqueue_qdrant_upsert(_coll, sq_points, memory_id=pid)
-                else:
-                    client.upsert(collection_name=_coll, points=sq_points)
-                    await register_memory_points_batch(_sq_mp_records)
+                await _persist_background_points(_coll, sq_points, _sq_mp_records, pid)
             logger.info(
                 "synthetic_questions.background_complete",
                 extra={"memory_id": pid, "question_count": len(sq_points)},
