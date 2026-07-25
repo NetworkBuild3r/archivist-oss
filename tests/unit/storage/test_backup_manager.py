@@ -131,7 +131,7 @@ class TestToThreadOffload:
             return {"snapshot_id": "fake-snapshot", "label": label}
 
         monkeypatch.setattr("backup_manager.create_snapshot", blocking_create_snapshot)
-        monkeypatch.setattr("backup_manager.prune_snapshots", lambda: [])
+        monkeypatch.setattr("backup_manager.prune_snapshots", list)
 
         other_call_completed = []
 
