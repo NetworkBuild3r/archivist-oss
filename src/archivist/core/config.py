@@ -498,14 +498,25 @@ class ArchivistSettings(BaseSettings):
                     data = yaml.safe_load(f)
                 if isinstance(data, dict):
                     return {str(k): str(v) for k, v in data.items()}
-            except Exception:
-                pass
+            except Exception as e:
+                # Log the source path and parse-error message only — never the
+                # file's parsed/raw content, which may carry sensitive routing
+                # data (INIT-022/SPEC-007, M3).
+                logger.warning(
+                    "config.team_map_yaml_parse_failed",
+                    extra={"team_map_path": path, "error": str(e)},
+                )
         raw = self.team_map_json
         if raw:
             try:
                 return json.loads(raw)
-            except Exception:
-                pass
+            except Exception as e:
+                # Log only the parse-error message — never the raw
+                # TEAM_MAP_JSON value itself (INIT-022/SPEC-007, M3).
+                logger.warning(
+                    "config.team_map_json_parse_failed",
+                    extra={"error": str(e)},
+                )
         return {}
 
     def _log_startup(self) -> None:

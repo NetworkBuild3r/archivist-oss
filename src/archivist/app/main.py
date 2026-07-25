@@ -390,6 +390,15 @@ async def lifespan(_app: Starlette):
                 _background_tasks.clear()
                 await _pool_module.pool.close()
                 logger.info("Graph backend closed (%s)", _pool_module.pool.__class__.__name__)
+
+                # Close the module-level embeddings/LLM httpx.AsyncClient singletons
+                # so graceful shutdown doesn't leak pooled sockets (INIT-022/SPEC-007, M6).
+                from archivist.features.embeddings import aclose_embed_client
+                from archivist.features.llm import aclose_llm_client
+
+                await aclose_embed_client()
+                await aclose_llm_client()
+                logger.info("HTTP clients closed (embeddings, llm)")
     finally:
         streamable_http_session_manager = None
 
