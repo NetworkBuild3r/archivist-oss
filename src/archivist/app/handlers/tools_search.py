@@ -1,5 +1,6 @@
 """MCP tool handlers — core search and retrieval."""
 
+import asyncio
 from datetime import UTC
 
 from mcp.types import TextContent, Tool
@@ -26,7 +27,7 @@ from archivist.storage.graph import (
 )
 from archivist.storage.graph_retrieval import detect_contradictions, get_entity_brief
 
-from ._common import _rbac_gate, error_response, require_caller, resolve_caller, success_response
+from ._common import error_response, require_caller, require_rbac, resolve_caller, success_response
 
 # ---------------------------------------------------------------------------
 # Tool definitions
@@ -387,9 +388,9 @@ async def _handle_search(arguments: dict) -> list[TextContent]:
     caller = resolve_caller(arguments)
 
     if namespace and caller:
-        denied = _rbac_gate(caller, "read", namespace)
+        denied = require_rbac(caller, "read", namespace)
         if denied:
-            return [TextContent(type="text", text=denied)]
+            return denied
 
     if agent_ids:
         allowed, denied_list = filter_agents_for_read(caller, agent_ids)
@@ -461,9 +462,9 @@ async def _handle_recall(arguments: dict) -> list[TextContent]:
         return err
 
     if namespace and caller:
-        denied = _rbac_gate(caller, "read", namespace)
+        denied = require_rbac(caller, "read", namespace)
         if denied:
-            return [TextContent(type="text", text=denied)]
+            return denied
 
     entities = await search_entities(entity_name, namespace=namespace)
     if not entities:
@@ -512,9 +513,9 @@ async def _handle_timeline(arguments: dict) -> list[TextContent]:
         return err
 
     if namespace and caller:
-        denied = _rbac_gate(caller, "read", namespace)
+        denied = require_rbac(caller, "read", namespace)
         if denied:
-            return [TextContent(type="text", text=denied)]
+            return denied
 
     if agent_id:
         allowed, denied_list = filter_agents_for_read(caller, [agent_id])
@@ -579,9 +580,9 @@ async def _handle_insights(arguments: dict) -> list[TextContent]:
         return err
 
     if namespace and caller:
-        denied = _rbac_gate(caller, "read", namespace)
+        denied = require_rbac(caller, "read", namespace)
         if denied:
-            return [TextContent(type="text", text=denied)]
+            return denied
 
     results = await search_vectors(topic, namespace=namespace, limit=limit * 3)
     results = [r for r in results if can_read_agent_memory(caller, r.get("agent_id", ""))]
@@ -627,7 +628,11 @@ async def _handle_deref(arguments: dict) -> list[TextContent]:
 
     client = qdrant_client()
     try:
-        points = client.retrieve(
+        # Offloaded off the event loop — qdrant-client's HTTP/gRPC calls are
+        # synchronous and would otherwise block the whole MCP server for the
+        # duration of the round trip (INIT-022/SPEC-009, H4-search).
+        points = await asyncio.to_thread(
+            client.retrieve,
             collection_name=QDRANT_COLLECTION,
             ids=[memory_id],
             with_payload=True,
@@ -644,9 +649,9 @@ async def _handle_deref(arguments: dict) -> list[TextContent]:
     if agent_id and not is_permissive_mode():
         ns = payload.get("namespace", "")
         if ns:
-            denied = _rbac_gate(agent_id, "read", ns)
+            denied = require_rbac(agent_id, "read", ns)
             if denied:
-                return [TextContent(type="text", text=denied)]
+                return denied
 
     return success_response(
         {
@@ -678,9 +683,9 @@ async def _handle_index(arguments: dict) -> list[TextContent]:
         namespace = get_namespace_for_agent(agent_id)
 
     if namespace and agent_id and not is_permissive_mode():
-        denied = _rbac_gate(agent_id, "read", namespace)
+        denied = require_rbac(agent_id, "read", namespace)
         if denied:
-            return [TextContent(type="text", text=denied)]
+            return denied
 
     index_text = await build_namespace_index(namespace, agent_ids=[agent_id] if agent_id else None)
     return [TextContent(type="text", text=index_text)]
@@ -759,9 +764,9 @@ async def _handle_wake_up(arguments: dict) -> list[TextContent]:
         namespace = get_namespace_for_agent(agent_id)
 
     if namespace and agent_id and not is_permissive_mode():
-        denied = _rbac_gate(agent_id, "read", namespace)
+        denied = require_rbac(agent_id, "read", namespace)
         if denied:
-            return [TextContent(type="text", text=denied)]
+            return denied
 
     ctx = await get_cached_wake_up(namespace, agent_id=agent_id)
     if not ctx:

@@ -567,7 +567,7 @@ def _search_patches():
             return_value=[],
         ),
         patch(
-            "archivist.app.handlers.tools_search._rbac_gate",
+            "archivist.app.handlers.tools_search.require_rbac",
             return_value=None,
         ),
         patch(
@@ -603,7 +603,7 @@ class TestSearchHandlers:
                 return_value=_MOCK_RELS,
             ),
             patch(
-                "archivist.app.handlers.tools_search._rbac_gate",
+                "archivist.app.handlers.tools_search.require_rbac",
                 return_value=None,
             ),
             patch(
@@ -657,7 +657,7 @@ class TestSearchHandlers:
                 return_value=brief_data,
             ),
             patch(
-                "archivist.app.handlers.tools_search._rbac_gate",
+                "archivist.app.handlers.tools_search.require_rbac",
                 return_value=None,
             ),
             patch(
@@ -709,7 +709,7 @@ class TestSearchHandlers:
                 return_value={"results": [], "total": 0},
             ),
             patch(
-                "archivist.app.handlers.tools_search._rbac_gate",
+                "archivist.app.handlers.tools_search.require_rbac",
                 return_value=None,
             ),
             patch(
@@ -772,7 +772,7 @@ class TestSearchHandlers:
                 return_value=[],
             ),
             patch(
-                "archivist.app.handlers.tools_search._rbac_gate",
+                "archivist.app.handlers.tools_search.require_rbac",
                 return_value=None,
             ),
         ):
@@ -798,7 +798,7 @@ class TestSearchHandlers:
                 return_value=[],
             ),
             patch(
-                "archivist.app.handlers.tools_search._rbac_gate",
+                "archivist.app.handlers.tools_search.require_rbac",
                 return_value=None,
             ),
         ):

@@ -495,7 +495,7 @@ async def test_recall_does_not_return_coroutine_string(qa_pool):
             new_callable=AsyncMock,
             return_value=[],
         ),
-        patch("archivist.app.handlers.tools_search._rbac_gate", return_value=None),
+        patch("archivist.app.handlers.tools_search.require_rbac", return_value=None),
         patch("archivist.app.handlers.tools_search.require_caller", return_value=None),
         patch("archivist.app.handlers.tools_search.resolve_caller", return_value="agent-1"),
     ):
