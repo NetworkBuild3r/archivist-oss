@@ -208,27 +208,18 @@ def _file_checksum(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
-async def curate_cycle():
-    """Run one curation cycle: scan new files, extract knowledge, update graph.
+def _scan_memory_files_sync(memory_root: str, cutoff: datetime) -> list[tuple[str, str, str, str]]:
+    """Blocking file-system scan: walk ``memory_root``, filter by mtime, read content.
 
-    Uses mtime as a fast first pass, then content checksum to skip files
-    whose content hasn't actually changed (e.g. touch, metadata-only update).
-
-    Files are processed concurrently (up to CURATOR_MAX_PARALLEL) to overlap
-    LLM extraction latency.
+    INIT-022/SPEC-006 (M2): pure synchronous I/O (``os.walk``/``getmtime``/
+    ``open().read()``) with no ``await`` inside — safe to run in full inside
+    ``asyncio.to_thread`` without touching the event loop for the scan's
+    duration. Returns ``(filepath, rel, text, checksum)`` tuples for files
+    newer than ``cutoff`` with non-trivial content; the checksum-unchanged
+    skip (which needs an async DB lookup) is applied by the caller afterward.
     """
-    last_run = await get_curator_state("last_curate_time")
-    if last_run:
-        cutoff = datetime.fromisoformat(last_run)
-    else:
-        cutoff = datetime.now(UTC) - timedelta(days=7)
-
-    now = datetime.now(UTC)
-    processed = 0
-    skipped_unchanged = 0
-
-    candidates: list[tuple[str, str, str]] = []  # (filepath, rel, text)
-    for root, _dirs, files in os.walk(MEMORY_ROOT):
+    found: list[tuple[str, str, str, str]] = []
+    for root, _dirs, files in os.walk(memory_root):
         for fname in files:
             if not fname.endswith(".md"):
                 continue
@@ -244,17 +235,43 @@ async def curate_cycle():
                 if len(text.strip()) < 50:
                     continue
 
-                rel = os.path.relpath(filepath, MEMORY_ROOT)
-
-                current_checksum = _file_checksum(text)
-                stored_checksum = await get_curator_state(f"checksum:{rel}")
-                if stored_checksum == current_checksum:
-                    skipped_unchanged += 1
-                    continue
-
-                candidates.append((filepath, rel, text))
+                rel = os.path.relpath(filepath, memory_root)
+                found.append((filepath, rel, text, _file_checksum(text)))
             except Exception as e:
                 logger.error("Curator scan failed on %s: %s", filepath, e)
+    return found
+
+
+async def curate_cycle():
+    """Run one curation cycle: scan new files, extract knowledge, update graph.
+
+    Uses mtime as a fast first pass, then content checksum to skip files
+    whose content hasn't actually changed (e.g. touch, metadata-only update).
+
+    Files are processed concurrently (up to CURATOR_MAX_PARALLEL) to overlap
+    LLM extraction latency. The file-system scan itself runs via
+    ``asyncio.to_thread`` (INIT-022/SPEC-006, M2) so it doesn't block the
+    event loop — other MCP tool calls can proceed while a cycle's scan runs.
+    """
+    last_run = await get_curator_state("last_curate_time")
+    if last_run:
+        cutoff = datetime.fromisoformat(last_run)
+    else:
+        cutoff = datetime.now(UTC) - timedelta(days=7)
+
+    now = datetime.now(UTC)
+    processed = 0
+    skipped_unchanged = 0
+
+    scanned = await asyncio.to_thread(_scan_memory_files_sync, MEMORY_ROOT, cutoff)
+
+    candidates: list[tuple[str, str, str]] = []  # (filepath, rel, text)
+    for filepath, rel, text, current_checksum in scanned:
+        stored_checksum = await get_curator_state(f"checksum:{rel}")
+        if stored_checksum == current_checksum:
+            skipped_unchanged += 1
+            continue
+        candidates.append((filepath, rel, text))
 
     sem = asyncio.Semaphore(max(1, CURATOR_MAX_PARALLEL))
 
@@ -288,14 +305,15 @@ async def curate_cycle():
     return {"processed": processed, "skipped": skipped_unchanged}
 
 
-async def extract_all_agent_memories() -> int:
-    """Run knowledge extraction on every eligible agent markdown file under MEMORY_ROOT.
+def _scan_all_memory_files_sync(memory_root: str) -> list[tuple[str, str, str]]:
+    """Blocking file-system scan for ``extract_all_agent_memories`` (no mtime/checksum filter).
 
-    Ignores mtime/checksum (for benchmarks and backfills). Does not run decay.
-    Processes files concurrently up to CURATOR_MAX_PARALLEL.
+    INIT-022/SPEC-006 (M2): pure synchronous I/O, safe to run entirely inside
+    ``asyncio.to_thread``. ``should_extract_knowledge`` is pure string logic
+    (no I/O), so it's fine to call from within the thread.
     """
     candidates: list[tuple[str, str, str]] = []
-    for root, _dirs, files in os.walk(MEMORY_ROOT):
+    for root, _dirs, files in os.walk(memory_root):
         for fname in files:
             if not fname.endswith(".md"):
                 continue
@@ -305,12 +323,24 @@ async def extract_all_agent_memories() -> int:
                     text = f.read()
                 if len(text.strip()) < 50:
                     continue
-                rel = os.path.relpath(filepath, MEMORY_ROOT)
+                rel = os.path.relpath(filepath, memory_root)
                 if not should_extract_knowledge(rel):
                     continue
                 candidates.append((filepath, rel, text))
             except Exception as e:
                 logger.error("Bench curator scan failed on %s: %s", filepath, e)
+    return candidates
+
+
+async def extract_all_agent_memories() -> int:
+    """Run knowledge extraction on every eligible agent markdown file under MEMORY_ROOT.
+
+    Ignores mtime/checksum (for benchmarks and backfills). Does not run decay.
+    Processes files concurrently up to CURATOR_MAX_PARALLEL. The file-system
+    scan runs via ``asyncio.to_thread`` (INIT-022/SPEC-006, M2) so it doesn't
+    block the event loop.
+    """
+    candidates = await asyncio.to_thread(_scan_all_memory_files_sync, MEMORY_ROOT)
 
     sem = asyncio.Semaphore(max(1, CURATOR_MAX_PARALLEL))
 

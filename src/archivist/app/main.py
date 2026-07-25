@@ -390,6 +390,15 @@ async def lifespan(_app: Starlette):
                 _background_tasks.clear()
                 await _pool_module.pool.close()
                 logger.info("Graph backend closed (%s)", _pool_module.pool.__class__.__name__)
+
+                # Close the module-level embeddings/LLM httpx.AsyncClient singletons
+                # so graceful shutdown doesn't leak pooled sockets (INIT-022/SPEC-007, M6).
+                from archivist.features.embeddings import aclose_embed_client
+                from archivist.features.llm import aclose_llm_client
+
+                await aclose_embed_client()
+                await aclose_llm_client()
+                logger.info("HTTP clients closed (embeddings, llm)")
     finally:
         streamable_http_session_manager = None
 
@@ -638,7 +647,12 @@ async def handle_backup_restore(request):
     from archivist.storage.backup_manager import SnapshotPathError, restore_snapshot
 
     try:
-        result = restore_snapshot(snapshot_id, target=target)
+        # Offloaded off the event loop (fixes H5); the running loop is
+        # captured here — before dispatch — and handed to restore_snapshot()
+        # so its SQLite path can schedule the write-lock-guarded restore back
+        # onto it from the worker thread (INIT-022/SPEC-002, fixes C2).
+        loop = asyncio.get_running_loop()
+        result = await asyncio.to_thread(restore_snapshot, snapshot_id, target=target, loop=loop)
         return JSONResponse(result)
     except FileNotFoundError as e:
         return JSONResponse({"error": str(e)}, status_code=404)

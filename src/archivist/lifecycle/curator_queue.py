@@ -114,7 +114,7 @@ async def _apply_op(op_type: str, payload: dict):
     if op_type == "archive_memory":
         await _apply_archive(payload)
     elif op_type == "merge_memory":
-        _apply_merge(payload)
+        await _apply_merge(payload)
     elif op_type == "delete_memory":
         await _apply_delete(payload)
     elif op_type == "consolidate_tips":
@@ -144,9 +144,51 @@ async def _apply_archive(payload: dict):
             logger.warning("Failed to archive memory %s: %s", mid, e)
 
 
-def _apply_merge(payload: dict):
-    """Merge memory content — delegates to the existing merge module."""
-    # placeholder: full merge logic lives in merge.py
+async def _apply_merge(payload: dict) -> None:
+    """Merge conflicting memories via ``lifecycle.merge``'s real merge logic.
+
+    INIT-022/SPEC-006: this op used to be a no-op stub whose body was only a
+    docstring, so ``drain()`` reported every ``"merge_memory"`` op
+    ``status="applied"`` without ever merging anything (H1). This wires it to
+    the real ``merge_memories()`` implementation.
+
+    The enqueueing handler (``app/handlers/tools_storage.py``) enqueues this op
+    *before* it generates the new memory's own ID, so the payload cannot name
+    the just-written memory — folding that brand-new text into the merge would
+    require a handler-side change, which is out of this spec's scope (see the
+    spec's Integration Points: "no change needed on the handler side"). Given
+    that constraint, this performs a real merge of the *pre-existing*
+    conflicting memories the dedup LLM flagged ``"decision": "merge"`` in
+    ``payload["decisions"]``, using the ``"concat"`` strategy (lossless, no
+    extra LLM round-trip). If fewer than two such memories are present there is
+    nothing meaningful to merge, so the op raises rather than silently
+    reporting success — ``drain()`` catches this and marks the op ``"failed"``
+    with the reason logged.
+
+    Follow-up candidate (flagged in the SPEC-006 completion summary, not
+    fixed here): pass the new memory's pre-generated ID into the enqueue
+    payload so a future merge can fold in the newly-stored text too.
+    """
+    from archivist.lifecycle.merge import merge_memories
+
+    decisions = payload.get("decisions", [])
+    merge_ids = [
+        d.get("existing_id")
+        for d in decisions
+        if isinstance(d, dict) and d.get("decision") == "merge" and d.get("existing_id")
+    ]
+    agent_id = payload.get("agent_id") or "curator"
+    namespace = payload.get("namespace") or ""
+
+    if len(merge_ids) < 2:
+        raise ValueError(
+            f"merge_memory op has {len(merge_ids)} mergeable existing_ids (need >= 2 "
+            "to perform a real merge) — refusing to report false success"
+        )
+
+    result = await merge_memories(merge_ids, "concat", agent_id, namespace)
+    if result.get("error"):
+        raise RuntimeError(f"merge_memories failed: {result['error']}")
 
 
 _last_pre_prune_snapshot: float = 0.0

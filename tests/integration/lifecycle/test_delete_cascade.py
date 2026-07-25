@@ -169,7 +169,11 @@ class TestDeleteMemoryComplete:
 
         mock_fts.assert_called_once()
         mock_needle.assert_called_once()
-        mock_entity_facts.assert_called_once_with("mem-123")
+        # INIT-022/SPEC-004: _delete_sqlite_artifacts now always passes an
+        # explicit conn= kwarg (None on the non-outbox path) so it can be
+        # reused with a real MemoryTransaction.conn from the OUTBOX_ENABLED
+        # branch — this is intentional post-fix behavior, not a regression.
+        mock_entity_facts.assert_called_once_with("mem-123", conn=None)
 
     async def test_cleans_up_child_fts_and_needle(
         self, mock_fts, mock_needle, mock_entity_facts, mock_audit
@@ -226,7 +230,9 @@ class TestDeleteMemoryComplete:
 
         mock_fts.assert_called_once()
         mock_needle.assert_called_once()
-        mock_entity_facts.assert_called_once_with("mem-fail")
+        # INIT-022/SPEC-004: conn= is now always explicit (None here) — see
+        # test_calls_all_cleanup_steps for the full rationale.
+        mock_entity_facts.assert_called_once_with("mem-fail", conn=None)
 
     async def test_partial_deletion_error_on_many_failures(self, mock_audit):
         """PartialDeletionError raised when qdrant_primary or qdrant_children fail."""

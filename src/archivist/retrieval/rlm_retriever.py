@@ -10,6 +10,7 @@ Phase 5 (v0.8): hot cache, retrieval trajectory logging.
 import asyncio
 import logging
 import time
+from dataclasses import dataclass, field
 
 from qdrant_client.models import (
     FieldCondition,
@@ -521,16 +522,20 @@ async def search_vectors(
     _target_collection = collection_for(namespace)
 
     # Degrade to [] on Qdrant/network errors so retrieval can fall back to BM25-only paths.
+    # INIT-022/SPEC-005 (H4): offloaded to a worker thread — the qdrant-client call is
+    # synchronous network I/O and was previously blocking the event loop.
     t_q = time.monotonic()
     try:
-        results = client.query_points(
+        response = await asyncio.to_thread(
+            client.query_points,
             collection_name=_target_collection,
             query=query_vec,
             query_filter=search_filter,
             limit=fetch_limit,
             with_payload=True,
             search_params=SearchParams(hnsw_ef=QDRANT_SEARCH_EF),
-        ).points
+        )
+        results = response.points
     except Exception as e:
         qdur_ms = (time.monotonic() - t_q) * 1000
         m.observe(m.QDRANT_QUERY_DURATION, qdur_ms)
@@ -626,6 +631,624 @@ def _observe_search_results(namespace: str, sources: list | None) -> None:
     m.observe(m.SEARCH_RESULTS, float(len(sources or [])), {"namespace": namespace or "_default"})
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# INIT-022/SPEC-005 (H6): `recursive_retrieve` decomposition support.
+#
+# The reranker-enabled (v2) and legacy retrieval paths are extracted into
+# `_run_reranker_pipeline` / `_run_legacy_pipeline` below — separately named,
+# independently callable/testable functions instead of interleaved branches in
+# one ~1080-line function body. `BranchOutcome` is the explicit contract
+# between them and `recursive_retrieve`: either the branch already produced a
+# complete short-circuit response (`early_response`), or it produced
+# `enriched`/`filtered`/`common_trace` for the shared cap/refine/synthesize
+# tail plus the counters the tail's final log line needs.
+#
+# The old `_trace_kw()` closure (which read ~15 of `recursive_retrieve`'s
+# mutable locals) is replaced by `_static_trace_fields()` (the fields fixed by
+# branch time — computed once) and `_finalize_trace_extra()` (merges those
+# with a freshly-evaluated `budget.remaining_ms()` and each branch's own
+# mutable counters at each trace-construction call site, preserving the
+# original's live-read timing behavior exactly).
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class BranchOutcome:
+    """Result of the reranker-enabled or legacy retrieval branch.
+
+    If ``early_response`` is set, `recursive_retrieve` returns it immediately —
+    the branch already produced a complete short-circuit response (empty
+    nomination pool, below-threshold, or an iterative-retry recursion).
+    ``early_response_is_final`` distinguishes the two: a recursion's result is
+    already fully finalized (stage0 attach, metrics, hot-cache put) by the
+    recursive call itself, so the caller must NOT re-wrap it; the other
+    short-circuits are bare dicts the caller still needs to finish.
+
+    Otherwise ``enriched``, ``filtered``, and ``common_trace`` feed the shared
+    cap/refine/synthesize tail, and ``n_dedupe``/``ltr_used``/
+    ``bm25_rescue_count``/``synthetic_hits`` feed the tail's final log line.
+    """
+
+    early_response: dict | None = None
+    early_response_is_final: bool = False
+    enriched: list[dict] = field(default_factory=list)
+    filtered: list[dict] = field(default_factory=list)
+    common_trace: dict = field(default_factory=dict)
+    n_dedupe: int = 0
+    ltr_used: bool = False
+    bm25_rescue_count: int = 0
+    synthetic_hits: int = 0
+
+
+def _static_trace_fields(
+    *,
+    auto_type: str,
+    auto_subcategory: str,
+    inventory_total: int | None,
+    temporal_intent: str,
+    detected_topic: str,
+    topic_fallback_used: bool,
+    n_expansion_variants: int,
+    hyde_used: bool,
+    needle_query_detected: bool,
+    needle_registry_hit_count: int,
+    is_retry: bool,
+) -> dict:
+    """Trace fields already fixed by the time the reranker/legacy branch runs.
+
+    Explicit-parameter replacement for the non-time-varying half of the old
+    `_trace_kw()` closure — computed once in `recursive_retrieve` and threaded
+    through to whichever branch runs. ``latency_budget_ms`` is intentionally
+    excluded: see `_finalize_trace_extra`.
+    """
+    return {
+        "auto_classified_type": auto_type,
+        "auto_subcategory": auto_subcategory,
+        "inventory_total": inventory_total,
+        "temporal_intent": temporal_intent,
+        "detected_topic": detected_topic,
+        "topic_fallback_used": topic_fallback_used,
+        "query_expansion_variants": n_expansion_variants,
+        "dynamic_threshold_enabled": DYNAMIC_THRESHOLD_ENABLED,
+        "hyde_used": hyde_used,
+        "needle_query_detected": needle_query_detected,
+        "needle_registry_hits": needle_registry_hit_count,
+        "iterative_retry": is_retry,
+    }
+
+
+def _finalize_trace_extra(trace_static: dict, budget: LatencyBudget, **branch_mutable) -> dict:
+    """Merge fixed trace fields with a fresh budget read and branch-local counters.
+
+    ``budget.remaining_ms()`` is re-evaluated on every call (not baked into
+    ``trace_static``) so each trace built at a different point in a branch's
+    execution reflects the time actually elapsed at that point — matching the
+    pre-refactor `_trace_kw()` closure's behavior of reading `_budget` live on
+    every call rather than once.
+    """
+    return {**trace_static, "latency_budget_ms": budget.remaining_ms(), **branch_mutable}
+
+
+def _build_empty_result(
+    *,
+    answer: str,
+    sources: list,
+    chunks_searched: int,
+    agents_scoped: list[str],
+    trace: dict,
+    **extra_fields,
+) -> dict:
+    """Construct a short-circuit empty/degraded retrieval response.
+
+    Explicit-parameter replacement for the ad-hoc empty-response dict literals
+    previously duplicated inline at 3 call sites in `recursive_retrieve`
+    (no-coarse-results, no-nomination-pool, below-threshold).
+    """
+    result = {
+        "answer": answer,
+        "sources": sources,
+        "chunks_searched": chunks_searched,
+        "agents_scoped": agents_scoped,
+        "retrieval_trace": trace,
+    }
+    result.update(extra_fields)
+    return result
+
+
+async def _maybe_iterative_retry(
+    query: str,
+    reranked: list[dict],
+    *,
+    is_retry: bool,
+    budget: LatencyBudget,
+    retry_kwargs: dict,
+) -> dict | None:
+    """Auto-reformulate and retry once when legacy-path confidence is low.
+
+    Returns the retried call's full result dict, or ``None`` if no retry was
+    attempted (caller should continue with ``reranked`` unchanged).
+
+    Explicit-parameter replacement for `recursive_retrieve`'s inline "Stage 3a:
+    Iterative retrieval" block, which closed over the whole function's local
+    scope (query, budget, and every retrieval parameter needed to recurse).
+    """
+    _ITERATIVE_THRESHOLD = 0.45
+    if (
+        is_retry
+        or not reranked
+        or max(r.get("score", 0) for r in reranked) >= _ITERATIVE_THRESHOLD
+        or not budget.can_afford(200)
+    ):
+        return None
+    try:
+        snippets = " | ".join((r.get("text", "") or "")[:80] for r in reranked[:3])
+        reformulated = await llm_query(
+            f"The search query '{query}' returned low-relevance results: [{snippets}]. "
+            "Suggest a single, better search query to find the answer. Return ONLY the query.",
+            system="You are a search query optimizer. Return only the improved query, nothing else.",
+            max_tokens=64,
+            model=LLM_REFINE_MODEL or LLM_MODEL,
+            stage="iterative_retrieval",
+        )
+        reformulated = reformulated.strip().strip('"').strip("'")
+        if reformulated and reformulated.lower() != query.lower():
+            logger.debug("Iterative retrieval: reformulated %r -> %r", query, reformulated)
+            return await recursive_retrieve(reformulated, **retry_kwargs, _is_retry=True)
+    except Exception as e:
+        logger.debug("Iterative retrieval reformulation failed: %s", e)
+    return None
+
+
+async def _run_reranker_pipeline(
+    query: str,
+    *,
+    vec_results: list[list[dict]],
+    bm25_hits: list[dict],
+    literal_hits: list[dict],
+    registry_hits: list[dict],
+    detected_entities: list[dict],
+    vector_limit: int,
+    n_coarse: int,
+    n_bm25: int,
+    n_graph_entities: int,
+    n_graph_items: int,
+    tier: str,
+    agent_id: str,
+    agent_ids: list[str] | None,
+    stage_timings: dict,
+    t_post: float,
+    trace_static: dict,
+    budget: LatencyBudget,
+) -> BranchOutcome:
+    """v2 CLEAN PATH: nominate -> ID-dedupe -> parent enrich -> rerank -> top-K.
+
+    The cross-encoder is the single source of truth for ranking. No RRF, no
+    threshold, no temporal decay, no hotness, no rescue.
+
+    INIT-022/SPEC-005 (H6): extracted from `recursive_retrieve`'s
+    ``RERANKER_ENABLED`` branch — unchanged behavior.
+    """
+    # Nomination: collect ALL candidates into a pool, dedupe by Qdrant point ID.
+    # Sources were already gathered in parallel by the caller (vec_results,
+    # bm25_hits, literal_hits, registry_hits). We flatten everything into one
+    # list and keep the best score per unique point ID.
+    candidate_pool: dict[str, dict] = {}
+    _all_nomination_sources = []
+    for vr in vec_results:
+        _all_nomination_sources.extend(vr)
+    if bm25_hits:
+        _all_nomination_sources.extend(bm25_hits)
+    if literal_hits:
+        _all_nomination_sources.extend(literal_hits)
+    if registry_hits:
+        _all_nomination_sources.extend(registry_hits)
+
+    for r in _all_nomination_sources:
+        rid = str(r.get("id") or r.get("qdrant_id") or "")
+        if not rid:
+            fp = r.get("file_path", "")
+            ci = r.get("chunk_index", 0)
+            rid = f"{fp}:{ci}"
+        existing = candidate_pool.get(rid)
+        if existing is None or r.get("score", 0) > existing.get("score", 0):
+            candidate_pool[rid] = dict(r)
+        if r.get("representation_type") == "synthetic_question":
+            candidate_pool[rid]["synthetic_match"] = True
+        if r.get("needle_registry_hit"):
+            candidate_pool[rid]["needle_registry_hit"] = True
+
+    pool = list(candidate_pool.values())
+    n_dedupe = len(pool)
+    n_synthetic_hits = sum(1 for r in pool if r.get("synthetic_match"))
+
+    # Graph entity facts: inject as additional candidates (not score modifiers)
+    if GRAPH_RETRIEVAL_ENABLED and detected_entities:
+        entity_facts = await build_entity_fact_results(detected_entities, min_score=0.0)
+        for ef in entity_facts:
+            efid = str(ef.get("id", ""))
+            if efid and efid not in candidate_pool:
+                candidate_pool[efid] = ef
+                pool.append(ef)
+
+    if not pool:
+        stage_timings["postprocess_ms"] = round((time.monotonic() - t_post) * 1000, 1)
+        empty_pool = _build_empty_result(
+            answer="No relevant memories found.",
+            sources=[],
+            chunks_searched=n_coarse,
+            agents_scoped=agent_ids or ([agent_id] if agent_id else []),
+            trace=_retrieval_trace(
+                vector_limit=vector_limit,
+                coarse_count=n_coarse,
+                deduped_count=0,
+                threshold=0.0,
+                after_threshold_count=0,
+                after_rerank_count=0,
+                parent_enriched=False,
+                refinement_chunks=0,
+                graph_entities_found=n_graph_entities,
+                graph_context_items=n_graph_items,
+                tier=tier,
+                bm25_hits=n_bm25,
+                stage_timings=stage_timings,
+                reranker_enabled=True,
+                reranker_model=RERANKER_MODEL,
+                **_finalize_trace_extra(
+                    trace_static,
+                    budget,
+                    ltr_used=False,
+                    bm25_rescue_count=0,
+                    adaptive_widened=False,
+                    cross_agent_capped=False,
+                    synthetic_hits=n_synthetic_hits,
+                ),
+            ),
+        )
+        return BranchOutcome(early_response=empty_pool, n_dedupe=0, synthetic_hits=n_synthetic_hits)
+
+    # Cross-encoder rerank: the sole ranking authority
+    # Parent text is already stored in the payload at index time — no runtime fetch needed
+    from archivist.retrieval.reranker import rerank_candidates
+
+    reranked = await rerank_candidates(
+        query,
+        pool,
+        model_name=RERANKER_MODEL,
+        top_k=RERANKER_TOP_K,
+    )
+    n_rerank = len(reranked)
+    filtered = reranked
+
+    stage_timings["postprocess_ms"] = round((time.monotonic() - t_post) * 1000, 1)
+    common_trace = dict(
+        vector_limit=vector_limit,
+        coarse_count=n_coarse,
+        deduped_count=n_dedupe,
+        threshold=0.0,
+        after_threshold_count=len(filtered),
+        after_rerank_count=n_rerank,
+        parent_enriched=any(r.get("parent_text") for r in filtered),
+        refinement_chunks=0,
+        graph_entities_found=n_graph_entities,
+        graph_context_items=n_graph_items,
+        entity_facts_injected=0,
+        temporal_decay_applied=False,
+        tier=tier,
+        outcome_adjustments=0,
+        context_status=None,
+        bm25_hits=n_bm25,
+        stage_timings=stage_timings,
+        reranker_enabled=True,
+        reranker_model=RERANKER_MODEL,
+        nomination_pool_size=len(pool),
+        **_finalize_trace_extra(
+            trace_static,
+            budget,
+            ltr_used=False,
+            bm25_rescue_count=0,
+            adaptive_widened=False,
+            cross_agent_capped=False,
+            synthetic_hits=n_synthetic_hits,
+        ),
+    )
+    return BranchOutcome(
+        enriched=filtered,
+        filtered=filtered,
+        common_trace=common_trace,
+        n_dedupe=n_dedupe,
+        ltr_used=False,
+        bm25_rescue_count=0,
+        synthetic_hits=n_synthetic_hits,
+    )
+
+
+async def _run_legacy_pipeline(
+    query: str,
+    *,
+    coarse: list[dict],
+    agent_id: str,
+    agent_ids: list[str] | None,
+    team: str,
+    namespace: str,
+    date_from: str,
+    date_to: str,
+    effective_memory_type: str,
+    limit: int,
+    effective_threshold: float,
+    temporal_intent: str,
+    vector_limit: int,
+    n_coarse: int,
+    n_bm25: int,
+    detected_entities: list[dict],
+    n_graph_entities: int,
+    n_graph_items: int,
+    tier: str,
+    needle_query_detected: bool,
+    refine: bool,
+    threshold: float | None,
+    max_tokens: int | None,
+    memory_type: str,
+    is_retry: bool,
+    budget: LatencyBudget,
+    stage_timings: dict,
+    t_post: float,
+    trace_static: dict,
+    cached_query_vec: list[float] | None,
+) -> BranchOutcome:
+    """LEGACY PATH (``RERANKER_ENABLED=False``): RRF/BM25 merge (already applied
+    by the caller) -> temporal decay -> LTR/hotness/importance scoring ->
+    threshold -> adaptive widen -> BM25 rescue -> cross-agent guard -> entity
+    fact injection -> outcome-aware scoring -> rerank -> iterative retry.
+
+    Kept intact for shadow comparison during migration.
+
+    INIT-022/SPEC-005 (H6): extracted from `recursive_retrieve`'s
+    ``RERANKER_ENABLED=False`` branch — unchanged behavior.
+    """
+    # Legacy merging: RRF + BM25 merge (already done by the caller, in `coarse`)
+    coarse = dedupe_vector_hits(coarse)
+    n_dedupe = len(coarse)
+    n_synthetic_hits = sum(1 for r in coarse if r.get("synthetic_match"))
+
+    # Stage 1c: Temporal decay (v0.5, intent-aware v1.9)
+    temporal_applied = False
+    if TEMPORAL_DECAY_HALFLIFE_DAYS > 0:
+        coarse = apply_temporal_decay(
+            coarse,
+            TEMPORAL_DECAY_HALFLIFE_DAYS,
+            temporal_intent=temporal_intent,
+        )
+        temporal_applied = True
+
+    # Stage 1d-1e: Scoring — LTR model (v1.10) or hand-tuned pipeline
+    ltr_used = False
+    if ltr_available():
+        coarse = ltr_rank_results(coarse)
+        ltr_used = True
+    else:
+        coarse = await apply_hotness_to_results(coarse)
+        coarse = apply_importance_to_results(coarse)
+
+    # Stage 2: Threshold filter (Phase 1, dynamic v1.10)
+    if DYNAMIC_THRESHOLD_ENABLED:
+        filtered = apply_dynamic_threshold(coarse, effective_threshold)
+    else:
+        filtered = apply_retrieval_threshold(coarse, effective_threshold)
+
+    # Stage 2-rescue: Adaptive vector limit (v1.9)
+    was_adaptive_widened = False
+    if (
+        ADAPTIVE_VECTOR_LIMIT_ENABLED
+        and len(filtered) < ADAPTIVE_VECTOR_MIN_RESULTS
+        and n_coarse >= vector_limit
+    ):
+        wider_limit = int(vector_limit * ADAPTIVE_VECTOR_LIMIT_MULTIPLIER)
+        wider_coarse = await search_vectors(
+            query,
+            agent_id=agent_id,
+            agent_ids=agent_ids,
+            team=team,
+            namespace=namespace,
+            date_from=date_from,
+            date_to=date_to,
+            memory_type=effective_memory_type,
+            limit=wider_limit,
+            _query_vec=cached_query_vec,
+        )
+        if len(wider_coarse) > n_coarse:
+            was_adaptive_widened = True
+            wider_coarse = dedupe_vector_hits(wider_coarse)
+            if TEMPORAL_DECAY_HALFLIFE_DAYS > 0:
+                wider_coarse = apply_temporal_decay(
+                    wider_coarse,
+                    TEMPORAL_DECAY_HALFLIFE_DAYS,
+                    temporal_intent=temporal_intent,
+                )
+            wider_coarse = await apply_hotness_to_results(wider_coarse)
+            wider_coarse = apply_importance_to_results(wider_coarse)
+            wider_filtered = apply_retrieval_threshold(wider_coarse, effective_threshold)
+            filtered, _ = _merge_into_results(filtered, wider_filtered)
+
+    # Stage 2-bm25-rescue: BM25 rescue slots (v1.9, needle-boosted v1.11)
+    n_bm25_rescue = 0
+    if BM25_RESCUE_ENABLED and BM25_ENABLED and n_bm25 > 0:
+        bm25_max = max((r.get("bm25_score", 0) for r in coarse if r.get("bm25_score")), default=0)
+        if bm25_max > 0:
+            rescue_threshold = bm25_max * BM25_RESCUE_MIN_SCORE_RATIO
+            rescue_slots = 7 if needle_query_detected else BM25_RESCUE_MAX_SLOTS
+            rescue_candidates = [r for r in coarse if r.get("bm25_score", 0) >= rescue_threshold][
+                :rescue_slots
+            ]
+            filtered, n_bm25_rescue = _merge_into_results(
+                filtered,
+                rescue_candidates,
+                min_score=effective_threshold,
+                tag="bm25_rescue",
+            )
+
+    # Stage 2-xagent: Cross-agent rank guards (v1.9)
+    was_cross_agent_capped = False
+    if agent_ids and len(agent_ids) > 1 and CROSS_AGENT_MAX_SHARE < 1.0 and filtered:
+        max_per_agent = max(1, int(len(filtered) * CROSS_AGENT_MAX_SHARE))
+        agent_counts: dict[str, int] = {}
+        guarded: list[dict] = []
+        overflow: list[dict] = []
+        for r in filtered:
+            aid = r.get("agent_id", "")
+            cnt = agent_counts.get(aid, 0)
+            if cnt < max_per_agent:
+                guarded.append(r)
+                agent_counts[aid] = cnt + 1
+            else:
+                overflow.append(r)
+                was_cross_agent_capped = True
+        guarded.extend(overflow)
+        filtered = guarded
+
+    # Stage 2a: Entity fact injection (v1.7) — guaranteed recall for known entities
+    n_entity_facts_injected = 0
+    if GRAPH_RETRIEVAL_ENABLED and detected_entities:
+        entity_facts = await build_entity_fact_results(
+            detected_entities,
+            min_score=effective_threshold + 0.05,
+            as_of=date_from,
+        )
+        if entity_facts:
+            filtered, n_entity_facts_injected = _merge_into_results(
+                filtered,
+                entity_facts,
+                preserve_top_n=min(5, max(limit // 2, 1)),
+            )
+
+    if not filtered:
+        stage_timings["postprocess_ms"] = round((time.monotonic() - t_post) * 1000, 1)
+        below = _build_empty_result(
+            answer="",
+            sources=[],
+            chunks_searched=n_coarse,
+            agents_scoped=agent_ids or ([agent_id] if agent_id else []),
+            trace=_retrieval_trace(
+                vector_limit=vector_limit,
+                coarse_count=n_coarse,
+                deduped_count=n_dedupe,
+                threshold=effective_threshold,
+                after_threshold_count=0,
+                after_rerank_count=0,
+                parent_enriched=False,
+                refinement_chunks=0,
+                graph_entities_found=n_graph_entities,
+                graph_context_items=n_graph_items,
+                temporal_decay_applied=temporal_applied,
+                tier=tier,
+                bm25_hits=n_bm25,
+                stage_timings=stage_timings,
+                **_finalize_trace_extra(
+                    trace_static,
+                    budget,
+                    ltr_used=ltr_used,
+                    bm25_rescue_count=n_bm25_rescue,
+                    adaptive_widened=was_adaptive_widened,
+                    cross_agent_capped=was_cross_agent_capped,
+                    synthetic_hits=n_synthetic_hits,
+                ),
+            ),
+            status="below_threshold",
+            threshold=effective_threshold,
+            best_score=max(r["score"] for r in coarse) if coarse else 0,
+        )
+        return BranchOutcome(
+            early_response=below,
+            n_dedupe=n_dedupe,
+            ltr_used=ltr_used,
+            bm25_rescue_count=n_bm25_rescue,
+            synthetic_hits=n_synthetic_hits,
+        )
+
+    # Stage 2b: Outcome-aware scoring (v0.6)
+    n_outcome_adj = 0
+    filtered_ids = [str(r.get("id", "")) for r in filtered if r.get("id")]
+    if filtered_ids:
+        try:
+            adjustments = await get_outcome_adjustments(filtered_ids)
+            for r in filtered:
+                adj = adjustments.get(str(r.get("id", "")), 0.0)
+                if adj != 0.0:
+                    r["outcome_adjustment"] = adj
+                    r["score"] = r.get("score", 0) + adj
+                    n_outcome_adj += 1
+            if n_outcome_adj:
+                filtered.sort(key=lambda x: x.get("score", 0), reverse=True)
+        except Exception as e:
+            logger.debug("Outcome adjustments skipped: %s", e)
+
+    # Stage 3: Rerank (legacy RERANK_ENABLED path — separate from RERANKER_ENABLED)
+    reranked = await _apply_rerank(query, filtered)
+    n_rerank = len(reranked)
+
+    # Stage 3a: Iterative retrieval — auto-reformulate on low-confidence (v1.10)
+    retry_kwargs = dict(
+        agent_id=agent_id,
+        agent_ids=agent_ids,
+        team=team,
+        namespace=namespace,
+        limit=limit,
+        refine=refine,
+        threshold=threshold,
+        tier=tier,
+        date_from=date_from,
+        date_to=date_to,
+        max_tokens=max_tokens,
+        memory_type=memory_type,
+    )
+    retry_result = await _maybe_iterative_retry(
+        query, reranked, is_retry=is_retry, budget=budget, retry_kwargs=retry_kwargs
+    )
+    if retry_result is not None:
+        return BranchOutcome(early_response=retry_result, early_response_is_final=True)
+
+    # Stage 4: Parent text is now stored at index time; no runtime enrichment needed
+    enriched = reranked
+
+    stage_timings["postprocess_ms"] = round((time.monotonic() - t_post) * 1000, 1)
+    common_trace = dict(
+        vector_limit=vector_limit,
+        coarse_count=n_coarse,
+        deduped_count=n_dedupe,
+        threshold=effective_threshold,
+        after_threshold_count=len(filtered),
+        after_rerank_count=n_rerank,
+        parent_enriched=any(r.get("parent_text") for r in enriched),
+        refinement_chunks=0,
+        graph_entities_found=n_graph_entities,
+        graph_context_items=n_graph_items,
+        entity_facts_injected=n_entity_facts_injected,
+        temporal_decay_applied=temporal_applied,
+        tier=tier,
+        outcome_adjustments=n_outcome_adj,
+        context_status=None,
+        bm25_hits=n_bm25,
+        stage_timings=stage_timings,
+        **_finalize_trace_extra(
+            trace_static,
+            budget,
+            ltr_used=ltr_used,
+            bm25_rescue_count=n_bm25_rescue,
+            adaptive_widened=was_adaptive_widened,
+            cross_agent_capped=was_cross_agent_capped,
+            synthetic_hits=n_synthetic_hits,
+        ),
+    )
+    return BranchOutcome(
+        enriched=enriched,
+        filtered=filtered,
+        common_trace=common_trace,
+        n_dedupe=n_dedupe,
+        ltr_used=ltr_used,
+        bm25_rescue_count=n_bm25_rescue,
+        synthetic_hits=n_synthetic_hits,
+    )
+
+
 async def recursive_retrieve(
     query: str,
     agent_id: str = "",
@@ -687,32 +1310,12 @@ async def recursive_retrieve(
     vector_limit = max(VECTOR_SEARCH_LIMIT, limit)
     n_graph_entities = 0
     n_graph_items = 0
-    n_bm25_rescue = 0
-    n_synthetic_hits = 0
-    was_adaptive_widened = False
-    was_cross_agent_capped = False
-
-    def _trace_kw() -> dict:
-        return {
-            "auto_classified_type": auto_type,
-            "auto_subcategory": auto_subcategory,
-            "inventory_total": stage0_inventory.total_memories if stage0_inventory else None,
-            "temporal_intent": temporal_intent,
-            "detected_topic": detected_topic,
-            "topic_fallback_used": topic_fallback_used,
-            "bm25_rescue_count": n_bm25_rescue,
-            "adaptive_widened": was_adaptive_widened,
-            "cross_agent_capped": was_cross_agent_capped,
-            "query_expansion_variants": n_expansion_variants,
-            "dynamic_threshold_enabled": DYNAMIC_THRESHOLD_ENABLED,
-            "ltr_used": _ltr_used,
-            "hyde_used": _hyde_used,
-            "needle_query_detected": _needle_query_detected,
-            "needle_registry_hits": len(_registry_hits),
-            "synthetic_hits": n_synthetic_hits,
-            "iterative_retry": _is_retry,
-            "latency_budget_ms": _budget.remaining_ms(),
-        }
+    # NOTE (INIT-022/SPEC-005, H6): the retry/adaptive-widen/rescue/cross-agent-cap/
+    # synthetic-hit/LTR counters that used to live here (and be read by a local
+    # `_trace_kw()` closure) are now owned locally by `_run_legacy_pipeline` /
+    # `_run_reranker_pipeline` and threaded back out via `BranchOutcome` — see
+    # `_static_trace_fields()` / `_finalize_trace_extra()` for the explicit-parameter
+    # replacement of `_trace_kw()`'s mutable-outer-scope-closure pattern.
 
     cache_extra = (
         f"{agent_id}|{','.join(agent_ids or [])}|{team}|{date_from}|{date_to}|{limit}|{refine}"
@@ -765,7 +1368,6 @@ async def recursive_retrieve(
     # ── Stage timings (ms) for retrieval trace ──
     _stage_timings: dict[str, float] = {}
     n_expansion_variants = 0
-    _ltr_used = False
     _hyde_used = False
 
     # ── Deterministic needle registry lookup (v2.0 — O(1) exact match) ──
@@ -792,7 +1394,10 @@ async def recursive_retrieve(
             if _reg_ids:
                 _reg_coll = collection_for(namespace)
                 try:
-                    _reg_points = qdrant_client().retrieve(
+                    # INIT-022/SPEC-005 (H4): offloaded to a worker thread — same reasoning
+                    # as the query_points call in search_vectors above.
+                    _reg_points = await asyncio.to_thread(
+                        qdrant_client().retrieve,
                         collection_name=_reg_coll,
                         ids=_reg_ids,
                         with_payload=True,
@@ -1009,6 +1614,22 @@ async def recursive_retrieve(
         except Exception as e:
             logger.debug("Late HyDE pass failed: %s", e)
 
+    # Trace fields fixed by this point in the pipeline (see `_static_trace_fields`
+    # docstring) — computed once and threaded through to whichever branch runs.
+    trace_static = _static_trace_fields(
+        auto_type=auto_type,
+        auto_subcategory=auto_subcategory,
+        inventory_total=stage0_inventory.total_memories if stage0_inventory else None,
+        temporal_intent=temporal_intent,
+        detected_topic=detected_topic,
+        topic_fallback_used=topic_fallback_used,
+        n_expansion_variants=n_expansion_variants,
+        hyde_used=_hyde_used,
+        needle_query_detected=_needle_query_detected,
+        needle_registry_hit_count=len(_registry_hits),
+        is_retry=_is_retry,
+    )
+
     if not coarse:
         empty = {
             "answer": "No relevant memories found.",
@@ -1029,7 +1650,15 @@ async def recursive_retrieve(
                 tier=tier,
                 bm25_hits=n_bm25,
                 stage_timings=_stage_timings,
-                **_trace_kw(),
+                **_finalize_trace_extra(
+                    trace_static,
+                    _budget,
+                    ltr_used=False,
+                    bm25_rescue_count=0,
+                    adaptive_widened=False,
+                    cross_agent_capped=False,
+                    synthetic_hits=0,
+                ),
             ),
         }
         _attach_stage0(empty, stage0_inventory, auto_type, user_memory_type)
@@ -1040,364 +1669,75 @@ async def recursive_retrieve(
     _t_post = time.monotonic()
 
     if RERANKER_ENABLED:
-        # ══════════════════════════════════════════════════════════════════
-        # v2 CLEAN PATH: nominate → ID-dedupe → parent enrich → rerank → top-K
-        # The cross-encoder is the single source of truth for ranking.
-        # No RRF, no threshold, no temporal decay, no hotness, no rescue.
-        # ══════════════════════════════════════════════════════════════════
-
-        # Nomination: collect ALL candidates into a pool, dedupe by Qdrant point ID.
-        # Sources were already gathered in parallel above (vec_results, bm25_hits,
-        # literal_hits, _registry_hits).  We flatten everything into one list
-        # and keep the best score per unique point ID.
-        candidate_pool: dict[str, dict] = {}
-        _all_nomination_sources = []
-        for vr in vec_results:
-            _all_nomination_sources.extend(vr)
-        if bm25_hits:
-            _all_nomination_sources.extend(bm25_hits)
-        if literal_hits:
-            _all_nomination_sources.extend(literal_hits)
-        if _registry_hits:
-            _all_nomination_sources.extend(_registry_hits)
-
-        for r in _all_nomination_sources:
-            rid = str(r.get("id") or r.get("qdrant_id") or "")
-            if not rid:
-                fp = r.get("file_path", "")
-                ci = r.get("chunk_index", 0)
-                rid = f"{fp}:{ci}"
-            existing = candidate_pool.get(rid)
-            if existing is None or r.get("score", 0) > existing.get("score", 0):
-                candidate_pool[rid] = dict(r)
-            if r.get("representation_type") == "synthetic_question":
-                candidate_pool[rid]["synthetic_match"] = True
-            if r.get("needle_registry_hit"):
-                candidate_pool[rid]["needle_registry_hit"] = True
-
-        pool = list(candidate_pool.values())
-        n_dedupe = len(pool)
-        n_synthetic_hits = sum(1 for r in pool if r.get("synthetic_match"))
-
-        # Graph entity facts: inject as additional candidates (not score modifiers)
-        if GRAPH_RETRIEVAL_ENABLED and detected_entities:
-            entity_facts = await build_entity_fact_results(detected_entities, min_score=0.0)
-            for ef in entity_facts:
-                efid = str(ef.get("id", ""))
-                if efid and efid not in candidate_pool:
-                    candidate_pool[efid] = ef
-                    pool.append(ef)
-
-        if not pool:
-            _stage_timings["postprocess_ms"] = round((time.monotonic() - _t_post) * 1000, 1)
-            empty_pool = {
-                "answer": "No relevant memories found.",
-                "sources": [],
-                "chunks_searched": n_coarse,
-                "agents_scoped": agent_ids or ([agent_id] if agent_id else []),
-                "retrieval_trace": _retrieval_trace(
-                    vector_limit=vector_limit,
-                    coarse_count=n_coarse,
-                    deduped_count=0,
-                    threshold=0.0,
-                    after_threshold_count=0,
-                    after_rerank_count=0,
-                    parent_enriched=False,
-                    refinement_chunks=0,
-                    graph_entities_found=n_graph_entities,
-                    graph_context_items=n_graph_items,
-                    tier=tier,
-                    bm25_hits=n_bm25,
-                    stage_timings=_stage_timings,
-                    reranker_enabled=True,
-                    reranker_model=RERANKER_MODEL,
-                    **_trace_kw(),
-                ),
-            }
-            _attach_stage0(empty_pool, stage0_inventory, auto_type, user_memory_type)
-            _observe_search_results(namespace, [])
-            return empty_pool
-
-        # Cross-encoder rerank: the sole ranking authority
-        # Parent text is already stored in the payload at index time — no runtime fetch needed
-        from archivist.retrieval.reranker import rerank_candidates
-
-        reranked = await rerank_candidates(
+        outcome = await _run_reranker_pipeline(
             query,
-            pool,
-            model_name=RERANKER_MODEL,
-            top_k=RERANKER_TOP_K,
-        )
-        n_rerank = len(reranked)
-        filtered = reranked
-
-        _stage_timings["postprocess_ms"] = round((time.monotonic() - _t_post) * 1000, 1)
-        _common_trace = dict(
+            vec_results=vec_results,
+            bm25_hits=bm25_hits,
+            literal_hits=literal_hits,
+            registry_hits=_registry_hits,
+            detected_entities=detected_entities,
             vector_limit=vector_limit,
-            coarse_count=n_coarse,
-            deduped_count=n_dedupe,
-            threshold=0.0,
-            after_threshold_count=len(filtered),
-            after_rerank_count=n_rerank,
-            parent_enriched=any(r.get("parent_text") for r in filtered),
-            refinement_chunks=0,
-            graph_entities_found=n_graph_entities,
-            graph_context_items=n_graph_items,
-            entity_facts_injected=0,
-            temporal_decay_applied=False,
+            n_coarse=n_coarse,
+            n_bm25=n_bm25,
+            n_graph_entities=n_graph_entities,
+            n_graph_items=n_graph_items,
             tier=tier,
-            outcome_adjustments=0,
-            context_status=None,
-            bm25_hits=n_bm25,
+            agent_id=agent_id,
+            agent_ids=agent_ids,
             stage_timings=_stage_timings,
-            reranker_enabled=True,
-            reranker_model=RERANKER_MODEL,
-            nomination_pool_size=len(pool),
-            **_trace_kw(),
+            t_post=_t_post,
+            trace_static=trace_static,
+            budget=_budget,
         )
     else:
-        # ══════════════════════════════════════════════════════════════════
-        # LEGACY PATH (RERANKER_ENABLED=False)
-        # Kept intact for shadow comparison during migration.
-        # ══════════════════════════════════════════════════════════════════
-
-        # Legacy merging: RRF + BM25 merge (already done above in coarse)
-        coarse = dedupe_vector_hits(coarse)
-        n_dedupe = len(coarse)
-        n_synthetic_hits = sum(1 for r in coarse if r.get("synthetic_match"))
-
-        # Stage 1c: Temporal decay (v0.5, intent-aware v1.9)
-        temporal_applied = False
-        if TEMPORAL_DECAY_HALFLIFE_DAYS > 0:
-            coarse = apply_temporal_decay(
-                coarse,
-                TEMPORAL_DECAY_HALFLIFE_DAYS,
-                temporal_intent=temporal_intent,
-            )
-            temporal_applied = True
-
-        # Stage 1d–1e: Scoring — LTR model (v1.10) or hand-tuned pipeline
-        _ltr_used = False
-        if ltr_available():
-            coarse = ltr_rank_results(coarse)
-            _ltr_used = True
-        else:
-            coarse = await apply_hotness_to_results(coarse)
-            coarse = apply_importance_to_results(coarse)
-
-        # Stage 2: Threshold filter (Phase 1, dynamic v1.10)
-        if DYNAMIC_THRESHOLD_ENABLED:
-            filtered = apply_dynamic_threshold(coarse, effective_threshold)
-        else:
-            filtered = apply_retrieval_threshold(coarse, effective_threshold)
-
-        # Stage 2-rescue: Adaptive vector limit (v1.9)
-        if (
-            ADAPTIVE_VECTOR_LIMIT_ENABLED
-            and len(filtered) < ADAPTIVE_VECTOR_MIN_RESULTS
-            and n_coarse >= vector_limit
-        ):
-            wider_limit = int(vector_limit * ADAPTIVE_VECTOR_LIMIT_MULTIPLIER)
-            wider_coarse = await search_vectors(
-                query,
-                agent_id=agent_id,
-                agent_ids=agent_ids,
-                team=team,
-                namespace=namespace,
-                date_from=date_from,
-                date_to=date_to,
-                memory_type=effective_memory_type,
-                limit=wider_limit,
-                _query_vec=_cached_query_vec,
-            )
-            if len(wider_coarse) > n_coarse:
-                was_adaptive_widened = True
-                wider_coarse = dedupe_vector_hits(wider_coarse)
-                if TEMPORAL_DECAY_HALFLIFE_DAYS > 0:
-                    wider_coarse = apply_temporal_decay(
-                        wider_coarse,
-                        TEMPORAL_DECAY_HALFLIFE_DAYS,
-                        temporal_intent=temporal_intent,
-                    )
-                wider_coarse = await apply_hotness_to_results(wider_coarse)
-                wider_coarse = apply_importance_to_results(wider_coarse)
-                wider_filtered = apply_retrieval_threshold(wider_coarse, effective_threshold)
-                filtered, _ = _merge_into_results(filtered, wider_filtered)
-
-        # Stage 2-bm25-rescue: BM25 rescue slots (v1.9, needle-boosted v1.11)
-        if BM25_RESCUE_ENABLED and BM25_ENABLED and n_bm25 > 0:
-            bm25_max = max(
-                (r.get("bm25_score", 0) for r in coarse if r.get("bm25_score")), default=0
-            )
-            if bm25_max > 0:
-                rescue_threshold = bm25_max * BM25_RESCUE_MIN_SCORE_RATIO
-                rescue_slots = 7 if _needle_query_detected else BM25_RESCUE_MAX_SLOTS
-                rescue_candidates = [
-                    r for r in coarse if r.get("bm25_score", 0) >= rescue_threshold
-                ][:rescue_slots]
-                filtered, n_bm25_rescue = _merge_into_results(
-                    filtered,
-                    rescue_candidates,
-                    min_score=effective_threshold,
-                    tag="bm25_rescue",
-                )
-
-        # Stage 2-xagent: Cross-agent rank guards (v1.9)
-        if agent_ids and len(agent_ids) > 1 and CROSS_AGENT_MAX_SHARE < 1.0 and filtered:
-            max_per_agent = max(1, int(len(filtered) * CROSS_AGENT_MAX_SHARE))
-            agent_counts: dict[str, int] = {}
-            guarded: list[dict] = []
-            overflow: list[dict] = []
-            for r in filtered:
-                aid = r.get("agent_id", "")
-                cnt = agent_counts.get(aid, 0)
-                if cnt < max_per_agent:
-                    guarded.append(r)
-                    agent_counts[aid] = cnt + 1
-                else:
-                    overflow.append(r)
-                    was_cross_agent_capped = True
-            guarded.extend(overflow)
-            filtered = guarded
-
-        # Stage 2a: Entity fact injection (v1.7) — guaranteed recall for known entities
-        n_entity_facts_injected = 0
-        if GRAPH_RETRIEVAL_ENABLED and detected_entities:
-            entity_facts = await build_entity_fact_results(
-                detected_entities,
-                min_score=effective_threshold + 0.05,
-                as_of=date_from,
-            )
-            if entity_facts:
-                filtered, n_entity_facts_injected = _merge_into_results(
-                    filtered,
-                    entity_facts,
-                    preserve_top_n=min(5, max(limit // 2, 1)),
-                )
-
-        if not filtered:
-            _stage_timings["postprocess_ms"] = round((time.monotonic() - _t_post) * 1000, 1)
-            below = {
-                "status": "below_threshold",
-                "answer": "",
-                "sources": [],
-                "chunks_searched": n_coarse,
-                "threshold": effective_threshold,
-                "best_score": max(r["score"] for r in coarse) if coarse else 0,
-                "agents_scoped": agent_ids or ([agent_id] if agent_id else []),
-                "retrieval_trace": _retrieval_trace(
-                    vector_limit=vector_limit,
-                    coarse_count=n_coarse,
-                    deduped_count=n_dedupe,
-                    threshold=effective_threshold,
-                    after_threshold_count=0,
-                    after_rerank_count=0,
-                    parent_enriched=False,
-                    refinement_chunks=0,
-                    graph_entities_found=n_graph_entities,
-                    graph_context_items=n_graph_items,
-                    temporal_decay_applied=temporal_applied,
-                    tier=tier,
-                    bm25_hits=n_bm25,
-                    stage_timings=_stage_timings,
-                    **_trace_kw(),
-                ),
-            }
-            _attach_stage0(below, stage0_inventory, auto_type, user_memory_type)
-            _observe_search_results(namespace, [])
-            return below
-
-        # Stage 2b: Outcome-aware scoring (v0.6)
-        n_outcome_adj = 0
-        filtered_ids = [str(r.get("id", "")) for r in filtered if r.get("id")]
-        if filtered_ids:
-            try:
-                adjustments = await get_outcome_adjustments(filtered_ids)
-                for r in filtered:
-                    adj = adjustments.get(str(r.get("id", "")), 0.0)
-                    if adj != 0.0:
-                        r["outcome_adjustment"] = adj
-                        r["score"] = r.get("score", 0) + adj
-                        n_outcome_adj += 1
-                if n_outcome_adj:
-                    filtered.sort(key=lambda x: x.get("score", 0), reverse=True)
-            except Exception as e:
-                logger.debug("Outcome adjustments skipped: %s", e)
-
-        # Stage 3: Rerank (legacy RERANK_ENABLED path — separate from RERANKER_ENABLED)
-        reranked = await _apply_rerank(query, filtered)
-        n_rerank = len(reranked)
-
-        # Stage 3a: Iterative retrieval — auto-reformulate on low-confidence (v1.10)
-        _ITERATIVE_THRESHOLD = 0.45
-        if (
-            not _is_retry
-            and reranked
-            and max(r.get("score", 0) for r in reranked) < _ITERATIVE_THRESHOLD
-            and _budget.can_afford(200)
-        ):
-            try:
-                snippets = " | ".join((r.get("text", "") or "")[:80] for r in reranked[:3])
-                reformulated = await llm_query(
-                    f"The search query '{query}' returned low-relevance results: [{snippets}]. "
-                    "Suggest a single, better search query to find the answer. Return ONLY the query.",
-                    system="You are a search query optimizer. Return only the improved query, nothing else.",
-                    max_tokens=64,
-                    model=LLM_REFINE_MODEL or LLM_MODEL,
-                    stage="iterative_retrieval",
-                )
-                reformulated = reformulated.strip().strip('"').strip("'")
-                if reformulated and reformulated.lower() != query.lower():
-                    logger.debug("Iterative retrieval: reformulated %r -> %r", query, reformulated)
-                    _stage_timings["postprocess_ms"] = round((time.monotonic() - _t_post) * 1000, 1)
-                    return await recursive_retrieve(
-                        reformulated,
-                        agent_id=agent_id,
-                        agent_ids=agent_ids,
-                        team=team,
-                        namespace=namespace,
-                        limit=limit,
-                        refine=refine,
-                        threshold=threshold,
-                        tier=tier,
-                        date_from=date_from,
-                        date_to=date_to,
-                        max_tokens=max_tokens,
-                        memory_type=memory_type,
-                        _is_retry=True,
-                    )
-            except Exception as e:
-                logger.debug("Iterative retrieval reformulation failed: %s", e)
-
-        # Stage 4: Parent text is now stored at index time; no runtime enrichment needed
-        enriched = reranked
-
-        _stage_timings["postprocess_ms"] = round((time.monotonic() - _t_post) * 1000, 1)
-        _common_trace = dict(
+        outcome = await _run_legacy_pipeline(
+            query,
+            coarse=coarse,
+            agent_id=agent_id,
+            agent_ids=agent_ids,
+            team=team,
+            namespace=namespace,
+            date_from=date_from,
+            date_to=date_to,
+            effective_memory_type=effective_memory_type,
+            limit=limit,
+            effective_threshold=effective_threshold,
+            temporal_intent=temporal_intent,
             vector_limit=vector_limit,
-            coarse_count=n_coarse,
-            deduped_count=n_dedupe,
-            threshold=effective_threshold,
-            after_threshold_count=len(filtered),
-            after_rerank_count=n_rerank,
-            parent_enriched=any(r.get("parent_text") for r in enriched),
-            refinement_chunks=0,
-            graph_entities_found=n_graph_entities,
-            graph_context_items=n_graph_items,
-            entity_facts_injected=n_entity_facts_injected,
-            temporal_decay_applied=temporal_applied,
+            n_coarse=n_coarse,
+            n_bm25=n_bm25,
+            detected_entities=detected_entities,
+            n_graph_entities=n_graph_entities,
+            n_graph_items=n_graph_items,
             tier=tier,
-            outcome_adjustments=n_outcome_adj,
-            context_status=None,
-            bm25_hits=n_bm25,
+            needle_query_detected=_needle_query_detected,
+            refine=refine,
+            threshold=threshold,
+            max_tokens=max_tokens,
+            memory_type=memory_type,
+            is_retry=_is_retry,
+            budget=_budget,
             stage_timings=_stage_timings,
-            **_trace_kw(),
+            t_post=_t_post,
+            trace_static=trace_static,
+            cached_query_vec=_cached_query_vec,
         )
 
-    # ── Common tail: cap → refine → synthesize ──
-    if RERANKER_ENABLED:
-        enriched = filtered
-    # else: enriched was set in the legacy branch above
+    if outcome.early_response is not None:
+        if outcome.early_response_is_final:
+            return outcome.early_response
+        early = outcome.early_response
+        _attach_stage0(early, stage0_inventory, auto_type, user_memory_type)
+        _observe_search_results(namespace, early.get("sources"))
+        return early
+
+    enriched = outcome.enriched
+    filtered = outcome.filtered
+    _common_trace = outcome.common_trace
+    n_dedupe = outcome.n_dedupe
+    _ltr_used = outcome.ltr_used
+    n_bm25_rescue = outcome.bm25_rescue_count
+    n_synthetic_hits = outcome.synthetic_hits
 
     # Cap how many chunks we refine (per-request limit)
     enriched = enriched[:limit]

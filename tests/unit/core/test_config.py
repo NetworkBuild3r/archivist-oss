@@ -14,6 +14,8 @@ Tests validate:
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 from pydantic import ValidationError
 
@@ -295,6 +297,110 @@ class TestTeamMapLoading:
         s = _fresh(monkeypatch, {"SQLITE_PATH": str(tmp_path)})
         result = s._load_team_map()
         assert result == {}
+
+
+class TestTeamMapLoadFailureLogging:
+    """M3 (INIT-022/SPEC-007): malformed team_map sources must log a warning,
+    not fail silently, before falling back to {}."""
+
+    def test_malformed_yaml_logs_warning_and_falls_back_to_empty(
+        self, monkeypatch, tmp_path, caplog
+    ):
+        yaml_path = tmp_path / "team_map.yaml"
+        # Unterminated flow sequence — guaranteed yaml.YAMLError on parse.
+        yaml_path.write_text("agent1: [unterminated\n")
+        s = _fresh(
+            monkeypatch,
+            {
+                "SQLITE_PATH": str(tmp_path),
+                "TEAM_MAP_PATH": str(yaml_path),
+            },
+        )
+
+        with caplog.at_level(logging.WARNING, logger="archivist.config"):
+            result = s._load_team_map()
+
+        assert result == {}
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert any("team_map" in r.message.lower() for r in warnings), (
+            "expected a WARNING log entry naming team_map on malformed YAML"
+        )
+
+    def test_malformed_json_env_logs_warning_and_falls_back_to_empty(
+        self, monkeypatch, tmp_path, caplog
+    ):
+        s = _fresh(
+            monkeypatch,
+            {
+                "SQLITE_PATH": str(tmp_path),
+                "TEAM_MAP_JSON": "{not valid json",
+            },
+        )
+
+        with caplog.at_level(logging.WARNING, logger="archivist.config"):
+            result = s._load_team_map()
+
+        assert result == {}
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert any("team_map" in r.message.lower() for r in warnings), (
+            "expected a WARNING log entry naming team_map on malformed JSON"
+        )
+
+    def test_malformed_json_env_warning_does_not_leak_raw_content(
+        self, monkeypatch, tmp_path, caplog
+    ):
+        """Security AC: TEAM_MAP_JSON may carry sensitive routing data — the
+        warning must log only the parse-error message, never the raw env-var
+        content."""
+        sensitive_raw = '{"secret-agent-007": "classified-ops-team-do-not-log-me"'
+        s = _fresh(
+            monkeypatch,
+            {
+                "SQLITE_PATH": str(tmp_path),
+                "TEAM_MAP_JSON": sensitive_raw,
+            },
+        )
+
+        with caplog.at_level(logging.WARNING, logger="archivist.config"):
+            s._load_team_map()
+
+        for record in caplog.records:
+            assert sensitive_raw not in record.message
+            assert "classified-ops-team-do-not-log-me" not in record.message
+
+    def test_malformed_yaml_warning_does_not_leak_file_content(self, monkeypatch, tmp_path, caplog):
+        """Security AC: only the source path + parse-error message are logged,
+        never the parsed/raw file content."""
+        yaml_path = tmp_path / "team_map.yaml"
+        yaml_path.write_text("agent1: [do-not-log-this-marker\n")
+        s = _fresh(
+            monkeypatch,
+            {
+                "SQLITE_PATH": str(tmp_path),
+                "TEAM_MAP_PATH": str(yaml_path),
+            },
+        )
+
+        with caplog.at_level(logging.WARNING, logger="archivist.config"):
+            s._load_team_map()
+
+        for record in caplog.records:
+            assert "do-not-log-this-marker" not in record.message
+
+    def test_yaml_takes_precedence_and_json_not_attempted_on_success(self, monkeypatch, tmp_path):
+        """Sanity: happy-path YAML load is unaffected by the logging change."""
+        yaml_path = tmp_path / "team_map.yaml"
+        yaml_path.write_text("agent1: teamA\n")
+        s = _fresh(
+            monkeypatch,
+            {
+                "SQLITE_PATH": str(tmp_path),
+                "TEAM_MAP_PATH": str(yaml_path),
+                "TEAM_MAP_JSON": '{"agentX": "ops"}',
+            },
+        )
+        result = s._load_team_map()
+        assert result == {"agent1": "teamA"}
 
 
 class TestCompatLayer:

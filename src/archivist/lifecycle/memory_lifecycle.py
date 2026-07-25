@@ -11,6 +11,7 @@ import sqlite3
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any
 
+import aiosqlite
 from qdrant_client.models import FieldCondition, Filter, MatchValue
 
 if TYPE_CHECKING:
@@ -211,29 +212,36 @@ async def _delete_sqlite_artifacts(
     the others.
 
     Args:
-        txn: Optional open ``MemoryTransaction``.  When provided, the
-            ``delete_fts_chunks_batch`` and ``delete_needle_tokens_batch``
-            calls are joined to the same pool.write() connection so all
-            SQLite cleanup and the outbox event land in one atomic commit.
-            When ``None`` each helper acquires its own lock (legacy behaviour).
+        txn: Optional open ``MemoryTransaction``.  When provided, ``txn.conn``
+            is threaded through to ``delete_fts_chunks_batch``,
+            ``delete_needle_tokens_batch``, and
+            ``_delete_entity_facts_for_memory`` so all three SQLite cleanup
+            steps and the outbox event land in one atomic commit — making
+            this helper genuinely reusable from ``delete_memory_complete``'s
+            ``OUTBOX_ENABLED`` branch instead of that branch duplicating
+            these same three try/except blocks inline (INIT-022/SPEC-004,
+            `M4`). When ``None`` (default) each helper acquires its own
+            ``pool.write()`` lock (legacy/non-outbox behaviour).
     """
+    conn: aiosqlite.Connection | None = txn.conn if txn is not None else None
+
     fts_count = 0
     try:
-        fts_count = await delete_fts_chunks_batch(all_ids)
+        fts_count = await delete_fts_chunks_batch(all_ids, conn=conn)
     except (sqlite3.Error, OSError) as e:
         logger.error("cascade.fts_batch failed for %s: %s", memory_id, e)
         failed_steps.append("fts_batch")
 
     needle_count = 0
     try:
-        needle_count = await delete_needle_tokens_batch(all_ids)
+        needle_count = await delete_needle_tokens_batch(all_ids, conn=conn)
     except (sqlite3.Error, OSError) as e:
         logger.error("cascade.needle_batch failed for %s: %s", memory_id, e)
         failed_steps.append("needle_batch")
 
     facts_count = 0
     try:
-        facts_count = await _delete_entity_facts_for_memory(memory_id)
+        facts_count = await _delete_entity_facts_for_memory(memory_id, conn=conn)
     except (sqlite3.Error, OSError) as e:
         logger.error("cascade.entity_facts failed for %s: %s", memory_id, e)
         failed_steps.append("entity_facts")
@@ -418,7 +426,10 @@ async def _finalize_archive(
 # ---------------------------------------------------------------------------
 
 
-async def _delete_entity_facts_for_memory(memory_id: str) -> int:
+async def _delete_entity_facts_for_memory(
+    memory_id: str,
+    conn: aiosqlite.Connection | None = None,
+) -> int:
     """Soft-deactivate entity facts linked to *memory_id*.
 
     Primary path: exact match on the ``memory_id`` column (indexed, O(log n)).
@@ -426,19 +437,25 @@ async def _delete_entity_facts_for_memory(memory_id: str) -> int:
     ``memory_id`` is still empty.  Once all rows are backfilled the fallback
     becomes a no-op.
 
+    Args:
+        conn: Optional open ``aiosqlite.Connection`` (e.g. from a
+            ``MemoryTransaction``).  When provided, the UPDATE statements
+            join the caller's transaction instead of acquiring a new
+            ``pool.write()`` lock. When ``None`` (default) a fresh write-lock
+            is acquired from the pool (INIT-022/SPEC-004, `M4`).
+
     Returns count of soft-deactivated facts.
     """
-    from archivist.storage.sqlite_pool import pool
 
-    async with pool.write() as conn:
+    async def _run(c: aiosqlite.Connection) -> int:
         try:
-            cur = await conn.execute(
+            cur = await c.execute(
                 "UPDATE facts SET is_active = 0 WHERE memory_id = ? AND is_active = 1",
                 (memory_id,),
             )
             deactivated = cur.rowcount
 
-            cur2 = await conn.execute(
+            cur2 = await c.execute(
                 "UPDATE facts SET is_active = 0 "
                 "WHERE source_file LIKE ? AND is_active = 1 AND memory_id = ''",
                 (f"%{memory_id}%",),
@@ -453,6 +470,14 @@ async def _delete_entity_facts_for_memory(memory_id: str) -> int:
                 e,
             )
             return 0
+
+    if conn is not None:
+        return await _run(conn)
+
+    from archivist.storage.sqlite_pool import pool
+
+    async with pool.write() as c:
+        return await _run(c)
 
 
 # ---------------------------------------------------------------------------
@@ -503,28 +528,15 @@ async def delete_memory_complete(
         async with MemoryTransaction() as txn:
             txn.enqueue_qdrant_delete(col, all_ids, memory_id=memory_id)
 
-            # SQLite cleanup — each step try/excepted inside helpers but all
-            # sharing the same connection so they commit together.
-            fts_count = 0
-            try:
-                fts_count = await delete_fts_chunks_batch(all_ids)
-            except (sqlite3.Error, OSError) as e:
-                logger.error("cascade.fts_batch failed for %s: %s", memory_id, e)
-                result.failed_steps.append("fts_batch")
-
-            needle_count = 0
-            try:
-                needle_count = await delete_needle_tokens_batch(all_ids)
-            except (sqlite3.Error, OSError) as e:
-                logger.error("cascade.needle_batch failed for %s: %s", memory_id, e)
-                result.failed_steps.append("needle_batch")
-
-            facts_count = 0
-            try:
-                facts_count = await _delete_entity_facts_for_memory(memory_id)
-            except (sqlite3.Error, OSError) as e:
-                logger.error("cascade.entity_facts failed for %s: %s", memory_id, e)
-                result.failed_steps.append("entity_facts")
+            # SQLite cleanup — reuses the same helper as the legacy path
+            # below, passing this transaction's connection through so all
+            # three steps and the outbox enqueue above commit together
+            # (INIT-022/SPEC-004, `M4`; previously duplicated inline here).
+            (
+                fts_count,
+                needle_count,
+                facts_count,
+            ) = await _delete_sqlite_artifacts(memory_id, all_ids, result.failed_steps, txn=txn)
 
         result.qdrant_primary = 1
         result.qdrant_reverse_hyde = len(hyde_ids)

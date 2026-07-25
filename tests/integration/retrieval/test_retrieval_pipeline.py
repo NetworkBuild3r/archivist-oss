@@ -221,9 +221,11 @@ class TestPhase3NominateThenRerank:
         assert "not RERANKER_ENABLED" in source
 
     def test_v2_path_does_id_based_dedup(self):
-        from rlm_retriever import recursive_retrieve
+        # INIT-022/SPEC-005 (H6): nomination/dedup logic now lives in
+        # _run_reranker_pipeline, extracted out of recursive_retrieve.
+        from rlm_retriever import _run_reranker_pipeline
 
-        source = inspect.getsource(recursive_retrieve)
+        source = inspect.getsource(_run_reranker_pipeline)
         assert "candidate_pool" in source
 
     def test_v2_pool_collects_all_nomination_sources(self):
@@ -234,9 +236,11 @@ class TestPhase3NominateThenRerank:
             assert source_name in source
 
     def test_v2_trace_includes_nomination_pool_size(self):
-        from rlm_retriever import recursive_retrieve
+        # INIT-022/SPEC-005 (H6): nomination/dedup logic now lives in
+        # _run_reranker_pipeline, extracted out of recursive_retrieve.
+        from rlm_retriever import _run_reranker_pipeline
 
-        source = inspect.getsource(recursive_retrieve)
+        source = inspect.getsource(_run_reranker_pipeline)
         assert "nomination_pool_size" in source
 
     def test_v2_pool_keeps_best_score_per_id(self):
@@ -339,9 +343,11 @@ class TestPhase3NominateThenRerank:
         assert v.get("RERANK_ENABLED") == "false"
 
     def test_legacy_path_preserved(self):
-        from rlm_retriever import recursive_retrieve
+        # INIT-022/SPEC-005 (H6): legacy-path post-processing now lives in
+        # _run_legacy_pipeline, extracted out of recursive_retrieve.
+        from rlm_retriever import _run_legacy_pipeline
 
-        source = inspect.getsource(recursive_retrieve)
+        source = inspect.getsource(_run_legacy_pipeline)
         assert "LEGACY PATH" in source
         assert "apply_temporal_decay" in source
         assert "apply_hotness_to_results" in source

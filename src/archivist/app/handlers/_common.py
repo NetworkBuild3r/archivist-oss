@@ -41,6 +41,25 @@ def _rbac_gate(agent_id: str, action: str, namespace: str) -> str | None:
     return None
 
 
+def require_rbac(agent_id: str, action: str, namespace: str) -> list[TextContent] | None:
+    """Return an error response when RBAC denies ``action`` on ``namespace``.
+
+    Wraps ``_rbac_gate`` in the ``list[TextContent]`` shape every handler
+    needs, so callers can do
+    ``if denied := require_rbac(agent_id, action, namespace): return denied``.
+
+    Extracted (INIT-022/SPEC-009, M9) from ~12 hand-copied call sites across
+    ``tools_storage.py``/``tools_search.py``/``tools_admin.py``/``tools_skills.py``
+    that each did ``denied = _rbac_gate(...); if denied: return
+    [TextContent(type="text", text=denied)]`` inline — this is the single
+    chokepoint replacing all of them, with zero behavioral change.
+    """
+    denied = _rbac_gate(agent_id, action, namespace)
+    if denied:
+        return [TextContent(type="text", text=denied)]
+    return None
+
+
 def resolve_caller(arguments: dict) -> str:
     """Return the effective caller agent_id from tool arguments.
 

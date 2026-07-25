@@ -74,7 +74,7 @@ class TestMicroChunkCap:
             patch("audit.log_memory_event", new_callable=AsyncMock),
             patch("handlers.tools_storage.get_namespace_for_agent", return_value="test-ns"),
             patch("handlers.tools_storage.get_namespace_config", return_value=None),
-            patch("handlers.tools_storage._rbac_gate", return_value=None),
+            patch("handlers.tools_storage.require_rbac", return_value=None),
         ):
             monkeypatch.setattr("config.REVERSE_HYDE_ENABLED", False)
             monkeypatch.setattr("config.BM25_ENABLED", False)
@@ -139,7 +139,7 @@ class TestReverseHydeFireAndForget:
             patch("handlers.tools_storage._extract_needle_micro_chunks", return_value=[]),
             patch("handlers.tools_storage.get_namespace_for_agent", return_value="test-ns"),
             patch("handlers.tools_storage.get_namespace_config", return_value=None),
-            patch("handlers.tools_storage._rbac_gate", return_value=None),
+            patch("handlers.tools_storage.require_rbac", return_value=None),
             patch("hyde.generate_reverse_hyde_questions", side_effect=slow_hyde),
         ):
             monkeypatch.setattr("config.REVERSE_HYDE_ENABLED", True)
@@ -200,7 +200,7 @@ class TestReverseHydeFireAndForget:
             patch("handlers.tools_storage._extract_needle_micro_chunks", return_value=[]),
             patch("handlers.tools_storage.get_namespace_for_agent", return_value="test-ns"),
             patch("handlers.tools_storage.get_namespace_config", return_value=None),
-            patch("handlers.tools_storage._rbac_gate", return_value=None),
+            patch("handlers.tools_storage.require_rbac", return_value=None),
             patch("hyde.generate_reverse_hyde_questions", side_effect=failing_hyde),
             patch.object(test_logger, "warning", side_effect=capture_warning),
         ):
@@ -239,7 +239,13 @@ class TestIndexerParallelReverseHyde:
             "asyncio.gather in indexer must use return_exceptions=True"
         )
 
-    async def test_parallel_hyde_calls(self, monkeypatch, tmp_path):
+    async def test_parallel_hyde_calls(self, async_pool, monkeypatch, tmp_path):
+        # INIT-022/SPEC-001 (C1): the shared _persist_points() helper now
+        # re-raises MemoryTransaction failures instead of swallowing them at
+        # debug level, so this test -- like its siblings above -- needs a
+        # real initialized pool for the primary-points transaction to
+        # succeed. Previously this test passed only because that same
+        # transaction failure was being silently discarded.
         call_times = []
 
         async def tracked_hyde(text):
