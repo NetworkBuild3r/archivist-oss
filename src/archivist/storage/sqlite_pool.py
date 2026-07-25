@@ -185,11 +185,15 @@ class SQLiteGraphBackend:
             logger.info("SQLite pool closed")
 
     @asynccontextmanager
-    async def write(self) -> AsyncIterator[aiosqlite.Connection]:
+    async def write(self) -> AsyncIterator[_WrappedSQLiteConn]:
         """Acquire the write lock and yield the connection.
 
         Auto-commits on clean exit; rolls back on any exception and re-raises.
         Records write-lock acquire latency in ``SQLITE_POOL_ACQUIRE_MS``.
+
+        Yields ``_WrappedSQLiteConn`` (not bare ``aiosqlite.Connection``) so
+        callers can use ``fetchone`` / ``fetchall`` / ``fetchval`` — the same
+        surface as ``AsyncpgConnection`` (INIT-002 dual-backend typing).
         """
         if self._conn is None:
             raise RuntimeError("SQLitePool is not initialized — call initialize_pool() first")
@@ -210,8 +214,12 @@ class SQLiteGraphBackend:
                     raise
 
     @asynccontextmanager
-    async def read(self) -> AsyncIterator[aiosqlite.Connection]:
-        """Yield the connection for read-only queries (no lock required under WAL)."""
+    async def read(self) -> AsyncIterator[_WrappedSQLiteConn]:
+        """Yield the connection for read-only queries (no lock required under WAL).
+
+        Yields ``_WrappedSQLiteConn`` with ``fetchone`` / ``fetchall`` / ``fetchval``
+        matching the Postgres wrapper API (INIT-002).
+        """
         if self._conn is None:
             raise RuntimeError("SQLitePool is not initialized — call initialize_pool() first")
         yield _WrappedSQLiteConn(self._conn)

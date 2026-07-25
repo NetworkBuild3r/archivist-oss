@@ -3,6 +3,7 @@
 import logging
 import time
 from collections.abc import Awaitable, Callable
+from typing import cast
 
 from mcp.types import TextContent, Tool
 
@@ -48,7 +49,8 @@ for _handlers in (
     COORDINATION_HANDLERS,
     DOCS_HANDLERS,
 ):
-    TOOL_REGISTRY.update(_handlers)
+    # Domain modules type HANDLERS as dict[str, object]; values are HandlerFn.
+    TOOL_REGISTRY.update(cast(dict[str, HandlerFn], _handlers))
 
 ALL_TOOLS: list[Tool] = (
     SEARCH_TOOLS
