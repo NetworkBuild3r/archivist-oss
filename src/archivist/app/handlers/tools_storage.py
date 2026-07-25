@@ -19,10 +19,13 @@ from archivist.core.archivist_uri import memory_uri
 from archivist.core.config import (
     CONFLICT_BLOCK_ON_STORE,
     CONFLICT_CHECK_ON_STORE,
+    DEFAULT_CONFIDENCE_BY_ACTOR_TYPE,
     TEAM_MAP,
 )
+from archivist.core.provenance import SourceTrace, default_confidence
 from archivist.core.rbac import get_namespace_config, get_namespace_for_agent
 from archivist.features.embeddings import embed_batch, embed_text
+from archivist.retrieval.topic_detector import detect_topics
 from archivist.storage.collection_router import (
     collection_for,
     collections_for_query,
@@ -35,6 +38,7 @@ from archivist.storage.graph import (
     upsert_entity,
 )
 from archivist.storage.qdrant import qdrant_client
+from archivist.storage.transaction import MemoryTransaction
 from archivist.utils.chunking import _extract_needle_micro_chunks
 from archivist.utils.text_utils import compute_memory_checksum
 from archivist.write.conflict_detection import (
@@ -47,6 +51,19 @@ from archivist.write.indexer import compute_ttl
 from archivist.write.pre_extractor import extract_needle_entities, pre_extract
 
 from ._common import _rbac_gate, error_response, resolve_actor, success_response
+
+# NOTE (INIT-022/SPEC-008, ac-5): `SourceTrace`/`default_confidence`, `detect_topics`,
+# `DEFAULT_CONFIDENCE_BY_ACTOR_TYPE`, and `MemoryTransaction` are hoisted here because no
+# test rebinds them at call time. The feature-flag constants below (`OUTBOX_ENABLED`,
+# `BM25_ENABLED`, `REVERSE_HYDE_ENABLED`, `SYNTHETIC_QUESTIONS_ENABLED`,
+# `CONTEXTUAL_AUGMENTATION_ENABLED`, `TOPIC_ROUTING_ENABLED`, `MAX_MICRO_CHUNKS_PER_MEMORY`)
+# and `log_memory_event` are deliberately NOT hoisted and stay as function-local imports in
+# `_handle_store` — the existing test suite (e.g. `tests/system/conftest.py`'s `_enable_outbox`
+# autouse fixture, `tests/integration/mcp/test_provenance_handlers.py`) monkeypatches these on
+# their *source* modules (`archivist.core.config`, `archivist.core.audit`) expecting the
+# re-import inside the handler to observe the patched value at call time; a top-of-file import
+# would bind the pre-patch value once at module-import time and silently stop honoring those
+# per-test overrides.
 
 logger = logging.getLogger("archivist.mcp")
 
@@ -304,7 +321,6 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
     force_skip = bool(arguments.get("force_skip_conflict_check", False))
 
     actor_id, actor_type = resolve_actor(arguments)
-    from archivist.core.provenance import SourceTrace, default_confidence
 
     raw_confidence = arguments.get("confidence", -1)
     confidence = (
@@ -429,7 +445,6 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
         _auto_hints = pre_extract(text)
         _auto_entities = _auto_hints.get("entities", [])
         _needle_entities = extract_needle_entities(text)
-        from archivist.core.config import DEFAULT_CONFIDENCE_BY_ACTOR_TYPE
 
         _extracted_conf = DEFAULT_CONFIDENCE_BY_ACTOR_TYPE.get("extracted", 0.5)
         _extracted_fact_kw = dict(_fact_kw, confidence=_extracted_conf, provenance="deterministic")
@@ -456,7 +471,6 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
         thought_type = _auto_hints.get("thought_type", "general")
 
     from archivist.core.config import TOPIC_ROUTING_ENABLED
-    from archivist.retrieval.topic_detector import detect_topics
 
     _detected_topic = ""
     if TOPIC_ROUTING_ENABLED:
@@ -515,7 +529,6 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
     _coll = ensure_collection(namespace)
 
     from archivist.core.config import OUTBOX_ENABLED
-    from archivist.storage.transaction import MemoryTransaction
 
     _primary_point = PointStruct(id=pid, vector=vec, payload=payload)
 
@@ -695,7 +708,6 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
                 )
             if _rh_points:
                 from archivist.core.config import OUTBOX_ENABLED
-                from archivist.storage.transaction import MemoryTransaction
 
                 _rh_mp_records = [
                     {"memory_id": pid, "qdrant_id": str(rp.id), "point_type": "reverse_hyde"}
@@ -773,7 +785,6 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
             )
             if sq_points:
                 from archivist.core.config import OUTBOX_ENABLED
-                from archivist.storage.transaction import MemoryTransaction
 
                 _sq_mp_records = [
                     {
@@ -1180,7 +1191,9 @@ async def _handle_delete(arguments: dict) -> list[TextContent]:
 
     ns_err = _rbac_gate(agent_id, "write", namespace)
     if ns_err:
-        return ns_err
+        # INIT-022/SPEC-008 (H3): was returning the bare error string instead of the
+        # structured [TextContent] payload every other RBAC-gated handler in this file returns.
+        return [TextContent(type="text", text=ns_err)]
     if not namespace:
         namespace = get_namespace_for_agent(agent_id)
 
