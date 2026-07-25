@@ -491,7 +491,7 @@ async def consolidate_tips(budget: int = 20) -> dict:
     import archivist.core.metrics as m
     import archivist.lifecycle.curator_queue as curator_queue
     from archivist.core.config import CURATOR_TIP_BUDGET
-    from archivist.features.embeddings import embed_text
+    from archivist.features.embeddings import embed_batch
     from archivist.storage.sqlite_pool import pool
 
     _ensure_trajectory_schema()
@@ -508,10 +508,11 @@ async def consolidate_tips(budget: int = 20) -> dict:
     if len(all_tips) < 3:
         return {"clusters_found": 0, "consolidated": 0, "budget_used": 0}
 
-    embeddings = []
-    for tip in all_tips:
-        vec = await embed_text(tip["tip_text"])
-        embeddings.append(vec)
+    # INIT-022/SPEC-006 (M5): single batched embed_batch() call instead of one
+    # embed_text() round-trip per tip — embed_batch preserves the same
+    # in-process embedding cache (falls back to embed_text under the hood for
+    # cache hits/misses), so no caching behavior is lost.
+    embeddings = await embed_batch([tip["tip_text"] for tip in all_tips])
 
     clusters = _cluster_tips(all_tips, embeddings, threshold=0.85)
     mergeable = [c for c in clusters if len(c) >= 3]
