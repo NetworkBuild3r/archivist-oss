@@ -9,7 +9,6 @@ from archivist.app.dashboard import batch_heuristic, build_dashboard
 from archivist.core.rbac import get_namespace_for_agent, list_accessible_namespaces
 from archivist.features.skills import find_skill, get_lessons, get_skill_health
 from archivist.retrieval.retrieval_log import get_retrieval_logs, get_retrieval_stats
-from archivist.storage.sqlite_pool import pool
 
 from ._common import error_response, success_response
 
@@ -438,6 +437,11 @@ async def _handle_savings_dashboard(arguments: dict) -> list[TextContent]:
         _tier_distribution_stats,
         _token_savings_stats,
     )
+
+    # Imported here (not at module scope) so this always resolves to the pool
+    # object main.py's startup rebinds `sqlite_pool.pool` to — see
+    # dashboard.build_dashboard() for the full rationale (INIT-026/SPEC-001).
+    from archivist.storage.sqlite_pool import pool
 
     window_days = int(arguments.get("window_days") or 7)
     top_n = int(arguments.get("heatmap_top_n") or 50)
