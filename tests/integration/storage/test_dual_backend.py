@@ -458,9 +458,7 @@ async def test_dual_upsert_fts_chunk_tier_columns(dual_pool):
     assert float(row["importance"]) == pytest.approx(0.8), (
         f"[{backend_name}] importance mismatch: {row['importance']}"
     )
-    assert row["tier_label"] == "l1", (
-        f"[{backend_name}] tier_label mismatch: {row['tier_label']}"
-    )
+    assert row["tier_label"] == "l1", f"[{backend_name}] tier_label mismatch: {row['tier_label']}"
 
     # Cleanup
     async with backend.write() as conn:
@@ -493,9 +491,7 @@ async def test_dual_upsert_fts_chunk_defaults(dual_pool):
     assert float(row["importance"]) == pytest.approx(0.5), (
         f"[{backend_name}] default importance should be 0.5"
     )
-    assert row["tier_label"] == "l2", (
-        f"[{backend_name}] default tier_label should be 'l2'"
-    )
+    assert row["tier_label"] == "l2", f"[{backend_name}] default tier_label should be 'l2'"
     assert float(row["decay_rate"]) == pytest.approx(0.0), (
         f"[{backend_name}] default decay_rate should be 0.0"
     )
@@ -503,4 +499,3 @@ async def test_dual_upsert_fts_chunk_defaults(dual_pool):
     # Cleanup
     async with backend.write() as conn:
         await conn.execute("DELETE FROM memory_chunks WHERE qdrant_id = ?", (qid,))
-

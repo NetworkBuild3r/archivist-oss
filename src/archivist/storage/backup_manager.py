@@ -53,8 +53,33 @@ MANIFEST_VERSION = 1
 ARCHIVIST_VERSION = "2.0.1"
 
 
+class SnapshotPathError(ValueError):
+    """Raised when a snapshot_id would resolve outside BACKUP_DIR.
+
+    A ``ValueError`` subclass so any existing ``except ValueError`` handling still
+    catches it; callers that need to distinguish this from other value errors (to
+    map it to its own HTTP status, for example) should catch it explicitly and
+    before the broader ``ValueError`` case.
+    """
+
+
 def _snapshot_dir(snapshot_id: str) -> Path:
-    return Path(BACKUP_DIR) / snapshot_id
+    """Resolve ``snapshot_id`` to its directory under BACKUP_DIR.
+
+    Rejects any snapshot_id that would resolve outside BACKUP_DIR — via ``..``
+    traversal, an absolute path, or a symlink escape — before returning. Both the
+    backup root and the candidate path are fully resolved (``Path.resolve()``,
+    which follows symlinks) so a pre-existing symlink inside BACKUP_DIR pointing
+    elsewhere cannot be used to escape it; containment is checked on the resolved
+    paths rather than by string-matching ``..`` (INIT-014/SPEC-001).
+    """
+    if not snapshot_id or not snapshot_id.strip():
+        raise SnapshotPathError("snapshot_id must not be empty")
+    backup_root = Path(BACKUP_DIR).resolve()
+    candidate = (backup_root / snapshot_id).resolve()
+    if candidate == backup_root or backup_root not in candidate.parents:
+        raise SnapshotPathError(f"Invalid snapshot_id {snapshot_id!r}: resolves outside BACKUP_DIR")
+    return candidate
 
 
 def _ensure_backup_dir() -> None:
@@ -420,6 +445,10 @@ def restore_snapshot(snapshot_id: str, target: str = "all") -> dict:
         target: What to restore — "all", "qdrant", or "sqlite".
 
     Returns summary of restored components.
+
+    Raises:
+        SnapshotPathError: if snapshot_id would resolve outside BACKUP_DIR.
+        FileNotFoundError: if the snapshot's manifest.json is missing.
     """
     snap_dir = _snapshot_dir(snapshot_id)
     manifest_path = snap_dir / "manifest.json"
@@ -529,7 +558,11 @@ def _restore_sqlite(backup_path: Path) -> None:
 
 
 def delete_snapshot(snapshot_id: str) -> bool:
-    """Delete a snapshot directory. Returns True if deleted."""
+    """Delete a snapshot directory. Returns True if deleted.
+
+    Raises:
+        SnapshotPathError: if snapshot_id would resolve outside BACKUP_DIR.
+    """
     snap_dir = _snapshot_dir(snapshot_id)
     if not snap_dir.is_dir():
         return False

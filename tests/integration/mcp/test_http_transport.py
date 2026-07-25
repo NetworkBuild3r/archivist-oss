@@ -4,7 +4,9 @@ Covers both transport layers:
   - Streamable HTTP  POST /mcp        (primary, MCP spec ≥2025-03)
   - Legacy SSE       GET  /mcp/sse    (backward-compat for OpenClaw ≤v2026.4.8)
 
-Also covers the auth middleware OpenClaw placeholder acceptance.
+Also covers the auth middleware's rejection of the OpenClaw un-interpolated
+placeholder (INIT-014/SPEC-001 — this used to be a universal auth bypass; it is
+now always rejected, with a diagnostic warning still logged).
 """
 
 from contextlib import asynccontextmanager
@@ -192,18 +194,26 @@ async def test_auth_middleware_accepts_actual_key(monkeypatch):
     assert accepted.get("called"), "call_next was not invoked — valid Bearer token was rejected"
 
 
-async def test_auth_middleware_accepts_openclaw_placeholder(monkeypatch):
-    """OpenClaw compatibility: literal 'Bearer ${ARCHIVIST_API_KEY}' must be accepted with a warning."""
+async def test_auth_middleware_rejects_openclaw_placeholder_with_warning(monkeypatch, caplog):
+    """Literal 'Bearer ${ARCHIVIST_API_KEY}' must be REJECTED (401), not accepted.
+
+    Regression test for INIT-014/SPEC-001 (ac-1, ac-2): this literal, publicly
+    documented placeholder string used to be a universal auth bypass — accepted
+    regardless of the real configured key. It must now always be rejected. The
+    diagnostic warning that helps operators spot the OpenClaw env-var-interpolation
+    bug is still logged, so that diagnostic value is not lost.
+    """
+    import logging
 
     import main
 
     monkeypatch.setattr(main, "ARCHIVIST_API_KEY", "some-secret-key", raising=False)
 
     middleware = main.ArchivistAuthMiddleware(app=None)
-    accepted = {}
+    called = {}
 
     async def call_next(req):
-        accepted["called"] = True
+        called["called"] = True
         from starlette.responses import JSONResponse
 
         return JSONResponse({"ok": True})
@@ -222,12 +232,52 @@ async def test_auth_middleware_accepts_openclaw_placeholder(monkeypatch):
         return {"type": "http.request", "body": b"", "more_body": False}
 
     request = Request(scope, receive)
-    # Warning is emitted via logger.warning(), not Python warnings.warn() —
-    # just dispatch and assert call_next was invoked (no 401).
-    response = await middleware.dispatch(request, call_next)
-    assert accepted.get("called"), (
-        "call_next was not invoked — OpenClaw literal placeholder '${ARCHIVIST_API_KEY}' was rejected"
+    with caplog.at_level(logging.WARNING, logger="archivist"):
+        response = await middleware.dispatch(request, call_next)
+
+    assert not called.get("called"), (
+        "call_next was invoked — the OpenClaw literal placeholder "
+        "'${ARCHIVIST_API_KEY}' was accepted as a credential, but it must be rejected"
     )
+    assert response.status_code == 401
+    assert any("uninterpolated_placeholder" in r.message for r in caplog.records), (
+        "the OpenClaw-bug diagnostic warning was not logged on rejection"
+    )
+
+
+async def test_auth_middleware_placeholder_rejected_even_without_real_key(monkeypatch):
+    """Edge case: the placeholder must never authenticate, even if it happens to
+    equal what a misconfigured deployment might expect."""
+    import main
+
+    monkeypatch.setattr(main, "ARCHIVIST_API_KEY", "real-secret-key", raising=False)
+
+    middleware = main.ArchivistAuthMiddleware(app=None)
+
+    async def call_next(req):
+        from starlette.responses import JSONResponse
+
+        return JSONResponse({"ok": True})
+
+    from starlette.requests import Request
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/mcp",
+        "query_string": b"",
+        # X-API-Key carrying the placeholder must also be rejected — only the
+        # Authorization header case is the documented OpenClaw bug, so this must
+        # fall through to the generic "unauthorized" path.
+        "headers": [(b"x-api-key", b"Bearer ${ARCHIVIST_API_KEY}")],
+    }
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    request = Request(scope, receive)
+    response = await middleware.dispatch(request, call_next)
+    assert response.status_code == 401
 
 
 async def test_auth_middleware_rejects_unknown_token(monkeypatch):

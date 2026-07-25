@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import random
 import statistics
-from typing import Sequence
+from collections.abc import Sequence
 
 
 def bootstrap_ci(

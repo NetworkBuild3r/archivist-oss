@@ -13,8 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from archivist.retrieval.context_packer import PackedContext, _pack_greedy, _pack_adaptive
-
+from archivist.retrieval.context_packer import _pack_adaptive, _pack_greedy
 
 # ---------------------------------------------------------------------------
 # PackedContext.naive_tokens
@@ -144,7 +143,7 @@ class TestLogRetrievalNewColumns:
         assert values[-4] is None  # tokens_returned
         assert values[-3] is None  # tokens_naive
         assert values[-2] is None  # savings_pct
-        assert values[-1] == ""   # pack_policy
+        assert values[-1] == ""  # pack_policy
 
     @pytest.mark.asyncio
     async def test_log_retrieval_returns_empty_when_disabled(self):
@@ -269,7 +268,10 @@ class TestDashboardHelpers:
             patch("archivist.app.dashboard._stale_estimate", return_value={"stale_pct": 0}),
             patch("archivist.app.dashboard._hotness_heatmap", new=AsyncMock(return_value=[])),
             patch("archivist.app.dashboard.health.all_status", return_value={}),
-            patch("archivist.retrieval.hot_cache.stats", return_value={"enabled": False, "total_entries": 0, "agents": 0}),
+            patch(
+                "archivist.retrieval.hot_cache.stats",
+                return_value={"enabled": False, "total_entries": 0, "agents": 0},
+            ),
         ):
             from archivist.app.dashboard import build_dashboard
 
@@ -291,7 +293,9 @@ class TestSavingsDashboardHandler:
         mock_savings = {
             "total_queries": 5,
             "avg_savings_pct": 42.0,
-            "per_policy": [{"pack_policy": "adaptive", "cnt": 5, "avg_savings_pct": 42.0, "tokens_saved": 5000}],
+            "per_policy": [
+                {"pack_policy": "adaptive", "cnt": 5, "avg_savings_pct": 42.0, "tokens_saved": 5000}
+            ],
             "window_days": 7,
         }
         mock_tier = {"by_pack_policy": []}
@@ -304,9 +308,17 @@ class TestSavingsDashboardHandler:
 
         with (
             patch("archivist.app.handlers.tools_admin.pool", mock_pool),
-            patch("archivist.app.dashboard._token_savings_stats", new=AsyncMock(return_value=mock_savings)),
-            patch("archivist.app.dashboard._tier_distribution_stats", new=AsyncMock(return_value=mock_tier)),
-            patch("archivist.app.dashboard._hotness_heatmap", new=AsyncMock(return_value=mock_heatmap)),
+            patch(
+                "archivist.app.dashboard._token_savings_stats",
+                new=AsyncMock(return_value=mock_savings),
+            ),
+            patch(
+                "archivist.app.dashboard._tier_distribution_stats",
+                new=AsyncMock(return_value=mock_tier),
+            ),
+            patch(
+                "archivist.app.dashboard._hotness_heatmap", new=AsyncMock(return_value=mock_heatmap)
+            ),
         ):
             from archivist.app.handlers.tools_admin import _handle_savings_dashboard
 

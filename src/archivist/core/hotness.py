@@ -63,9 +63,7 @@ async def get_hotness_scores(memory_ids: list[str]) -> dict[str, float]:
     return {r["memory_id"]: r["score"] for r in rows}
 
 
-async def apply_hotness_to_results(
-    results: list[dict], weight: float | None = None
-) -> list[dict]:
+async def apply_hotness_to_results(results: list[dict], weight: float | None = None) -> list[dict]:
     """Blend hotness scores into retrieval results after temporal decay."""
     w = weight if weight is not None else HOTNESS_WEIGHT
     if w <= 0 or not results:

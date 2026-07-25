@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import time
 
-import pytest
-
 from archivist.retrieval.session_store import SessionStore, get_session_store
 
 

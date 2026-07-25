@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from archivist.retrieval.context_packer import PackedContext, pack_context
 
 
@@ -64,7 +62,10 @@ class TestPackContextL0First:
             _make_result(0.7, l0="Headline B", text="Very long full text B " * 20),
         ]
         pc = pack_context(results, max_tokens=100, tier_policy="l0_first")
-        assert all(s["tier_text"] in (s.get("l0", ""), s.get("l1", ""), s.get("text", "")) for s in pc.sources)
+        assert all(
+            s["tier_text"] in (s.get("l0", ""), s.get("l1", ""), s.get("text", ""))
+            for s in pc.sources
+        )
         assert pc.total_tokens <= 100
 
 
@@ -77,7 +78,11 @@ class TestPackContextAdaptive:
         ]
         pc = pack_context(results, max_tokens=500, tier_policy="adaptive", min_full_results=1)
         assert pc.total_tokens <= 500
-        assert "l2" in pc.tier_distribution or "l1" in pc.tier_distribution or "l0" in pc.tier_distribution
+        assert (
+            "l2" in pc.tier_distribution
+            or "l1" in pc.tier_distribution
+            or "l0" in pc.tier_distribution
+        )
 
     def test_adaptive_fits_within_budget(self):
         results = [_make_result(float(i) / 10, text="word " * 200) for i in range(5, 0, -1)]

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 
 class TestAutoCompressHookDisabled:
     """AUTO_COMPRESS_ENABLED=False (default) — hook must be a no-op."""
@@ -39,9 +37,7 @@ class TestAutoCompressHookDisabled:
         import archivist.retrieval.rlm_retriever as rlm
 
         would_compress = (
-            rlm.AUTO_COMPRESS_ENABLED
-            and packed.over_budget
-            and packed.dropped_count > 0
+            rlm.AUTO_COMPRESS_ENABLED and packed.over_budget and packed.dropped_count > 0
         )
         assert would_compress is False
         assert compact_calls == []
