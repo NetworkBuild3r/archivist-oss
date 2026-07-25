@@ -638,7 +638,14 @@ async def handle_backup_restore(request):
     from archivist.storage.backup_manager import SnapshotPathError, restore_snapshot
 
     try:
-        result = restore_snapshot(snapshot_id, target=target)
+        # Offloaded off the event loop (fixes H5); the running loop is
+        # captured here — before dispatch — and handed to restore_snapshot()
+        # so its SQLite path can schedule the write-lock-guarded restore back
+        # onto it from the worker thread (INIT-022/SPEC-002, fixes C2).
+        loop = asyncio.get_running_loop()
+        result = await asyncio.to_thread(
+            restore_snapshot, snapshot_id, target=target, loop=loop
+        )
         return JSONResponse(result)
     except FileNotFoundError as e:
         return JSONResponse({"error": str(e)}, status_code=404)

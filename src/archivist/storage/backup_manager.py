@@ -437,12 +437,25 @@ def list_snapshots() -> list[dict]:
 # ── Snapshot restore ─────────────────────────────────────────────────────────
 
 
-def restore_snapshot(snapshot_id: str, target: str = "all") -> dict:
+def restore_snapshot(
+    snapshot_id: str,
+    target: str = "all",
+    *,
+    loop: asyncio.AbstractEventLoop | None = None,
+) -> dict:
     """Restore from a snapshot directory.
 
     Args:
         snapshot_id: The snapshot directory name under BACKUP_DIR.
         target: What to restore — "all", "qdrant", or "sqlite".
+        loop: The caller's running event loop, captured via
+            ``asyncio.get_running_loop()`` *before* dispatching this (synchronous,
+            potentially multi-minute) function through ``asyncio.to_thread()``.
+            Required only for the "all"/"sqlite" targets on a SQLite backend
+            (INIT-022/SPEC-002, fixes C2) — ``_restore_sqlite()`` runs inside the
+            worker thread ``to_thread`` spawns and has no event loop of its own,
+            so it needs this reference to schedule its write-lock-guarded restore
+            back onto the loop that is still running while this thread executes.
 
     Returns summary of restored components.
 
@@ -500,7 +513,13 @@ def restore_snapshot(snapshot_id: str, target: str = "all") -> dict:
             db_backup = snap_dir / "graph.db"
             if db_backup.is_file():
                 try:
-                    _restore_sqlite(db_backup)
+                    if loop is None:
+                        raise RuntimeError(
+                            "restore_snapshot(target='sqlite'/'all') requires "
+                            "loop=asyncio.get_running_loop(), captured by the "
+                            "caller before dispatching via asyncio.to_thread()"
+                        )
+                    _restore_sqlite(db_backup, loop)
                     restored["sqlite"] = "restored"
                 except Exception as e:
                     msg = f"SQLite restore failed: {e}"
@@ -528,18 +547,18 @@ def _restore_qdrant_collection(collection_name: str, snapshot_file: Path) -> Non
     logger.info("Qdrant collection '%s' restored from snapshot", collection_name)
 
 
-def _restore_sqlite(backup_path: Path) -> None:
+def _restore_sqlite(backup_path: Path, loop: asyncio.AbstractEventLoop) -> None:
     """Restore SQLite from a backup file using the backup API.
 
-    Acquires GRAPH_WRITE_LOCK_ASYNC via the running event loop to prevent
-    concurrent writes during the restore.  restore_snapshot() is always
-    invoked from asyncio.to_thread(), so the running loop is accessible.
+    Runs inside the worker thread that ``asyncio.to_thread()`` spawns for
+    ``restore_snapshot()`` (INIT-022/SPEC-002, fixes C2) — this function itself
+    has no running event loop, so ``loop`` (the caller's original loop, still
+    running while this thread executes) is required to schedule the write-lock
+    acquisition and backup back onto it; ``future.result()`` then blocks this
+    worker thread, not the loop, until that finishes.
     """
-    import asyncio as _asyncio
 
-    loop = _asyncio.get_event_loop()
-
-    async def _acquire_and_restore():
+    async def _acquire_and_restore() -> None:
         async with _get_graph_write_lock():
             source = sqlite3.connect(str(backup_path))
             dest = sqlite3.connect(SQLITE_PATH)
@@ -549,7 +568,7 @@ def _restore_sqlite(backup_path: Path) -> None:
                 dest.close()
                 source.close()
 
-    future = _asyncio.run_coroutine_threadsafe(_acquire_and_restore(), loop)
+    future = asyncio.run_coroutine_threadsafe(_acquire_and_restore(), loop)
     future.result(timeout=120)
     logger.info("SQLite database restored from %s", backup_path.name)
 
@@ -737,6 +756,18 @@ def _export_agent_graph(agent_id: str, out_dir: Path, safe_agent: str, ts: str) 
     return count
 
 
+async def _run_fts_upserts(fts_pending: list[dict[str, object]]) -> None:
+    """Upsert all queued FTS-chunk records in a single event loop run.
+
+    Called once via ``asyncio.run(...)`` after ``import_agent()``'s main NDJSON
+    loop instead of once per line (INIT-022/SPEC-002, fixes M15).
+    """
+    from archivist.storage.graph import upsert_fts_chunk
+
+    for kwargs in fts_pending:
+        await upsert_fts_chunk(**kwargs)
+
+
 def import_agent(ndjson_path: str, dry_run: bool = False) -> dict:
     """Import agent memories from an NDJSON export file.
 
@@ -746,7 +777,6 @@ def import_agent(ndjson_path: str, dry_run: bool = False) -> dict:
 
     from archivist.core.config import BM25_ENABLED
     from archivist.storage.collection_router import ensure_collection
-    from archivist.storage.graph import upsert_fts_chunk
 
     path = Path(ndjson_path)
     if not path.is_file():
@@ -758,7 +788,9 @@ def import_agent(ndjson_path: str, dry_run: bool = False) -> dict:
 
     imported = 0
     skipped = 0
-    fts_rebuilt = 0
+    # Queued FTS-upsert kwargs, flushed via a single asyncio.run() call after the
+    # main loop instead of once per NDJSON line (INIT-022/SPEC-002, fixes M15).
+    fts_pending: list[dict[str, object]] = []
 
     with open(path, encoding="utf-8") as f:
         batch: list[tuple[str, PointStruct]] = []
@@ -798,25 +830,29 @@ def import_agent(ndjson_path: str, dry_run: bool = False) -> dict:
                     batch.clear()
 
                 if BM25_ENABLED and payload.get("text"):
-                    asyncio.run(
-                        upsert_fts_chunk(
-                            qdrant_id=point_id,
-                            text=payload["text"],
-                            file_path=payload.get("file_path", ""),
-                            chunk_index=payload.get("chunk_index", 0),
-                            agent_id=payload.get("agent_id", ""),
-                            namespace=payload.get("namespace", ""),
-                            date=payload.get("date", ""),
-                            memory_type=payload.get("memory_type", "general"),
-                        )
+                    fts_pending.append(
+                        {
+                            "qdrant_id": point_id,
+                            "text": payload["text"],
+                            "file_path": payload.get("file_path", ""),
+                            "chunk_index": payload.get("chunk_index", 0),
+                            "agent_id": payload.get("agent_id", ""),
+                            "namespace": payload.get("namespace", ""),
+                            "date": payload.get("date", ""),
+                            "memory_type": payload.get("memory_type", "general"),
+                        }
                     )
-                    fts_rebuilt += 1
             else:
                 imported += 1
 
         if batch and not dry_run:
             _flush_import_batch(client, batch)
             imported += len(batch)
+
+    fts_rebuilt = 0
+    if fts_pending:
+        asyncio.run(_run_fts_upserts(fts_pending))
+        fts_rebuilt = len(fts_pending)
 
     summary = {
         "file": str(path),
