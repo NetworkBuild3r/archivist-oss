@@ -240,4 +240,3 @@ python -m benchmarks.token_efficiency \
 
 # Results are printed as a formatted table and saved to .benchmarks/
 ```
-

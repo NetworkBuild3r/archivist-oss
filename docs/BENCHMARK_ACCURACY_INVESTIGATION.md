@@ -1,9 +1,9 @@
 # LongMemEval 50% Accuracy: Root Cause Investigation and Fix Plan
 
-**Branch:** `fix/longmemeval-accuracy`  
-**Run date:** 2026-04-21  
-**Git SHA:** `79a92be`  
-**Dataset:** `longmemeval_s_cleaned.json` (6-question smoke test)  
+**Branch:** `fix/longmemeval-accuracy`
+**Run date:** 2026-04-21
+**Git SHA:** `79a92be`
+**Dataset:** `longmemeval_s_cleaned.json` (6-question smoke test)
 **Judge:** `qwen3.6-35b-a3b @ http://192.168.11.161:11435`
 
 ---
@@ -76,7 +76,7 @@ Key observation: `BM25_ENABLED=false` + `CONTEXTUAL_AUGMENTATION_ENABLED=false` 
 ```
 # Session 30 — 2023/05/27 (Sat) 08:23 (cont.)
 
-including redwood forests, chaparral, and coastal scrub. These hikes offer a 
+including redwood forests, chaparral, and coastal scrub. These hikes offer a
 mix of challenging terrain, scenic views, and varied landscapes...
 ```
 
@@ -163,12 +163,12 @@ the product backlog I provided earlier: Sprint Backlog - Week 1...
 ```
 # Session 37 — 2023/05/28 (Sun) 15:47
 
-**user:** I'm planning a game night with friends next Friday and I need some 
+**user:** I'm planning a game night with friends next Friday and I need some
 suggestions for board games and snacks that everyone will enjoy. Can you help me wit
 ---
 # Session 31 — 2023/05/27 (Sat) 15:42 (cont.)
 
-really excited to start my master's program at the University of Melbourne, which 
+really excited to start my master's program at the University of Melbourne, which
 I got accepted into back in February. **assistant:** Congratulations on
 ---
 # Session 32 — 2023/05/27 (Sat) 16:31 (cont.)
@@ -191,7 +191,7 @@ for modern and contemporary bed frames at a
 
 **The judge prompt that was sent:**
 ```
-I will give you a question, a correct answer, and a response from a model. Please 
+I will give you a question, a correct answer, and a response from a model. Please
 answer yes if the response contains the correct answer. Otherwise, answer no.
 
 Question: What was my last name before I changed it?
