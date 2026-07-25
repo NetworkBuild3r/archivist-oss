@@ -11,6 +11,7 @@ import re
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from qdrant_client.models import FieldCondition, Filter, MatchValue, PointStruct
 
@@ -44,6 +45,11 @@ from archivist.utils.text_utils import compute_memory_checksum, extract_agent_id
 from archivist.write.contextual_augment import augment_chunk
 from archivist.write.pre_extractor import extract_needle_entities, pre_extract
 from archivist.write.tiering import generate_tiers
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
+    from archivist.storage.transaction import MemoryTransaction
 
 logger = logging.getLogger("archivist.indexer")
 
@@ -133,6 +139,104 @@ def compute_ttl(namespace: str, importance: float = 0.5) -> int | None:
     return None
 
 
+# ── Shared persistence helper (INIT-022/SPEC-001, M13 dedup) ─────────────────
+
+
+async def _persist_points(
+    coll: str,
+    points: list[PointStruct],
+    mp_records: list[dict],
+    memory_id: str,
+    *,
+    force_transaction: bool = False,
+    extra_txn_work: "Callable[[MemoryTransaction], Awaitable[None]] | None" = None,
+) -> None:
+    """Persist ``points`` + their ``memory_points`` rows for one write-path call site.
+
+    Unifies the "insert memory_points rows, then enqueue-or-apply the Qdrant upsert"
+    pattern previously duplicated across the primary-points, reverse-HyDE, and
+    synthetic-questions write paths (INIT-022/SPEC-001, M13).
+
+    Args:
+        coll: Target Qdrant collection name.
+        points: Points to upsert.
+        mp_records: Rows to insert into ``memory_points``, each a dict with
+            ``memory_id``, ``qdrant_id``, and ``point_type`` keys.
+        memory_id: Correlation ID recorded on the enqueued outbox event.
+        force_transaction: If ``True``, always run the ``MemoryTransaction`` (so
+            ``extra_txn_work`` and the ``memory_points`` insert always execute),
+            applying the Qdrant write inline afterward when ``OUTBOX_ENABLED`` is
+            ``False`` — matches the primary-points call site's existing branching.
+            If ``False`` (default), the whole persist step branches on
+            ``OUTBOX_ENABLED`` — matches the reverse-HyDE / synthetic-questions
+            call sites' existing branching.
+        extra_txn_work: Optional coroutine run inside the open transaction before
+            the ``memory_points`` insert (e.g. FTS5 + needle-token registration
+            for the primary-points call site).
+
+    Raises:
+        Exception: Re-raises any failure from the transaction commit or the
+            legacy (non-transactional) ``register_memory_points_batch`` call, so
+            a write-path failure is surfaced to the caller instead of being
+            silently reported as success (INIT-022/SPEC-001, C1 fix).
+    """
+    from archivist.core.config import OUTBOX_ENABLED
+    from archivist.storage.transaction import MemoryTransaction
+
+    now_iso = datetime.now(UTC).isoformat()
+    mp_rows = [(r["memory_id"], r["qdrant_id"], r["point_type"], now_iso) for r in mp_records]
+
+    async def _run_transaction() -> None:
+        async with MemoryTransaction() as txn:
+            if extra_txn_work is not None:
+                await extra_txn_work(txn)
+            # memory_points and the outbox event join the same transaction —
+            # all commit atomically or none do.
+            await txn.executemany(
+                """INSERT OR IGNORE INTO memory_points
+                       (memory_id, qdrant_id, point_type, created_at)
+                   VALUES (?, ?, ?, ?)""",
+                mp_rows,
+            )
+            txn.enqueue_qdrant_upsert(coll, points, memory_id=memory_id)
+
+    if force_transaction:
+        try:
+            await _run_transaction()
+        except Exception:
+            logger.error(
+                "indexer._persist_points: transaction failed",
+                exc_info=True,
+                extra={"collection": coll, "memory_id": memory_id, "point_count": len(points)},
+            )
+            raise
+        if not OUTBOX_ENABLED:
+            qdrant_client().upsert(collection_name=coll, points=points)
+        return
+
+    if OUTBOX_ENABLED:
+        try:
+            await _run_transaction()
+        except Exception:
+            logger.error(
+                "indexer._persist_points: transaction failed",
+                exc_info=True,
+                extra={"collection": coll, "memory_id": memory_id, "point_count": len(points)},
+            )
+            raise
+    else:
+        qdrant_client().upsert(collection_name=coll, points=points)
+        try:
+            await register_memory_points_batch(mp_records)
+        except Exception:
+            logger.error(
+                "indexer._persist_points: register_memory_points_batch failed",
+                exc_info=True,
+                extra={"collection": coll, "memory_id": memory_id, "point_count": len(points)},
+            )
+            raise
+
+
 # ── Indexing ──────────────────────────────────────────────────────────────────
 
 
@@ -164,7 +268,6 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
     ns_config = get_namespace_config(meta["namespace"])
     consistency = ns_config.consistency if ns_config else "eventual"
     ttl_expires_at = compute_ttl(meta["namespace"])
-    client = qdrant_client()
 
     if hierarchical:
         hier_chunks = chunk_text_hierarchical(
@@ -316,10 +419,6 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
 
     if points:
         _coll = ensure_collection(meta.get("namespace", ""))
-        _now_iso = datetime.now(UTC).isoformat()
-
-        from archivist.core.config import OUTBOX_ENABLED
-        from archivist.storage.transaction import MemoryTransaction
 
         _mp_records = []
         for p in points:
@@ -334,51 +433,42 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
                     {"memory_id": pid_str, "qdrant_id": pid_str, "point_type": "primary"}
                 )
 
-        try:
-            async with MemoryTransaction() as txn:
-                # FTS5 and needle registry join the same transaction as memory_points
-                # and the outbox event — all commit atomically or none do.
-                if BM25_ENABLED:
-                    for p in points:
-                        await txn.upsert_fts_chunk(
-                            qdrant_id=str(p.id),
-                            text=p.payload.get("text", ""),
-                            file_path=p.payload.get("file_path", ""),
-                            chunk_index=p.payload.get("chunk_index", 0),
-                            agent_id=p.payload.get("agent_id", ""),
-                            namespace=p.payload.get("namespace", ""),
-                            date=p.payload.get("date", ""),
-                            memory_type=p.payload.get("memory_type", "general"),
-                            actor_id=p.payload.get("actor_id", ""),
-                            actor_type=p.payload.get("actor_type", ""),
-                            importance=float(p.payload.get("importance_score", 0.5)),
-                            tier_label=_tier_label_for(p.payload),
-                        )
+        async def _primary_extra_txn_work(txn: "MemoryTransaction") -> None:
+            """Register FTS5 chunks (if enabled) and needle tokens for all points."""
+            if BM25_ENABLED:
                 for p in points:
-                    await txn.register_needle_tokens(
-                        str(p.id),
-                        p.payload.get("text", ""),
-                        namespace=meta.get("namespace", ""),
-                        agent_id=meta.get("agent_id", ""),
-                        actor_id=meta.get("actor_id", ""),
-                        actor_type=meta.get("actor_type", ""),
+                    await txn.upsert_fts_chunk(
+                        qdrant_id=str(p.id),
+                        text=p.payload.get("text", ""),
+                        file_path=p.payload.get("file_path", ""),
+                        chunk_index=p.payload.get("chunk_index", 0),
+                        agent_id=p.payload.get("agent_id", ""),
+                        namespace=p.payload.get("namespace", ""),
+                        date=p.payload.get("date", ""),
+                        memory_type=p.payload.get("memory_type", "general"),
+                        actor_id=p.payload.get("actor_id", ""),
+                        actor_type=p.payload.get("actor_type", ""),
+                        importance=float(p.payload.get("importance_score", 0.5)),
+                        tier_label=_tier_label_for(p.payload),
                     )
-                await txn.executemany(
-                    """INSERT OR IGNORE INTO memory_points
-                           (memory_id, qdrant_id, point_type, created_at)
-                       VALUES (?, ?, ?, ?)""",
-                    [
-                        (r["memory_id"], r["qdrant_id"], r["point_type"], _now_iso)
-                        for r in _mp_records
-                    ],
+            for p in points:
+                await txn.register_needle_tokens(
+                    str(p.id),
+                    p.payload.get("text", ""),
+                    namespace=meta.get("namespace", ""),
+                    agent_id=meta.get("agent_id", ""),
+                    actor_id=meta.get("actor_id", ""),
+                    actor_type=meta.get("actor_type", ""),
                 )
-                txn.enqueue_qdrant_upsert(_coll, points, memory_id=meta.get("file_path", ""))
-        except Exception as _e:
-            logger.debug("indexer.register_memory_points failed: %s", _e)
 
-        # When the outbox is disabled, apply the Qdrant write inline (legacy).
-        if not OUTBOX_ENABLED:
-            client.upsert(collection_name=_coll, points=points)
+        await _persist_points(
+            _coll,
+            points,
+            _mp_records,
+            meta.get("file_path", ""),
+            force_transaction=True,
+            extra_txn_work=_primary_extra_txn_work,
+        )
 
         _metrics.inc(_metrics.INDEX_CHUNKS, value=len(points))
 
@@ -473,9 +563,6 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
                     continue
                 _rh_points.extend(batch)
             if _rh_points:
-                from archivist.core.config import OUTBOX_ENABLED
-                from archivist.storage.transaction import MemoryTransaction
-
                 _rh_mp_records = [
                     {
                         "memory_id": rp.payload.get("source_memory_id", str(rp.id)),
@@ -484,34 +571,9 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
                     }
                     for rp in _rh_points
                 ]
-                if OUTBOX_ENABLED:
-                    try:
-                        async with MemoryTransaction() as txn:
-                            await txn.executemany(
-                                """INSERT OR IGNORE INTO memory_points
-                                       (memory_id, qdrant_id, point_type, created_at)
-                                   VALUES (?, ?, ?, ?)""",
-                                [
-                                    (
-                                        r["memory_id"],
-                                        r["qdrant_id"],
-                                        r["point_type"],
-                                        datetime.now(UTC).isoformat(),
-                                    )
-                                    for r in _rh_mp_records
-                                ],
-                            )
-                            txn.enqueue_qdrant_upsert(
-                                _coll, _rh_points, memory_id=meta.get("file_path", "")
-                            )
-                    except Exception as _e:
-                        logger.debug("indexer.reverse_hyde transaction failed: %s", _e)
-                else:
-                    client.upsert(collection_name=_coll, points=_rh_points)
-                    try:
-                        await register_memory_points_batch(_rh_mp_records)
-                    except Exception as _e:
-                        logger.debug("indexer.register_memory_points (reverse_hyde) failed: %s", _e)
+                await _persist_points(
+                    _coll, _rh_points, _rh_mp_records, meta.get("file_path", "")
+                )
                 _metrics.inc(_metrics.INDEX_CHUNKS, value=len(_rh_points))
 
         # Synthetic question generation: multi-representation indexing
@@ -551,9 +613,6 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
                     continue
                 _sq_points.extend(batch)
             if _sq_points:
-                from archivist.core.config import OUTBOX_ENABLED
-                from archivist.storage.transaction import MemoryTransaction
-
                 _sq_mp_records = [
                     {
                         "memory_id": sp.payload.get("source_memory_id", str(sp.id)),
@@ -562,36 +621,9 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
                     }
                     for sp in _sq_points
                 ]
-                if OUTBOX_ENABLED:
-                    try:
-                        async with MemoryTransaction() as txn:
-                            await txn.executemany(
-                                """INSERT OR IGNORE INTO memory_points
-                                       (memory_id, qdrant_id, point_type, created_at)
-                                   VALUES (?, ?, ?, ?)""",
-                                [
-                                    (
-                                        r["memory_id"],
-                                        r["qdrant_id"],
-                                        r["point_type"],
-                                        datetime.now(UTC).isoformat(),
-                                    )
-                                    for r in _sq_mp_records
-                                ],
-                            )
-                            txn.enqueue_qdrant_upsert(
-                                _coll, _sq_points, memory_id=meta.get("file_path", "")
-                            )
-                    except Exception as _e:
-                        logger.debug("indexer.synthetic_questions transaction failed: %s", _e)
-                else:
-                    client.upsert(collection_name=_coll, points=_sq_points)
-                    try:
-                        await register_memory_points_batch(_sq_mp_records)
-                    except Exception as _e:
-                        logger.debug(
-                            "indexer.register_memory_points (synthetic_questions) failed: %s", _e
-                        )
+                await _persist_points(
+                    _coll, _sq_points, _sq_mp_records, meta.get("file_path", "")
+                )
                 _metrics.inc(_metrics.INDEX_CHUNKS, value=len(_sq_points))
                 logger.info(
                     "Indexed %d synthetic question points for %s",
@@ -611,7 +643,7 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
     return len(points)
 
 
-async def delete_file_points(filepath: str):
+async def delete_file_points(filepath: str) -> None:
     """Remove all points for a given file path from Qdrant and FTS5."""
     rel = os.path.relpath(filepath, MEMORY_ROOT)
     client = qdrant_client()
@@ -628,8 +660,15 @@ async def delete_file_points(filepath: str):
                         _coll,
                         _filt.model_dump(mode="json"),
                     )
-            except Exception:
-                pass
+            except Exception as _e:
+                # Stale points may remain in `_coll` until the next delete/reindex —
+                # log loudly so this is diagnosable rather than silently swallowed
+                # (INIT-022/SPEC-001, H8 fix).
+                logger.warning(
+                    "indexer.delete_file_points: Qdrant delete-by-filter failed (outbox)",
+                    exc_info=True,
+                    extra={"collection": _coll, "file_path": rel, "error": str(_e)},
+                )
         else:
             try:
                 client.delete(
@@ -638,8 +677,12 @@ async def delete_file_points(filepath: str):
                         must=[FieldCondition(key="file_path", match=MatchValue(value=rel))]
                     ),
                 )
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.warning(
+                    "indexer.delete_file_points: Qdrant delete-by-filter failed (legacy)",
+                    exc_info=True,
+                    extra={"collection": _coll, "file_path": rel, "error": str(_e)},
+                )
     if BM25_ENABLED:
         await delete_fts_chunks_by_file(rel)
 
