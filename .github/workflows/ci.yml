@@ -101,12 +101,14 @@ jobs:
         env:
           MYPY_MAX_ERRORS: "175"
         run: |
-          OUTPUT=$(python -m mypy src/archivist/ --config-file pyproject.toml 2>&1)
+          # mypy exits 1 when any errors exist — capture under `|| true` so
+          # `bash -e` does not abort before the ratchet count (INIT-002).
+          OUTPUT=$(python -m mypy src/archivist/ --config-file pyproject.toml 2>&1) || true
           echo "$OUTPUT"
-          COUNT=$(echo "$OUTPUT" | grep "^src/archivist/.*: error:" | grep -v "\[import-not-found\]\|\[import-untyped\]" | wc -l || true)
+          COUNT=$(echo "$OUTPUT" | grep "^src/archivist/.*: error:" | grep -v "\[import-not-found\]\|\[import-untyped\]" | wc -l | tr -d ' ' || true)
           echo ""
           echo "::notice::mypy type errors (real, excl. import stubs): $COUNT / ceiling: $MYPY_MAX_ERRORS"
-          if [ "$COUNT" -gt "$MYPY_MAX_ERRORS" ]; then
+          if [ "${COUNT:-0}" -gt "$MYPY_MAX_ERRORS" ]; then
             echo "::error::mypy error count ($COUNT) exceeds ratchet ceiling ($MYPY_MAX_ERRORS). Fix errors before merging."
             exit 1
           fi

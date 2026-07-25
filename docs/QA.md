@@ -86,11 +86,11 @@ narrow derived-scope pytest run as sufficient for Mode D completion.
 ```bash
 # Pin must match CI after INIT-002/SPEC-005 (do not `pip install mypy` unpinned).
 pip install "mypy==1.19.1" types-PyYAML types-tqdm
-OUTPUT=$(python -m mypy src/archivist/ --config-file pyproject.toml 2>&1)
+OUTPUT=$(python -m mypy src/archivist/ --config-file pyproject.toml 2>&1) || true
 echo "$OUTPUT"
-COUNT=$(echo "$OUTPUT" | grep "^src/archivist/.*: error:" | grep -v "\[import-not-found\]\|\[import-untyped\]" | wc -l || true)
+COUNT=$(echo "$OUTPUT" | grep "^src/archivist/.*: error:" | grep -v "\[import-not-found\]\|\[import-untyped\]" | wc -l | tr -d ' ' || true)
 echo "mypy real errors: $COUNT / ceiling 175"
-test "$COUNT" -le 175
+test "${COUNT:-0}" -le 175
 ```
 
 **Hard rules:** no new ruff ignores, no raising `MYPY_MAX_ERRORS`, no reintroducing
