@@ -228,7 +228,7 @@ async def test_export_produces_manifest_path_and_bytes(
     assert Path(result["path"]).resolve().is_relative_to(backup.resolve())
     assert result["manifest"]["chunk_count"] == 1
     assert result["manifest"]["version"] >= 1
-    assert isinstance(result["bytes"], (bytes, bytearray))
+    assert isinstance(result["bytes"], bytes | bytearray)
     assert b"chunk_count" in result["bytes"]
     assert b"api_key" not in result["bytes"].lower()
 

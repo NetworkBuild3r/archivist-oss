@@ -109,7 +109,8 @@ class TestEmptyLineage:
         mock_pool.read.return_value.__aexit__ = AsyncMock(return_value=False)
 
         with (
-            patch("archivist.app.lineage.pool", mock_pool),
+            # Patch the module attribute — lineage imports pool inside functions (INIT-002/SPEC-003).
+            patch("archivist.storage.sqlite_pool.pool", mock_pool),
             patch(
                 "archivist.app.lineage._provenance_edges",
                 new=AsyncMock(return_value=[]),
@@ -299,7 +300,7 @@ class TestLineageNamespaceScoping:
         mock_pool.read.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
         mock_pool.read.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        with patch("archivist.app.lineage.pool", mock_pool):
+        with patch("archivist.storage.sqlite_pool.pool", mock_pool):
             await build_entity_lineage("Acme Corp", namespace="tenant-a")
 
         sql, params = mock_conn.fetchone.await_args.args
@@ -316,7 +317,7 @@ class TestLineageNamespaceScoping:
         mock_pool.read.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
         mock_pool.read.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        with patch("archivist.app.lineage.pool", mock_pool):
+        with patch("archivist.storage.sqlite_pool.pool", mock_pool):
             await _retrieval_edges("a_______", 10)
 
         sql, params = mock_conn.fetchall.await_args.args
@@ -345,7 +346,8 @@ class TestSavingsDashboardCostKeys:
         mock_pool.read.return_value.__aexit__ = AsyncMock(return_value=False)
 
         with (
-            patch("archivist.app.handlers.tools_admin.pool", mock_pool),
+            # tools_admin imports pool inside _handle_savings_dashboard (INIT-002/SPEC-003).
+            patch("archivist.storage.sqlite_pool.pool", mock_pool),
             patch(
                 "archivist.app.dashboard._token_savings_stats",
                 new=AsyncMock(return_value=mock_savings),

@@ -112,7 +112,16 @@ def _make_mock_client(scroll_side_effect=None, children=None):
 
 
 class TestDeleteMemoryComplete:
-    """delete_memory_complete cleans ALL artifact types."""
+    """delete_memory_complete cleans ALL artifact types.
+
+    INIT-002/SPEC-004: outbox default-on requires an initialized SQLitePool
+    (MemoryTransaction). Qdrant deletes are durable via outbox enqueue + drain.
+    """
+
+    @pytest.fixture(autouse=True)
+    async def _require_pool(self, async_pool):
+        """Ensure SQLitePool is initialized for OUTBOX_ENABLED MemoryTransaction."""
+        yield async_pool
 
     @pytest.fixture
     def mock_qdrant(self):
@@ -164,8 +173,10 @@ class TestDeleteMemoryComplete:
             yield m
 
     async def test_calls_all_cleanup_steps(
-        self, mock_qdrant, mock_fts, mock_needle, mock_entity_facts, mock_audit
+        self, async_pool, mock_qdrant, mock_fts, mock_needle, mock_entity_facts, mock_audit
     ):
+        from tests.fixtures.mocks import count_outbox
+
         from archivist.lifecycle.memory_lifecycle import delete_memory_complete
 
         result = await delete_memory_complete("mem-123", "test-ns")
@@ -179,11 +190,11 @@ class TestDeleteMemoryComplete:
 
         mock_fts.assert_called_once()
         mock_needle.assert_called_once()
-        # INIT-022/SPEC-004: _delete_sqlite_artifacts now always passes an
-        # explicit conn= kwarg (None on the non-outbox path) so it can be
-        # reused with a real MemoryTransaction.conn from the OUTBOX_ENABLED
-        # branch — this is intentional post-fix behavior, not a regression.
-        mock_entity_facts.assert_called_once_with("mem-123", conn=None)
+        # Outbox path threads MemoryTransaction.conn into SQLite cleanup.
+        mock_entity_facts.assert_called_once()
+        assert mock_entity_facts.call_args[0][0] == "mem-123"
+        assert mock_entity_facts.call_args.kwargs.get("conn") is not None
+        assert await count_outbox(async_pool, "pending") >= 1
 
     async def test_cleans_up_child_fts_and_needle(
         self, mock_fts, mock_needle, mock_entity_facts, mock_audit
@@ -206,7 +217,7 @@ class TestDeleteMemoryComplete:
         with patch("archivist.lifecycle.memory_lifecycle.qdrant_client", return_value=client):
             from archivist.lifecycle.memory_lifecycle import delete_memory_complete
 
-            result = await delete_memory_complete("mem-parent", "ns")
+            await delete_memory_complete("mem-parent", "ns")
 
         fts_ids = mock_fts.call_args[0][0]
         assert "mem-parent" in fts_ids
@@ -218,38 +229,59 @@ class TestDeleteMemoryComplete:
         assert set(needle_ids) == {"mem-parent", "micro-1", "micro-2", "rhyde-1"}
 
     async def test_qdrant_failure_tracked_in_failed_steps(
-        self, mock_fts, mock_needle, mock_entity_facts, mock_audit
+        self, async_pool, mock_fts, mock_needle, mock_entity_facts, mock_audit, monkeypatch
     ):
-        """If Qdrant primary delete fails, failed_steps records it and PartialDeletionError is raised."""
-        from archivist.lifecycle.cascade import PartialDeletionError
+        """Durable path: enqueue succeeds; persistent drain failure → dead-letter."""
+        from tests.fixtures.mocks import (
+            count_outbox,
+            drain_outbox_to_terminal,
+            make_vector_backend_mock,
+        )
+
+        import archivist.core.config as _cfg
+
+        monkeypatch.setattr(_cfg, "OUTBOX_MAX_RETRIES", 2)
 
         client = MagicMock()
-        client.delete.side_effect = Exception("Qdrant connection refused")
-        client.scroll.side_effect = Exception("Qdrant connection refused")
+        client.scroll.return_value = ([], None)
         client.count.return_value = MagicMock(count=0)
 
         with patch("archivist.lifecycle.memory_lifecycle.qdrant_client", return_value=client):
             from archivist.lifecycle.memory_lifecycle import delete_memory_complete
 
-            with pytest.raises(PartialDeletionError) as exc_info:
-                await delete_memory_complete("mem-fail", "ns")
+            result = await delete_memory_complete("mem-fail", "ns")
 
-            result = exc_info.value.result
-            assert "qdrant_primary" in result.failed_steps
-            assert result.qdrant_primary == 1  # pre-count preserved on failure
+        # Enqueue path does not call Qdrant synchronously — no PartialDeletionError here.
+        assert "qdrant_primary" not in result.failed_steps
+        assert result.qdrant_primary == 1
+        assert await count_outbox(async_pool, "pending") >= 1
 
         mock_fts.assert_called_once()
         mock_needle.assert_called_once()
-        # INIT-022/SPEC-004: conn= is now always explicit (None here) — see
-        # test_calls_all_cleanup_steps for the full rationale.
-        mock_entity_facts.assert_called_once_with("mem-fail", conn=None)
+        mock_entity_facts.assert_called_once()
+        assert mock_entity_facts.call_args[0][0] == "mem-fail"
+        assert mock_entity_facts.call_args.kwargs.get("conn") is not None
 
-    async def test_partial_deletion_error_on_many_failures(self, mock_audit):
-        """PartialDeletionError raised when qdrant_primary or qdrant_children fail."""
-        from archivist.lifecycle.cascade import PartialDeletionError
+        backend = make_vector_backend_mock()
+        backend.delete = AsyncMock(side_effect=Exception("Qdrant connection refused"))
+        await drain_outbox_to_terminal(async_pool, backend)
+        assert await count_outbox(async_pool, "dead") >= 1
+
+    async def test_partial_deletion_error_on_many_failures(
+        self, async_pool, mock_audit, monkeypatch
+    ):
+        """SQLite cleanup failures are recorded; Qdrant failure lands in outbox DLQ."""
+        from tests.fixtures.mocks import (
+            count_outbox,
+            drain_outbox_to_terminal,
+            make_vector_backend_mock,
+        )
+
+        import archivist.core.config as _cfg
+
+        monkeypatch.setattr(_cfg, "OUTBOX_MAX_RETRIES", 2)
 
         client = MagicMock()
-        client.delete.side_effect = Exception("down")
         client.scroll.side_effect = Exception("down")
         client.count.return_value = MagicMock(count=0)
 
@@ -260,19 +292,28 @@ class TestDeleteMemoryComplete:
                 side_effect=sqlite3.OperationalError("db locked"),
             ),
             patch(
-                "archivist.lifecycle.memory_lifecycle.delete_needle_tokens_batch", return_value=0
+                "archivist.lifecycle.memory_lifecycle.delete_needle_tokens_batch",
+                new_callable=AsyncMock,
+                return_value=0,
             ),
             patch(
                 "archivist.lifecycle.memory_lifecycle._delete_entity_facts_for_memory",
+                new_callable=AsyncMock,
                 return_value=0,
             ),
         ):
             from archivist.lifecycle.memory_lifecycle import delete_memory_complete
 
-            with pytest.raises(PartialDeletionError) as exc_info:
-                await delete_memory_complete("mem-x", "ns")
+            result = await delete_memory_complete("mem-x", "ns")
 
-            assert "qdrant_primary" in exc_info.value.result.failed_steps
+        assert "fts_batch" in result.failed_steps
+        assert "qdrant_primary" not in result.failed_steps
+        assert await count_outbox(async_pool, "pending") >= 1
+
+        backend = make_vector_backend_mock()
+        backend.delete = AsyncMock(side_effect=Exception("down"))
+        await drain_outbox_to_terminal(async_pool, backend)
+        assert await count_outbox(async_pool, "dead") >= 1
 
     async def test_uses_collection_router(
         self, mock_fts, mock_needle, mock_entity_facts, mock_audit
@@ -293,13 +334,18 @@ class TestDeleteMemoryComplete:
         cf.assert_called_once_with("custom-ns")
 
     async def test_collection_override(
-        self, mock_qdrant, mock_fts, mock_needle, mock_entity_facts, mock_audit
+        self, async_pool, mock_qdrant, mock_fts, mock_needle, mock_entity_facts, mock_audit
     ):
-        """Explicit collection= kwarg overrides routing."""
+        """Explicit collection= kwarg overrides routing (verified after outbox drain)."""
+        from tests.fixtures.mocks import count_outbox, drain_outbox
+
         from archivist.lifecycle.memory_lifecycle import delete_memory_complete
+        from archivist.storage.backends import QdrantVectorBackend
 
         await delete_memory_complete("m1", "ns", collection="override_col")
 
+        assert await count_outbox(async_pool, "pending") >= 1
+        await drain_outbox(QdrantVectorBackend(mock_qdrant))
         assert mock_qdrant.delete.call_args_list[0][1]["collection_name"] == "override_col"
 
     async def test_audit_logging_called(
@@ -2496,24 +2542,41 @@ class TestLogDeleteFailure:
 class TestDeadLetterOnCascadeFailure:
     """Dead-letter table is populated when a Qdrant delete fails."""
 
-    async def test_delete_failure_logged_to_dead_letter(self, async_pool):
-        """When Qdrant primary delete fails, delete_failures is written."""
+    async def test_delete_failure_logged_to_dead_letter(self, async_pool, monkeypatch):
+        """Outbox drain exhausts retries → delete_failures row (durable path).
+
+        INIT-002/SPEC-004: with OUTBOX_ENABLED default-on, delete_memory_complete
+        enqueues rather than raising PartialDeletionError on Qdrant failure.
+        """
+        from tests.fixtures.mocks import (
+            count_outbox,
+            drain_outbox_to_terminal,
+            make_vector_backend_mock,
+        )
+
+        import archivist.core.config as _cfg
         import archivist.core.config as config
-        from archivist.lifecycle.cascade import PartialDeletionError
         from archivist.lifecycle.memory_lifecycle import delete_memory_complete
+
+        monkeypatch.setattr(_cfg, "OUTBOX_MAX_RETRIES", 2)
 
         memory_id = "mem-dlq-1"
         mock_client = _make_qdrant_client()
-        mock_client.delete.side_effect = Exception("Qdrant unavailable")
 
         with (
             patch("archivist.lifecycle.memory_lifecycle.qdrant_client", return_value=mock_client),
             patch("archivist.lifecycle.memory_lifecycle.collection_for", return_value="test-coll"),
             patch("archivist.lifecycle.memory_lifecycle.log_memory_event", new_callable=AsyncMock),
         ):
-            with pytest.raises(PartialDeletionError):
-                await delete_memory_complete(memory_id, "test-ns")
+            await delete_memory_complete(memory_id, "test-ns")
 
+        assert await count_outbox(async_pool, "pending") >= 1
+
+        backend = make_vector_backend_mock()
+        backend.delete = AsyncMock(side_effect=Exception("Qdrant unavailable"))
+        await drain_outbox_to_terminal(async_pool, backend)
+
+        assert await count_outbox(async_pool, "dead") >= 1
         conn = sqlite3.connect(config.SQLITE_PATH)
         rows = conn.execute("SELECT memory_id FROM delete_failures").fetchall()
         conn.close()

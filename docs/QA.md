@@ -66,6 +66,37 @@ this to `--cov-fail-under=0` because it only runs the fast unit+regression
 subset (~24% by design); the floor is the full-suite target, raised roughly
 2–5 points per quarter as coverage grows.
 
+### Reproduce CI locally (INIT-002)
+
+Use these commands before pushing to a PR. They mirror
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml). Do **not** treat a
+narrow derived-scope pytest run as sufficient for Mode D completion.
+
+| CI job | Local reproduction | INIT-002 owner |
+|--------|-------------------|----------------|
+| Pre-commit Hooks | `pre-commit run --all-files` | SPEC-002 |
+| Lint & Format (Ruff) | `ruff format --check src/ tests/` then `ruff check src/ tests/` | SPEC-002 |
+| Type Check (mypy) | Install the **same pinned mypy** as CI (see below), then run the ratchet snippet | SPEC-005 |
+| Unit & Regression | `python -m pytest tests/unit tests/regression -q` (CI also runs coverage flags on this job) | SPEC-003, SPEC-004 |
+| Integration & System | `python -m pytest tests/integration tests/system -q` | SPEC-004 |
+| Chaos | `python -m pytest tests/qa/test_chaos_fault_injection.py -q` | keep green |
+
+**Mypy ratchet (match CI):**
+
+```bash
+# Pin must match CI after INIT-002/SPEC-005 (do not `pip install mypy` unpinned).
+pip install "mypy==1.19.1" types-PyYAML types-tqdm
+OUTPUT=$(python -m mypy src/archivist/ --config-file pyproject.toml 2>&1)
+echo "$OUTPUT"
+COUNT=$(echo "$OUTPUT" | grep "^src/archivist/.*: error:" | grep -v "\[import-not-found\]\|\[import-untyped\]" | wc -l || true)
+echo "mypy real errors: $COUNT / ceiling 175"
+test "$COUNT" -le 175
+```
+
+**Hard rules:** no new ruff ignores, no raising `MYPY_MAX_ERRORS`, no reintroducing
+Phase-5 shims (`import graph`), no flipping `OUTBOX_ENABLED` default back to
+false to green tests — fix fixtures/asserts for the durable outbox path.
+
 ## Manual and fleet QA
 
 - **Operator checklist** — [`QA_CHECKLIST.md`](../QA_CHECKLIST.md): environment, HTTP endpoints, every MCP tool, pipeline stages, RBAC, degradation matrix, sign-off table.

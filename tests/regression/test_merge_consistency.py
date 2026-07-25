@@ -50,20 +50,22 @@ class TestMergeCollectionRouting:
     """merge_memories routes to collection_for(ns), not QDRANT_COLLECTION."""
 
     async def test_upsert_uses_collection_for_ns(self, async_pool):
-        """Qdrant upsert must use collection_for(ns), not the global constant."""
+        """Qdrant upsert must use collection_for(ns), not the global constant.
+
+        INIT-002/SPEC-004: outbox default-on — collection routing is asserted on
+        ``enqueue_qdrant_upsert`` (durable path), not a synchronous client.upsert.
+        """
         mock_client = MagicMock()
         mock_client.retrieve.return_value = [
             _make_mock_point("id1"),
             _make_mock_point("id2"),
         ]
 
-        upsert_calls = []
-
-        def capture_upsert(**kwargs):
-            upsert_calls.append(kwargs.get("collection_name"))
-            return MagicMock(operation_id=1)
-
-        mock_client.upsert.side_effect = capture_upsert
+        txn_cm = _mock_txn_ctx()
+        # _mock_txn_ctx returns a MagicMock factory; capture the txn instance.
+        txn_instance = txn_cm.return_value
+        txn_instance.__aenter__ = AsyncMock(return_value=txn_instance)
+        txn_instance.__aexit__ = AsyncMock(return_value=False)
 
         with (
             patch("archivist.lifecycle.merge.qdrant_client", return_value=mock_client),
@@ -75,7 +77,7 @@ class TestMergeCollectionRouting:
             patch(
                 "archivist.lifecycle.merge.record_version", new_callable=AsyncMock, return_value=2
             ),
-            patch("archivist.storage.transaction.MemoryTransaction", _mock_txn_ctx()),
+            patch("archivist.storage.transaction.MemoryTransaction", txn_cm),
             patch("archivist.lifecycle.merge.log_memory_event", new_callable=AsyncMock),
             patch(
                 "archivist.lifecycle.memory_lifecycle.delete_memory_complete",
@@ -84,15 +86,18 @@ class TestMergeCollectionRouting:
             patch(
                 "archivist.lifecycle.merge.collection_for",
                 return_value="archivist_test_ns",
-            ) as mock_coll_for,
+            ),
         ):
             from archivist.lifecycle.merge import merge_memories
 
             await merge_memories(["id1", "id2"], "latest", "agent1", "test-ns")
 
-        assert upsert_calls, "Qdrant upsert was never called"
-        assert upsert_calls[0] == "archivist_test_ns", (
-            f"upsert used wrong collection: {upsert_calls[0]!r} — "
+        assert txn_instance.enqueue_qdrant_upsert.called, (
+            "enqueue_qdrant_upsert was never called — durable write path missing"
+        )
+        enqueued_collection = txn_instance.enqueue_qdrant_upsert.call_args[0][0]
+        assert enqueued_collection == "archivist_test_ns", (
+            f"upsert enqueued to wrong collection: {enqueued_collection!r} — "
             "should be collection_for(ns), not the hardcoded constant"
         )
 

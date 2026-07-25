@@ -72,7 +72,11 @@ def _store_patches(mock_client):
 
 
 async def test_store_with_provenance_sets_payload(async_pool, monkeypatch):
-    """archivist_store with provenance fields propagates to primary Qdrant point."""
+    """archivist_store with provenance fields propagates to primary Qdrant point.
+
+    INIT-002/SPEC-004: outbox default-on — assert pending outbox row, then drain
+    so Qdrant upserts observe durable-path payloads.
+    """
     monkeypatch.setattr("archivist.core.config.REVERSE_HYDE_ENABLED", False)
     monkeypatch.setattr("archivist.core.config.SYNTHETIC_QUESTIONS_ENABLED", False)
     monkeypatch.setattr("archivist.core.config.BM25_ENABLED", False)
@@ -96,7 +100,10 @@ async def test_store_with_provenance_sets_payload(async_pool, monkeypatch):
         patches[9],
         patches[10],
     ):
+        from tests.fixtures.mocks import count_outbox, drain_outbox
+
         from archivist.app.handlers.tools_storage import _handle_store
+        from archivist.storage.backends import QdrantVectorBackend
 
         await _handle_store(
             {
@@ -108,6 +115,9 @@ async def test_store_with_provenance_sets_payload(async_pool, monkeypatch):
                 "source_trace": {"tool": "manual_entry", "upstream_source": "slack"},
             }
         )
+
+        assert await count_outbox(async_pool, "pending") >= 1
+        await drain_outbox(QdrantVectorBackend(mock_client))
 
     primary = [p for p in captured if p.payload.get("representation_type") == "chunk"]
     assert len(primary) >= 1
@@ -145,7 +155,10 @@ async def test_store_provenance_defaults(async_pool, monkeypatch):
         patches[9],
         patches[10],
     ):
+        from tests.fixtures.mocks import count_outbox, drain_outbox
+
         from archivist.app.handlers.tools_storage import _handle_store
+        from archivist.storage.backends import QdrantVectorBackend
 
         await _handle_store(
             {
@@ -153,6 +166,9 @@ async def test_store_provenance_defaults(async_pool, monkeypatch):
                 "agent_id": "alice",
             }
         )
+
+        assert await count_outbox(async_pool, "pending") >= 1
+        await drain_outbox(QdrantVectorBackend(mock_client))
 
     primary = [p for p in captured if p.payload.get("representation_type") == "chunk"]
     assert len(primary) >= 1

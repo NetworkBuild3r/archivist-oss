@@ -19,12 +19,17 @@ Optional extras (not required for the default server image or CI unit tests):
 
 ## Checks before you open a PR
 
-Run the same checks CI enforces (adjust paths if you use a different venv):
+Run the same checks CI enforces (adjust paths if you use a different venv).
+The authoritative job→command matrix is in [`docs/QA.md`](docs/QA.md) §
+**Reproduce CI locally (INIT-002)** — use that before every push.
 
 ```bash
-ruff check . --fix && ruff format .
-python -m mypy src/archivist/ --config-file pyproject.toml
-python -m pytest tests/ -q --tb=no
+pre-commit run --all-files
+ruff format --check src/ tests/
+ruff check src/ tests/
+# mypy: install the pinned version from docs/QA.md, then run the ratchet snippet there
+python -m pytest tests/unit tests/regression -q
+python -m pytest tests/integration tests/system -q
 ```
 
 **Storage / outbox changes** — also run the focused QA package:

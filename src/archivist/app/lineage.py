@@ -11,8 +11,6 @@ import logging
 import re
 from typing import Any
 
-from archivist.storage.sqlite_pool import pool
-
 logger = logging.getLogger("archivist.lineage")
 
 # Memory ids are UUID-ish / opaque tokens — reject path/injection shapes.
@@ -78,6 +76,10 @@ def _edge(
 
 async def resolve_memory_namespace(memory_id: str) -> str:
     """Best-effort namespace for RBAC from SQLite, then Qdrant payload."""
+    # Function-local import so call-time resolves the pool main.py rebinds
+    # (module-level `from ... import pool` would stay on the placeholder — INIT-002/SPEC-003).
+    from archivist.storage.sqlite_pool import pool
+
     async with pool.read() as conn:
         row = await conn.fetchone(
             "SELECT namespace FROM memory_chunks WHERE qdrant_id = ? LIMIT 1",
@@ -188,6 +190,9 @@ async def _provenance_edges(memory_id: str) -> list[dict[str, Any]]:
 async def _version_edges(memory_id: str, limit: int) -> list[dict[str, Any]]:
     edges: list[dict[str, Any]] = []
     try:
+        # See resolve_memory_namespace() for why this import is function-local (INIT-002/SPEC-003).
+        from archivist.storage.sqlite_pool import pool
+
         async with pool.read() as conn:
             rows = await conn.fetchall(
                 """SELECT version, agent_id, timestamp, operation, parent_versions
@@ -255,6 +260,9 @@ async def _retrieval_edges(memory_id: str, limit: int) -> list[dict[str, Any]]:
     """Edges from retrieval_logs whose trace JSON mentions the memory id."""
     edges: list[dict[str, Any]] = []
     try:
+        # See resolve_memory_namespace() for why this import is function-local (INIT-002/SPEC-003).
+        from archivist.storage.sqlite_pool import pool
+
         async with pool.read() as conn:
             # LIKE against JSON text is approximate but avoids dialect-specific JSON path ops.
             rows = await conn.fetchall(
@@ -297,6 +305,9 @@ async def _entity_edges(entity_id: str, limit: int, namespace: str = "") -> list
     """
     edges: list[dict[str, Any]] = []
     try:
+        # See resolve_memory_namespace() for why this import is function-local (INIT-002/SPEC-003).
+        from archivist.storage.sqlite_pool import pool
+
         async with pool.read() as conn:
             # entities.id is INTEGER; also resolve by case-insensitive name.
             if entity_id.isdigit():

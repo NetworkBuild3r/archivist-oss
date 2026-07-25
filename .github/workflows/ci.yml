@@ -82,7 +82,9 @@ jobs:
       - name: Install deps
         run: |
           pip install --upgrade pip
-          pip install -r requirements.txt mypy types-PyYAML types-tqdm
+          # Pin mypy to match local baseline (INIT-002/SPEC-005). Unpinned installs
+          # pulled 2.3.0 and broke the ratchet with version skew vs developers on 1.19.1.
+          pip install -r requirements.txt "mypy==1.19.1" types-PyYAML types-tqdm
 
       - name: mypy — ratchet gate (count may not increase above baseline)
         # Only real type errors count — import-not-found / import-untyped are
