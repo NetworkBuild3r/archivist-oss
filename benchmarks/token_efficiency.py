@@ -55,15 +55,24 @@ logger = logging.getLogger("benchmarks.token_efficiency")
 BENCHMARK_QUERIES: list[dict] = [
     # --- domain: engineering ---
     {"query": "How do I fix a SQLite locked database error?", "domain": "engineering"},
-    {"query": "What is the difference between asyncio.gather and asyncio.wait?", "domain": "engineering"},
+    {
+        "query": "What is the difference between asyncio.gather and asyncio.wait?",
+        "domain": "engineering",
+    },
     {"query": "How does hotness scoring work in Archivist?", "domain": "engineering"},
-    {"query": "What Qdrant collection configuration is needed for semantic search?", "domain": "engineering"},
+    {
+        "query": "What Qdrant collection configuration is needed for semantic search?",
+        "domain": "engineering",
+    },
     {"query": "How do I run integration tests for the Postgres backend?", "domain": "engineering"},
     {"query": "What is the tier-aware context packing algorithm?", "domain": "engineering"},
     {"query": "How does Archivist handle multi-agent memory isolation?", "domain": "engineering"},
     {"query": "What config variables control token budgeting?", "domain": "engineering"},
     {"query": "How does FTS5 BM25 ranking work in SQLite?", "domain": "engineering"},
-    {"query": "What is the difference between l0, l1, and l2 memory tiers?", "domain": "engineering"},
+    {
+        "query": "What is the difference between l0, l1, and l2 memory tiers?",
+        "domain": "engineering",
+    },
     {"query": "How does the knowledge graph store entity relationships?", "domain": "engineering"},
     {"query": "How do I set up Archivist with a Postgres database?", "domain": "engineering"},
     {"query": "What is reciprocal rank fusion and how is it used here?", "domain": "engineering"},
@@ -101,10 +110,19 @@ BENCHMARK_QUERIES: list[dict] = [
     {"query": "How should a coding agent record a decision?", "domain": "agent-usage"},
     {"query": "What is a trajectory and how should an agent use it?", "domain": "agent-usage"},
     {"query": "How does the multi-hop graph search work?", "domain": "agent-usage"},
-    {"query": "What should an agent include when calling archivist_store?", "domain": "agent-usage"},
+    {
+        "query": "What should an agent include when calling archivist_store?",
+        "domain": "agent-usage",
+    },
     {"query": "How do I retrieve only my own agent's memories?", "domain": "agent-usage"},
-    {"query": "What is the difference between archivist_recall and archivist_search?", "domain": "agent-usage"},
-    {"query": "How do I use archivist_get_context instead of archivist_search?", "domain": "agent-usage"},
+    {
+        "query": "What is the difference between archivist_recall and archivist_search?",
+        "domain": "agent-usage",
+    },
+    {
+        "query": "How do I use archivist_get_context instead of archivist_search?",
+        "domain": "agent-usage",
+    },
 ]
 
 # Sampling budget: max 100 results returned per query for naive comparison
@@ -192,7 +210,9 @@ def _compute_summary(results: list[dict]) -> dict:
 
     for policy in policies:
         policy_results = [r["measurements"].get(policy, {}) for r in results]
-        savings_vals = [p["savings_pct"] for p in policy_results if p.get("savings_pct") is not None]
+        savings_vals = [
+            p["savings_pct"] for p in policy_results if p.get("savings_pct") is not None
+        ]
         token_saved_vals = [
             (p.get("tokens_naive") or 0) - (p.get("tokens_returned") or 0)
             for p in policy_results
@@ -202,7 +222,9 @@ def _compute_summary(results: list[dict]) -> dict:
 
         summary[policy] = {
             "queries_measured": len(savings_vals),
-            "avg_savings_pct": round(sum(savings_vals) / len(savings_vals), 1) if savings_vals else None,
+            "avg_savings_pct": round(sum(savings_vals) / len(savings_vals), 1)
+            if savings_vals
+            else None,
             "min_savings_pct": round(min(savings_vals), 1) if savings_vals else None,
             "max_savings_pct": round(max(savings_vals), 1) if savings_vals else None,
             "total_tokens_saved": sum(token_saved_vals),
@@ -218,13 +240,23 @@ def _print_summary_table(summary: dict, total_queries: int) -> None:
     print(header)
     print(f"  Archivist Token Efficiency Benchmark — {total_queries} queries")
     print(header)
-    print(f"  {'Policy':<20} {'Avg Savings %':>14} {'Min':>8} {'Max':>8} {'Tokens Saved':>14} {'Avg ms':>8}")
+    print(
+        f"  {'Policy':<20} {'Avg Savings %':>14} {'Min':>8} {'Max':>8} {'Tokens Saved':>14} {'Avg ms':>8}"
+    )
     print(f"  {'-' * 64}")
     for policy, stats in summary.items():
-        avg_s = f"{stats['avg_savings_pct']:.1f}%" if stats["avg_savings_pct"] is not None else "N/A"
-        min_s = f"{stats['min_savings_pct']:.1f}%" if stats["min_savings_pct"] is not None else "N/A"
-        max_s = f"{stats['max_savings_pct']:.1f}%" if stats["max_savings_pct"] is not None else "N/A"
-        saved = f"{stats['total_tokens_saved']:,}" if stats["total_tokens_saved"] is not None else "N/A"
+        avg_s = (
+            f"{stats['avg_savings_pct']:.1f}%" if stats["avg_savings_pct"] is not None else "N/A"
+        )
+        min_s = (
+            f"{stats['min_savings_pct']:.1f}%" if stats["min_savings_pct"] is not None else "N/A"
+        )
+        max_s = (
+            f"{stats['max_savings_pct']:.1f}%" if stats["max_savings_pct"] is not None else "N/A"
+        )
+        saved = (
+            f"{stats['total_tokens_saved']:,}" if stats["total_tokens_saved"] is not None else "N/A"
+        )
         dur = f"{stats['avg_duration_ms']:.0f}" if stats["avg_duration_ms"] is not None else "N/A"
         print(f"  {policy:<20} {avg_s:>14} {min_s:>8} {max_s:>8} {saved:>14} {dur:>8}")
     print(header)
@@ -256,7 +288,9 @@ async def _run(args: argparse.Namespace) -> None:
     max_tokens = int(args.max_tokens)
 
     logger.info("Running token efficiency benchmark on %d queries", len(queries))
-    print(f"\nRunning token efficiency benchmark — {len(queries)} queries × {len(policies)} policies")
+    print(
+        f"\nRunning token efficiency benchmark — {len(queries)} queries × {len(policies)} policies"
+    )
     print(f"max_tokens={max_tokens}  agent_id={agent_id}\n")
 
     results: list[dict] = []
@@ -280,7 +314,9 @@ async def _run(args: argparse.Namespace) -> None:
         # Quick line summary
         adaptive = measurements.get("adaptive", {})
         if adaptive.get("savings_pct") is not None:
-            print(f"savings={adaptive['savings_pct']:.0f}%  tokens={adaptive.get('tokens_returned', '?')}")
+            print(
+                f"savings={adaptive['savings_pct']:.0f}%  tokens={adaptive.get('tokens_returned', '?')}"
+            )
         elif adaptive.get("error"):
             print(f"ERROR: {adaptive['error'][:60]}")
             errors += 1
@@ -295,9 +331,7 @@ async def _run(args: argparse.Namespace) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     date_str = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     output_path = (
-        Path(args.output)
-        if args.output
-        else output_dir / f"token_efficiency_{date_str}.json"
+        Path(args.output) if args.output else output_dir / f"token_efficiency_{date_str}.json"
     )
 
     payload = {

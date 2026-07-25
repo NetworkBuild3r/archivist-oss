@@ -10,16 +10,15 @@ from archivist.retrieval.context_api import (
     ContextChunk,
     HandoffPacket,
     RelevantContext,
-    create_handoff_packet,
     format_context_for_prompt,
     get_relevant_context,
     receive_handoff_packet,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_source(idx: int, tier: str = "l2", score: float = 0.9) -> dict:
     return {
@@ -116,7 +115,10 @@ class TestGetRelevantContext:
     async def test_returns_relevant_context_struct(self):
         mock_result = _mock_retrieval_result()
         with (
-            patch("archivist.retrieval.context_api.recursive_retrieve", new=AsyncMock(return_value=mock_result)),
+            patch(
+                "archivist.retrieval.context_api.recursive_retrieve",
+                new=AsyncMock(return_value=mock_result),
+            ),
             patch("archivist.retrieval.context_api.count_tokens", return_value=50),
             patch("archivist.retrieval.context_api.search_tips", new=AsyncMock(return_value=[])),
         ):
@@ -135,7 +137,10 @@ class TestGetRelevantContext:
     async def test_graph_facts_extracted_from_retrieval_trace(self):
         mock_result = _mock_retrieval_result(answer="Archivist is a memory system.")
         with (
-            patch("archivist.retrieval.context_api.recursive_retrieve", new=AsyncMock(return_value=mock_result)),
+            patch(
+                "archivist.retrieval.context_api.recursive_retrieve",
+                new=AsyncMock(return_value=mock_result),
+            ),
             patch("archivist.retrieval.context_api.count_tokens", return_value=50),
             patch("archivist.retrieval.context_api.search_tips", new=AsyncMock(return_value=[])),
         ):
@@ -150,9 +155,14 @@ class TestGetRelevantContext:
         tip_rows = [{"content": "always call session_end at task end"}]
         mock_result = _mock_retrieval_result()
         with (
-            patch("archivist.retrieval.context_api.recursive_retrieve", new=AsyncMock(return_value=mock_result)),
+            patch(
+                "archivist.retrieval.context_api.recursive_retrieve",
+                new=AsyncMock(return_value=mock_result),
+            ),
             patch("archivist.retrieval.context_api.count_tokens", return_value=50),
-            patch("archivist.retrieval.context_api.search_tips", new=AsyncMock(return_value=tip_rows)),
+            patch(
+                "archivist.retrieval.context_api.search_tips", new=AsyncMock(return_value=tip_rows)
+            ),
         ):
             ctx = await get_relevant_context("alice", "some task", include_tips=True)
 
@@ -162,7 +172,10 @@ class TestGetRelevantContext:
     async def test_include_tips_false_skips_tips(self):
         mock_result = _mock_retrieval_result()
         with (
-            patch("archivist.retrieval.context_api.recursive_retrieve", new=AsyncMock(return_value=mock_result)),
+            patch(
+                "archivist.retrieval.context_api.recursive_retrieve",
+                new=AsyncMock(return_value=mock_result),
+            ),
             patch("archivist.retrieval.context_api.count_tokens", return_value=50),
         ):
             ctx = await get_relevant_context("alice", "some task", include_tips=False)
@@ -173,7 +186,10 @@ class TestGetRelevantContext:
     async def test_include_graph_false_skips_graph_facts(self):
         mock_result = _mock_retrieval_result()
         with (
-            patch("archivist.retrieval.context_api.recursive_retrieve", new=AsyncMock(return_value=mock_result)),
+            patch(
+                "archivist.retrieval.context_api.recursive_retrieve",
+                new=AsyncMock(return_value=mock_result),
+            ),
             patch("archivist.retrieval.context_api.count_tokens", return_value=50),
         ):
             ctx = await get_relevant_context("alice", "some task", include_graph=False)
@@ -184,21 +200,35 @@ class TestGetRelevantContext:
     async def test_extra_memory_ids_are_injected(self):
         mock_result = _mock_retrieval_result(sources=[_make_source(0)])
         mock_packed = MagicMock()
-        mock_packed.sources = [_make_source(0), {"id": "pinned-m99", "qdrant_id": "pinned-m99", "text": "[pinned memory: pinned-m99]", "tier_text": "[pinned memory: pinned-m99]", "score": 0.0, "file_path": "", "date": "", "agent_id": "alice", "_packed_tier": "l2"}]
+        mock_packed.sources = [
+            _make_source(0),
+            {
+                "id": "pinned-m99",
+                "qdrant_id": "pinned-m99",
+                "text": "[pinned memory: pinned-m99]",
+                "tier_text": "[pinned memory: pinned-m99]",
+                "score": 0.0,
+                "file_path": "",
+                "date": "",
+                "agent_id": "alice",
+                "_packed_tier": "l2",
+            },
+        ]
         mock_packed.total_tokens = 40
         mock_packed.over_budget = False
         mock_packed.tier_distribution = {"l2": 2}
         mock_packed.token_savings_pct = 0.0
 
         with (
-            patch("archivist.retrieval.context_api.recursive_retrieve", new=AsyncMock(return_value=mock_result)),
+            patch(
+                "archivist.retrieval.context_api.recursive_retrieve",
+                new=AsyncMock(return_value=mock_result),
+            ),
             patch("archivist.retrieval.context_api.pack_context", return_value=mock_packed),
             patch("archivist.retrieval.context_api.count_tokens", return_value=20),
             patch("archivist.retrieval.context_api.search_tips", new=AsyncMock(return_value=[])),
         ):
-            ctx = await get_relevant_context(
-                "alice", "task", extra_memory_ids=["pinned-m99"]
-            )
+            ctx = await get_relevant_context("alice", "task", extra_memory_ids=["pinned-m99"])
 
         memory_ids = [c.memory_id for c in ctx.sources]
         assert "pinned-m99" in memory_ids
@@ -208,10 +238,15 @@ class TestGetRelevantContext:
         sources = [_make_source(i) for i in range(4)]
         mock_result = _mock_retrieval_result(sources=sources)
         with (
-            patch("archivist.retrieval.context_api.recursive_retrieve", new=AsyncMock(return_value=mock_result)),
+            patch(
+                "archivist.retrieval.context_api.recursive_retrieve",
+                new=AsyncMock(return_value=mock_result),
+            ),
             patch("archivist.retrieval.context_api.count_tokens", return_value=50),
         ):
-            ctx = await get_relevant_context("alice", "task", include_tips=False, include_graph=False)
+            ctx = await get_relevant_context(
+                "alice", "task", include_tips=False, include_graph=False
+            )
 
         for i in range(4):
             assert f"mem-{i}" in ctx.provenance
@@ -220,10 +255,15 @@ class TestGetRelevantContext:
     async def test_over_budget_propagated(self):
         mock_result = _mock_retrieval_result(over_budget=True)
         with (
-            patch("archivist.retrieval.context_api.recursive_retrieve", new=AsyncMock(return_value=mock_result)),
+            patch(
+                "archivist.retrieval.context_api.recursive_retrieve",
+                new=AsyncMock(return_value=mock_result),
+            ),
             patch("archivist.retrieval.context_api.count_tokens", return_value=50),
         ):
-            ctx = await get_relevant_context("alice", "task", include_tips=False, include_graph=False)
+            ctx = await get_relevant_context(
+                "alice", "task", include_tips=False, include_graph=False
+            )
 
         assert ctx.over_budget is True
 
@@ -234,7 +274,9 @@ class TestGetRelevantContext:
 
 
 class TestFormatContextForPrompt:
-    def _make_ctx(self, answer="", sources=None, graph_facts=None, tips=None, savings=55.0) -> RelevantContext:
+    def _make_ctx(
+        self, answer="", sources=None, graph_facts=None, tips=None, savings=55.0
+    ) -> RelevantContext:
         chunks = sources or [
             ContextChunk("m1", "memory text one", 0.9, "l0", "/f.md", "2026-01-01", "alice"),
             ContextChunk("m2", "memory text two", 0.7, "l2", "", "", ""),

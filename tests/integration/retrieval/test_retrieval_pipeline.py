@@ -4,7 +4,6 @@ Migrated from tests/test_new_modules.py (TestPhase2SyntheticQuestionPipeline,
 TestPhase3NominateThenRerank, TestPhase4ParentTextAtIndexTime, TestPhase5SemanticChunking).
 """
 
-import asyncio
 import importlib
 import inspect
 import os
@@ -147,7 +146,7 @@ class TestPhase2SyntheticQuestionPipeline:
             hot_cache.HOT_CACHE_ENABLED = old_enabled
             hot_cache.force_invalidate_all()
 
-    def test_synthetic_point_payload_structure(self):
+    async def test_synthetic_point_payload_structure(self):
         """Synthetic question points must carry required fields for the search path."""
         from unittest.mock import AsyncMock, patch
 
@@ -164,17 +163,15 @@ class TestPhase2SyntheticQuestionPipeline:
             mock_embed.return_value = [[0.1] * 1024, [0.2] * 1024]
             synthetic_questions._cache.clear()
 
-            points = asyncio.get_event_loop().run_until_complete(
-                synthetic_questions.generate_and_embed_synthetic_points(
-                    chunk_point_id="parent-chunk-id",
-                    chunk_text="Backups run at 04:15 UTC on Sunday",
-                    base_payload={
-                        "agent_id": "chief",
-                        "namespace": "default",
-                        "file_path": "agents/chief/daily.md",
-                        "chunk_index": 3,
-                    },
-                )
+            points = await synthetic_questions.generate_and_embed_synthetic_points(
+                chunk_point_id="parent-chunk-id",
+                chunk_text="Backups run at 04:15 UTC on Sunday",
+                base_payload={
+                    "agent_id": "chief",
+                    "namespace": "default",
+                    "file_path": "agents/chief/daily.md",
+                    "chunk_index": 3,
+                },
             )
 
         assert len(points) == 2
