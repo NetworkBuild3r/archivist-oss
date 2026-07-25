@@ -54,7 +54,7 @@ def _store_patches(mock_client):
         patch("handlers.tools_storage.ensure_collection", return_value="test_coll"),
         patch("handlers.tools_storage.register_memory_points_batch", new_callable=AsyncMock),
         patch("handlers.tools_storage.get_namespace_config", return_value=None),
-        patch("handlers.tools_storage._rbac_gate", return_value=None),
+        patch("handlers.tools_storage.require_rbac", return_value=None),
         patch("audit.log_memory_event", new_callable=AsyncMock),
     ]
 

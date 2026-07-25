@@ -111,7 +111,7 @@ async def test_store_handler_returns_text_content(qa_pool, memory_factory):
             return_value=mem["namespace"],
         ),
         patch(
-            "archivist.app.handlers.tools_storage._rbac_gate",
+            "archivist.app.handlers.tools_storage.require_rbac",
             return_value=None,
         ),
         patch(
@@ -174,8 +174,8 @@ async def test_store_handler_rbac_denial_returns_permission_error(qa_pool, memor
     mem = memory_factory()
 
     with patch(
-        "archivist.app.handlers.tools_storage._rbac_gate",
-        return_value="Permission denied: write on namespace 'restricted'",
+        "archivist.app.handlers.tools_storage.require_rbac",
+        return_value=_fake_text_content("Permission denied: write on namespace 'restricted'"),
     ):
         result = await _handle_store(
             {
@@ -208,7 +208,7 @@ async def test_delete_handler_returns_text_content(qa_pool, memory_factory):
             return_value=mock_result,
         ),
         patch(
-            "archivist.app.handlers.tools_storage._rbac_gate",
+            "archivist.app.handlers.tools_storage.require_rbac",
             return_value=None,
         ),
         patch(
@@ -248,7 +248,7 @@ async def test_merge_handler_bad_strategy_returns_error(qa_pool, memory_factory)
             return_value={"error": "Unknown merge strategy: bad_strat"},
         ),
         patch(
-            "archivist.app.handlers.tools_storage._rbac_gate",
+            "archivist.app.handlers.tools_storage.require_rbac",
             return_value=None,
         ),
         patch(
@@ -351,7 +351,7 @@ async def test_store_handler_enqueues_outbox_event(qa_pool, memory_factory):
             return_value=mem["namespace"],
         ),
         patch(
-            "archivist.app.handlers.tools_storage._rbac_gate",
+            "archivist.app.handlers.tools_storage.require_rbac",
             return_value=None,
         ),
         patch(
@@ -495,7 +495,7 @@ async def test_recall_does_not_return_coroutine_string(qa_pool):
             new_callable=AsyncMock,
             return_value=[],
         ),
-        patch("archivist.app.handlers.tools_search._rbac_gate", return_value=None),
+        patch("archivist.app.handlers.tools_search.require_rbac", return_value=None),
         patch("archivist.app.handlers.tools_search.require_caller", return_value=None),
         patch("archivist.app.handlers.tools_search.resolve_caller", return_value="agent-1"),
     ):
