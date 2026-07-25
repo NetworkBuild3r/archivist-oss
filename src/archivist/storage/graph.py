@@ -1810,37 +1810,56 @@ async def delete_needle_tokens_by_memory(memory_id: str) -> int:
 _BATCH_CHUNK = 500
 
 
-async def delete_fts_chunks_batch(qdrant_ids: list[str]) -> int:
+async def delete_fts_chunks_batch(
+    qdrant_ids: list[str],
+    conn: aiosqlite.Connection | None = None,
+) -> int:
     """Remove FTS5 entries and memory_chunks rows for multiple Qdrant IDs.
 
     Internally chunks the ID list into groups of 500 to stay under the
-    sqlite3 ~999-parameter limit.  Retries once on ``OperationalError``
-    (e.g. "database is locked").
+    sqlite3 ~999-parameter limit.  When acquiring its own connection,
+    retries once on ``OperationalError`` (e.g. "database is locked").
+
+    Args:
+        conn: Optional open ``aiosqlite.Connection`` (e.g. from a
+            ``MemoryTransaction``).  When provided, the deletes join the
+            caller's transaction instead of acquiring a new ``pool.write()``
+            lock, and the locked-database retry is skipped — a retry here
+            would need to re-run the caller's *whole* transaction, not just
+            this call, so the caller owns that decision. When ``None``
+            (default) a fresh write-lock is acquired from the pool
+            (INIT-022/SPEC-004, `M4`).
     """
     if not qdrant_ids:
         return 0
     from archivist.storage.sqlite_pool import pool
 
+    async def _run(c: aiosqlite.Connection) -> int:
+        total = 0
+        for i in range(0, len(qdrant_ids), _BATCH_CHUNK):
+            chunk = qdrant_ids[i : i + _BATCH_CHUNK]
+            placeholders = ",".join("?" * len(chunk))
+            rows = await (
+                await c.execute(
+                    f"SELECT rowid FROM memory_chunks WHERE qdrant_id IN ({placeholders})",
+                    chunk,
+                )
+            ).fetchall()
+            await _delete_fts_rows_async(c, rows)
+            cur = await c.execute(
+                f"DELETE FROM memory_chunks WHERE qdrant_id IN ({placeholders})",
+                chunk,
+            )
+            total += cur.rowcount
+        return total
+
+    if conn is not None:
+        return await _run(conn)
+
     for attempt in range(2):
         try:
-            total = 0
-            async with pool.write() as conn:
-                for i in range(0, len(qdrant_ids), _BATCH_CHUNK):
-                    chunk = qdrant_ids[i : i + _BATCH_CHUNK]
-                    placeholders = ",".join("?" * len(chunk))
-                    rows = await (
-                        await conn.execute(
-                            f"SELECT rowid FROM memory_chunks WHERE qdrant_id IN ({placeholders})",
-                            chunk,
-                        )
-                    ).fetchall()
-                    await _delete_fts_rows_async(conn, rows)
-                    cur = await conn.execute(
-                        f"DELETE FROM memory_chunks WHERE qdrant_id IN ({placeholders})",
-                        chunk,
-                    )
-                    total += cur.rowcount
-            return total
+            async with pool.write() as c:
+                return await _run(c)
         except Exception as e:
             if attempt == 0 and "locked" in str(e).lower():
                 import asyncio as _asyncio
@@ -1884,31 +1903,50 @@ async def set_fts_excluded_batch(qdrant_ids: list[str], excluded: int = 1) -> in
     return total
 
 
-async def delete_needle_tokens_batch(memory_ids: list[str]) -> int:
+async def delete_needle_tokens_batch(
+    memory_ids: list[str],
+    conn: aiosqlite.Connection | None = None,
+) -> int:
     """Remove needle_registry rows for multiple memory IDs.
 
     Internally chunks the ID list into groups of 500 to stay under the
-    sqlite3 ~999-parameter limit.  Retries once on ``OperationalError``
-    (e.g. "database is locked").
+    sqlite3 ~999-parameter limit.  When acquiring its own connection,
+    retries once on ``OperationalError`` (e.g. "database is locked").
+
+    Args:
+        conn: Optional open ``aiosqlite.Connection`` (e.g. from a
+            ``MemoryTransaction``).  When provided, the deletes join the
+            caller's transaction instead of acquiring a new ``pool.write()``
+            lock, and the locked-database retry is skipped (see
+            ``delete_fts_chunks_batch`` for the rationale). When ``None``
+            (default) a fresh write-lock is acquired from the pool
+            (INIT-022/SPEC-004, `M4`).
     """
     if not memory_ids:
         return 0
     from archivist.storage.sqlite_pool import pool
 
     _ensure_needle_registry()
+
+    async def _run(c: aiosqlite.Connection) -> int:
+        total = 0
+        for i in range(0, len(memory_ids), _BATCH_CHUNK):
+            chunk = memory_ids[i : i + _BATCH_CHUNK]
+            placeholders = ",".join("?" * len(chunk))
+            cur = await c.execute(
+                f"DELETE FROM needle_registry WHERE memory_id IN ({placeholders})",
+                chunk,
+            )
+            total += cur.rowcount
+        return total
+
+    if conn is not None:
+        return await _run(conn)
+
     for attempt in range(2):
         try:
-            total = 0
-            async with pool.write() as conn:
-                for i in range(0, len(memory_ids), _BATCH_CHUNK):
-                    chunk = memory_ids[i : i + _BATCH_CHUNK]
-                    placeholders = ",".join("?" * len(chunk))
-                    cur = await conn.execute(
-                        f"DELETE FROM needle_registry WHERE memory_id IN ({placeholders})",
-                        chunk,
-                    )
-                    total += cur.rowcount
-            return total
+            async with pool.write() as c:
+                return await _run(c)
         except Exception as e:
             if attempt == 0 and "locked" in str(e).lower():
                 import asyncio as _asyncio

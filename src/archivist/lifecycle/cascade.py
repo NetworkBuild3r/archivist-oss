@@ -24,6 +24,7 @@ through a cascade will leave partial state.  The contract:
      Aborts early if Qdrant is unreachable.
 """
 
+import asyncio
 import logging
 
 from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
@@ -69,7 +70,7 @@ class PartialDeletionError(Exception):
 # ---------------------------------------------------------------------------
 
 
-async def _qdrant_delete(
+def _qdrant_delete_sync(
     client,
     col: str,
     selector,
@@ -78,14 +79,18 @@ async def _qdrant_delete(
     failed_steps: list[str],
     retries: int = 1,
 ) -> int:
-    """Delete Qdrant points and return a count.
+    """Blocking core of the Qdrant delete: count + delete-with-retry.
 
     For a list selector the count is ``len(selector)``.  For a Filter selector
     the count is obtained via ``client.count`` *before* deleting (the delete
     response does not include a deleted-point count).
 
     Transient errors (429, 503, connection/timeout) are retried up to *retries*
-    times with a 0.5 s back-off.  Permanent errors fail immediately.
+    times with a 0.5 s back-off (``time.sleep``, not ``asyncio.sleep`` — this
+    function is 100% synchronous and MUST only be invoked via
+    ``asyncio.to_thread`` from the async ``_qdrant_delete`` wrapper below;
+    calling it directly on the event loop reintroduces the blocking-call bug
+    this offload fixes — INIT-022/SPEC-004, `H2`).
 
     On failure the *step_name* is appended to *failed_steps* and the pre-count
     (not 0) is returned so audit logs remain truthful.
@@ -121,6 +126,41 @@ async def _qdrant_delete(
             memory_id,
             1 + retries,
         )
+
+    return count if result is None else result
+
+
+async def _qdrant_delete(
+    client,
+    col: str,
+    selector,
+    step_name: str,
+    memory_id: str,
+    failed_steps: list[str],
+    retries: int = 1,
+) -> int:
+    """Delete Qdrant points and return a count (event-loop-safe).
+
+    All blocking work (``client.count``, ``client.delete`` with its
+    ``time.sleep``-based retry) runs off the event loop via
+    ``asyncio.to_thread(_qdrant_delete_sync, ...)`` — matching the
+    ``_qdrant_set_payload`` / ``_scroll_all`` offload idiom used elsewhere in
+    this module (INIT-022/SPEC-004, `H2`). Only the dead-letter-queue logging
+    below (itself ``async``, using the shared aiosqlite pool) stays on the
+    event loop.
+    """
+    result = await asyncio.to_thread(
+        _qdrant_delete_sync,
+        client,
+        col,
+        selector,
+        step_name,
+        memory_id,
+        failed_steps,
+        retries,
+    )
+
+    if step_name in failed_steps:
         # Record the failed IDs in the dead-letter table for later inspection/replay.
         if isinstance(selector, list) and selector:
             try:
@@ -130,7 +170,7 @@ async def _qdrant_delete(
             except Exception as _dlq_err:
                 logger.debug("cascade.log_delete_failure failed: %s", _dlq_err)
 
-    return count if result is None else result
+    return result
 
 
 def _qdrant_set_payload(
@@ -261,7 +301,13 @@ async def sweep_orphans() -> dict[str, int | str]:
     client = qdrant_client()
 
     try:
-        client.get_collections()
+        # Offloaded via asyncio.to_thread — the qdrant_client SDK is fully
+        # synchronous, so calling it directly on the event loop blocks every
+        # other coroutine (concurrent MCP requests, the sqlite_pool write
+        # lock, etc.) for the call's full round-trip.  Matches the
+        # `_resolve_child_ids`/`to_thread(_scroll_all, ...)` idiom already
+        # used elsewhere in this pipeline (INIT-022/SPEC-004, `M1`).
+        await asyncio.to_thread(client.get_collections)
     except Exception as e:
         logger.warning("sweep_orphans: Qdrant unavailable, skipping: %s", e)
         return {"fts_cleaned": 0, "needle_cleaned": 0, "skipped": "qdrant_unavailable"}
@@ -291,7 +337,10 @@ async def sweep_orphans() -> dict[str, int | str]:
             any_retrieve_failed = False
             for coll in collections:
                 try:
-                    points = client.retrieve(
+                    # Offloaded — same rationale as the get_collections() call
+                    # above (INIT-022/SPEC-004, `M1`).
+                    points = await asyncio.to_thread(
+                        client.retrieve,
                         collection_name=coll,
                         ids=sub,
                         with_payload=False,
@@ -341,7 +390,10 @@ async def sweep_orphans() -> dict[str, int | str]:
             any_retrieve_failed = False
             for coll in collections:
                 try:
-                    points = client.retrieve(
+                    # Offloaded — same rationale as Phase 1 above
+                    # (INIT-022/SPEC-004, `M1`).
+                    points = await asyncio.to_thread(
+                        client.retrieve,
                         collection_name=coll,
                         ids=sub,
                         with_payload=False,
