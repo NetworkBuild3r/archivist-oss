@@ -74,7 +74,7 @@ class TestMicroChunkCap:
             patch("audit.log_memory_event", new_callable=AsyncMock),
             patch("handlers.tools_storage.get_namespace_for_agent", return_value="test-ns"),
             patch("handlers.tools_storage.get_namespace_config", return_value=None),
-            patch("handlers.tools_storage._rbac_gate", return_value=None),
+            patch("handlers.tools_storage.require_rbac", return_value=None),
         ):
             monkeypatch.setattr("config.REVERSE_HYDE_ENABLED", False)
             monkeypatch.setattr("config.BM25_ENABLED", False)
@@ -139,7 +139,7 @@ class TestReverseHydeFireAndForget:
             patch("handlers.tools_storage._extract_needle_micro_chunks", return_value=[]),
             patch("handlers.tools_storage.get_namespace_for_agent", return_value="test-ns"),
             patch("handlers.tools_storage.get_namespace_config", return_value=None),
-            patch("handlers.tools_storage._rbac_gate", return_value=None),
+            patch("handlers.tools_storage.require_rbac", return_value=None),
             patch("hyde.generate_reverse_hyde_questions", side_effect=slow_hyde),
         ):
             monkeypatch.setattr("config.REVERSE_HYDE_ENABLED", True)
@@ -200,7 +200,7 @@ class TestReverseHydeFireAndForget:
             patch("handlers.tools_storage._extract_needle_micro_chunks", return_value=[]),
             patch("handlers.tools_storage.get_namespace_for_agent", return_value="test-ns"),
             patch("handlers.tools_storage.get_namespace_config", return_value=None),
-            patch("handlers.tools_storage._rbac_gate", return_value=None),
+            patch("handlers.tools_storage.require_rbac", return_value=None),
             patch("hyde.generate_reverse_hyde_questions", side_effect=failing_hyde),
             patch.object(test_logger, "warning", side_effect=capture_warning),
         ):

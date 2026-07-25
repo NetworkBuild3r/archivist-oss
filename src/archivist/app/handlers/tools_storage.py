@@ -50,7 +50,7 @@ from archivist.write.contextual_augment import augment_chunk
 from archivist.write.indexer import compute_ttl
 from archivist.write.pre_extractor import extract_needle_entities, pre_extract
 
-from ._common import _rbac_gate, error_response, resolve_actor, success_response
+from ._common import error_response, require_rbac, resolve_actor, success_response
 
 # NOTE (INIT-022/SPEC-008, ac-5): `SourceTrace`/`default_confidence`, `detect_topics`,
 # `DEFAULT_CONFIDENCE_BY_ACTOR_TYPE`, and `MemoryTransaction` are hoisted here because no
@@ -559,9 +559,9 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
     if retention == "permanent":
         importance = max(importance, 1.0)
 
-    denied = _rbac_gate(agent_id, "write", namespace)
+    denied = require_rbac(agent_id, "write", namespace)
     if denied:
-        return [TextContent(type="text", text=denied)]
+        return denied
 
     if CONFLICT_CHECK_ON_STORE and not force_skip:
         _shared_vec, _shared_results = await _query_similar(text, namespace)
@@ -1035,9 +1035,9 @@ async def _handle_compress(arguments: dict) -> list[TextContent]:
     fmt = arguments.get("format", "flat")
     previous_summary = arguments.get("previous_summary", "")
 
-    denied = _rbac_gate(agent_id, "write", namespace)
+    denied = require_rbac(agent_id, "write", namespace)
     if denied:
-        return [TextContent(type="text", text=denied)]
+        return denied
 
     if not memory_ids:
         return error_response({"error": "memory_ids required"})
@@ -1141,9 +1141,9 @@ async def _handle_pin(arguments: dict) -> list[TextContent]:
     if not memory_id and not entity_name:
         return error_response({"error": "Provide memory_id or entity_name (or both)"})
 
-    denied = _rbac_gate(agent_id, "write", namespace)
+    denied = require_rbac(agent_id, "write", namespace)
     if denied:
-        return [TextContent(type="text", text=denied)]
+        return denied
 
     pinned = []
 
@@ -1222,9 +1222,9 @@ async def _handle_unpin(arguments: dict) -> list[TextContent]:
     if not memory_id and not entity_name:
         return error_response({"error": "Provide memory_id or entity_name (or both)"})
 
-    denied = _rbac_gate(agent_id, "write", namespace)
+    denied = require_rbac(agent_id, "write", namespace)
     if denied:
-        return [TextContent(type="text", text=denied)]
+        return denied
 
     unpinned = []
 
@@ -1295,11 +1295,13 @@ async def _handle_delete(arguments: dict) -> list[TextContent]:
     if not agent_id:
         return error_response({"error": "agent_id is required"})
 
-    ns_err = _rbac_gate(agent_id, "write", namespace)
-    if ns_err:
-        # INIT-022/SPEC-008 (H3): was returning the bare error string instead of the
-        # structured [TextContent] payload every other RBAC-gated handler in this file returns.
-        return [TextContent(type="text", text=ns_err)]
+    denied = require_rbac(agent_id, "write", namespace)
+    if denied:
+        # INIT-022/SPEC-008 (H3) fixed this site's bug (was returning the bare error
+        # string instead of the structured payload); INIT-022/SPEC-009 (M9) then
+        # extracted the shared pattern into `require_rbac` so every handler uses one
+        # authorization chokepoint.
+        return denied
     if not namespace:
         namespace = get_namespace_for_agent(agent_id)
 
