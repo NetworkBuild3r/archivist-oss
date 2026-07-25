@@ -1,5 +1,6 @@
 """MCP tool handlers — admin, observability, namespaces, audit, URI resolution."""
 
+import asyncio
 import logging
 
 from mcp.types import TextContent, Tool
@@ -481,7 +482,10 @@ async def _handle_backup(arguments: dict) -> list[TextContent]:
 
     if action == "create":
         label = arguments.get("label", "")
-        result = create_snapshot(label=label)
+        # Offloaded off the event loop — create_snapshot() does multi-minute
+        # synchronous I/O (httpx, sqlite3 online-backup, pg_dump) that would
+        # otherwise freeze the whole MCP server (INIT-022/SPEC-002, fixes H5).
+        result = await asyncio.to_thread(create_snapshot, label=label)
         prune_snapshots()
         return success_response(result)
 
@@ -495,7 +499,14 @@ async def _handle_backup(arguments: dict) -> list[TextContent]:
             return error_response({"error": "snapshot_id is required for restore"})
         target = arguments.get("target", "all")
         try:
-            result = restore_snapshot(snapshot_id, target=target)
+            # Offloaded off the event loop (fixes H5); the running loop is
+            # captured here — before dispatch — and handed to restore_snapshot()
+            # so its SQLite path can schedule the write-lock-guarded restore
+            # back onto it from the worker thread (fixes C2).
+            loop = asyncio.get_running_loop()
+            result = await asyncio.to_thread(
+                restore_snapshot, snapshot_id, target=target, loop=loop
+            )
             return success_response(result)
         except (FileNotFoundError, ValueError) as e:
             return error_response({"error": str(e)})
