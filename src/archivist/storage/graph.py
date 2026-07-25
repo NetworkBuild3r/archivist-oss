@@ -419,14 +419,18 @@ def _migrate_schema():
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {typedef}")
                 conn.commit()
                 _logger.info("Migrated %s: added %s column", table, column)
-            except (sqlite3.OperationalError, Exception):
+            except sqlite3.OperationalError:
                 pass
         for ddl in indexes:
             try:
                 conn.execute(ddl)
                 conn.commit()
-            except Exception:
-                pass
+            except Exception as e:
+                # CREATE INDEX IF NOT EXISTS is idempotent, so a real failure here
+                # (e.g. a referenced column missing because an earlier migration
+                # failed) should leave a trace instead of vanishing silently.
+                if "already exists" not in str(e).lower():
+                    _logger.debug("Index creation skipped for %r: %s", ddl, e)
         conn.close()
 
 
@@ -930,6 +934,96 @@ async def search_fts(
     )
 
 
+def _build_fts_where(
+    namespace: str, agent_id: str, memory_type: str, actor_type: str
+) -> tuple[list[str], list]:
+    """Build the shared namespace/agent/type/actor filter clauses common to all FTS variants."""
+    where_clauses = ["mc.is_excluded = 0"]
+    params: list = []
+
+    if namespace:
+        where_clauses.append("mc.namespace = ?")
+        params.append(namespace)
+    if agent_id:
+        where_clauses.append("mc.agent_id = ?")
+        params.append(agent_id)
+    if memory_type:
+        where_clauses.append("mc.memory_type = ?")
+        params.append(memory_type)
+    if actor_type:
+        where_clauses.append("mc.actor_type = ?")
+        params.append(actor_type)
+
+    return where_clauses, params
+
+
+async def _run_fts_query(
+    sql: str,
+    params: list,
+    *,
+    backend: str,
+    negate_score: bool,
+    error_context: str,
+) -> list[dict]:
+    """Execute a built FTS query, shape results, record metrics, and log-and-swallow errors.
+
+    Shared tail end of all four ``_search_fts_*`` variants: connection acquisition,
+    execution, ``bm25_score`` normalization, timing/count metrics, and error handling.
+    """
+    from archivist.storage.sqlite_pool import pool
+
+    _t0 = time.monotonic()
+    try:
+        async with pool.read() as conn:
+            cur = await conn.execute(sql, params)
+            results = []
+            for row in await cur.fetchall():
+                r = dict(row)
+                rank = r.pop("bm25_rank", 0)
+                r["bm25_score"] = -rank if negate_score else rank
+                results.append(r)
+        m.observe(m.FTS_SEARCH_DURATION_MS, (time.monotonic() - _t0) * 1000.0, {"backend": backend})
+        m.inc(m.FTS_SEARCH_TOTAL, {"backend": backend})
+        return results
+    except Exception as e:
+        logging.getLogger("archivist.graph").warning("%s: %s", error_context, e)
+        return []
+
+
+async def _search_fts_sqlite_family(
+    *,
+    fts_table: str,
+    match_query: str,
+    namespace: str,
+    agent_id: str,
+    memory_type: str,
+    limit: int,
+    actor_type: str,
+    error_context: str,
+) -> list[dict]:
+    """Shared SQLite FTS5 BM25 search body for both the stemmed and exact-match tables."""
+    where_clauses, filter_params = _build_fts_where(namespace, agent_id, memory_type, actor_type)
+    where_sql = " AND " + " AND ".join(where_clauses)
+
+    sql = (
+        "SELECT mc.qdrant_id, mc.file_path, mc.chunk_index, mc.agent_id, "
+        "mc.namespace, mc.date, mc.memory_type, mc.text, "
+        "mc.actor_id, mc.actor_type, mc.importance, mc.tier_label, "
+        "rank AS bm25_rank "
+        f"FROM {fts_table} "
+        f"JOIN memory_chunks mc ON {fts_table}.rowid = mc.rowid "
+        "LEFT JOIN memory_hotness mh ON mh.memory_id = mc.qdrant_id "
+        f"WHERE {fts_table} MATCH ? {where_sql} "
+        "ORDER BY (rank * (1 + 0.3 * COALESCE(mh.importance_signal, 0.5))) "
+        "LIMIT ?"
+    )
+    params = [match_query, *filter_params, limit]
+
+    return await _run_fts_query(
+        sql, params, backend="sqlite", negate_score=True, error_context=error_context
+    )
+
+
 async def _search_fts_sqlite(
     query: str,
     namespace: str = "",
@@ -939,57 +1033,57 @@ async def _search_fts_sqlite(
     actor_type: str = "",
 ) -> list[dict]:
     """SQLite FTS5 BM25 search implementation (stemmed / ``memory_fts``)."""
-    from archivist.storage.sqlite_pool import pool
+    return await _search_fts_sqlite_family(
+        fts_table="memory_fts",
+        match_query=query,
+        namespace=namespace,
+        agent_id=agent_id,
+        memory_type=memory_type,
+        limit=limit,
+        actor_type=actor_type,
+        error_context="FTS search failed",
+    )
 
-    _t0 = time.monotonic()
-    try:
-        async with pool.read() as conn:
-            where_clauses = ["mc.is_excluded = 0"]
-            params: list = []
 
-            if namespace:
-                where_clauses.append("mc.namespace = ?")
-                params.append(namespace)
-            if agent_id:
-                where_clauses.append("mc.agent_id = ?")
-                params.append(agent_id)
-            if memory_type:
-                where_clauses.append("mc.memory_type = ?")
-                params.append(memory_type)
-            if actor_type:
-                where_clauses.append("mc.actor_type = ?")
-                params.append(actor_type)
-
-            where_sql = " AND " + " AND ".join(where_clauses)
-
-            sql = (
-                "SELECT mc.qdrant_id, mc.file_path, mc.chunk_index, mc.agent_id, "
-                "mc.namespace, mc.date, mc.memory_type, mc.text, "
-                "mc.actor_id, mc.actor_type, mc.importance, mc.tier_label, "
-                "rank AS bm25_rank "
-                "FROM memory_fts "
-                "JOIN memory_chunks mc ON memory_fts.rowid = mc.rowid "
-                "LEFT JOIN memory_hotness mh ON mh.memory_id = mc.qdrant_id "
-                f"WHERE memory_fts MATCH ? {where_sql} "
-                "ORDER BY (rank * (1 + 0.3 * COALESCE(mh.importance_signal, 0.5))) "
-                f"LIMIT ?"
-            )
-            params = [query] + params + [limit]
-
-            cur = await conn.execute(sql, params)
-            results = []
-            for row in await cur.fetchall():
-                r = dict(row)
-                r["bm25_score"] = -r.pop("bm25_rank", 0)
-                results.append(r)
-        m.observe(
-            m.FTS_SEARCH_DURATION_MS, (time.monotonic() - _t0) * 1000.0, {"backend": "sqlite"}
-        )
-        m.inc(m.FTS_SEARCH_TOTAL, {"backend": "sqlite"})
-        return results
-    except Exception as e:
-        logging.getLogger("archivist.graph").warning("FTS search failed: %s", e)
+async def _search_fts_postgres_family(
+    *,
+    tsquery_expr: str,
+    fts_column: str,
+    ts_config: str,
+    namespace: str,
+    agent_id: str,
+    memory_type: str,
+    limit: int,
+    actor_type: str,
+    error_context: str,
+) -> list[dict]:
+    """Shared Postgres tsvector FTS search body for both the stemmed and exact-match configs."""
+    if not tsquery_expr:
         return []
+
+    where_clauses, filter_params = _build_fts_where(namespace, agent_id, memory_type, actor_type)
+    where_sql = " AND " + " AND ".join(where_clauses)
+
+    # ts_rank_cd returns values in [0,1]; multiply by 32 to normalize
+    # into the same ballpark as SQLite FTS5 BM25 scores (~0.5-30 range).
+    sql = (
+        "SELECT mc.qdrant_id, mc.file_path, mc.chunk_index, mc.agent_id, "
+        "mc.namespace, mc.date, mc.memory_type, mc.text, "
+        "mc.actor_id, mc.actor_type, mc.importance, mc.tier_label, "
+        f"ts_rank_cd(mc.{fts_column}, to_tsquery('{ts_config}', ?)) * 32 AS bm25_rank "
+        "FROM memory_chunks mc "
+        "LEFT JOIN memory_hotness mh ON mh.memory_id = mc.qdrant_id "
+        f"WHERE mc.{fts_column} @@ to_tsquery('{ts_config}', ?) {where_sql} "
+        f"ORDER BY (ts_rank_cd(mc.{fts_column}, to_tsquery('{ts_config}', ?)) * 32 "
+        "          * (1 + 0.3 * COALESCE(mh.importance_signal, 0.5))) DESC "
+        "LIMIT ?"
+    )
+    # tsquery_expr used three times: SELECT ranking, WHERE filter, ORDER BY
+    params = [tsquery_expr, tsquery_expr, *filter_params, tsquery_expr, limit]
+
+    return await _run_fts_query(
+        sql, params, backend="postgres", negate_score=False, error_context=error_context
+    )
 
 
 async def _search_fts_postgres(
@@ -1003,70 +1097,25 @@ async def _search_fts_postgres(
 ) -> list[dict]:
     """Postgres tsvector FTS search implementation (stemmed / ``fts_vector``)."""
     from archivist.storage.fts_search import _pg_tsquery_and, _pg_tsquery_or, _pg_tsquery_phrase
-    from archivist.storage.sqlite_pool import pool
 
     builder = {
         "or": _pg_tsquery_or,
         "and": _pg_tsquery_and,
         "phrase": _pg_tsquery_phrase,
     }.get(fts_mode, _pg_tsquery_or)
-
     tsquery_expr = builder(raw_query)
-    if not tsquery_expr:
-        return []
 
-    _t0 = time.monotonic()
-    try:
-        async with pool.read() as conn:
-            where_clauses = ["mc.is_excluded = 0"]
-            params: list = [tsquery_expr]
-
-            if namespace:
-                where_clauses.append("mc.namespace = ?")
-                params.append(namespace)
-            if agent_id:
-                where_clauses.append("mc.agent_id = ?")
-                params.append(agent_id)
-            if memory_type:
-                where_clauses.append("mc.memory_type = ?")
-                params.append(memory_type)
-            if actor_type:
-                where_clauses.append("mc.actor_type = ?")
-                params.append(actor_type)
-
-            where_sql = " AND " + " AND ".join(where_clauses)
-
-            # ts_rank_cd returns values in [0,1]; multiply by 32 to normalize
-            # into the same ballpark as SQLite FTS5 BM25 scores (~0.5-30 range).
-            sql = (
-                "SELECT mc.qdrant_id, mc.file_path, mc.chunk_index, mc.agent_id, "
-                "mc.namespace, mc.date, mc.memory_type, mc.text, "
-                "mc.actor_id, mc.actor_type, mc.importance, mc.tier_label, "
-                "ts_rank_cd(mc.fts_vector, to_tsquery('english', ?)) * 32 AS bm25_rank "
-                "FROM memory_chunks mc "
-                "LEFT JOIN memory_hotness mh ON mh.memory_id = mc.qdrant_id "
-                f"WHERE mc.fts_vector @@ to_tsquery('english', ?) {where_sql} "
-                "ORDER BY (ts_rank_cd(mc.fts_vector, to_tsquery('english', ?)) * 32 "
-                "          * (1 + 0.3 * COALESCE(mh.importance_signal, 0.5))) DESC "
-                "LIMIT ?"
-            )
-            # tsquery_expr used three times: SELECT ranking, WHERE filter, ORDER BY
-            params = [tsquery_expr, tsquery_expr] + params[1:] + [tsquery_expr, limit]
-
-            cur = await conn.execute(sql, params)
-            results = []
-            for row in await cur.fetchall():
-                r = dict(row)
-                r["bm25_score"] = r.pop("bm25_rank", 0)
-                results.append(r)
-        m.observe(
-            m.FTS_SEARCH_DURATION_MS, (time.monotonic() - _t0) * 1000.0, {"backend": "postgres"}
-        )
-        m.inc(m.FTS_SEARCH_TOTAL, {"backend": "postgres"})
-        return results
-    except Exception as e:
-        logging.getLogger("archivist.graph").warning("FTS Postgres search failed: %s", e)
-        return []
+    return await _search_fts_postgres_family(
+        tsquery_expr=tsquery_expr,
+        fts_column="fts_vector",
+        ts_config="english",
+        namespace=namespace,
+        agent_id=agent_id,
+        memory_type=memory_type,
+        limit=limit,
+        actor_type=actor_type,
+        error_context="FTS Postgres search failed",
+    )
 
 
 async def search_fts_exact(
@@ -1126,57 +1175,16 @@ async def _search_fts_exact_sqlite(
     actor_type: str = "",
 ) -> list[dict]:
     """SQLite FTS5 exact (non-stemmed) BM25 search via ``memory_fts_exact``."""
-    from archivist.storage.sqlite_pool import pool
-
-    _t0 = time.monotonic()
-    try:
-        async with pool.read() as conn:
-            where_clauses = ["mc.is_excluded = 0"]
-            params: list = []
-
-            if namespace:
-                where_clauses.append("mc.namespace = ?")
-                params.append(namespace)
-            if agent_id:
-                where_clauses.append("mc.agent_id = ?")
-                params.append(agent_id)
-            if memory_type:
-                where_clauses.append("mc.memory_type = ?")
-                params.append(memory_type)
-            if actor_type:
-                where_clauses.append("mc.actor_type = ?")
-                params.append(actor_type)
-
-            where_sql = " AND " + " AND ".join(where_clauses)
-
-            sql = (
-                "SELECT mc.qdrant_id, mc.file_path, mc.chunk_index, mc.agent_id, "
-                "mc.namespace, mc.date, mc.memory_type, mc.text, "
-                "mc.actor_id, mc.actor_type, mc.importance, mc.tier_label, "
-                "rank AS bm25_rank "
-                "FROM memory_fts_exact "
-                "JOIN memory_chunks mc ON memory_fts_exact.rowid = mc.rowid "
-                "LEFT JOIN memory_hotness mh ON mh.memory_id = mc.qdrant_id "
-                f"WHERE memory_fts_exact MATCH ? {where_sql} "
-                "ORDER BY (rank * (1 + 0.3 * COALESCE(mh.importance_signal, 0.5))) "
-                f"LIMIT ?"
-            )
-            params = [query] + params + [limit]
-
-            cur = await conn.execute(sql, params)
-            results = []
-            for row in await cur.fetchall():
-                r = dict(row)
-                r["bm25_score"] = -r.pop("bm25_rank", 0)
-                results.append(r)
-        m.observe(
-            m.FTS_SEARCH_DURATION_MS, (time.monotonic() - _t0) * 1000.0, {"backend": "sqlite"}
-        )
-        m.inc(m.FTS_SEARCH_TOTAL, {"backend": "sqlite"})
-        return results
-    except Exception as e:
-        logging.getLogger("archivist.graph").warning("FTS exact search failed: %s", e)
-        return []
+    return await _search_fts_sqlite_family(
+        fts_table="memory_fts_exact",
+        match_query=query,
+        namespace=namespace,
+        agent_id=agent_id,
+        memory_type=memory_type,
+        limit=limit,
+        actor_type=actor_type,
+        error_context="FTS exact search failed",
+    )
 
 
 async def _search_fts_exact_postgres(
@@ -1193,61 +1201,20 @@ async def _search_fts_exact_postgres(
     equivalent to FTS5's ``unicode61`` tokenizer.
     """
     from archivist.storage.fts_search import _pg_tsquery_or
-    from archivist.storage.sqlite_pool import pool
 
     tsquery_expr = _pg_tsquery_or(raw_query)
-    if not tsquery_expr:
-        return []
 
-    _t0 = time.monotonic()
-    try:
-        async with pool.read() as conn:
-            where_clauses = ["mc.is_excluded = 0"]
-            params: list = [tsquery_expr]
-
-            if namespace:
-                where_clauses.append("mc.namespace = ?")
-                params.append(namespace)
-            if agent_id:
-                where_clauses.append("mc.agent_id = ?")
-                params.append(agent_id)
-            if memory_type:
-                where_clauses.append("mc.memory_type = ?")
-                params.append(memory_type)
-            if actor_type:
-                where_clauses.append("mc.actor_type = ?")
-                params.append(actor_type)
-
-            where_sql = " AND " + " AND ".join(where_clauses)
-
-            sql = (
-                "SELECT mc.qdrant_id, mc.file_path, mc.chunk_index, mc.agent_id, "
-                "mc.namespace, mc.date, mc.memory_type, mc.text, "
-                "mc.actor_id, mc.actor_type, mc.importance, mc.tier_label, "
-                "ts_rank_cd(mc.fts_vector_simple, to_tsquery('simple', ?)) * 32 AS bm25_rank "
-                "FROM memory_chunks mc "
-                "LEFT JOIN memory_hotness mh ON mh.memory_id = mc.qdrant_id "
-                f"WHERE mc.fts_vector_simple @@ to_tsquery('simple', ?) {where_sql} "
-                "ORDER BY (ts_rank_cd(mc.fts_vector_simple, to_tsquery('simple', ?)) * 32 "
-                "          * (1 + 0.3 * COALESCE(mh.importance_signal, 0.5))) DESC "
-                "LIMIT ?"
-            )
-            params = [tsquery_expr, tsquery_expr] + params[1:] + [tsquery_expr, limit]
-
-            cur = await conn.execute(sql, params)
-            results = []
-            for row in await cur.fetchall():
-                r = dict(row)
-                r["bm25_score"] = r.pop("bm25_rank", 0)
-                results.append(r)
-        m.observe(
-            m.FTS_SEARCH_DURATION_MS, (time.monotonic() - _t0) * 1000.0, {"backend": "postgres"}
-        )
-        m.inc(m.FTS_SEARCH_TOTAL, {"backend": "postgres"})
-        return results
-    except Exception as e:
-        logging.getLogger("archivist.graph").warning("FTS exact Postgres search failed: %s", e)
-        return []
+    return await _search_fts_postgres_family(
+        tsquery_expr=tsquery_expr,
+        fts_column="fts_vector_simple",
+        ts_config="simple",
+        namespace=namespace,
+        agent_id=agent_id,
+        memory_type=memory_type,
+        limit=limit,
+        actor_type=actor_type,
+        error_context="FTS exact Postgres search failed",
+    )
 
 
 _RETENTION_RANK = {"ephemeral": 0, "standard": 1, "durable": 2, "permanent": 3}
@@ -1924,7 +1891,10 @@ async def delete_hotness(memory_id: str) -> int:
 
     Returns the number of rows deleted (0 or 1).  Silently returns 0 if the
     ``memory_hotness`` table does not yet exist (it is lazily created by
-    ``hotness.refresh_hotness``).
+    ``hotness.refresh_hotness``).  Any other database error is logged at
+    ``warning`` for visibility — the return contract (always ``0`` on
+    failure, since this runs as part of hard-delete cascade cleanup) is
+    unchanged; only the missing error visibility is fixed.
     """
     from archivist.storage.sqlite_pool import pool
 
@@ -1938,6 +1908,7 @@ async def delete_hotness(memory_id: str) -> int:
     except Exception as e:
         if "no such table" in str(e).lower():
             return 0
+        logger.warning("delete_hotness failed for %s: %s", memory_id, e)
         return 0
 
 
