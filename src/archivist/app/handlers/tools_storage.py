@@ -1180,7 +1180,9 @@ async def _handle_delete(arguments: dict) -> list[TextContent]:
 
     ns_err = _rbac_gate(agent_id, "write", namespace)
     if ns_err:
-        return ns_err
+        # INIT-022/SPEC-008 (H3): was returning the bare error string instead of the
+        # structured [TextContent] payload every other RBAC-gated handler in this file returns.
+        return [TextContent(type="text", text=ns_err)]
     if not namespace:
         namespace = get_namespace_for_agent(agent_id)
 
