@@ -243,7 +243,12 @@ class TestDashboardHelpers:
 
         from archivist.app.dashboard import _hotness_heatmap
 
-        with patch("archivist.app.dashboard.pool", mock_pool):
+        # Patched at the source (archivist.storage.sqlite_pool.pool), not on the
+        # dashboard module — dashboard.py imports `pool` inside the function it's
+        # used in (INIT-026/SPEC-001), so there is no module-level attribute to
+        # patch here anymore; the function-local import re-reads this source at
+        # call time.
+        with patch("archivist.storage.sqlite_pool.pool", mock_pool):
             result = await _hotness_heatmap()
 
         assert result == []
@@ -263,7 +268,9 @@ class TestDashboardHelpers:
         mock_hc.stats.return_value = {"enabled": False, "total_entries": 0, "agents": 0}
 
         with (
-            patch("archivist.app.dashboard.pool", mock_pool),
+            # Patched at the source — see the comment in
+            # test_hotness_heatmap_returns_empty_on_error above.
+            patch("archivist.storage.sqlite_pool.pool", mock_pool),
             patch("archivist.app.dashboard._qdrant_stats", return_value={"total_points": 0}),
             patch("archivist.app.dashboard._stale_estimate", return_value={"stale_pct": 0}),
             patch("archivist.app.dashboard._hotness_heatmap", new=AsyncMock(return_value=[])),
@@ -307,7 +314,9 @@ class TestSavingsDashboardHandler:
         mock_pool.read.return_value.__aexit__ = AsyncMock(return_value=False)
 
         with (
-            patch("archivist.app.handlers.tools_admin.pool", mock_pool),
+            # Patched at the source — see the comment in
+            # test_hotness_heatmap_returns_empty_on_error above.
+            patch("archivist.storage.sqlite_pool.pool", mock_pool),
             patch(
                 "archivist.app.dashboard._token_savings_stats",
                 new=AsyncMock(return_value=mock_savings),

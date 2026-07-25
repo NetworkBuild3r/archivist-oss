@@ -16,7 +16,6 @@ from datetime import UTC, datetime
 import archivist.core.health as health
 from archivist.core.config import QDRANT_COLLECTION, TOKEN_USD_PER_1K
 from archivist.storage.qdrant import qdrant_client
-from archivist.storage.sqlite_pool import pool
 
 logger = logging.getLogger("archivist.dashboard")
 
@@ -55,6 +54,12 @@ def attach_cost_estimates(
 
 async def build_dashboard(window_days: int = 7) -> dict:
     """Aggregate health metrics across all subsystems."""
+    # Imported here (not at module scope) so this always resolves to the pool
+    # object main.py's startup rebinds `sqlite_pool.pool` to — a module-level
+    # `from ... import pool` would bind once, at import time, to the
+    # pre-initialization placeholder and never see that rebind (INIT-026/SPEC-001).
+    from archivist.storage.sqlite_pool import pool
+
     now_iso = datetime.now(UTC).isoformat()
 
     qdrant_stats = _qdrant_stats()
@@ -413,6 +418,9 @@ async def _tier_distribution_stats(conn, window_days: int) -> dict:
 async def _hotness_heatmap(top_n: int = 50) -> list[dict]:
     """Return top-N memories by hotness score for the heatmap widget."""
     try:
+        # See build_dashboard() above for why this import is function-local.
+        from archivist.storage.sqlite_pool import pool
+
         async with pool.read() as conn:
             rows = await conn.fetchall(
                 """SELECT

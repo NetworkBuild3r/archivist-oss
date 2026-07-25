@@ -107,6 +107,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   CHANGELOG/README, plus the previously-hardcoded health-endpoint version
   string in `src/archivist/app/main.py`.
 
+### Fixed
+
+- `GET /admin/dashboard` and the `archivist_health_dashboard` / `archivist_savings_dashboard` MCP tools
+  raised `RuntimeError: SQLitePool is not initialized` on every call against the default SQLite backend.
+  `dashboard.py` and `tools_admin.py` imported the connection-pool singleton at module scope, binding to
+  the pre-initialization placeholder instead of the real backend startup rebinds `sqlite_pool.pool` to;
+  every other consumer already imported it inside the function that uses it. Both files now follow that
+  same pattern.
+
 ## [2.3.0] - 2026-04-25
 
 ### Added — Answer Finder Architecture
