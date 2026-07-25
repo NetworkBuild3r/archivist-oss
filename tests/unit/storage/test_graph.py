@@ -292,7 +292,7 @@ class TestFtsSearchPostgresFamily:
         conn = _FakeAsyncConn(rows=_FIXTURE_ROWS)
         _patch_pool(monkeypatch, conn)
 
-        results = await _search_fts_postgres("fox", raw_query="fox", fts_mode="or", namespace="ns1")
+        results = await _search_fts_postgres(raw_query="fox", fts_mode="or", namespace="ns1")
 
         assert len(results) == 2
         # Postgres family does NOT negate the rank (unlike the sqlite family).
@@ -310,7 +310,7 @@ class TestFtsSearchPostgresFamily:
         conn = _FakeAsyncConn(rows=_FIXTURE_ROWS)
         _patch_pool(monkeypatch, conn)
 
-        results = await _search_fts_exact_postgres("fox", raw_query="fox")
+        results = await _search_fts_exact_postgres(raw_query="fox")
 
         assert len(results) == 2
         assert results[0]["bm25_score"] == -2.5
@@ -325,11 +325,11 @@ class TestFtsSearchPostgresFamily:
 
         conn_a = _FakeAsyncConn(rows=_FIXTURE_ROWS)
         _patch_pool(monkeypatch, conn_a)
-        stemmed = await _search_fts_postgres("fox", raw_query="fox", fts_mode="or")
+        stemmed = await _search_fts_postgres(raw_query="fox", fts_mode="or")
 
         conn_b = _FakeAsyncConn(rows=_FIXTURE_ROWS)
         _patch_pool(monkeypatch, conn_b)
-        exact = await _search_fts_exact_postgres("fox", raw_query="fox")
+        exact = await _search_fts_exact_postgres(raw_query="fox")
 
         assert [r["bm25_score"] for r in stemmed] == [r["bm25_score"] for r in exact]
         assert [r["qdrant_id"] for r in stemmed] == [r["qdrant_id"] for r in exact]
@@ -343,7 +343,7 @@ class TestFtsSearchPostgresFamily:
         _patch_pool(monkeypatch, conn)
 
         # A single stopword-only query yields "" from the "and" builder.
-        results = await _search_fts_postgres("the", raw_query="the", fts_mode="and")
+        results = await _search_fts_postgres(raw_query="the", fts_mode="and")
 
         assert results == []
         assert conn.executed == []
@@ -355,7 +355,7 @@ class TestFtsSearchPostgresFamily:
         conn = _FakeAsyncConn(rows=_FIXTURE_ROWS)
         _patch_pool(monkeypatch, conn)
 
-        await _search_fts_postgres("fox", raw_query="fox", fts_mode="or")
+        await _search_fts_postgres(raw_query="fox", fts_mode="or")
 
         assert len(metrics_recorder.observed) == 1
         assert metrics_recorder.observed[0][2] == {"backend": "postgres"}
@@ -370,7 +370,7 @@ class TestFtsSearchPostgresFamily:
         _patch_pool(monkeypatch, conn)
 
         with caplog.at_level(logging.WARNING, logger="archivist.graph"):
-            results = await _search_fts_postgres("fox", raw_query="fox", fts_mode="or")
+            results = await _search_fts_postgres(raw_query="fox", fts_mode="or")
 
         assert results == []
         assert "FTS Postgres search failed" in caplog.text
@@ -382,7 +382,7 @@ class TestFtsSearchPostgresFamily:
         _patch_pool(monkeypatch, conn)
 
         with caplog.at_level(logging.WARNING, logger="archivist.graph"):
-            results = await _search_fts_exact_postgres("fox", raw_query="fox")
+            results = await _search_fts_exact_postgres(raw_query="fox")
 
         assert results == []
         assert "FTS exact Postgres search failed" in caplog.text
