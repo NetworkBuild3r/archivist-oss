@@ -15,7 +15,6 @@ Covers:
 - Orphan sweeper reconciles SQLite vs Qdrant
 """
 
-import asyncio
 import sqlite3
 from datetime import UTC
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -1362,7 +1361,7 @@ def _make_qdrant_client(scroll_return=None):
 class TestSearchVectorsMustNotFilter:
     """search_vectors() includes must_not conditions for archived and deleted."""
 
-    def test_must_not_always_set(self, monkeypatch):
+    async def test_must_not_always_set(self, monkeypatch):
         """Filter(must_not=...) is always constructed, not conditional."""
         import rlm_retriever
 
@@ -1382,9 +1381,7 @@ class TestSearchVectorsMustNotFilter:
         monkeypatch.setattr("rlm_retriever.collection_for", lambda ns: "test-coll")
         monkeypatch.setattr("rlm_retriever.embed_text", AsyncMock(return_value=[0.0] * 1024))
 
-        asyncio.get_event_loop().run_until_complete(
-            rlm_retriever.search_vectors("some query", namespace="test-ns")
-        )
+        await rlm_retriever.search_vectors("some query", namespace="test-ns")
 
         assert captured_filter is not None
         must_not = captured_filter.must_not
@@ -1393,7 +1390,7 @@ class TestSearchVectorsMustNotFilter:
         assert "archived" in keys
         assert "deleted" in keys
 
-    def test_must_not_values_are_true(self, monkeypatch):
+    async def test_must_not_values_are_true(self, monkeypatch):
         """The must_not conditions match value=True."""
         import rlm_retriever
 
@@ -1413,9 +1410,7 @@ class TestSearchVectorsMustNotFilter:
         monkeypatch.setattr("rlm_retriever.collection_for", lambda ns: "test-coll")
         monkeypatch.setattr("rlm_retriever.embed_text", AsyncMock(return_value=[0.0] * 1024))
 
-        asyncio.get_event_loop().run_until_complete(
-            rlm_retriever.search_vectors("some query", namespace="test-ns")
-        )
+        await rlm_retriever.search_vectors("some query", namespace="test-ns")
 
         must_not_by_key = {c.key: c for c in captured_filter.must_not}
         assert must_not_by_key["archived"].match.value is True
