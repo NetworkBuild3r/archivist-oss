@@ -239,7 +239,13 @@ class TestIndexerParallelReverseHyde:
             "asyncio.gather in indexer must use return_exceptions=True"
         )
 
-    async def test_parallel_hyde_calls(self, monkeypatch, tmp_path):
+    async def test_parallel_hyde_calls(self, async_pool, monkeypatch, tmp_path):
+        # INIT-022/SPEC-001 (C1): the shared _persist_points() helper now
+        # re-raises MemoryTransaction failures instead of swallowing them at
+        # debug level, so this test -- like its siblings above -- needs a
+        # real initialized pool for the primary-points transaction to
+        # succeed. Previously this test passed only because that same
+        # transaction failure was being silently discarded.
         call_times = []
 
         async def tracked_hyde(text):
