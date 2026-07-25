@@ -259,19 +259,6 @@ TOOLS: list[Tool] = [
 # ---------------------------------------------------------------------------
 
 
-def _resolve_skill(name: str, provider: str = "") -> dict | None:
-    """Sync shim — callers in this file must be updated to use await _resolve_skill_async()."""
-    import asyncio
-
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            raise RuntimeError("use await _resolve_skill_async() inside async context")
-    except Exception:
-        pass
-    return None
-
-
 async def _resolve_skill_async(name: str, provider: str = "") -> dict | None:
     return await find_skill(name, provider)
 
