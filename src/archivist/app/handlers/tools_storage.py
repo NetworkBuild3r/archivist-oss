@@ -351,6 +351,186 @@ async def _persist_background_points(
         await register_memory_points_batch(mp_records)
 
 
+async def _extract_and_store_entities(
+    text: str,
+    agent_id: str,
+    *,
+    namespace: str,
+    retention: str,
+    actor_id: str,
+    actor_type: str,
+    fact_kw: dict,
+) -> dict:
+    """Auto-extract entities from ``text`` and store each as an entity/fact pair.
+
+    Combines ``pre_extract`` hints with ``extract_needle_entities`` output,
+    skips the agent's own name, and returns the ``pre_extract`` hints dict
+    (used by the caller for thought-type detection).
+
+    Extracted from ``_handle_store``'s inline auto-entity-extraction block
+    (INIT-022/SPEC-008, M7) — pure extraction, no behavior change.
+    """
+    _auto_hints = pre_extract(text)
+    _auto_entities = _auto_hints.get("entities", [])
+    _needle_entities = extract_needle_entities(text)
+
+    _extracted_conf = DEFAULT_CONFIDENCE_BY_ACTOR_TYPE.get("extracted", 0.5)
+    _extracted_fact_kw = dict(fact_kw, confidence=_extracted_conf, provenance="deterministic")
+    for ent in _auto_entities + _needle_entities:
+        ename = ent["name"].strip()
+        if ename and ename != agent_id:
+            etype = ent.get("type", "unknown")
+            _eid = await upsert_entity(
+                ename,
+                etype,
+                retention_class=retention,
+                namespace=namespace or "global",
+                actor_id=actor_id,
+                actor_type=actor_type,
+            )
+            await add_fact(_eid, text[:200], f"explicit/{agent_id}", agent_id, **_extracted_fact_kw)
+    return _auto_hints
+
+
+async def _reverse_hyde_background(
+    *,
+    text: str,
+    pid: str,
+    agent_id: str,
+    namespace: str,
+    now: datetime,
+    importance: float,
+    retention: str,
+    memory_type: str,
+    thought_type: str,
+    actor_id: str,
+    actor_type: str,
+    confidence: float,
+    source_trace: SourceTrace,
+    coll: str,
+) -> None:
+    """Fire-and-forget: generate hypothetical questions for ``text`` and persist them.
+
+    Promoted from a nested closure inside ``_handle_store`` to a module-level
+    function taking explicit parameters instead of capturing locals via
+    closure (INIT-022/SPEC-008, M7) — pure extraction, no behavior change.
+    """
+    from archivist.write.hyde import generate_reverse_hyde_questions
+
+    _rh_questions = await generate_reverse_hyde_questions(text)
+    if not _rh_questions:
+        return
+    _rh_vecs = await embed_batch(_rh_questions)
+    _rh_points = []
+    for qi, (q, qv) in enumerate(zip(_rh_questions, _rh_vecs)):
+        _q_id = str(uuid.uuid4())
+        _rh_trace = source_trace.with_parent(pid)
+        _rh_points.append(
+            PointStruct(
+                id=_q_id,
+                vector=qv,
+                payload={
+                    "agent_id": agent_id,
+                    "text": text,
+                    "file_path": f"explicit/{agent_id}",
+                    "file_type": "reverse_hyde",
+                    "date": now.strftime("%Y-%m-%d"),
+                    "team": TEAM_MAP.get(agent_id, "unknown"),
+                    "chunk_index": 0,
+                    "namespace": namespace,
+                    "version": 1,
+                    "importance_score": importance,
+                    "retention_class": retention,
+                    "memory_type": memory_type,
+                    "thought_type": thought_type,
+                    "source_memory_id": pid,
+                    "is_reverse_hyde": True,
+                    "reverse_hyde_question": q,
+                    "actor_id": actor_id,
+                    "actor_type": actor_type,
+                    "confidence": confidence,
+                    "source_trace": _rh_trace.to_dict(),
+                },
+            )
+        )
+    if _rh_points:
+        _rh_mp_records = [
+            {"memory_id": pid, "qdrant_id": str(rp.id), "point_type": "reverse_hyde"}
+            for rp in _rh_points
+        ]
+        await _persist_background_points(coll, _rh_points, _rh_mp_records, pid)
+    logger.info(
+        "reverse_hyde.background_complete",
+        extra={"memory_id": pid, "question_count": len(_rh_questions)},
+    )
+
+
+async def _synthetic_questions_background(
+    *,
+    text: str,
+    pid: str,
+    agent_id: str,
+    namespace: str,
+    now: datetime,
+    importance: float,
+    retention: str,
+    memory_type: str,
+    thought_type: str,
+    actor_id: str,
+    actor_type: str,
+    confidence: float,
+    source_trace: SourceTrace,
+    coll: str,
+) -> None:
+    """Fire-and-forget: generate synthetic questions for ``text`` and persist them.
+
+    Promoted from a nested closure inside ``_handle_store`` to a module-level
+    function taking explicit parameters instead of capturing locals via
+    closure (INIT-022/SPEC-008, M7) — pure extraction, no behavior change.
+    """
+    from archivist.write.synthetic_questions import generate_and_embed_synthetic_points
+
+    _sq_trace = source_trace.with_parent(pid)
+    base_payload = {
+        "agent_id": agent_id,
+        "text": text,
+        "file_path": f"explicit/{agent_id}",
+        "file_type": "explicit",
+        "date": now.strftime("%Y-%m-%d"),
+        "team": TEAM_MAP.get(agent_id, "unknown"),
+        "chunk_index": 0,
+        "namespace": namespace,
+        "version": 1,
+        "importance_score": importance,
+        "retention_class": retention,
+        "memory_type": memory_type,
+        "thought_type": thought_type,
+        "actor_id": actor_id,
+        "actor_type": actor_type,
+        "confidence": confidence,
+        "source_trace": _sq_trace.to_dict(),
+    }
+    sq_points = await generate_and_embed_synthetic_points(
+        chunk_point_id=pid,
+        chunk_text=text,
+        base_payload=base_payload,
+    )
+    if sq_points:
+        _sq_mp_records = [
+            {
+                "memory_id": pid,
+                "qdrant_id": str(sp.id),
+                "point_type": "synthetic_question",
+            }
+            for sp in sq_points
+        ]
+        await _persist_background_points(coll, sq_points, _sq_mp_records, pid)
+    logger.info(
+        "synthetic_questions.background_complete",
+        extra={"memory_id": pid, "question_count": len(sq_points)},
+    )
+
+
 async def _handle_store(arguments: dict) -> list[TextContent]:
     _t_store = time.monotonic()
     text = arguments["text"]
@@ -483,27 +663,15 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
         )
         await add_fact(eid, text[:200], f"explicit/{agent_id}", agent_id, **_fact_kw)
 
-        _auto_hints = pre_extract(text)
-        _auto_entities = _auto_hints.get("entities", [])
-        _needle_entities = extract_needle_entities(text)
-
-        _extracted_conf = DEFAULT_CONFIDENCE_BY_ACTOR_TYPE.get("extracted", 0.5)
-        _extracted_fact_kw = dict(_fact_kw, confidence=_extracted_conf, provenance="deterministic")
-        for ent in _auto_entities + _needle_entities:
-            ename = ent["name"].strip()
-            if ename and ename != agent_id:
-                etype = ent.get("type", "unknown")
-                _eid = await upsert_entity(
-                    ename,
-                    etype,
-                    retention_class=retention,
-                    namespace=namespace or "global",
-                    actor_id=actor_id,
-                    actor_type=actor_type,
-                )
-                await add_fact(
-                    _eid, text[:200], f"explicit/{agent_id}", agent_id, **_extracted_fact_kw
-                )
+        _auto_hints = await _extract_and_store_entities(
+            text,
+            agent_id,
+            namespace=namespace,
+            retention=retention,
+            actor_id=actor_id,
+            actor_type=actor_type,
+            fact_kw=_fact_kw,
+        )
     else:
         _auto_hints = pre_extract(text)
 
@@ -708,56 +876,6 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
 
     if REVERSE_HYDE_ENABLED:
 
-        async def _reverse_hyde_background():
-            from archivist.write.hyde import generate_reverse_hyde_questions
-
-            _rh_questions = await generate_reverse_hyde_questions(text)
-            if not _rh_questions:
-                return
-            _rh_vecs = await embed_batch(_rh_questions)
-            _rh_points = []
-            for qi, (q, qv) in enumerate(zip(_rh_questions, _rh_vecs)):
-                _q_id = str(uuid.uuid4())
-                _rh_trace = source_trace.with_parent(pid)
-                _rh_points.append(
-                    PointStruct(
-                        id=_q_id,
-                        vector=qv,
-                        payload={
-                            "agent_id": agent_id,
-                            "text": text,
-                            "file_path": f"explicit/{agent_id}",
-                            "file_type": "reverse_hyde",
-                            "date": now.strftime("%Y-%m-%d"),
-                            "team": TEAM_MAP.get(agent_id, "unknown"),
-                            "chunk_index": 0,
-                            "namespace": namespace,
-                            "version": 1,
-                            "importance_score": importance,
-                            "retention_class": retention,
-                            "memory_type": arguments.get("memory_type", "general"),
-                            "thought_type": thought_type,
-                            "source_memory_id": pid,
-                            "is_reverse_hyde": True,
-                            "reverse_hyde_question": q,
-                            "actor_id": actor_id,
-                            "actor_type": actor_type,
-                            "confidence": confidence,
-                            "source_trace": _rh_trace.to_dict(),
-                        },
-                    )
-                )
-            if _rh_points:
-                _rh_mp_records = [
-                    {"memory_id": pid, "qdrant_id": str(rp.id), "point_type": "reverse_hyde"}
-                    for rp in _rh_points
-                ]
-                await _persist_background_points(_coll, _rh_points, _rh_mp_records, pid)
-            logger.info(
-                "reverse_hyde.background_complete",
-                extra={"memory_id": pid, "question_count": len(_rh_questions)},
-            )
-
         def _rh_done(task: asyncio.Task):
             if task.cancelled():
                 return
@@ -765,56 +883,31 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
             if exc:
                 logger.warning("Reverse HyDE background task failed for %s: %s", pid, exc)
 
-        _rh_task = asyncio.create_task(_reverse_hyde_background(), name=f"reverse_hyde_{pid}")
+        _rh_task = asyncio.create_task(
+            _reverse_hyde_background(
+                text=text,
+                pid=pid,
+                agent_id=agent_id,
+                namespace=namespace,
+                now=now,
+                importance=importance,
+                retention=retention,
+                memory_type=arguments.get("memory_type", "general"),
+                thought_type=thought_type,
+                actor_id=actor_id,
+                actor_type=actor_type,
+                confidence=confidence,
+                source_trace=source_trace,
+                coll=_coll,
+            ),
+            name=f"reverse_hyde_{pid}",
+        )
         _rh_task.add_done_callback(_rh_done)
 
     # Synthetic question generation (background, non-blocking)
     from archivist.core.config import SYNTHETIC_QUESTIONS_ENABLED as _SQ_ENABLED
 
     if _SQ_ENABLED:
-
-        async def _synthetic_questions_background():
-            from archivist.write.synthetic_questions import generate_and_embed_synthetic_points
-
-            _sq_trace = source_trace.with_parent(pid)
-            base_payload = {
-                "agent_id": agent_id,
-                "text": text,
-                "file_path": f"explicit/{agent_id}",
-                "file_type": "explicit",
-                "date": now.strftime("%Y-%m-%d"),
-                "team": TEAM_MAP.get(agent_id, "unknown"),
-                "chunk_index": 0,
-                "namespace": namespace,
-                "version": 1,
-                "importance_score": importance,
-                "retention_class": retention,
-                "memory_type": arguments.get("memory_type", "general"),
-                "thought_type": thought_type,
-                "actor_id": actor_id,
-                "actor_type": actor_type,
-                "confidence": confidence,
-                "source_trace": _sq_trace.to_dict(),
-            }
-            sq_points = await generate_and_embed_synthetic_points(
-                chunk_point_id=pid,
-                chunk_text=text,
-                base_payload=base_payload,
-            )
-            if sq_points:
-                _sq_mp_records = [
-                    {
-                        "memory_id": pid,
-                        "qdrant_id": str(sp.id),
-                        "point_type": "synthetic_question",
-                    }
-                    for sp in sq_points
-                ]
-                await _persist_background_points(_coll, sq_points, _sq_mp_records, pid)
-            logger.info(
-                "synthetic_questions.background_complete",
-                extra={"memory_id": pid, "question_count": len(sq_points)},
-            )
 
         def _sq_done(task: asyncio.Task):
             if task.cancelled():
@@ -823,7 +916,25 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
             if exc:
                 logger.warning("Synthetic questions background task failed for %s: %s", pid, exc)
 
-        _sq_task = asyncio.create_task(_synthetic_questions_background(), name=f"synthetic_q_{pid}")
+        _sq_task = asyncio.create_task(
+            _synthetic_questions_background(
+                text=text,
+                pid=pid,
+                agent_id=agent_id,
+                namespace=namespace,
+                now=now,
+                importance=importance,
+                retention=retention,
+                memory_type=arguments.get("memory_type", "general"),
+                thought_type=thought_type,
+                actor_id=actor_id,
+                actor_type=actor_type,
+                confidence=confidence,
+                source_trace=source_trace,
+                coll=_coll,
+            ),
+            name=f"synthetic_q_{pid}",
+        )
         _sq_task.add_done_callback(_sq_done)
 
     from archivist.core.audit import log_memory_event
