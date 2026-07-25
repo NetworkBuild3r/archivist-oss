@@ -208,9 +208,7 @@ def _file_checksum(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
-def _scan_memory_files_sync(
-    memory_root: str, cutoff: datetime
-) -> list[tuple[str, str, str, str]]:
+def _scan_memory_files_sync(memory_root: str, cutoff: datetime) -> list[tuple[str, str, str, str]]:
     """Blocking file-system scan: walk ``memory_root``, filter by mtime, read content.
 
     INIT-022/SPEC-006 (M2): pure synchronous I/O (``os.walk``/``getmtime``/

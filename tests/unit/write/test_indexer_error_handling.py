@@ -1,12 +1,12 @@
 """Regression tests for INIT-022/SPEC-001's indexer error-handling fixes.
 
-  - C1 (Critical): ``_persist_points`` (the shared helper introduced by the
-    M13 dedup) must re-raise on a ``MemoryTransaction`` failure instead of
-    swallowing it -- previously ``index_file()`` reported success (returned
-    ``len(points)``) even when nothing was actually persisted.
-  - H8 (High): ``delete_file_points`` must log at ``warning`` level (not
-    silently swallow) when the Qdrant delete-by-filter call fails, on both
-    the outbox and legacy code paths.
+- C1 (Critical): ``_persist_points`` (the shared helper introduced by the
+  M13 dedup) must re-raise on a ``MemoryTransaction`` failure instead of
+  swallowing it -- previously ``index_file()`` reported success (returned
+  ``len(points)``) even when nothing was actually persisted.
+- H8 (High): ``delete_file_points`` must log at ``warning`` level (not
+  silently swallow) when the Qdrant delete-by-filter call fails, on both
+  the outbox and legacy code paths.
 """
 
 from __future__ import annotations

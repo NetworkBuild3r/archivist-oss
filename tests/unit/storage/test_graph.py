@@ -44,7 +44,9 @@ class _FakeAsyncConn:
     *rows* (for reads) or *rowcount* (for writes).
     """
 
-    def __init__(self, rows: list[dict] | None = None, rowcount: int = 0, exc: Exception | None = None):
+    def __init__(
+        self, rows: list[dict] | None = None, rowcount: int = 0, exc: Exception | None = None
+    ):
         self._rows = rows
         self._rowcount = rowcount
         self._exc = exc
@@ -227,7 +229,9 @@ class TestFtsSearchSqliteFamily:
         sql, _ = conn.executed[0]
         assert "memory_fts_exact" in sql
 
-    async def test_sqlite_variants_produce_identical_result_shape(self, monkeypatch, metrics_recorder):
+    async def test_sqlite_variants_produce_identical_result_shape(
+        self, monkeypatch, metrics_recorder
+    ):
         """ac-2 parity check: stemmed and exact sqlite variants must agree on
         shape/score-sign for the same fixture, proving the shared helper didn't
         introduce a divergence between the two call sites."""
@@ -255,7 +259,9 @@ class TestFtsSearchSqliteFamily:
 
         assert len(metrics_recorder.observed) == 1
         assert metrics_recorder.observed[0][2] == {"backend": "sqlite"}
-        assert metrics_recorder.incremented == [("archivist_fts_search_total", {"backend": "sqlite"})]
+        assert metrics_recorder.incremented == [
+            ("archivist_fts_search_total", {"backend": "sqlite"})
+        ]
 
     async def test_sqlite_search_error_logs_warning_and_returns_empty(self, monkeypatch, caplog):
         from archivist.storage.graph import _search_fts_sqlite
@@ -318,7 +324,9 @@ class TestFtsSearchPostgresFamily:
         assert "fts_vector_simple" in sql
         assert "to_tsquery('simple'" in sql
 
-    async def test_postgres_variants_produce_identical_result_shape(self, monkeypatch, metrics_recorder):
+    async def test_postgres_variants_produce_identical_result_shape(
+        self, monkeypatch, metrics_recorder
+    ):
         """ac-2 parity check: stemmed and exact postgres variants agree on
         shape/score-sign for the same fixture."""
         from archivist.storage.graph import _search_fts_exact_postgres, _search_fts_postgres
@@ -334,7 +342,9 @@ class TestFtsSearchPostgresFamily:
         assert [r["bm25_score"] for r in stemmed] == [r["bm25_score"] for r in exact]
         assert [r["qdrant_id"] for r in stemmed] == [r["qdrant_id"] for r in exact]
 
-    async def test_empty_tsquery_short_circuits_without_touching_pool(self, monkeypatch, metrics_recorder):
+    async def test_empty_tsquery_short_circuits_without_touching_pool(
+        self, monkeypatch, metrics_recorder
+    ):
         """raw_query that reduces to an empty tsquery must return [] without a
         pool round-trip (existing behavior, unchanged by the refactor)."""
         from archivist.storage.graph import _search_fts_postgres
@@ -349,7 +359,9 @@ class TestFtsSearchPostgresFamily:
         assert conn.executed == []
         assert metrics_recorder.observed == []
 
-    async def test_metrics_recorded_with_postgres_backend_label(self, monkeypatch, metrics_recorder):
+    async def test_metrics_recorded_with_postgres_backend_label(
+        self, monkeypatch, metrics_recorder
+    ):
         from archivist.storage.graph import _search_fts_postgres
 
         conn = _FakeAsyncConn(rows=_FIXTURE_ROWS)
@@ -375,7 +387,9 @@ class TestFtsSearchPostgresFamily:
         assert results == []
         assert "FTS Postgres search failed" in caplog.text
 
-    async def test_exact_postgres_search_error_uses_distinct_error_context(self, monkeypatch, caplog):
+    async def test_exact_postgres_search_error_uses_distinct_error_context(
+        self, monkeypatch, caplog
+    ):
         from archivist.storage.graph import _search_fts_exact_postgres
 
         conn = _FakeAsyncConn(exc=RuntimeError("connection reset"))
@@ -417,7 +431,11 @@ class _FakeMigrateConn:
 
     def execute(self, sql: str, *args):
         self.executed.append(sql)
-        if self.raise_on_prefix is not None and sql.startswith(self.raise_on_prefix) and self.raise_exc:
+        if (
+            self.raise_on_prefix is not None
+            and sql.startswith(self.raise_on_prefix)
+            and self.raise_exc
+        ):
             raise self.raise_exc
 
     def commit(self):

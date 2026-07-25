@@ -652,9 +652,7 @@ async def handle_backup_restore(request):
         # so its SQLite path can schedule the write-lock-guarded restore back
         # onto it from the worker thread (INIT-022/SPEC-002, fixes C2).
         loop = asyncio.get_running_loop()
-        result = await asyncio.to_thread(
-            restore_snapshot, snapshot_id, target=target, loop=loop
-        )
+        result = await asyncio.to_thread(restore_snapshot, snapshot_id, target=target, loop=loop)
         return JSONResponse(result)
     except FileNotFoundError as e:
         return JSONResponse({"error": str(e)}, status_code=404)

@@ -200,7 +200,9 @@ class TestToThreadOffload:
             if started.is_set():
                 break
             await asyncio.sleep(0.01)
-        assert started.is_set(), "restore_snapshot never started — to_thread offload isn't happening"
+        assert started.is_set(), (
+            "restore_snapshot never started — to_thread offload isn't happening"
+        )
         assert worker_thread_holder["thread"] is not main_thread
 
         await asyncio.wait_for(other_task, timeout=2)

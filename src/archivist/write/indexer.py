@@ -571,9 +571,7 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
                     }
                     for rp in _rh_points
                 ]
-                await _persist_points(
-                    _coll, _rh_points, _rh_mp_records, meta.get("file_path", "")
-                )
+                await _persist_points(_coll, _rh_points, _rh_mp_records, meta.get("file_path", ""))
                 _metrics.inc(_metrics.INDEX_CHUNKS, value=len(_rh_points))
 
         # Synthetic question generation: multi-representation indexing
@@ -621,9 +619,7 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
                     }
                     for sp in _sq_points
                 ]
-                await _persist_points(
-                    _coll, _sq_points, _sq_mp_records, meta.get("file_path", "")
-                )
+                await _persist_points(_coll, _sq_points, _sq_mp_records, meta.get("file_path", ""))
                 _metrics.inc(_metrics.INDEX_CHUNKS, value=len(_sq_points))
                 logger.info(
                     "Indexed %d synthetic question points for %s",

@@ -536,9 +536,7 @@ async def delete_memory_complete(
                 fts_count,
                 needle_count,
                 facts_count,
-            ) = await _delete_sqlite_artifacts(
-                memory_id, all_ids, result.failed_steps, txn=txn
-            )
+            ) = await _delete_sqlite_artifacts(memory_id, all_ids, result.failed_steps, txn=txn)
 
         result.qdrant_primary = 1
         result.qdrant_reverse_hyde = len(hyde_ids)
