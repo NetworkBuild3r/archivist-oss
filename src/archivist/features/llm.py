@@ -52,6 +52,23 @@ def _message_text(data: dict) -> str:
     return out
 
 
+def _openai_base(url: str) -> str:
+    """Normalise an OpenAI-compatible base URL before ``/v1/chat/completions`` is appended.
+
+    Strips a single trailing slash, then a trailing ``/v1`` segment (with or without its own
+    trailing slash), so operator-configured ``LLM_URL`` values that already end in ``/`` or
+    ``/v1`` (a common shape for OpenAI-compatible proxies) don't produce a malformed request
+    URL (doubled or duplicated ``/v1``). Deeper custom base paths (e.g. ``/openai/v1``) are
+    preserved — only the trailing ``/v1`` segment is removed.
+
+    INIT-021/SPEC-001
+    """
+    base = url.rstrip("/")
+    if base.endswith("/v1"):
+        base = base[: -len("/v1")]
+    return base
+
+
 def _get_llm_client() -> httpx.AsyncClient:
     global _llm_client
     if _llm_client is None or _llm_client.is_closed:
@@ -96,7 +113,9 @@ async def llm_query(
     if json_mode:
         body["response_format"] = {"type": "json_object"}
 
-    effective_url = url or LLM_URL
+    # INIT-021/SPEC-001: normalise so trailing "/" or "/v1" configs don't
+    # double up against the "/v1/chat/completions" suffix appended below.
+    effective_url = _openai_base(url or LLM_URL)
     effective_key = LLM_API_KEY if api_key is None else api_key
 
     m.inc(m.LLM_CALL)
