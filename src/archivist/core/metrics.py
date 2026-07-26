@@ -424,7 +424,16 @@ OUTBOX_PENDING = "archivist_outbox_pending"
 OUTBOX_DEAD = "archivist_outbox_dead"
 """Gauge: current count of outbox rows with status='dead'."""
 OUTBOX_LAG_SECONDS = "archivist_outbox_lag_seconds"
-"""Gauge: age in seconds of the oldest pending outbox row (0 when queue empty)."""
+"""Gauge: age in seconds of the oldest pending outbox row (0 when queue empty).
+
+INIT-005/SPEC-002 / ADR-005 GR-LAG-001: this is the coach-path **searchable-vector
+lag** instrumentation hook. Pending outbox age bounds how long a durable store
+ack may wait before Qdrant (and deferred embed, when enabled) makes the memory
+vector-searchable. Scraped via ``GET /metrics``; refreshed by
+``_collect_db_gauges_async``. Alias: ``SEARCHABLE_LAG_SECONDS``.
+"""
+SEARCHABLE_LAG_SECONDS = OUTBOX_LAG_SECONDS
+"""Alias for ``OUTBOX_LAG_SECONDS`` — searchable-lag SLO surface (INIT-005/SPEC-002)."""
 OUTBOX_DRAIN_DURATION = "archivist_outbox_drain_duration_ms"
 """Histogram: wall-clock time per drain() call in milliseconds."""
 OUTBOX_APPLIED_TOTAL = "archivist_outbox_applied_total"
@@ -463,6 +472,17 @@ INDEX_DURATION_MS = "archivist_index_duration_ms"
 Covers compressed namespace index rebuilds (``archivist_index`` /
 ``build_namespace_index``) and other full-index wall clocks. Coach-path
 baselines: INIT-004/SPEC-001.
+"""
+STORE_EMBED_MS = "archivist_store_embed_duration_ms"
+"""Histogram: primary store ``embed_text`` stage duration (ms).
+
+INIT-005/SPEC-002: also surfaced on store success JSON as
+``stage_timings.embed_ms``. Numeric only — never log memory text.
+"""
+STORE_CONFLICT_MS = "archivist_store_conflict_duration_ms"
+"""Histogram: optional store conflict-check stage duration (ms).
+
+INIT-005/SPEC-002: optional ``stage_timings.conflict_ms`` on store success.
 """
 
 # ── Curator per-phase observability ───────────────────────────────────────────

@@ -4,18 +4,17 @@
 
 **Goal** — Be the most **trustworthy and production-ready** open multi-agent memory layer in 2026: observable, RBAC-aware, safe under fleet load, and the best answer finder in the industry.
 
-**Next milestones (engineering)** — Immediate focus is **LLM-native coach memory
-surfaces** ([ADR-004](adr/ADR-004-llm-native-coach-memory-surfaces.md), INIT-004):
-reshape `archivist_index` into a progressive-disclosure **map** (not citable
-key-fact prose), add coach `get_context` budgets + `mode=bootstrap`, and lock
-cite-or-refuse / empty-OK boundaries in coach_core evals. ADR-003’s five-tool
-coach-core contract remains the base; this extends CE surface rules. Phase 7–10
-differentiators and **INIT-005** (embed-defer / write-path perf) remain
-longer-horizon — they are **not** the recommended next engineering work.
-(INIT-001 / [ADR-001](adr/ADR-001-platform-coherence-sequencing.md) and
-INIT-003 / [ADR-003](adr/ADR-003-coach-core-reliability.md) remain historical /
+**Next milestones (engineering)** — Immediate focus is **coach-path performance**
+([ADR-005](adr/ADR-005-coach-path-performance.md), INIT-005): cut write-path
+latency with ack-budget hard-skips, safe embed reuse, and opt-in embed-deferred
+store under an explicit searchable-lag SLO — without weakening ADR-003 durable
+graph+outbox ack or ADR-004 CE surfaces. INIT-004 / [ADR-004](adr/ADR-004-llm-native-coach-memory-surfaces.md)
+(LLM-native coach memory surfaces) is **complete / historical**. Phase 7–10
+differentiators remain longer-horizon — they are **not** the recommended next
+engineering work. (INIT-001 / [ADR-001](adr/ADR-001-platform-coherence-sequencing.md)
+and INIT-003 / [ADR-003](adr/ADR-003-coach-core-reliability.md) remain
 foundational context.)
-<!-- INIT-004/SPEC-002 -->
+<!-- INIT-005/SPEC-001 -->
 
 ---
 
@@ -65,24 +64,27 @@ These six features combined will make Archivist the **most trustworthy and produ
 
 ## Immediate Next Steps (Recommended)
 
-<!-- INIT-004/SPEC-002 -->
+<!-- INIT-005/SPEC-001 -->
 
-**Authoritative next work:** [ADR-004: LLM-native coach memory surfaces](adr/ADR-004-llm-native-coach-memory-surfaces.md)
-(INIT-004) — CE contract from BRAIN-002 on top of the ADR-003 five-tool core.
-Make index a map (not evidence), bootstrap via `get_context(mode=bootstrap)`,
-tighten coach budgets, and eval cite-or-refuse / empty-OK. Do **not** treat
-Phase 7–10 breadth or **INIT-005** embed-defer as the immediate plan.
+**Authoritative next work:** [ADR-005: Coach-path performance](adr/ADR-005-coach-path-performance.md)
+(INIT-005) — write-path latency contract on top of ADR-003 durable store-ack and
+completed INIT-004 / [ADR-004](adr/ADR-004-llm-native-coach-memory-surfaces.md)
+CE surfaces. Hard-skip optional pre-ack gates under budget (never skip outbox),
+reuse conflict embeds when text is unchanged, opt-in `ARCHIVIST_EMBED_DEFER`
+with explicit searchable-lag SLO. Do **not** treat Phase 7–10 breadth or
+re-opening INIT-004 CE as the immediate plan.
 
-1. **LLM-native coach memory surfaces (INIT-004)** — ADR-004 freeze, then
-   map-only `archivist_index`, coach `get_context` budgets + bootstrap mode,
-   map-only compressed-index builder, and coach_core CE evals.
-2. **Parked for later (not next)** — **INIT-005** (embed-deferred store /
-   write-path perf); Phase 8 lifecycle productization, Phase 7 checkpoint UX,
-   MaP MCP / fleet demos, `share_*` depth, Phase 9 observability billboard.
-   INIT-001 / [ADR-001](adr/ADR-001-platform-coherence-sequencing.md) and
-   INIT-003 / [ADR-003](adr/ADR-003-coach-core-reliability.md) are foundational
-   context, not the current recommended queue.
-3. Optional: add a **domain-specific long-document fixture** (your own docs +
+1. **Coach-path performance (INIT-005)** — ADR-005 freeze, then store stage
+   timings, ack-budget hard-skips, embed reuse, embed-deferred store + drain,
+   store lag API contract, and coach_core perf/lag/durability evals.
+2. **Complete / historical (not next)** — **INIT-004** (LLM-native coach memory
+   surfaces / ADR-004). Foundational context: INIT-001 /
+   [ADR-001](adr/ADR-001-platform-coherence-sequencing.md), INIT-003 /
+   [ADR-003](adr/ADR-003-coach-core-reliability.md).
+3. **Parked for later (not next)** — Phase 8 lifecycle productization, Phase 7
+   checkpoint UX, MaP MCP / fleet demos, `share_*` depth, Phase 9 observability
+   billboard.
+4. Optional: add a **domain-specific long-document fixture** (your own docs +
    questions) locally to tune retrieval beyond the public toy corpus — keep
    private data out of the public repo.
 

@@ -67,6 +67,7 @@ class TestStorePipelineLog:
             "entity_count",
             "reverse_hyde_queued",
             "duration_ms",
+            "stage_timings",
         ]:
             assert field in source
 
@@ -77,12 +78,70 @@ class TestStorePipelineLog:
         source = inspect.getsource(ts._handle_store_inner)
         assert '"duration_ms": _duration_ms' in source
 
+    def test_store_stage_timings_embed_ms_hook(self):
+        """INIT-005/SPEC-002: store success exposes stage_timings.embed_ms."""
+        import archivist.app.handlers.tools_storage as ts
+
+        source = inspect.getsource(ts._handle_store_inner)
+        assert 'stage_timings["embed_ms"]' in source
+        assert '"stage_timings": stage_timings' in source
+        assert "STORE_EMBED_MS" in source
+
+    def test_store_stage_timings_optional_conflict_ms(self):
+        """INIT-005/SPEC-002: optional conflict_ms when conflict check runs."""
+        import archivist.app.handlers.tools_storage as ts
+
+        source = inspect.getsource(ts._handle_store_inner)
+        assert 'stage_timings["conflict_ms"]' in source
+        assert "STORE_CONFLICT_MS" in source
+
+    def test_store_complete_log_stage_timings_no_text_fields(self):
+        """Timing log extras must not include memory text / secrets keys."""
+        import archivist.app.handlers.tools_storage as ts
+
+        source = inspect.getsource(ts._handle_store_inner)
+        # Prefer the success complete log that carries stage_timings.
+        marker = '"searchable_lag_metric": m.SEARCHABLE_LAG_SECONDS'
+        assert marker in source
+        lag_idx = source.index(marker)
+        # Window covering the complete-log extras around the lag/stage fields.
+        snippet = source[max(0, lag_idx - 600) : lag_idx + 120]
+        assert '"stage_timings": stage_timings' in snippet
+        # Must not attach fact body to the complete log extras.
+        assert '"text":' not in snippet
+        assert "embed_input" not in snippet
+
     def test_store_log_uses_time_import(self):
         import archivist.app.handlers.tools_storage as ts
 
         source = inspect.getsource(ts)
         assert "import time" in source
         assert "store_pipeline.complete" in inspect.getsource(ts._handle_store_inner)
+
+
+class TestSearchableLagInstrumentation:
+    """INIT-005/SPEC-002: searchable-lag SLO hook reuses OUTBOX_LAG_SECONDS."""
+
+    def test_searchable_lag_aliases_outbox_lag(self):
+        from archivist.core import metrics as m
+
+        assert m.SEARCHABLE_LAG_SECONDS == m.OUTBOX_LAG_SECONDS
+        assert m.SEARCHABLE_LAG_SECONDS == "archivist_outbox_lag_seconds"
+
+    def test_store_stage_metric_constants_exist(self):
+        from archivist.core import metrics as m
+
+        assert m.STORE_EMBED_MS == "archivist_store_embed_duration_ms"
+        assert m.STORE_CONFLICT_MS == "archivist_store_conflict_duration_ms"
+        assert m.STORE_EMBED_MS != m.STORE_CONFLICT_MS
+
+    def test_outbox_lag_gauge_set_in_async_collector(self):
+        """Hook is testable: async gauge collector writes OUTBOX_LAG_SECONDS."""
+        import archivist.core.metrics as m
+
+        source = inspect.getsource(m._collect_db_gauges_async)
+        assert "OUTBOX_LAG_SECONDS" in source
+        assert "gauge_set" in source
 
 
 class TestRetrievalPipelineLog:

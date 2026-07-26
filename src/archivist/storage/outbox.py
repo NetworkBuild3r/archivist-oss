@@ -430,6 +430,15 @@ class OutboxProcessor:
             from qdrant_client.models import PointStruct
 
             raw_points: list[dict[str, Any]] = payload["points"]
+            # INIT-005/SPEC-005: fill deferred embeds before upsert (never log vectors).
+            if payload.get("embed_deferred"):
+                raw_points = await _fill_deferred_upsert_vectors(
+                    collection=collection,
+                    points=raw_points,
+                    embed_inputs=payload.get("embed_inputs") or {},
+                )
+            else:
+                _assert_upsert_namespace_safe(collection, raw_points)
             points = [
                 PointStruct(
                     id=p["id"],
@@ -550,6 +559,91 @@ class OutboxProcessor:
             memory_id,
             qdrant_ids[:5],
         )
+
+
+# ---------------------------------------------------------------------------
+# Embed-deferred upsert fill (INIT-005/SPEC-005)
+# ---------------------------------------------------------------------------
+
+
+def _assert_upsert_namespace_safe(
+    collection: str,
+    points: list[dict[str, Any]],
+) -> None:
+    """Reject upserts whose point namespace does not map to *collection*.
+
+    Drain must never apply vectors across namespaces (INIT-005/SPEC-005 security).
+    """
+    from archivist.storage.collection_router import collection_for
+
+    for p in points:
+        ns = str((p.get("payload") or {}).get("namespace") or "")
+        expected = collection_for(ns)
+        if expected != collection:
+            raise ValueError(
+                "outbox upsert namespace/collection mismatch: "
+                f"point_namespace={ns!r} maps_to={expected!r} "
+                f"event_collection={collection!r}"
+            )
+
+
+async def _fill_deferred_upsert_vectors(
+    *,
+    collection: str,
+    points: list[dict[str, Any]],
+    embed_inputs: dict[str, str],
+) -> list[dict[str, Any]]:
+    """Embed deferred point texts, then return points with vectors filled.
+
+    Does not log embed inputs or vectors. Namespace/collection mismatch fails closed.
+    """
+    from archivist.features.embeddings import embed_batch
+
+    _assert_upsert_namespace_safe(collection, points)
+
+    if not embed_inputs:
+        raise ValueError("embed_deferred upsert missing embed_inputs")
+
+    need_ids: list[str] = []
+    need_texts: list[str] = []
+    filled: list[dict[str, Any]] = []
+    for p in points:
+        pid = str(p["id"])
+        vec = p.get("vector")
+        if isinstance(vec, list) and len(vec) > 0:
+            filled.append(p)
+            continue
+        text = embed_inputs.get(pid)
+        if not text:
+            raise ValueError(f"embed_deferred missing embed_input for point {pid}")
+        need_ids.append(pid)
+        need_texts.append(text)
+        filled.append(p)
+
+    if need_texts:
+        t0 = time.monotonic()
+        vectors = await embed_batch(need_texts)
+        if len(vectors) != len(need_ids):
+            raise ValueError(
+                f"embed_batch size mismatch: got {len(vectors)} for {len(need_ids)} points"
+            )
+        by_id = dict(zip(need_ids, vectors, strict=True))
+        for p in filled:
+            pid = str(p["id"])
+            if pid in by_id:
+                p["vector"] = by_id[pid]
+        # Observability only — counts / duration; never vectors or fact text.
+        m.observe(m.STORE_EMBED_MS, (time.monotonic() - t0) * 1000)
+        logger.info(
+            "outbox.embed_deferred_filled",
+            extra={
+                "collection": collection,
+                "point_count": len(need_ids),
+                "duration_ms": round((time.monotonic() - t0) * 1000, 1),
+            },
+        )
+
+    return filled
 
 
 # ---------------------------------------------------------------------------

@@ -4,6 +4,8 @@ v1.0: adds LLM-adjudicated dedup for high-similarity matches.
 v1.11: consolidated query — single embed + single Qdrant search for both conflict + dedup.
 INIT-003/SPEC-004: pre-txn similarity query is fail-fast / budgeted so a dead
 Qdrant cannot stall store ack toward the ~30s client timeout.
+INIT-005/SPEC-004: expose conflict ``_shared_vec`` for primary-store embed reuse
+when the embedded string is byte-identical (same store call only).
 """
 
 import asyncio
@@ -122,6 +124,26 @@ async def _query_similar(
         results = []
 
     return vec, results
+
+
+def conflict_vec_for_primary_embed(
+    *,
+    conflict_text: str,
+    embed_input: str,
+    shared_vec: list[float] | None,
+) -> list[float] | None:
+    """Return conflict ``shared_vec`` when primary embed text is byte-identical.
+
+    INIT-005/SPEC-004: reuse only within a single store call when
+    ``embed_input == conflict_text``. Returns ``None`` when a fresh
+    ``embed_text`` call is required (no shared vec, or text changed by
+    augmentation / other transforms). Never caches across calls or namespaces.
+    """
+    if shared_vec is None:
+        return None
+    if embed_input != conflict_text:
+        return None
+    return shared_vec
 
 
 async def check_for_conflicts(

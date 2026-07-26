@@ -343,6 +343,11 @@ class ArchivistSettings(BaseSettings):
     # Soft ack budget for archivist_store logging/metrics (ms). Durable outbox
     # commit is the ack boundary — not Qdrant sync (INIT-003/SPEC-004).
     store_ack_budget_ms: int = Field(default=4000, ge=100)
+    # INIT-005/SPEC-005 / ADR-005: opt-in embed-deferred store. When true, store
+    # ack does not await the primary embed provider; outbox drain embeds then
+    # upserts (GR-LAG-001 searchable lag). Default false (safe / current path).
+    # Env: ARCHIVIST_EMBED_DEFER
+    archivist_embed_defer: bool = False
 
     # ── Agent → team mapping ──────────────────────────────────────────────────
     team_map_path: str = ""
@@ -521,6 +526,7 @@ class ArchivistSettings(BaseSettings):
             "METRICS_AUTH_EXEMPT": self.metrics_auth_exempt,
             "MCP_SSE_ENABLED": self.mcp_sse_enabled,
             "OUTBOX_ENABLED": self.outbox_enabled,
+            "ARCHIVIST_EMBED_DEFER": self.archivist_embed_defer,
             "CONTRADICTION_RESOLVE_ENABLED": self.contradiction_resolve_enabled,
             "CONTRADICTION_RESOLVE_DRY_RUN": self.contradiction_resolve_dry_run,
             "CONTRADICTION_RESOLVE_LLM_ENABLED": self.contradiction_resolve_llm_enabled,
@@ -857,6 +863,8 @@ CONFLICT_CHECK_ON_STORE = _settings.conflict_check_on_store
 CONFLICT_BLOCK_ON_STORE = _settings.conflict_block_on_store
 CONFLICT_QUERY_TIMEOUT_S = _settings.conflict_query_timeout_s
 STORE_ACK_BUDGET_MS = _settings.store_ack_budget_ms
+# INIT-005/SPEC-005 — ADR-005 opt-in; default false.
+ARCHIVIST_EMBED_DEFER = _settings.archivist_embed_defer
 
 TEAM_MAP_PATH = _settings.team_map_path
 TEAM_MAP: dict[str, str] = _settings._load_team_map()

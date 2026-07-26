@@ -45,7 +45,7 @@ See [ADR-003 § Store ack semantics](adr/ADR-003-coach-core-reliability.md#store
 
 | Tool | Purpose |
 |------|---------|
-| `archivist_store` | Write a memory with entity extraction, conflict checks, LLM dedup, optional provenance envelope; ack after durable outbox commit |
+| `archivist_store` | Write a memory with entity extraction, conflict checks, LLM dedup, optional provenance envelope; ack after durable outbox commit; additive `embed_deferred` / lag fields when defer enabled |
 | `archivist_delete` | Forget path: `mode=delete` (default soft-delete) or `mode=suppress` (hide, keep record). Namespace write RBAC required. |
 | `archivist_merge` | Merge conflicting entries (latest / concat / semantic / manual) |
 | `archivist_compress` | Archive memories and return compact summaries (flat or structured Goal/Progress/Decisions/Next Steps) |
@@ -56,14 +56,34 @@ See [ADR-003 § Store ack semantics](adr/ADR-003-coach-core-reliability.md#store
 
 <!-- INIT-003/SPEC-006 -->
 <!-- INIT-004/SPEC-003: archivist_index map-only dual shape -->
+<!-- INIT-005/SPEC-006: store deferred / searchable-lag success fields -->
 
 Coach-path enrichment of the ADR-003 five-tool contract (no net-new core tools):
 
 | Tool | Contract |
 |------|----------|
-| **`archivist_store`** | Additive provenance args: `source`, `subject`, `purpose`, `sensitivity` (`standard`\|`sensitive`\|`secret`\|`health`\|`public`), `statement_kind` (`user`\|`inferred`), plus existing `actor_*` / `confidence`. Persisted on `memory_chunks` (+ Qdrant payload). Optional `correction_of` links the new id as superseding the prior via SPEC-007 `correct_memory`. Size/enum validated. Namespace **write** RBAC. |
+| **`archivist_store`** | Additive provenance args: `source`, `subject`, `purpose`, `sensitivity` (`standard`\|`sensitive`\|`secret`\|`health`\|`public`), `statement_kind` (`user`\|`inferred`), plus existing `actor_*` / `confidence`. Persisted on `memory_chunks` (+ Qdrant payload). Optional `correction_of` links the new id as superseding the prior via SPEC-007 `correct_memory`. Size/enum validated. Namespace **write** RBAC. Success JSON is additive (see **Store ack lag fields** below). |
 | **`archivist_index`** | **Progressive-disclosure map, not evidence** ([ADR-004](adr/ADR-004-llm-native-coach-memory-surfaces.md) GR-CE-001). Returns JSON `{markdown, map}` under one tool: entity/type pointers, pinned/recent names, and search hints (~500-token intent). **No key-fact prose** — do not cite the TOC; use `archivist_search` / `archivist_get_context` `memories[]` for provenance-bearing facts. **No synchronous LLM** on this path (GR-CE-002). Rebuilds from the **live graph every call** (no index TTL). After store, the next index includes new entities; store also invalidates the search hot cache (`HOT_CACHE_TTL_SECONDS`, default 600s). Recommended coach sequence: `get_context(mode=bootstrap)` → turn evidence via `search`/`get_context` → navigational refresh via `index` as a **map only**. |
 | **`archivist_delete`** (ADR: forget) | `mode=delete` (default): governed soft-delete via SPEC-007 `delete_memory`. `mode=suppress`: SPEC-007 `suppress_memory` — hidden from default recall, row remains. Cross-namespace mutations require write RBAC on the target namespace. |
+
+### Store ack lag fields (`ARCHIVIST_EMBED_DEFER`)
+
+<!-- INIT-005/SPEC-006 · ADR-005 GR-LAG-001 / GR-DUR-001 -->
+
+Ack still means **durable graph + outbox** ([ADR-003](adr/ADR-003-coach-core-reliability.md)); Qdrant upsert remains async. Opt-in **`ARCHIVIST_EMBED_DEFER`** (default **`false`**) additionally skips the blocking primary embed on the ack path so vector rank may lag until outbox drain embeds then upserts. See [ADR-005](adr/ADR-005-coach-path-performance.md).
+
+| Success field | When | Semantics |
+|---------------|------|-----------|
+| `stored`, `memory_id`, `uri`, `namespace`, `provenance`, … | Always on success | Unchanged INIT-003 / INIT-004 ack fields — **not removed**. |
+| `duration_ms` | Always on success | Store-ack wall clock (ms). |
+| `stage_timings` | Always on success | Numeric stage map (e.g. `embed_ms`, optional `conflict_ms`). Observability only — **no** fact text or embedding vectors. |
+| `embed_deferred` | Always on success (`bool`) | `true` when this store used the embed-defer path (primary and/or micro-chunk vectors left empty for drain fill). |
+| `searchable_lag_hint` | Only when `embed_deferred` is `true` | Stable string `vector_rank_may_lag_until_outbox_drain`. Clients must not treat hybrid/vector rank as ready at ack; FTS/needle/graph durability at ack is unchanged. Empty or incomplete vector hit during lag is **cite-or-refuse OK** (ADR-004 empty-OK). |
+| `searchable_lag_metric` | Always on success | Prometheus gauge name for searchable-vector lag: `archivist_outbox_lag_seconds` (code alias `SEARCHABLE_LAG_SECONDS`). Scraped via `GET /metrics`. |
+
+**SLO pointer (ADR-005):** p95 drain-to-searchable **≤ 5s** on fake-embed / coach_core lanes; production real-embed uses the lag gauge + “eventually searchable” rather than a brittle live-provider wall-clock. Operator details: [`docs/QA.md`](QA.md) (INIT-005 embed-defer section).
+
+**Security:** store success JSON must **never** include embedding vectors, API keys, or raw secret material — only flags, timings, ids, and validated provenance labels.
 
 ## Trajectory & Feedback (5)
 

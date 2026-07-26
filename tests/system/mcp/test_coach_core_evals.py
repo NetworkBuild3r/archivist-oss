@@ -10,18 +10,24 @@ unit hooks (compressed_index.rebuild_complete / archivist_index_duration_ms).
 
 INIT-004/SPEC-006: CE evals — TOC token ceiling (~500), no Key Facts prose
 (GR-CE-001), get_context(mode=bootstrap) session start (SM-002).
+
+INIT-005/SPEC-007: perf + lag + durability — hard-skip observability; embed-defer
+ack fields + deterministic fake-embed outbox drain ≤5s (ADR-005 SLO spirit);
+prior dead-Qdrant / CE asserts remain green.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from contextlib import ExitStack, contextmanager
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from tests.fixtures.mocks import drain_outbox, make_vector_backend_mock
 from tests.integration.storage.test_store_ack_slo import (
     _count_outbox_pending,
     _store_patches,
@@ -697,3 +703,198 @@ class TestCoachCeEvals:
         assert payload.get("sources") == []
         answer = payload.get("answer") or ""
         assert "Bootstrap Context" in answer or "Identity" in answer or answer.strip()
+
+
+# ---------------------------------------------------------------------------
+# INIT-005/SPEC-007: perf — hard-skip observability + embed-defer lag SLO
+# ---------------------------------------------------------------------------
+
+# ADR-005 CI bar: p95 drain-to-searchable ≤ 5s with fake embed + in-test drain.
+_DRAIN_TO_SEARCHABLE_SLO_S = 5.0
+# Must match _store_patches ensure_collection return so deferred fill namespace check passes.
+_COACH_STORE_COLLECTION = "test_col"
+
+
+class _ExpiredAckBudget:
+    """Minimal LatencyBudget stand-in — always expired for hard-skip evals."""
+
+    def is_expired(self) -> bool:
+        return True
+
+    def remaining_ms(self) -> float:
+        return 0.0
+
+    def summary(self) -> dict:
+        return {
+            "budget_ms": 4000,
+            "elapsed_ms": 4000.0,
+            "remaining_ms": 0.0,
+            "reserved_ms": 0.0,
+            "reservations": {},
+        }
+
+
+class TestCoachHardSkipObservability:
+    """INIT-005/SPEC-007: optional-gate hard-skips are observable; outbox stays."""
+
+    async def test_hard_skip_logs_and_keeps_outbox(self, qa_pool, monkeypatch, caplog):
+        """Under expired ack budget, conflict/dedup hard-skip; durability ack holds."""
+        monkeypatch.setattr("archivist.core.config.OUTBOX_ENABLED", True)
+        monkeypatch.setattr("archivist.core.config.CONFLICT_CHECK_ON_STORE", True)
+        monkeypatch.setattr("archivist.app.handlers.tools_storage.CONFLICT_CHECK_ON_STORE", True)
+        monkeypatch.setattr("archivist.core.config.CONFLICT_BLOCK_ON_STORE", False)
+        monkeypatch.setattr("archivist.app.handlers.tools_storage.CONFLICT_BLOCK_ON_STORE", False)
+        monkeypatch.setattr("archivist.core.config.DEDUP_LLM_ENABLED", True)
+        monkeypatch.setattr("archivist.core.config.REVERSE_HYDE_ENABLED", False)
+        monkeypatch.setattr("archivist.core.config.BM25_ENABLED", False)
+        monkeypatch.setattr("archivist.core.config.SYNTHETIC_QUESTIONS_ENABLED", False)
+        monkeypatch.setattr("archivist.core.config.CONTEXTUAL_AUGMENTATION_ENABLED", False)
+        monkeypatch.setattr("archivist.core.config.TOPIC_ROUTING_ENABLED", False)
+        monkeypatch.setattr("archivist.core.config.ARCHIVIST_EMBED_DEFER", False)
+        monkeypatch.setattr(
+            "archivist.core.latency_budget.LatencyBudget",
+            lambda *a, **k: _ExpiredAckBudget(),
+        )
+
+        pending_before = await _count_outbox_pending(qa_pool)
+        secret_fact = "coach hard-skip secret fact about late meals"
+        with (
+            _store_patches(
+                upsert_side_effect=AssertionError("inline upsert must not run with outbox on")
+            ),
+            patch(
+                "archivist.app.handlers.tools_storage.get_namespace_for_agent",
+                return_value="coach-ns-hard-skip",
+            ),
+            caplog.at_level(logging.INFO, logger="archivist.mcp"),
+        ):
+            from archivist.app.handlers._registry import dispatch_tool
+
+            result = await dispatch_tool(
+                "archivist_store",
+                {
+                    "text": secret_fact,
+                    "agent_id": "coach-agent",
+                    "namespace": "coach-ns-hard-skip",
+                    "entities": ["HardSkipEntity007"],
+                },
+            )
+
+        data = json.loads(result[0].text)
+        assert data.get("stored") is True, data
+        assert "memory_id" in data
+        assert isinstance(data.get("stage_timings"), dict)
+
+        skip_records = [r for r in caplog.records if "store_pipeline.hard_skip" in r.message]
+        gates = {getattr(r, "gate", None) for r in skip_records}
+        assert "conflict" in gates, f"expected conflict hard-skip; got {gates}"
+        assert "dedup" in gates, f"expected dedup hard-skip; got {gates}"
+        for rec in skip_records:
+            blob = f"{rec.__dict__}"
+            assert "late meals" not in blob
+            assert secret_fact not in blob
+
+        pending_after = await _count_outbox_pending(qa_pool)
+        assert pending_after > pending_before
+
+
+class TestCoachEmbedDeferLagSlo:
+    """INIT-005/SPEC-007: defer ack fields + drain-to-searchable ≤5s (fake embed)."""
+
+    async def test_defer_ack_fields_and_drain_within_slo(self, qa_pool, monkeypatch):
+        """Enable EMBED_DEFER in-test only; fake embed + in-process drain (aud-1)."""
+        from archivist.app.handlers.tools_storage import _SEARCHABLE_LAG_HINT_DEFERRED
+        from archivist.core import metrics as m
+
+        _configure_coach_store_flags(monkeypatch)
+        # Default ARCHIVIST_EMBED_DEFER=false — opt in for this eval only.
+        monkeypatch.setattr("archivist.core.config.ARCHIVIST_EMBED_DEFER", True)
+
+        ns = "coach-ns-defer"
+        agent = "coach-agent-rt"
+        body = "CeDeferEntity007 sleep debt rises after late meals — defer lag eval"
+        pending_before = await _count_outbox_pending(qa_pool)
+
+        with (
+            _store_patches(
+                upsert_side_effect=AssertionError("inline upsert must not run with outbox on")
+            ) as mock_client,
+            patch(
+                "archivist.app.handlers.tools_storage.get_namespace_for_agent",
+                return_value=ns,
+            ),
+            patch(
+                "archivist.app.handlers.tools_storage.embed_text",
+                new_callable=AsyncMock,
+                side_effect=AssertionError("primary embed_text must not run when defer on"),
+            ),
+        ):
+            from archivist.app.handlers._registry import dispatch_tool
+
+            result = await dispatch_tool(
+                "archivist_store",
+                {
+                    "text": body,
+                    "agent_id": agent,
+                    "namespace": ns,
+                    "entities": ["CeDeferEntity007"],
+                    "source": "harness",
+                    "subject": "sleep",
+                    "purpose": "coaching",
+                },
+            )
+
+        data = json.loads(result[0].text)
+        assert data.get("stored") is True, data
+        mid = data["memory_id"]
+        assert data.get("embed_deferred") is True
+        assert data.get("searchable_lag_hint") == _SEARCHABLE_LAG_HINT_DEFERRED
+        assert data.get("searchable_lag_metric") == m.SEARCHABLE_LAG_SECONDS
+        assert isinstance(data.get("stage_timings"), dict)
+        assert "embed_ms" in data["stage_timings"]
+        assert mock_client.upsert.call_count == 0
+
+        # Graph durable at ack; outbox carries deferred (empty) vectors.
+        row = await _load_chunk(qa_pool, mid)
+        assert row is not None
+        assert row["namespace"] == ns
+
+        async with qa_pool.read() as conn:
+            cur = await conn.execute(
+                "SELECT payload FROM outbox WHERE status='pending' ORDER BY created_at DESC"
+            )
+            ob_row = await cur.fetchone()
+        assert ob_row is not None
+        payload = json.loads(ob_row["payload"] if hasattr(ob_row, "keys") else ob_row[0])
+        assert payload.get("embed_deferred") is True
+        assert mid in (payload.get("embed_inputs") or {})
+        assert payload["points"][0]["vector"] == []
+        pending_after = await _count_outbox_pending(qa_pool)
+        assert pending_after > pending_before
+
+        fake_vec = [0.17] * 8
+        backend = make_vector_backend_mock()
+        t0 = time.monotonic()
+        with (
+            patch(
+                "archivist.features.embeddings.embed_batch",
+                new_callable=AsyncMock,
+                return_value=[fake_vec],
+            ),
+            patch(
+                "archivist.storage.collection_router.collection_for",
+                return_value=_COACH_STORE_COLLECTION,
+            ),
+        ):
+            applied = await drain_outbox(backend)
+        elapsed = time.monotonic() - t0
+
+        assert applied >= 1, "expected deferred outbox row to apply"
+        assert elapsed <= _DRAIN_TO_SEARCHABLE_SLO_S, (
+            f"drain-to-searchable {elapsed:.3f}s exceeds ADR-005 CI SLO "
+            f"{_DRAIN_TO_SEARCHABLE_SLO_S}s (fake embed)"
+        )
+        backend.upsert.assert_awaited()
+        upsert_points = backend.upsert.await_args.args[1]
+        assert len(upsert_points) >= 1
+        assert list(upsert_points[0].vector) == fake_vec

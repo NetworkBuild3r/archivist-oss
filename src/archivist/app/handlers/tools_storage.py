@@ -6,6 +6,7 @@ import logging
 import time
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 
 from mcp.types import TextContent, Tool
 from qdrant_client.models import PointStruct
@@ -44,6 +45,7 @@ from archivist.utils.text_utils import compute_memory_checksum
 from archivist.write.conflict_detection import (
     _query_similar,
     check_for_conflicts,
+    conflict_vec_for_primary_embed,
     llm_adjudicated_dedup,
 )
 from archivist.write.contextual_augment import augment_chunk
@@ -74,6 +76,10 @@ _MAX_SUBJECT_LEN = 128
 _MAX_PURPOSE_LEN = 128
 _MAX_SOURCE_LEN = 256
 _MAX_CORRECTION_OF_LEN = 64
+
+# INIT-005/SPEC-006 — store success lag hint when ARCHIVIST_EMBED_DEFER path used.
+# Clients must not assume hybrid/vector rank is ready at ack (ADR-005 GR-LAG-001).
+_SEARCHABLE_LAG_HINT_DEFERRED = "vector_rank_may_lag_until_outbox_drain"
 
 
 def _validate_store_provenance(arguments: dict) -> dict | list[TextContent]:
@@ -170,7 +176,12 @@ TOOLS: list[Tool] = [
         description=(
             "Explicitly store a memory/fact with entity extraction and optional "
             "coach provenance (source, subject, sensitivity, purpose, statement_kind). "
-            "Ack after durable outbox commit; call archivist_index afterward for a "
+            "Ack after durable graph + outbox commit (not Qdrant sync). Success JSON "
+            "includes duration_ms, stage_timings, and embed_deferred; when "
+            "ARCHIVIST_EMBED_DEFER deferred the primary embed, also searchable_lag_hint "
+            "and searchable_lag_metric (vector rank may lag until outbox drain — "
+            "FTS/graph remain usable; empty vector hit is cite-or-refuse OK). "
+            "Never returns embedding vectors. Call archivist_index afterward for a "
             "fresh navigational index (live rebuild; store also busts search hot cache)."
         ),
         inputSchema={
@@ -686,6 +697,42 @@ def _is_graph_pool_uninitialized(exc: BaseException) -> bool:
     )
 
 
+# INIT-005/SPEC-003 — optional pre-ack gates hard-skip when remaining ack budget
+# falls below this floor (or is fully expired). Sized to leave headroom for
+# durable graph commit + outbox enqueue (GR-DUR-001); never applies to outbox.
+_ACK_OPTIONAL_GATE_MIN_REMAINING_MS = 250
+
+# Counter name used via m.inc without owning metrics.py (SPEC-002 owns metrics).
+_STORE_ACK_HARD_SKIP_TOTAL = "archivist_store_ack_hard_skip_total"
+
+
+def _should_hard_skip_optional_gates(ack_budget) -> bool:
+    """True when optional write gates must hard-skip under STORE_ACK_BUDGET_MS.
+
+    INIT-005/SPEC-003 / ADR-005: conflict, LLM dedup, and optional entity extract
+    may hard-skip when the ack budget is expired or remaining ms is below
+    ``_ACK_OPTIONAL_GATE_MIN_REMAINING_MS``. Durable graph + outbox are never
+    skipped by this predicate.
+    """
+    if ack_budget.is_expired():
+        return True
+    return ack_budget.remaining_ms() < _ACK_OPTIONAL_GATE_MIN_REMAINING_MS
+
+
+def _emit_ack_hard_skip(gate: str, *, namespace: str, ack_budget) -> None:
+    """Observable hard-skip (log + counter); never includes fact text (SM-002)."""
+    m.inc(_STORE_ACK_HARD_SKIP_TOTAL, {"gate": gate, "namespace": namespace or "global"})
+    logger.info(
+        "store_pipeline.hard_skip",
+        extra={
+            "gate": gate,
+            "namespace": namespace or "global",
+            "budget": ack_budget.summary(),
+            "min_remaining_ms": _ACK_OPTIONAL_GATE_MIN_REMAINING_MS,
+        },
+    )
+
+
 async def _handle_store(arguments: dict) -> list[TextContent]:
     _t_store = time.monotonic()
     text = arguments["text"]
@@ -793,45 +840,61 @@ async def _handle_store_inner(
     prov_statement_kind = provenance.get("statement_kind", "user")
     correction_of = provenance.get("correction_of", "")
 
+    # INIT-005/SPEC-002: store stage timings (observability only — no hard-skip /
+    # embed-reuse here; those belong to SPEC-003 / SPEC-004).
+    stage_timings: dict[str, float] = {}
+
+    # INIT-005/SPEC-003: hard-skip optional conflict/dedup under ack budget.
+    # Outbox + graph commit below are never gated by this predicate (GR-DUR-001).
+    # INIT-005/SPEC-004: _shared_vec stays None when conflict does not run (no reuse).
+    _shared_vec = None
+    _shared_results = None
     if CONFLICT_CHECK_ON_STORE and not force_skip:
-        # Bound pre-txn Qdrant similarity; fail-open on timeout/dead backend.
-        _shared_vec, _shared_results = await _query_similar(text, namespace)
-        cr = await check_for_conflicts(
-            text, namespace, agent_id, _shared_vec=_shared_vec, _shared_results=_shared_results
-        )
-        if cr.has_conflict and CONFLICT_BLOCK_ON_STORE:
-            m.inc(m.STORE_CONFLICT, {"namespace": namespace})
-            webhooks.fire_background(
-                "memory_conflict",
-                {
-                    "agent_id": agent_id,
-                    "namespace": namespace,
-                    "max_similarity": cr.max_similarity,
-                    "conflicting_ids": cr.conflicting_ids,
-                },
+        if _should_hard_skip_optional_gates(ack_budget):
+            _emit_ack_hard_skip("conflict", namespace=namespace, ack_budget=ack_budget)
+            stage_timings["conflict_ms"] = 0.0
+        else:
+            # Bound pre-txn Qdrant similarity; fail-open on timeout/dead backend.
+            _t_conflict = time.monotonic()  # INIT-005/SPEC-002
+            _shared_vec, _shared_results = await _query_similar(text, namespace)
+            cr = await check_for_conflicts(
+                text,
+                namespace,
+                agent_id,
+                _shared_vec=_shared_vec,
+                _shared_results=_shared_results,
             )
-            return error_response(
-                {
-                    "stored": False,
-                    "conflict": True,
-                    "max_similarity": cr.max_similarity,
-                    "conflicting_ids": cr.conflicting_ids,
-                    "recommendation": cr.recommendation,
-                    "hint": "Set force_skip_conflict_check true to store anyway, or merge with conflicting memories.",
-                }
-            )
-    else:
-        _shared_results = None
+            stage_timings["conflict_ms"] = round((time.monotonic() - _t_conflict) * 1000, 1)
+            m.observe(m.STORE_CONFLICT_MS, stage_timings["conflict_ms"])
+            if cr.has_conflict and CONFLICT_BLOCK_ON_STORE:
+                m.inc(m.STORE_CONFLICT, {"namespace": namespace})
+                webhooks.fire_background(
+                    "memory_conflict",
+                    {
+                        "agent_id": agent_id,
+                        "namespace": namespace,
+                        "max_similarity": cr.max_similarity,
+                        "conflicting_ids": cr.conflicting_ids,
+                    },
+                )
+                return error_response(
+                    {
+                        "stored": False,
+                        "conflict": True,
+                        "max_similarity": cr.max_similarity,
+                        "conflicting_ids": cr.conflicting_ids,
+                        "recommendation": cr.recommendation,
+                        "hint": (
+                            "Set force_skip_conflict_check true to store anyway, "
+                            "or merge with conflicting memories."
+                        ),
+                    }
+                )
 
     if not force_skip:
-        # Skip LLM dedup when the soft ack budget is already exhausted so embed/LLM
-        # cannot dominate the coach write path (still keeps outbox on).
-        if ack_budget.is_expired():
+        if _should_hard_skip_optional_gates(ack_budget):
             dedup = None
-            logger.info(
-                "store_pipeline.skip_dedup_budget",
-                extra={"namespace": namespace, "budget": ack_budget.summary()},
-            )
+            _emit_ack_hard_skip("dedup", namespace=namespace, ack_budget=ack_budget)
         else:
             dedup = await llm_adjudicated_dedup(
                 text, namespace, agent_id, _shared_results=_shared_results
@@ -903,15 +966,21 @@ async def _handle_store_inner(
         )
         await add_fact(eid, text[:200], f"explicit/{agent_id}", agent_id, **_fact_kw)
 
-        _auto_hints = await _extract_and_store_entities(
-            text,
-            agent_id,
-            namespace=namespace,
-            retention=retention,
-            actor_id=actor_id,
-            actor_type=actor_type,
-            fact_kw=_fact_kw,
-        )
+        # INIT-005/SPEC-003: optional auto-extract is a quality gate — hard-skip
+        # under ack budget; agent entity/fact above remains (durable graph).
+        if _should_hard_skip_optional_gates(ack_budget):
+            _emit_ack_hard_skip("extract", namespace=namespace, ack_budget=ack_budget)
+            _auto_hints = pre_extract(text)
+        else:
+            _auto_hints = await _extract_and_store_entities(
+                text,
+                agent_id,
+                namespace=namespace,
+                retention=retention,
+                actor_id=actor_id,
+                actor_type=actor_type,
+                fact_kw=_fact_kw,
+            )
     else:
         _auto_hints = pre_extract(text)
 
@@ -940,7 +1009,44 @@ async def _handle_store_inner(
             actor_id=actor_id,
             actor_type=actor_type,
         )
-    vec = await embed_text(embed_input)
+    # INIT-005/SPEC-002 — primary embed stage timing.
+    # INIT-005/SPEC-004 — reuse conflict _shared_vec when embed_input is
+    # byte-identical to the conflict-query text (same store call / namespace).
+    # INIT-005/SPEC-005 — ARCHIVIST_EMBED_DEFER: skip blocking primary embed when
+    # outbox can fill vectors on drain (ADR-005; default false).
+    from archivist.core.config import ARCHIVIST_EMBED_DEFER, OUTBOX_ENABLED
+
+    _embed_defer = bool(ARCHIVIST_EMBED_DEFER and OUTBOX_ENABLED)
+    _primary_embed_deferred = False
+    _t_embed = time.monotonic()
+    _reused_vec = conflict_vec_for_primary_embed(
+        conflict_text=text,
+        embed_input=embed_input,
+        shared_vec=_shared_vec,
+    )
+    if _reused_vec is not None:
+        vec = _reused_vec
+        logger.info(
+            "store_pipeline.embed_reuse_hit",
+            extra={"namespace": namespace},
+        )
+    elif _embed_defer:
+        # Placeholder — drain embeds before Qdrant upsert (GR-LAG-001).
+        vec = []
+        _primary_embed_deferred = True
+        logger.info(
+            "store_pipeline.embed_deferred",
+            extra={"namespace": namespace, "role": "primary"},
+        )
+    else:
+        vec = await embed_text(embed_input)
+        if _shared_vec is not None:
+            logger.info(
+                "store_pipeline.embed_reuse_miss",
+                extra={"namespace": namespace},
+            )
+    stage_timings["embed_ms"] = round((time.monotonic() - _t_embed) * 1000, 1)
+    m.observe(m.STORE_EMBED_MS, stage_timings["embed_ms"])
     client = qdrant_client()
     now = datetime.now(UTC)
     checksum = compute_memory_checksum(text, agent_id, namespace)
@@ -983,16 +1089,20 @@ async def _handle_store_inner(
 
     _coll = ensure_collection(namespace)
 
-    from archivist.core.config import OUTBOX_ENABLED
-
-    _primary_point = PointStruct(id=pid, vector=vec, payload=payload)
+    if _primary_embed_deferred:
+        # Dict form with empty vector — drain fills before PointStruct upsert.
+        _primary_point: Any = {"id": pid, "vector": [], "payload": payload}
+    else:
+        _primary_point = PointStruct(id=pid, vector=vec, payload=payload)
 
     from archivist.core.config import BM25_ENABLED
 
     # Generate micro-chunks for high-specificity tokens (IPs, crons, UUIDs, etc.)
-    # Embedding must happen before the transaction (async LLM/embed call).
+    # Embedding must happen before the transaction unless embed-defer is on
+    # (INIT-005/SPEC-005 — micro embeds also block ack when sync).
     _micro_chunks = _extract_needle_micro_chunks(text)
-    _micro_points = []
+    _micro_points: list[Any] = []
+    _micro_embed_inputs_by_id: dict[str, str] = {}
     if _micro_chunks:
         from archivist.core.config import MAX_MICRO_CHUNKS_PER_MEMORY
 
@@ -1008,8 +1118,10 @@ async def _handle_store_inner(
                 )
                 for mc in _micro_chunks
             ]
-        _micro_vecs = await embed_batch(_micro_embed_inputs)
-        for mi, (mc, mv) in enumerate(zip(_micro_chunks, _micro_vecs)):
+        _micro_vecs: list[list[float]] | None = None
+        if not _embed_defer:
+            _micro_vecs = await embed_batch(_micro_embed_inputs)
+        for mi, mc in enumerate(_micro_chunks):
             _mc_id = str(uuid.uuid4())
             _mc_payload = {
                 "agent_id": agent_id,
@@ -1037,7 +1149,14 @@ async def _handle_store_inner(
                 pass
             elif ttl_expires_at is not None:
                 _mc_payload["ttl_expires_at"] = ttl_expires_at
-            _micro_points.append(PointStruct(id=_mc_id, vector=mv, payload=_mc_payload))
+            if _embed_defer:
+                _micro_points.append({"id": _mc_id, "vector": [], "payload": _mc_payload})
+                _micro_embed_inputs_by_id[_mc_id] = _micro_embed_inputs[mi]
+            else:
+                assert _micro_vecs is not None
+                _micro_points.append(
+                    PointStruct(id=_mc_id, vector=_micro_vecs[mi], payload=_mc_payload)
+                )
 
     # Single atomic transaction: FTS5, needle registry, memory_points, and outbox
     # all commit together.  A crash at any point leaves nothing half-written.
@@ -1069,22 +1188,28 @@ async def _handle_store_inner(
             actor_type=actor_type,
         )
         for mp in _micro_points:
-            mc_text = mp.payload.get("text", "")
-            mc_id = str(mp.id)
+            # PointStruct or deferred dict (INIT-005/SPEC-005).
+            if isinstance(mp, dict):
+                mc_payload = mp.get("payload") or {}
+                mc_id = str(mp["id"])
+            else:
+                mc_payload = mp.payload or {}
+                mc_id = str(mp.id)
+            mc_text = mc_payload.get("text", "")
             if BM25_ENABLED:
                 await txn.upsert_fts_chunk(
                     qdrant_id=mc_id,
                     text=mc_text,
                     file_path=f"explicit/{agent_id}",
-                    chunk_index=mp.payload.get("chunk_index", 0),
+                    chunk_index=mc_payload.get("chunk_index", 0),
                     agent_id=agent_id,
                     namespace=namespace,
                     date=now.strftime("%Y-%m-%d"),
                     memory_type=arguments.get("memory_type", "general"),
                     actor_id=actor_id,
                     actor_type=actor_type,
-                    importance=float(mp.payload.get("importance_score", importance)),
-                    tier_label=mp.payload.get("tier_label", "l2"),
+                    importance=float(mc_payload.get("importance_score", importance)),
+                    tier_label=mc_payload.get("tier_label", "l2"),
                 )
             await txn.register_needle_tokens(
                 mc_id,
@@ -1104,7 +1229,15 @@ async def _handle_store_inner(
                 """INSERT OR IGNORE INTO memory_points
                        (memory_id, qdrant_id, point_type, created_at)
                    VALUES (?, ?, ?, ?)""",
-                [(pid, str(mp.id), "micro_chunk", _now_iso) for mp in _micro_points],
+                [
+                    (
+                        pid,
+                        str(mp["id"] if isinstance(mp, dict) else mp.id),
+                        "micro_chunk",
+                        _now_iso,
+                    )
+                    for mp in _micro_points
+                ],
             )
         # INIT-003/SPEC-006: persist SPEC-002 provenance columns on primary chunk.
         # When BM25 upsert already created the row, ON CONFLICT patches envelope fields;
@@ -1148,11 +1281,30 @@ async def _handle_store_inner(
                 _now_iso,
             ),
         )
-        txn.enqueue_qdrant_upsert(_coll, [_primary_point], memory_id=pid)
+        if _primary_embed_deferred:
+            txn.enqueue_qdrant_upsert(
+                _coll,
+                [_primary_point],
+                memory_id=pid,
+                embed_deferred=True,
+                embed_inputs={pid: embed_input},
+            )
+        else:
+            txn.enqueue_qdrant_upsert(_coll, [_primary_point], memory_id=pid)
         if _micro_points:
-            txn.enqueue_qdrant_upsert(_coll, _micro_points, memory_id=pid)
+            if _embed_defer:
+                txn.enqueue_qdrant_upsert(
+                    _coll,
+                    _micro_points,
+                    memory_id=pid,
+                    embed_deferred=True,
+                    embed_inputs=_micro_embed_inputs_by_id,
+                )
+            else:
+                txn.enqueue_qdrant_upsert(_coll, _micro_points, memory_id=pid)
 
     # When the outbox is disabled, apply Qdrant writes inline (legacy behaviour).
+    # Embed-defer requires outbox; this branch always has filled PointStructs.
     if not OUTBOX_ENABLED:
         from archivist.storage.outbox import warn_legacy_inline_qdrant_once
 
@@ -1299,6 +1451,12 @@ async def _handle_store_inner(
             "ack_budget_ms": STORE_ACK_BUDGET_MS,
             "ack_budget": _budget_summary,
             "outbox_enabled": OUTBOX_ENABLED,
+            # INIT-005/SPEC-002: numeric stage map only (never fact text / secrets).
+            "stage_timings": stage_timings,
+            # Searchable-lag SLO hook name (GR-LAG-001); value from gauges loop.
+            "searchable_lag_metric": m.SEARCHABLE_LAG_SECONDS,
+            # INIT-005/SPEC-005: defer flag only (no embed text / vectors).
+            "embed_deferred": bool(_primary_embed_deferred or (_embed_defer and _micro_points)),
         },
     )
 
@@ -1345,6 +1503,8 @@ async def _handle_store_inner(
                 )
                 correction_status = {"status": "correction_failed", "error": str(exc)}
 
+    # INIT-005/SPEC-006: additive lag / defer contract (no vectors or secrets).
+    _embed_deferred = bool(_primary_embed_deferred or (_embed_defer and _micro_points))
     response: dict = {
         "stored": True,
         "memory_id": pid,
@@ -1355,6 +1515,12 @@ async def _handle_store_inner(
         # Coach-path store-ack wall clock (INIT-004/SPEC-001); also logged on
         # store_pipeline.complete as duration_ms.
         "duration_ms": _duration_ms,
+        # INIT-005/SPEC-002: additive store stage map (at least embed_ms).
+        "stage_timings": stage_timings,
+        # INIT-005/SPEC-005 + SPEC-006: defer / searchable-lag signal (GR-LAG-001).
+        "embed_deferred": _embed_deferred,
+        # Metric name for ops/evals (alias SEARCHABLE_LAG_SECONDS → outbox lag).
+        "searchable_lag_metric": m.SEARCHABLE_LAG_SECONDS,
         "provenance": {
             "source": prov_source,
             "subject": prov_subject,
@@ -1366,6 +1532,8 @@ async def _handle_store_inner(
             "confidence": confidence,
         },
     }
+    if _embed_deferred:
+        response["searchable_lag_hint"] = _SEARCHABLE_LAG_HINT_DEFERRED
     if correction_of:
         response["correction_of"] = correction_of
         response["correction"] = correction_status
