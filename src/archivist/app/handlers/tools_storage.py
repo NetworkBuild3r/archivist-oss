@@ -1352,6 +1352,9 @@ async def _handle_store_inner(
         "namespace": namespace,
         "entities": entity_names or [agent_id],
         "version": 1,
+        # Coach-path store-ack wall clock (INIT-004/SPEC-001); also logged on
+        # store_pipeline.complete as duration_ms.
+        "duration_ms": _duration_ms,
         "provenance": {
             "source": prov_source,
             "subject": prov_subject,

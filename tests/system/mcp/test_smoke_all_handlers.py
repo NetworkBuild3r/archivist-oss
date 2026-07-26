@@ -782,8 +782,12 @@ class TestSearchHandlers:
 
         with (
             patch(
-                "archivist.app.handlers.tools_search.build_namespace_index",
-                return_value="# Index\n\nNo entries.",
+                "archivist.app.handlers.tools_search.build_namespace_index_payload",
+                new_callable=AsyncMock,
+                return_value={
+                    "markdown": "# Index\n\nNo entries.",
+                    "map": {"namespace": "default", "empty": True, "entity_types": {}},
+                },
             ),
             patch(
                 "archivist.app.handlers.tools_search.get_namespace_for_agent",
@@ -796,6 +800,8 @@ class TestSearchHandlers:
         ):
             result = await _handle_index({"agent_id": "agent-smoke", "namespace": "default"})
         _assert_text_response(result)
+        payload = json.loads(result[0].text)
+        assert "markdown" in payload and "map" in payload
 
     async def test_deref_missing_id_returns_error(self) -> None:
         from archivist.app.handlers.tools_search import _handle_deref

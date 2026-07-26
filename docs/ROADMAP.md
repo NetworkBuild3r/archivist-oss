@@ -4,15 +4,18 @@
 
 **Goal** — Be the most **trustworthy and production-ready** open multi-agent memory layer in 2026: observable, RBAC-aware, safe under fleet load, and the best answer finder in the industry.
 
-**Next milestones (engineering)** — Immediate focus is **coach-core reliability**
-([ADR-003](adr/ADR-003-coach-core-reliability.md), INIT-003): freeze and harden the
-five-tool coach path (`store` / `search` / `get_context` / `index` / `forget`)
-with provenance, pre-rank filters, supersede/suppress, ≤4s durable write ack, and
-a stable recall shape — default **core** tool profile. Phase 7–10 differentiators
-remain documented below as longer-horizon product track; they are **not** the
-recommended next engineering work. (INIT-001 / [ADR-001](adr/ADR-001-platform-coherence-sequencing.md)
-platform-coherence sequencing remains historical context for that initiative.)
-<!-- INIT-003/SPEC-001 -->
+**Next milestones (engineering)** — Immediate focus is **LLM-native coach memory
+surfaces** ([ADR-004](adr/ADR-004-llm-native-coach-memory-surfaces.md), INIT-004):
+reshape `archivist_index` into a progressive-disclosure **map** (not citable
+key-fact prose), add coach `get_context` budgets + `mode=bootstrap`, and lock
+cite-or-refuse / empty-OK boundaries in coach_core evals. ADR-003’s five-tool
+coach-core contract remains the base; this extends CE surface rules. Phase 7–10
+differentiators and **INIT-005** (embed-defer / write-path perf) remain
+longer-horizon — they are **not** the recommended next engineering work.
+(INIT-001 / [ADR-001](adr/ADR-001-platform-coherence-sequencing.md) and
+INIT-003 / [ADR-003](adr/ADR-003-coach-core-reliability.md) remain historical /
+foundational context.)
+<!-- INIT-004/SPEC-002 -->
 
 ---
 
@@ -62,22 +65,23 @@ These six features combined will make Archivist the **most trustworthy and produ
 
 ## Immediate Next Steps (Recommended)
 
-<!-- INIT-003/SPEC-001 -->
+<!-- INIT-004/SPEC-002 -->
 
-**Authoritative next work:** [ADR-003: Coach-core reliability](adr/ADR-003-coach-core-reliability.md)
-(INIT-003) — personal-production north star from the BRAIN-001 amendment. Make the
-five-tool coach core boringly reliable; enrich that contract; default to a **core**
-`list_tools` profile. Do **not** treat Phase 7–10 breadth as the immediate plan.
+**Authoritative next work:** [ADR-004: LLM-native coach memory surfaces](adr/ADR-004-llm-native-coach-memory-surfaces.md)
+(INIT-004) — CE contract from BRAIN-002 on top of the ADR-003 five-tool core.
+Make index a map (not evidence), bootstrap via `get_context(mode=bootstrap)`,
+tighten coach budgets, and eval cite-or-refuse / empty-OK. Do **not** treat
+Phase 7–10 breadth or **INIT-005** embed-defer as the immediate plan.
 
-1. **Coach-core contract + reliability (INIT-003)** — ADR-003 freeze, then
-   provenance/supersede schema, core tool profile, ≤4s durable store ack,
-   stable recall + pre-rank filters, index freshness, forget/suppress lifecycle,
-   and coach-path CI evals.
-2. **Parked for later (not next)** — Phase 8 lifecycle productization, Phase 7
-   checkpoint UX, MaP MCP / fleet demos, `share_*` depth, Phase 9 observability
-   billboard. INIT-001 / [ADR-001](adr/ADR-001-platform-coherence-sequencing.md)
-   documented that product order for its own initiative; it is historical context,
-   not the current recommended queue.
+1. **LLM-native coach memory surfaces (INIT-004)** — ADR-004 freeze, then
+   map-only `archivist_index`, coach `get_context` budgets + bootstrap mode,
+   map-only compressed-index builder, and coach_core CE evals.
+2. **Parked for later (not next)** — **INIT-005** (embed-deferred store /
+   write-path perf); Phase 8 lifecycle productization, Phase 7 checkpoint UX,
+   MaP MCP / fleet demos, `share_*` depth, Phase 9 observability billboard.
+   INIT-001 / [ADR-001](adr/ADR-001-platform-coherence-sequencing.md) and
+   INIT-003 / [ADR-003](adr/ADR-003-coach-core-reliability.md) are foundational
+   context, not the current recommended queue.
 3. Optional: add a **domain-specific long-document fixture** (your own docs +
    questions) locally to tune retrieval beyond the public toy corpus — keep
    private data out of the public repo.

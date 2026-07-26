@@ -27,7 +27,7 @@ The tables below describe the **full** registry; only the active profile is adve
 | `archivist_timeline` | Chronological slice for a topic with configurable lookback |
 | `archivist_insights` | Cross-agent topic discovery across accessible namespaces |
 | `archivist_deref` | Dereference a memory by ID for full L2 detail (drill-down after L0/L1 search) |
-| `archivist_index` | Compressed navigational index of namespace knowledge (~500 tokens); live rebuild each call |
+| `archivist_index` | Progressive-disclosure map (~500 tokens): entity/type pointers + search hints; dual `{markdown, map}`; not citable evidence; live rebuild each call |
 | `archivist_contradictions` | Surface contradicting facts about an entity across agents |
 | `archivist_entity_brief` | Structured knowledge card for an entity: facts, relationships, retention class, mention count, timeline. Supports `as_of` for point-in-time views. |
 | `archivist_wake_up` | Bootstrap session context — agent identity, critical pinned facts, namespace overview in ~200 tokens |
@@ -55,13 +55,14 @@ See [ADR-003 § Store ack semantics](adr/ADR-003-coach-core-reliability.md#store
 ## Store / Index / Forget contract
 
 <!-- INIT-003/SPEC-006 -->
+<!-- INIT-004/SPEC-003: archivist_index map-only dual shape -->
 
 Coach-path enrichment of the ADR-003 five-tool contract (no net-new core tools):
 
 | Tool | Contract |
 |------|----------|
 | **`archivist_store`** | Additive provenance args: `source`, `subject`, `purpose`, `sensitivity` (`standard`\|`sensitive`\|`secret`\|`health`\|`public`), `statement_kind` (`user`\|`inferred`), plus existing `actor_*` / `confidence`. Persisted on `memory_chunks` (+ Qdrant payload). Optional `correction_of` links the new id as superseding the prior via SPEC-007 `correct_memory`. Size/enum validated. Namespace **write** RBAC. |
-| **`archivist_index`** | Rebuilds from the **live graph every call** (no index TTL cache). After a successful store, the next index call includes new entities/facts. Store also invalidates the search hot cache (`HOT_CACHE_TTL_SECONDS`, default 600s — well under a 24h bust). Recommended sequence: `store` → `index` → `search`/`get_context`. |
+| **`archivist_index`** | **Progressive-disclosure map, not evidence** ([ADR-004](adr/ADR-004-llm-native-coach-memory-surfaces.md) GR-CE-001). Returns JSON `{markdown, map}` under one tool: entity/type pointers, pinned/recent names, and search hints (~500-token intent). **No key-fact prose** — do not cite the TOC; use `archivist_search` / `archivist_get_context` `memories[]` for provenance-bearing facts. **No synchronous LLM** on this path (GR-CE-002). Rebuilds from the **live graph every call** (no index TTL). After store, the next index includes new entities; store also invalidates the search hot cache (`HOT_CACHE_TTL_SECONDS`, default 600s). Recommended coach sequence: `get_context(mode=bootstrap)` → turn evidence via `search`/`get_context` → navigational refresh via `index` as a **map only**. |
 | **`archivist_delete`** (ADR: forget) | `mode=delete` (default): governed soft-delete via SPEC-007 `delete_memory`. `mode=suppress`: SPEC-007 `suppress_memory` — hidden from default recall, row remains. Cross-namespace mutations require write RBAC on the target namespace. |
 
 ## Trajectory & Feedback (5)
@@ -89,7 +90,7 @@ Coach-path enrichment of the ADR-003 five-tool contract (no net-new core tools):
 
 | Tool | Purpose |
 |------|---------|
-| `archivist_get_context` | High-level token-budgeted context assembly — tiers, graph facts, procedural tips in one call. Replaces multi-step search patterns. |
+| `archivist_get_context` | High-level token-budgeted context assembly — tiers, graph facts, procedural tips in one call. Supports `mode=normal\|bootstrap` (INIT-004/SPEC-004). Replaces multi-step search patterns. |
 | `archivist_handoff` | Package a session's summary, goals, tips, hottest memories, and knowledge snapshot into a structured `HandoffPacket`. |
 | `archivist_receive_handoff` | Inject a `HandoffPacket` into the receiving agent's ephemeral `SessionStore`. |
 
@@ -155,6 +156,27 @@ All three require `caller_agent_id` and enforce namespace RBAC. Distinct from Ph
 |------|---------|
 | `archivist_get_reference_docs` | Return the full Archivist tool skill reference from inside the server. Optionally pass `section` to filter to a heading (e.g. `search`, `storage`, `admin`). |
 
+## get_context modes & budgets
+
+<!-- INIT-004/SPEC-004 -->
+
+`archivist_get_context` accepts `mode`:
+
+| Mode | Purpose | Default `max_tokens` |
+|------|---------|----------------------|
+| `normal` (default) | Turn recall — tier-packed sources + stable `memories[]` | **2000** (coach-oriented; was 8000) |
+| `bootstrap` | Session start — compact identity / critical pointers / map slice (~200–400 tok spirit) | **400** |
+
+- **Explicit `max_tokens` always wins** over the mode default.
+- Bootstrap keeps the same success shape (`memories`, `sources`, `answer`,
+  `context_status`, …). It does **not** invent `memories[]` rows from the map;
+  empty `memories[]` is success (GR-CE-003). Prefer bootstrap over promoting
+  `archivist_wake_up` into the **core** profile (`wake_up` stays ops/full).
+- Recommended coach sequence: `get_context(mode=bootstrap)` → turn evidence via
+  `search` / `get_context` (budgeted) → navigational refresh via `archivist_index`
+  (map only — see ADR-004).
+- Namespace RBAC remains on the handler for both modes.
+
 ## Stable recall (search / get_context)
 
 <!-- INIT-003/SPEC-005 -->
@@ -193,6 +215,10 @@ backward compatibility:
 - When hits exist, each `memories[].text` is non-empty and usable. Prefer
   `memories` over dual-calling search + get_context for text. `answer` may
   still be empty when `refine=false` (search) / default get_context path.
+- **Empty recall is OK (GR-CE-003 / INIT-004/SPEC-004):** when filters or
+  thresholds yield nothing, `memories: []` is a valid success — cite-or-refuse;
+  do not invent facts. Bootstrap mode likewise returns empty `memories[]`
+  rather than fabricating memory rows from the map.
 - **Pre-rank filters** (applied before ranking; cannot be disabled to widen
   tenants): suppressed rows omitted; superseded losers omitted by default
   (SPEC-007 visibility helpers); `namespace` / optional `subject` hard-scope
@@ -206,9 +232,9 @@ backward compatibility:
 
 - `min_score` / `RETRIEVAL_THRESHOLD`: set to `0` to disable score filtering for a single call when debugging recall.
 - Prefer `archivist_get_context` for agent pre-prompt injection — it assembles tiers, graph facts, and tips in one token-budgeted call. Read `memories[].text` for usable recall when `answer` is empty.
+- Use `archivist_get_context(mode=bootstrap)` at session start for a compact identity/pointers/map payload (~200–400 tokens). `archivist_wake_up` remains on ops/full profiles and is not required on core.
 - Use `archivist_search` for explicit queries; `archivist_recall` when entity names are known.
 - Use `archivist_entity_brief` when you need a structured knowledge card — faster than multiple search/recall calls.
-- Call `archivist_wake_up` once at session start to pre-load critical context in ~200 tokens.
 - Use `archivist_context_check` before reasoning to decide if context compaction is needed.
 - Use `archivist_compress` with `format: structured` for Goal/Progress/Decisions/Next Steps summaries.
 - Log trajectories so future searches benefit from outcome-aware retrieval scoring.

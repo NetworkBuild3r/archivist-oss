@@ -21,7 +21,7 @@ PRAGMA foreign_keys=ON;
 
 CREATE TABLE IF NOT EXISTS entities (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    name TEXT NOT NULL COLLATE NOCASE,
     entity_type TEXT NOT NULL DEFAULT 'unknown',
     first_seen TEXT NOT NULL,
     last_seen TEXT NOT NULL,
@@ -31,7 +31,9 @@ CREATE TABLE IF NOT EXISTS entities (
     aliases TEXT NOT NULL DEFAULT '[]',
     namespace TEXT NOT NULL DEFAULT 'global',
     actor_id TEXT NOT NULL DEFAULT '',
-    actor_type TEXT NOT NULL DEFAULT ''
+    actor_type TEXT NOT NULL DEFAULT '',
+    -- Match production migration: names are unique per namespace, not globally
+    UNIQUE(name, namespace)
 );
 CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(name COLLATE NOCASE);
 CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(entity_type);

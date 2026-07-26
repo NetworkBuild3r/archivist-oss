@@ -27,6 +27,11 @@ from archivist.utils.tokenizer import count_tokens
 
 logger = logging.getLogger("archivist.context_api")
 
+# INIT-004/SPEC-004 — coach-oriented defaults (explicit caller max_tokens wins)
+NORMAL_DEFAULT_MAX_TOKENS = 2000
+BOOTSTRAP_DEFAULT_MAX_TOKENS = 400
+BOOTSTRAP_MODES = frozenset({"normal", "bootstrap"})
+
 
 # ---------------------------------------------------------------------------
 # Data structures
@@ -94,6 +99,9 @@ class RelevantContext:
     memories: list[dict] = field(default_factory=list)
     """INIT-003/SPEC-005 canonical recall shape: [{id, text, score, provenance}]."""
 
+    mode: str = "normal"
+    """INIT-004/SPEC-004 — ``normal`` (budgeted recall) or ``bootstrap`` (session start)."""
+
 
 @dataclass
 class HandoffPacket:
@@ -128,10 +136,97 @@ class HandoffPacket:
 # ---------------------------------------------------------------------------
 
 
+def resolve_context_max_tokens(
+    mode: str = "normal",
+    max_tokens: int | None = None,
+) -> int:
+    """Resolve the effective token budget for get_context.
+
+    Explicit ``max_tokens`` always wins. Otherwise apply coach-oriented defaults:
+    ``NORMAL_DEFAULT_MAX_TOKENS`` for normal mode and
+    ``BOOTSTRAP_DEFAULT_MAX_TOKENS`` for bootstrap (INIT-004/SPEC-004).
+    """
+    if max_tokens is not None:
+        return max(1, int(max_tokens))
+    if (mode or "normal").strip().lower() == "bootstrap":
+        return BOOTSTRAP_DEFAULT_MAX_TOKENS
+    return NORMAL_DEFAULT_MAX_TOKENS
+
+
+def _truncate_to_token_budget(text: str, max_tokens: int) -> tuple[str, int]:
+    """Return ``(text, token_count)`` clipped to *max_tokens* (char-ratio estimate)."""
+    if max_tokens <= 0 or not text:
+        return "", 0
+    tokens = count_tokens(text)
+    if tokens <= max_tokens:
+        return text, tokens
+    # Approximate clip then refine — avoid importing tiktoken encode/decode here.
+    ratio = max_tokens / max(tokens, 1)
+    clipped = text[: max(1, int(len(text) * ratio))]
+    while clipped and count_tokens(clipped) > max_tokens:
+        clipped = clipped[: max(0, len(clipped) - 32)]
+    if clipped and not clipped.endswith("…"):
+        clipped = clipped.rstrip() + "…"
+    return clipped, count_tokens(clipped)
+
+
+async def _get_bootstrap_context(
+    agent_id: str,
+    namespace: str,
+    max_tokens: int,
+) -> RelevantContext:
+    """Compact session-start payload (wake_up spirit) without promoting wake_up.
+
+    Uses identity / critical pointers + namespace map slice from the existing
+    wake-up builder. Does **not** invent ``memories[]`` rows — empty is success
+    (GR-CE-003 / INIT-004/SPEC-004).
+    """
+    from archivist.storage.compressed_index import (
+        build_wake_up_context,
+        format_wake_up_text,
+    )
+
+    # INIT-004/SPEC-007 M2 — never serve stale wake-up cache on coach bootstrap;
+    # live build so suppress/supersede visibility applies immediately.
+    wake_ctx = await build_wake_up_context(namespace, agent_id=agent_id)
+
+    # Relabel for core consumers — same spirit, not a novel / evidence dump.
+    raw_text = format_wake_up_text(wake_ctx, agent_id=agent_id)
+    raw_text = raw_text.replace("## Wake-Up Context", "## Bootstrap Context", 1)
+    body, total_tokens = _truncate_to_token_budget(raw_text, max_tokens)
+
+    tips = [t for t in (wake_ctx.get("fleet_tips") or []) if t]
+    # Keep tips inside the same budget when they would push over.
+    tip_budget_left = max(0, max_tokens - total_tokens)
+    kept_tips: list[str] = []
+    for tip in tips:
+        tip_tokens = count_tokens(tip)
+        if tip_tokens <= tip_budget_left:
+            kept_tips.append(tip)
+            tip_budget_left -= tip_tokens
+            total_tokens += tip_tokens
+
+    return RelevantContext(
+        answer=body,
+        sources=[],
+        graph_facts=[],
+        tips=kept_tips,
+        total_tokens=total_tokens,
+        budget_tokens=max_tokens,
+        over_budget=count_tokens(raw_text) > max_tokens,
+        tier_distribution={},
+        token_savings_pct=0.0,
+        provenance=[],
+        pack_policy="bootstrap",
+        memories=[],
+        mode="bootstrap",
+    )
+
+
 async def get_relevant_context(
     agent_id: str,
     task_description: str,
-    max_tokens: int = 8000,
+    max_tokens: int | None = None,
     namespace: str = "",
     tier_policy: str = "adaptive",
     include_graph: bool = True,
@@ -141,6 +236,7 @@ async def get_relevant_context(
     subject: str = "",
     purpose: str = "",
     sensitivity: str = "",
+    mode: str = "normal",
 ) -> RelevantContext:
     """Assemble minimal, token-budgeted context for *agent_id* and *task_description*.
 
@@ -156,7 +252,9 @@ async def get_relevant_context(
     Args:
         agent_id: The agent requesting context.
         task_description: Free-form description of the current task / query.
-        max_tokens: Hard budget for packed sources (default 8000).
+        max_tokens: Hard budget for packed sources. When omitted, uses the
+            coach-oriented default for *mode* (INIT-004/SPEC-004). Explicit
+            values always win.
         namespace: Limit retrieval to this namespace (empty = all).
         tier_policy: One of 'adaptive' (default), 'l0_first', 'l2_first'.
         include_graph: When True, include entity-fact strings from KG.
@@ -167,6 +265,9 @@ async def get_relevant_context(
         subject: Optional pre-rank subject filter (INIT-003/SPEC-005).
         purpose: Optional pre-rank purpose filter; empty = no restriction.
         sensitivity: Optional pre-rank sensitivity filter.
+        mode: ``normal`` (default) or ``bootstrap`` session-start compact
+            payload (INIT-004/SPEC-004). Empty ``memories[]`` is success when
+            nothing matches (GR-CE-003).
 
     Returns:
         :class:`RelevantContext` ready to format as a system prompt prefix.
@@ -174,12 +275,24 @@ async def get_relevant_context(
     from archivist.core.config import CONTEXT_L0_BUDGET_SHARE, CONTEXT_MIN_FULL_RESULTS
     from archivist.retrieval.retrieval_filters import build_stable_memories
 
+    mode_norm = (mode or "normal").strip().lower()
+    if mode_norm not in BOOTSTRAP_MODES:
+        mode_norm = "normal"
+    resolved_budget = resolve_context_max_tokens(mode=mode_norm, max_tokens=max_tokens)
+
+    if mode_norm == "bootstrap":
+        return await _get_bootstrap_context(
+            agent_id=agent_id,
+            namespace=namespace or "",
+            max_tokens=resolved_budget,
+        )
+
     # --- Step 1: run the full retrieval pipeline ---
     retrieval_result = await recursive_retrieve(
         query=task_description,
         agent_id=agent_id,
         namespace=namespace,
-        max_tokens=max_tokens,
+        max_tokens=resolved_budget,
         refine=False,
         tier=tier_policy if tier_policy in ("l0", "l1", "l2") else "l2",
         subject=subject or "",
@@ -217,7 +330,7 @@ async def get_relevant_context(
     if extra_memory_ids and raw_sources:
         packed = pack_context(
             raw_sources,
-            max_tokens=max_tokens,
+            max_tokens=resolved_budget,
             tier_policy=tier_policy,
             l0_budget_share=CONTEXT_L0_BUDGET_SHARE,
             min_full_results=CONTEXT_MIN_FULL_RESULTS,
@@ -314,13 +427,14 @@ async def get_relevant_context(
         graph_facts=graph_facts,
         tips=tips,
         total_tokens=total_tokens,
-        budget_tokens=max_tokens,
+        budget_tokens=resolved_budget,
         over_budget=over_budget,
         tier_distribution=tier_dist,
         token_savings_pct=float(savings_pct),
         provenance=provenance,
         pack_policy=tier_policy,
         memories=memories,
+        mode="normal",
     )
 
 

@@ -2150,6 +2150,8 @@ async def recursive_retrieve(
             "bm25_rescue": n_bm25_rescue,
             "synthetic_hits": n_synthetic_hits,
             "duration_ms": elapsed,
+            # Coach-path stage timings (INIT-004/SPEC-001); also on retrieval_trace.
+            "stage_timings": _stage_timings,
         },
     )
 
