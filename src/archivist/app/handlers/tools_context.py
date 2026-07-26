@@ -22,11 +22,16 @@ TOOLS: list[Tool] = [
             "Assemble token-budgeted, tier-aware context for an agent task in a single call. "
             "Replaces the pattern of calling archivist_search + archivist_tips + archivist_context_check "
             "separately. Returns a stable recall payload with canonical "
-            "memories[{id,text,score,provenance}] (usable text when hits exist), "
-            "legacy sources/answer keys, ranked chunks packed to max_tokens, graph facts, "
-            "and tips. Pre-rank filters omit suppressed/superseded; optional "
+            "memories[{id,text,score,provenance}] (usable text when hits exist; empty memories[] is "
+            "success when nothing matches — cite-or-refuse, do not invent). "
+            "mode=normal (default) uses a tighter coach-oriented token budget; "
+            "mode=bootstrap returns a compact session-start payload (~200–400 tokens: identity, "
+            "critical pointers, map slice) without promoting archivist_wake_up into core. "
+            "Legacy sources/answer keys, ranked chunks packed to max_tokens, graph facts, and tips "
+            "remain. Pre-rank filters omit suppressed/superseded; optional "
             "subject/purpose/sensitivity narrow within the namespace. "
-            "Metadata includes token savings, tier distribution, and safe provenance IDs."
+            "Metadata includes token savings, tier distribution, and safe provenance IDs. "
+            "Explicit max_tokens always overrides the mode default."
         ),
         inputSchema={
             "type": "object",
@@ -39,10 +44,22 @@ TOOLS: list[Tool] = [
                     "type": "string",
                     "description": "The agent's current task or query.",
                 },
+                "mode": {
+                    "type": "string",
+                    "description": (
+                        "'normal' (default) — budgeted turn recall; "
+                        "'bootstrap' — compact session-start identity/pointers/map "
+                        "(INIT-004/SPEC-004)."
+                    ),
+                    "default": "normal",
+                    "enum": ["normal", "bootstrap"],
+                },
                 "max_tokens": {
                     "type": "integer",
-                    "description": "Hard token budget for packed context (default 8000).",
-                    "default": 8000,
+                    "description": (
+                        "Hard token budget for packed context. Defaults: 2000 (normal), "
+                        "400 (bootstrap). Explicit values always win."
+                    ),
                 },
                 "namespace": {
                     "type": "string",
@@ -169,32 +186,56 @@ TOOLS: list[Tool] = [
 
 async def _handle_get_context(arguments: dict) -> list[TextContent]:
     """Assemble token-budgeted context for one agent query."""
+    from archivist.core.rbac import get_namespace_for_agent
     from archivist.retrieval.context_api import (
         RelevantContext,
         format_context_for_prompt,
         get_relevant_context,
+        resolve_context_max_tokens,
     )
 
     agent_id = (arguments.get("agent_id") or "").strip()
     task = (arguments.get("task_description") or "").strip()
     namespace = (arguments.get("namespace") or "").strip()
+    mode = (arguments.get("mode") or "normal").strip().lower()
+    if mode not in ("normal", "bootstrap"):
+        mode = "normal"
 
     if err := require_caller(agent_id):
         return err
     if not task:
         return error_response({"error": "task_description is required"})
 
+    # INIT-004/SPEC-007 M1 — bootstrap mirrors index/wake_up: resolve home ns
+    # when omitted so RBAC cannot be skipped by leaving namespace empty.
+    if mode == "bootstrap" and not namespace and agent_id:
+        namespace = get_namespace_for_agent(agent_id)
+
     # INIT-003/SPEC-005 — RBAC/namespace gate remains on the handler
+    # INIT-004/SPEC-004 — bootstrap cannot bypass namespace RBAC
     if namespace:
         denied = require_rbac(agent_id, "read", namespace)
         if denied:
             return denied
 
+    # Explicit max_tokens wins; omitted → mode default (INIT-004/SPEC-004)
+    raw_max = arguments.get("max_tokens")
+    explicit_max: int | None
+    if raw_max is None or raw_max == "":
+        explicit_max = None
+    else:
+        try:
+            explicit_max = int(raw_max)
+        except (TypeError, ValueError):
+            return error_response({"error": "max_tokens must be an integer"})
+
+    budget = resolve_context_max_tokens(mode=mode, max_tokens=explicit_max)
+
     try:
         ctx: RelevantContext = await get_relevant_context(
             agent_id=agent_id,
             task_description=task,
-            max_tokens=int(arguments.get("max_tokens") or 8000),
+            max_tokens=budget,
             namespace=namespace,
             tier_policy=(arguments.get("tier_policy") or "adaptive"),
             include_graph=bool(arguments.get("include_graph", True)),
@@ -203,6 +244,7 @@ async def _handle_get_context(arguments: dict) -> list[TextContent]:
             subject=(arguments.get("subject") or ""),
             purpose=(arguments.get("purpose") or ""),
             sensitivity=(arguments.get("sensitivity") or ""),
+            mode=mode,
         )
     except Exception as exc:
         logger.exception("archivist_get_context failed")
@@ -211,8 +253,10 @@ async def _handle_get_context(arguments: dict) -> list[TextContent]:
     payload: dict = {
         "agent_id": agent_id,
         "task_description": task,
+        "mode": ctx.mode or mode,
         "answer": ctx.answer,
         # INIT-003/SPEC-005 — canonical stable recall shape
+        # INIT-004/SPEC-004 — empty memories[] is success (GR-CE-003)
         "memories": list(ctx.memories),
         "sources": [
             {
@@ -231,6 +275,7 @@ async def _handle_get_context(arguments: dict) -> list[TextContent]:
         # Safe id list only — never secrets
         "provenance": list(ctx.provenance),
         "context_status": {
+            "mode": ctx.mode or mode,
             "total_tokens": ctx.total_tokens,
             "budget_tokens": ctx.budget_tokens,
             "over_budget": ctx.over_budget,

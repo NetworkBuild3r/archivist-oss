@@ -70,6 +70,13 @@ class TestStorePipelineLog:
         ]:
             assert field in source
 
+    def test_store_ack_duration_ms_in_response(self):
+        """Store success payload exposes duration_ms for coach_core baselines."""
+        import archivist.app.handlers.tools_storage as ts
+
+        source = inspect.getsource(ts._handle_store_inner)
+        assert '"duration_ms": _duration_ms' in source
+
     def test_store_log_uses_time_import(self):
         import archivist.app.handlers.tools_storage as ts
 
@@ -100,8 +107,17 @@ class TestRetrievalPipelineLog:
             "hyde_used",
             "ltr_used",
             "duration_ms",
+            "stage_timings",
         ]:
             assert field in source
+
+    def test_retrieval_stage_timing_keys_recorded(self):
+        """Coach-path baselines (INIT-004/SPEC-001): embed_ms + vector_ms hooks."""
+        import archivist.retrieval.rlm_retriever as rlm_retriever
+
+        source = inspect.getsource(rlm_retriever.recursive_retrieve)
+        assert '_stage_timings["embed_ms"]' in source
+        assert '_stage_timings["vector_ms"]' in source
 
 
 class TestDocstringsAndTypeHints:

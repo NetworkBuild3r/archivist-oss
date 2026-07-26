@@ -14,7 +14,7 @@ from archivist.core.rbac import (
 )
 from archivist.retrieval.rlm_retriever import recursive_retrieve, search_vectors
 from archivist.storage.compressed_index import (
-    build_namespace_index,
+    build_namespace_index_payload,
     cache_wake_up,
     format_wake_up_text,
     get_cached_wake_up,
@@ -270,14 +270,16 @@ TOOLS: list[Tool] = [
     ),
     Tool(
         name="archivist_index",
+        # INIT-004/SPEC-003 — progressive-disclosure map (ADR-004 GR-CE-001/002)
         description=(
-            "Get a compressed navigational index of what knowledge exists in a namespace. "
-            "Returns a short text (~500 tokens) listing entity categories and top topics — "
-            "useful for cross-domain bridging and deciding what to search for. "
-            "Freshness (INIT-003/SPEC-006): rebuilt from the live graph on every call "
-            "(no TTL cache). After archivist_store, the next index call reflects new "
-            "entities/facts; store also invalidates the search hot cache (≤ HOT_CACHE_TTL, "
-            "well under 24h) so recall stays coherent with the index."
+            "Get a progressive-disclosure MEMORY INDEX map for a namespace (~500 tokens). "
+            "Returns JSON {markdown, map}: entity/type pointers + search hints for "
+            "discovery — NOT citable evidence. Do not treat the TOC as facts; use "
+            "archivist_search / archivist_get_context memories[] for provenance-bearing "
+            "recall. No key-fact prose; no synchronous LLM on this path. "
+            "Freshness (INIT-003/SPEC-006): rebuilt from the live graph every call "
+            "(no TTL cache). After archivist_store, the next index reflects new entities; "
+            "store also invalidates the search hot cache (≤ HOT_CACHE_TTL)."
         ),
         inputSchema={
             "type": "object",
@@ -701,11 +703,11 @@ async def _handle_deref(arguments: dict) -> list[TextContent]:
 
 
 async def _handle_index(arguments: dict) -> list[TextContent]:
-    """Return a compressed navigational index for a namespace.
+    """Return progressive-disclosure index map for a namespace.
 
-    INIT-003/SPEC-006: live rebuild each call (no index TTL). Post-store freshness
-    relies on durable graph writes before store ack; callers should re-invoke index
-    after store when they need an updated MEMORY INDEX.
+    INIT-004/SPEC-003: dual shape ``{markdown, map}`` under one tool — navigational
+    pointers + search hints only (ADR-004 GR-CE-001). No synchronous LLM
+    (GR-CE-002). INIT-003/SPEC-006: live rebuild each call (no index TTL).
     """
     agent_id = arguments.get("agent_id", "")
     namespace = arguments.get("namespace", "")
@@ -718,8 +720,10 @@ async def _handle_index(arguments: dict) -> list[TextContent]:
         if denied:
             return denied
 
-    index_text = await build_namespace_index(namespace, agent_ids=[agent_id] if agent_id else None)
-    return [TextContent(type="text", text=index_text)]
+    payload = await build_namespace_index_payload(
+        namespace, agent_ids=[agent_id] if agent_id else None
+    )
+    return success_response(payload)
 
 
 async def _handle_contradictions(arguments: dict) -> list[TextContent]:

@@ -458,7 +458,12 @@ FTS_UPSERT_ERRORS_TOTAL = "archivist_fts_upsert_errors_total"
 
 # ── Write pipeline observability ──────────────────────────────────────────────
 INDEX_DURATION_MS = "archivist_index_duration_ms"
-"""Histogram: wall-clock time per full file indexing call (ms)."""
+"""Histogram: wall-clock time for index builds (ms).
+
+Covers compressed namespace index rebuilds (``archivist_index`` /
+``build_namespace_index``) and other full-index wall clocks. Coach-path
+baselines: INIT-004/SPEC-001.
+"""
 
 # ── Curator per-phase observability ───────────────────────────────────────────
 CURATOR_EXTRACT_MS = "archivist_curator_extract_duration_ms"

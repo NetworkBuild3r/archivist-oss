@@ -13,7 +13,7 @@ python -m pytest tests/ -q --tb=no
 
 CI runs this matrix on Python 3.12 and 3.13 with coverage gates; see [`.github/workflows/ci.yml`](https://github.com/NetworkBuild3r/archivist-oss/blob/main/.github/workflows/ci.yml).
 
-### Coach-path evals (INIT-003/SPEC-008)
+### Coach-path evals (INIT-003/SPEC-008 + INIT-004/SPEC-006 CE)
 
 Personal-production coach-path scenarios (store → index → search/`get_context`,
 dead-Qdrant store ack, two-namespace isolation) live under `tests/system/mcp/`
@@ -21,13 +21,61 @@ with the focused pytest marker `coach_core`. They run on the SQLite CI path
 (no live Qdrant; no myaifitness harness). The Integration & System CI job already
 collects `tests/system/`, so no dedicated workflow job is required.
 
+**INIT-004/SPEC-006 CE asserts** (same marker / SQLite path; ADR-004):
+
+| Assert | What it locks |
+|--------|----------------|
+| TOC token ceiling | `archivist_index` markdown ≤ `INDEX_MARKDOWN_TOKEN_CEILING` (500; REFERENCE ~500-token intent) via `token_estimate.markdown_tokens` / `count_tokens` |
+| No key-fact prose (GR-CE-001) | Index markdown has no `Key Facts` section and no citable fact sentences from stored prose |
+| Bootstrap mode (SM-002) | `archivist_get_context(mode=bootstrap)` returns compact session-start payload under bootstrap budget; empty `memories[]` is success |
+
 ```bash
-# Focused coach-core suite
+# Focused coach-core suite (includes CE asserts)
 python -m pytest -m coach_core -q --tb=short
 
 # Explicit module path
 python -m pytest tests/system/mcp/test_coach_core_evals.py -q --tb=short
 ```
+
+### Coach-path stage timing baselines (INIT-004/SPEC-001)
+
+Measure-before-optimize hooks for the personal-production coach path. Prefer
+these existing fields over inventing new instrumentation. No secrets belong in
+timing payloads (namespace / counts / durations only).
+
+| Stage | Where to read | Assert / observe |
+|-------|---------------|------------------|
+| Store ack wall clock | `archivist_store` success JSON `duration_ms`; structured log `store_pipeline.complete` → `duration_ms` (budget: `STORE_ACK_BUDGET_MS` / `ack_budget`) | `isinstance(duration_ms, int)` and `duration_ms >= 0`; warning log `store_pipeline.ack_budget_exceeded` when over budget |
+| Search embed | Search/`recursive_retrieve` → `retrieval_trace.stage_timings.embed_ms`; also on `retrieval_pipeline.complete` → `stage_timings` | Key present; numeric `>= 0` |
+| Search vector | Same `stage_timings.vector_ms` | Key present; numeric `>= 0` |
+| Index rebuild | Structured log `compressed_index.rebuild_complete` → `rebuild_ms`; Prometheus histogram `archivist_index_duration_ms` | Log + metric observed on every `build_namespace_index` / `archivist_index` call (empty namespaces included) |
+
+**How to assert in CI (SQLite path):**
+
+```bash
+# Hook / contract tests (unit)
+python -m pytest \
+  tests/unit/core/test_write_observability.py \
+  tests/unit/storage/test_compressed_index_timing.py \
+  -q --tb=short
+
+# coach_core includes a store ack duration_ms check
+python -m pytest -m coach_core -q --tb=short
+```
+
+**Manual / local log inspection:** run a store → index → search turn with
+`ARCHIVIST_LOG_LEVEL=INFO` (or the host logging config) and grep:
+
+```text
+store_pipeline.complete
+compressed_index.rebuild_complete
+retrieval_pipeline.complete
+```
+
+Confirm `duration_ms` / `rebuild_ms` / `stage_timings.embed_ms` /
+`stage_timings.vector_ms` appear. Scrape `GET /metrics` for
+`archivist_index_duration_ms` after an `archivist_index` call when
+`METRICS_ENABLED=true`.
 
 ### QA package (Phase 3 + 3.5)
 

@@ -4,6 +4,12 @@ Scenarios (SQLite CI path; no live Qdrant / no myaifitness harness):
 1. store → index → search/get_context round-trip with provenance + stable memories[]
 2. store under dead/hanging Qdrant fails fast / acks (composes SPEC-004 helpers)
 3. two-namespace isolation (cross-tenant no leakage)
+
+INIT-004/SPEC-001: store ack exposes duration_ms; index rebuild timing covered by
+unit hooks (compressed_index.rebuild_complete / archivist_index_duration_ms).
+
+INIT-004/SPEC-006: CE evals — TOC token ceiling (~500), no Key Facts prose
+(GR-CE-001), get_context(mode=bootstrap) session start (SM-002).
 """
 
 from __future__ import annotations
@@ -26,6 +32,10 @@ pytestmark = [
     pytest.mark.mcp,
     pytest.mark.coach_core,
 ]
+
+# docs/REFERENCE.md + ADR-004: progressive-disclosure map ~500-token intent.
+# Audited CE ceiling for coach_core — markdown map must stay at or under this.
+INDEX_MARKDOWN_TOKEN_CEILING = 500
 
 
 def _configure_coach_store_flags(monkeypatch) -> None:
@@ -187,6 +197,9 @@ class TestCoachRoundTrip:
         )
         assert store.get("stored") is True, store
         mid = store["memory_id"]
+        # INIT-004/SPEC-001: store-ack duration exposed for coach-path baselines.
+        assert isinstance(store.get("duration_ms"), int)
+        assert store["duration_ms"] >= 0
         assert store["provenance"]["subject"] == "sleep"
         assert store["provenance"]["sensitivity"] == "health"
 
@@ -202,9 +215,10 @@ class TestCoachRoundTrip:
                 "archivist_index",
                 {"agent_id": agent, "namespace": ns},
             )
-        index_text = index_result[0].text
-        assert entity in index_text
-        assert ns in index_text
+        index_payload = json.loads(index_result[0].text)
+        assert "markdown" in index_payload and "map" in index_payload
+        assert entity in index_result[0].text
+        assert ns in index_result[0].text
 
         hit = _row_to_hit(row)
         # Inject a secret-looking key to prove sanitize on the recall path.
@@ -528,3 +542,158 @@ class TestCoachNamespaceIsolation:
         denied_payload = json.loads(denied_out[0].text)
         assert denied_payload.get("error") == "access_denied"
         assert secret_b not in json.dumps(denied_payload)
+
+
+# ---------------------------------------------------------------------------
+# INIT-004/SPEC-001: coach-path stage timing hooks
+# ---------------------------------------------------------------------------
+
+
+class TestCoachPathTimingHooks:
+    """Evidence that coach-path timing fields stay wired for baselines."""
+
+    def test_search_stage_timing_keys_in_retriever(self):
+        import inspect
+
+        from archivist.retrieval import rlm_retriever
+
+        source = inspect.getsource(rlm_retriever.recursive_retrieve)
+        assert '_stage_timings["embed_ms"]' in source
+        assert '_stage_timings["vector_ms"]' in source
+        assert "stage_timings" in source
+
+    def test_index_rebuild_timing_hook_present(self):
+        import inspect
+
+        from archivist.storage import compressed_index as ci
+
+        source = inspect.getsource(ci.build_namespace_index_payload)
+        assert "compressed_index.rebuild_complete" in source
+        assert "rebuild_ms" in source
+        assert "INDEX_DURATION_MS" in source
+
+    async def test_store_ack_returns_duration_ms(self, qa_pool, monkeypatch):
+        _configure_coach_store_flags(monkeypatch)
+        store = await _store_one(
+            text="coach timing baseline memory for duration_ms",
+            namespace="coach-ns-timing",
+            agent_id="coach-agent",
+            entities=["TimingEntity004"],
+        )
+        assert store.get("stored") is True, store
+        assert isinstance(store.get("duration_ms"), int)
+        assert store["duration_ms"] >= 0
+
+
+# ---------------------------------------------------------------------------
+# INIT-004/SPEC-006: CE evals — TOC ceiling, GR-CE-001, bootstrap (SM-002)
+# ---------------------------------------------------------------------------
+
+
+class TestCoachCeEvals:
+    """Lock ADR-004 CE contracts into the coach_core CI marker."""
+
+    async def test_index_toc_token_ceiling_and_no_key_facts(self, qa_pool, monkeypatch):
+        """SM-001 + GR-CE-001: map stays ≤~500 tok; no Key Facts prose."""
+        from archivist.utils.tokenizer import count_tokens
+
+        _configure_coach_store_flags(monkeypatch)
+        ns = "coach-ns-ce-toc"
+        agent = "coach-agent-rt"
+        entity = "CeTocEntity006"
+        fact_prose = f"{entity} drinks green tea every morning before training"
+
+        store = await _store_one(
+            text=fact_prose,
+            namespace=ns,
+            agent_id=agent,
+            entities=[entity],
+            provenance={
+                "source": "harness",
+                "subject": "habits",
+                "purpose": "coaching",
+                "sensitivity": "standard",
+                "statement_kind": "user",
+            },
+        )
+        assert store.get("stored") is True, store
+
+        with _allow_search_rbac():
+            from archivist.app.handlers._registry import dispatch_tool
+
+            index_out = await dispatch_tool(
+                "archivist_index",
+                {"agent_id": agent, "namespace": ns},
+            )
+        payload = json.loads(index_out[0].text)
+        assert "markdown" in payload and "map" in payload
+        md = payload["markdown"]
+        assert isinstance(md, str) and md.strip()
+
+        # Token ceiling — prefer payload token_estimate; cross-check count_tokens.
+        te = payload.get("token_estimate") or {}
+        md_tokens = te.get("markdown_tokens")
+        if md_tokens is None:
+            md_tokens = count_tokens(md)
+        assert isinstance(md_tokens, int)
+        assert md_tokens <= INDEX_MARKDOWN_TOKEN_CEILING, (
+            f"index markdown tokens {md_tokens} exceed ceiling "
+            f"{INDEX_MARKDOWN_TOKEN_CEILING} (ADR-004 / REFERENCE ~500)"
+        )
+        assert count_tokens(md) <= INDEX_MARKDOWN_TOKEN_CEILING
+
+        # GR-CE-001 — no key-fact prose / Key Facts section
+        assert "Key Facts" not in md
+        assert "key fact" not in md.lower()
+        assert "green tea" not in md
+        assert "every morning" not in md
+        # Navigational pointer still present
+        assert entity in md or entity in json.dumps(payload["map"])
+
+    async def test_get_context_bootstrap_mode(self, qa_pool, monkeypatch):
+        """SM-002: get_context(mode=bootstrap) compact session-start path."""
+        from archivist.retrieval.context_api import BOOTSTRAP_DEFAULT_MAX_TOKENS
+
+        _configure_coach_store_flags(monkeypatch)
+        ns = "coach-ns-ce-boot"
+        agent = "coach-agent-rt"
+        entity = "CeBootEntity006"
+
+        store = await _store_one(
+            text=f"{entity} prefers morning workouts for session bootstrap",
+            namespace=ns,
+            agent_id=agent,
+            entities=[entity],
+            provenance={
+                "source": "harness",
+                "subject": "habits",
+                "purpose": "coaching",
+            },
+        )
+        assert store.get("stored") is True, store
+
+        with patch("archivist.app.handlers.tools_context.require_rbac", return_value=None):
+            from archivist.app.handlers._registry import dispatch_tool
+
+            ctx_out = await dispatch_tool(
+                "archivist_get_context",
+                {
+                    "agent_id": agent,
+                    "task_description": "session start bootstrap",
+                    "namespace": ns,
+                    "mode": "bootstrap",
+                },
+            )
+        payload = json.loads(ctx_out[0].text)
+        assert payload.get("mode") == "bootstrap"
+        status = payload.get("context_status") or {}
+        assert status.get("mode") == "bootstrap"
+        assert status.get("pack_policy") == "bootstrap"
+        assert status.get("budget_tokens") == BOOTSTRAP_DEFAULT_MAX_TOKENS
+        assert status.get("total_tokens") <= BOOTSTRAP_DEFAULT_MAX_TOKENS
+        # Empty memories[] is success on bootstrap (GR-CE-003) — not invented from TOC
+        assert isinstance(payload.get("memories"), list)
+        assert payload["memories"] == []
+        assert payload.get("sources") == []
+        answer = payload.get("answer") or ""
+        assert "Bootstrap Context" in answer or "Identity" in answer or answer.strip()
