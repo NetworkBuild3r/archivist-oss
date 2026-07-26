@@ -297,6 +297,9 @@ class MemoryTransaction:
         collection: str,
         points: list[Any],
         memory_id: str = "",
+        *,
+        embed_deferred: bool = False,
+        embed_inputs: dict[str, str] | None = None,
     ) -> None:
         """Enqueue a ``QDRANT_UPSERT`` event for the given *points*.
 
@@ -304,10 +307,17 @@ class MemoryTransaction:
         method (Pydantic v1) or ``model_dump()`` (Pydantic v2).  The outbox
         processor will reconstruct them on the other side.
 
+        When ``embed_deferred`` is True (INIT-005/SPEC-005), vectors may be
+        empty placeholders; ``embed_inputs`` maps point id → text for the
+        drain path to embed **before** Qdrant upsert. Texts live only on the
+        outbox JSON payload (not inside Qdrant point payloads).
+
         Args:
             collection: Target Qdrant collection name.
-            points: List of ``PointStruct`` objects to upsert.
+            points: List of ``PointStruct`` objects (or dicts) to upsert.
             memory_id: Optional memory ID for audit/logging correlation.
+            embed_deferred: When True, drain must fill vectors before upsert.
+            embed_inputs: point-id → embed text; required when deferred.
         """
         if not self._enabled:
             return
@@ -319,14 +329,19 @@ class MemoryTransaction:
                 serialised.append(p.dict())
             else:
                 serialised.append(p)
+        payload: dict[str, Any] = {
+            "collection": collection,
+            "points": serialised,
+            "memory_id": memory_id,
+        }
+        if embed_deferred:
+            # INIT-005/SPEC-005 — JSON flags only (no schema migration).
+            payload["embed_deferred"] = True
+            payload["embed_inputs"] = {str(k): v for k, v in (embed_inputs or {}).items()}
         self._events.append(
             OutboxEvent(
                 event_type=EventType.QDRANT_UPSERT,
-                payload={
-                    "collection": collection,
-                    "points": serialised,
-                    "memory_id": memory_id,
-                },
+                payload=payload,
             )
         )
 

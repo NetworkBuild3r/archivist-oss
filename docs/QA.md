@@ -13,7 +13,7 @@ python -m pytest tests/ -q --tb=no
 
 CI runs this matrix on Python 3.12 and 3.13 with coverage gates; see [`.github/workflows/ci.yml`](https://github.com/NetworkBuild3r/archivist-oss/blob/main/.github/workflows/ci.yml).
 
-### Coach-path evals (INIT-003/SPEC-008 + INIT-004/SPEC-006 CE)
+### Coach-path evals (INIT-003/SPEC-008 + INIT-004/SPEC-006 CE + INIT-005/SPEC-007)
 
 Personal-production coach-path scenarios (store → index → search/`get_context`,
 dead-Qdrant store ack, two-namespace isolation) live under `tests/system/mcp/`
@@ -29,8 +29,18 @@ collects `tests/system/`, so no dedicated workflow job is required.
 | No key-fact prose (GR-CE-001) | Index markdown has no `Key Facts` section and no citable fact sentences from stored prose |
 | Bootstrap mode (SM-002) | `archivist_get_context(mode=bootstrap)` returns compact session-start payload under bootstrap budget; empty `memories[]` is success |
 
+**INIT-005/SPEC-007 perf / lag / durability asserts** (same marker / SQLite path; ADR-005):
+
+| Assert | What it locks |
+|--------|----------------|
+| Dead-Qdrant / ack SLO | Existing `TestCoachDeadQdrantAck` — store acks with outbox pending; no sync Qdrant wait (INIT-003 spirit / SM-003) |
+| Hard-skip observability | Expired ack budget → `store_pipeline.hard_skip` for conflict/dedup (no fact text in log extras); outbox row still enqueued |
+| Embed-defer + lag fields | In-test `ARCHIVIST_EMBED_DEFER=true` (default remains **false**) → success JSON `embed_deferred`, `searchable_lag_hint`, `searchable_lag_metric`, `stage_timings.embed_ms` |
+| Drain-to-searchable SLO | Deterministic fake `embed_batch` + in-test `drain_outbox` → applied upsert with filled vectors in **≤ 5s** wall clock (ADR-005 CI bar; not live-provider wall-clock) |
+| Prior CE contracts | TOC ≤500 / no Key Facts / bootstrap still collected under `-m coach_core` |
+
 ```bash
-# Focused coach-core suite (includes CE asserts)
+# Focused coach-core suite (CE + INIT-005 perf asserts)
 python -m pytest -m coach_core -q --tb=short
 
 # Explicit module path
@@ -76,6 +86,61 @@ Confirm `duration_ms` / `rebuild_ms` / `stage_timings.embed_ms` /
 `stage_timings.vector_ms` appear. Scrape `GET /metrics` for
 `archivist_index_duration_ms` after an `archivist_index` call when
 `METRICS_ENABLED=true`.
+
+### Coach-path store stage timings + searchable lag (INIT-005/SPEC-002)
+
+ADR-005 / GR-LAG-001 baselines for the write path. Timing payloads are
+**numeric / ids / namespace only** — never memory fact text or secrets.
+
+| Stage / signal | Where to read | Assert / observe |
+|----------------|---------------|------------------|
+| Store embed | `archivist_store` success JSON `stage_timings.embed_ms`; log `store_pipeline.complete` → `stage_timings`; histogram `archivist_store_embed_duration_ms` | Key present on success; numeric `>= 0` |
+| Store conflict (optional) | Same `stage_timings.conflict_ms` when conflict check ran; histogram `archivist_store_conflict_duration_ms` | Present only when check executed; numeric `>= 0` |
+| Store ack wall | Existing `duration_ms` (INIT-004) | Unchanged |
+| Searchable-vector lag | Prometheus gauge `archivist_outbox_lag_seconds` (alias constant `SEARCHABLE_LAG_SECONDS`); refreshed by storage gauges loop from oldest pending outbox age; log field `searchable_lag_metric` names the hook | Gauge `>= 0`; empty queue → `0` |
+
+**SLO spirit (ADR-005):** with fake embed / coach_core, p95 drain-to-searchable ≤ 5s
+is asserted under `-m coach_core` (INIT-005/SPEC-007). This section locks the
+**instrumentation hooks** so lag is never silent.
+
+
+```bash
+# Hook / contract tests (unit)
+python -m pytest tests/unit/core/test_write_observability.py -q --tb=short
+```
+
+**Manual / local:** after `archivist_store` with `OUTBOX_ENABLED=true` and
+`METRICS_ENABLED=true`, confirm success JSON includes `stage_timings.embed_ms`,
+grep `store_pipeline.complete` for `stage_timings` (no fact text), and scrape
+`GET /metrics` for `archivist_outbox_lag_seconds` / `archivist_store_embed_duration_ms`.
+
+### Coach-path embed-defer + searchable-lag SLO (INIT-005/SPEC-005)
+
+ADR-005 / GR-LAG-001 / GR-DUR-001. Opt-in via `ARCHIVIST_EMBED_DEFER` (default
+**false**). When enabled with `OUTBOX_ENABLED=true`:
+
+| Signal | Where to read | Assert / observe |
+|--------|---------------|------------------|
+| Defer on store | Success JSON `embed_deferred: true`; log `store_pipeline.embed_deferred` | Primary `embed_text` not awaited on ack path |
+| Durable ack | Graph + outbox row (unchanged INIT-003) | FTS/needle usable at ack; vector may lag |
+| Drain fill | Outbox drain embeds **before** Qdrant upsert; log `outbox.embed_deferred_filled` (counts/duration only — **no** vectors or fact text) | Point eventually vector-searchable |
+| Searchable lag metric | `archivist_outbox_lag_seconds` / alias `SEARCHABLE_LAG_SECONDS` | Hook for lag SLO; never silent |
+| Dead Qdrant | Store ack still within INIT-003 spirit (`STORE_ACK_BUDGET_MS` / no sync Qdrant wait) | SM-003 — no regression |
+
+**SLO (ADR-005):** p95 drain-to-searchable **≤ 5s** on fake-embed / coach_core
+lanes — hard-asserted in `tests/system/mcp/test_coach_core_evals.py`
+(`TestCoachEmbedDeferLagSlo`; INIT-005/SPEC-007). Production real-embed: measure
+via lag gauge + “eventually searchable” — do not hard-gate wall-clock against
+live providers.
+
+```bash
+# Embed-defer unit + drain-fill tests
+python -m pytest tests/unit/app/handlers/test_embed_deferred_store.py \
+  tests/unit/storage/test_outbox_embed_deferred.py -q --tb=short
+
+# coach_core lag SLO + hard-skip observability (SPEC-007)
+python -m pytest -m coach_core -q --tb=short
+```
 
 ### QA package (Phase 3 + 3.5)
 
