@@ -185,11 +185,7 @@ _CRITICAL_SUBSYSTEMS = frozenset({"qdrant", "postgres", "embeddings"})
 async def handle_health(_request):
     statuses = health.all_status()
     overall = "healthy"
-    if any(
-        not v.get("healthy", True)
-        for k, v in statuses.items()
-        if k in _CRITICAL_SUBSYSTEMS
-    ):
+    if any(not v.get("healthy", True) for k, v in statuses.items() if k in _CRITICAL_SUBSYSTEMS):
         overall = "degraded"
     return JSONResponse(
         {

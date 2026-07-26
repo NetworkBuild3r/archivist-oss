@@ -29,7 +29,10 @@ def test_postgres_entity_unique_migration_changes_name_only_constraint():
     source = Path(graph_schema.__file__).read_text()
 
     assert "ALTER TABLE entities DROP CONSTRAINT entities_name_unique" in source
-    assert "ALTER TABLE entities ADD CONSTRAINT entities_name_unique UNIQUE (name, namespace)" in source
+    assert (
+        "ALTER TABLE entities ADD CONSTRAINT entities_name_unique UNIQUE (name, namespace)"
+        in source
+    )
     assert "_migrate_entity_unique_constraint_postgres" in source
 
 
