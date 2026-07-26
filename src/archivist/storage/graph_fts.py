@@ -353,8 +353,12 @@ async def search_fts(
 def _build_fts_where(
     namespace: str, agent_id: str, memory_type: str, actor_type: str
 ) -> tuple[list[str], list]:
-    """Build the shared namespace/agent/type/actor filter clauses common to all FTS variants."""
-    where_clauses = ["mc.is_excluded = 0"]
+    """Build the shared namespace/agent/type/actor filter clauses common to all FTS variants.
+
+    INIT-003/SPEC-009 (SEC-002): also exclude suppressed rows so BM25 cannot
+    surface content that default recall treats as hidden.
+    """
+    where_clauses = ["mc.is_excluded = 0", "mc.is_suppressed = 0"]
     params: list = []
 
     if namespace:
@@ -425,6 +429,7 @@ async def _search_fts_sqlite_family(
         "SELECT mc.qdrant_id, mc.file_path, mc.chunk_index, mc.agent_id, "
         "mc.namespace, mc.date, mc.memory_type, mc.text, "
         "mc.actor_id, mc.actor_type, mc.importance, mc.tier_label, "
+        "mc.is_suppressed, mc.supersedes_id, "
         "rank AS bm25_rank "
         f"FROM {fts_table} "
         f"JOIN memory_chunks mc ON {fts_table}.rowid = mc.rowid "
@@ -486,6 +491,7 @@ async def _search_fts_postgres_family(
         "SELECT mc.qdrant_id, mc.file_path, mc.chunk_index, mc.agent_id, "
         "mc.namespace, mc.date, mc.memory_type, mc.text, "
         "mc.actor_id, mc.actor_type, mc.importance, mc.tier_label, "
+        "mc.is_suppressed, mc.supersedes_id, "
         f"ts_rank_cd(mc.{fts_column}, to_tsquery('{ts_config}', ?)) * 32 AS bm25_rank "
         "FROM memory_chunks mc "
         "LEFT JOIN memory_hotness mh ON mh.memory_id = mc.qdrant_id "

@@ -81,7 +81,12 @@ from archivist.retrieval.query_intent import classify_temporal_intent
 from archivist.retrieval.rank_fusion import rrf_merge
 from archivist.retrieval.ranker import ltr_available
 from archivist.retrieval.ranker import rank_results as ltr_rank_results
-from archivist.retrieval.retrieval_filters import apply_dynamic_threshold, apply_retrieval_threshold
+from archivist.retrieval.retrieval_filters import (
+    apply_dynamic_threshold,
+    apply_prerank_filters,
+    apply_retrieval_threshold,
+    attach_stable_memories,
+)
 from archivist.retrieval.topic_detector import detect_query_topic
 from archivist.storage.collection_router import collection_for
 from archivist.storage.fts_search import merge_vector_and_bm25, search_bm25
@@ -371,12 +376,22 @@ async def _refine_one_chunk(
             )
             if extraction.strip().upper() != "IRRELEVANT":
                 return {
+                    "id": str(hit.get("id", hit.get("qdrant_id", ""))),
                     "extraction": extraction.strip(),
+                    "text": extraction.strip(),
                     "source": hit["file_path"],
+                    "file_path": hit.get("file_path", ""),
                     "date": hit["date"],
                     "agent_id": hit["agent_id"],
                     "score": hit["score"],
                     "rerank_score": hit.get("rerank_score"),
+                    "namespace": hit.get("namespace", ""),
+                    "subject": hit.get("subject", ""),
+                    "purpose": hit.get("purpose", ""),
+                    "sensitivity": hit.get("sensitivity", ""),
+                    "source_label": hit.get("source", ""),
+                    "confidence": hit.get("confidence"),
+                    "statement_kind": hit.get("statement_kind", ""),
                 }
         except Exception as e:
             logger.warning("LLM refinement failed for chunk: %s", e)
@@ -465,11 +480,17 @@ async def search_vectors(
     limit: int = 20,
     _query_vec: list[float] | None = None,
     actor_type: str = "",
+    subject: str = "",
+    purpose: str = "",
+    sensitivity: str = "",
 ) -> list[dict]:
     """Stage 1: coarse vector search in Qdrant with optional filters.
 
     Pass ``_query_vec`` to reuse a pre-computed embedding and avoid
     redundant calls to the embedding API (topic fallback, adaptive widen).
+
+    INIT-003/SPEC-005: optional subject/purpose/sensitivity narrow pre-rank;
+    suppressed points are excluded via must_not (cannot be widened by caller).
     """
     if _query_vec is not None:
         query_vec = _query_vec
@@ -506,11 +527,19 @@ async def search_vectors(
         )
     if actor_type:
         must_filters.append(FieldCondition(key="actor_type", match=MatchValue(value=actor_type)))
+    if subject:
+        must_filters.append(FieldCondition(key="subject", match=MatchValue(value=subject)))
+    if purpose:
+        must_filters.append(FieldCondition(key="purpose", match=MatchValue(value=purpose)))
+    if sensitivity:
+        must_filters.append(FieldCondition(key="sensitivity", match=MatchValue(value=sensitivity)))
 
     _date_range_active = bool(date_from or date_to) and date_from != date_to
     must_not_filters = [
         FieldCondition(key="archived", match=MatchValue(value=True)),
         FieldCondition(key="deleted", match=MatchValue(value=True)),
+        # INIT-003/SPEC-005 — suppressed never enter the nomination pool
+        FieldCondition(key="is_suppressed", match=MatchValue(value=True)),
     ]
     if not SYNTHETIC_QUESTIONS_ENABLED:
         must_not_filters.append(
@@ -577,6 +606,18 @@ async def search_vectors(
             "representation_type": hit.payload.get("representation_type", "chunk"),
             "synthetic_question": hit.payload.get("synthetic_question", ""),
             "source_memory_id": hit.payload.get("source_memory_id", ""),
+            # INIT-003/SPEC-005 coach provenance / lifecycle payload fields
+            "subject": hit.payload.get("subject", ""),
+            "purpose": hit.payload.get("purpose", ""),
+            "sensitivity": hit.payload.get("sensitivity", "standard"),
+            "source": hit.payload.get("source", ""),
+            "confidence": hit.payload.get("confidence"),
+            "statement_kind": hit.payload.get("statement_kind", ""),
+            "actor_type": hit.payload.get("actor_type", ""),
+            "is_suppressed": hit.payload.get("is_suppressed", False),
+            "is_superseded": hit.payload.get("is_superseded", False),
+            "supersedes_id": hit.payload.get("supersedes_id", ""),
+            "superseded_by": hit.payload.get("superseded_by"),
         }
         for hit in results
     ]
@@ -1265,8 +1306,16 @@ async def recursive_retrieve(
     memory_type: str = "",
     _is_retry: bool = False,
     actor_type: str = "",
+    subject: str = "",
+    purpose: str = "",
+    sensitivity: str = "",
 ) -> dict:
-    """Full RLM pipeline: coarse → dedupe → graph augment → temporal decay → threshold → rerank → parent → refine → synthesize."""
+    """Full RLM pipeline: coarse → dedupe → graph augment → temporal decay → threshold → rerank → parent → refine → synthesize.
+
+    INIT-003/SPEC-005: pre-rank filters (namespace/subject/purpose/sensitivity +
+    suppress/supersede visibility) run before ranking; response includes canonical
+    ``memories`` alongside legacy ``sources``.
+    """
     t0 = time.monotonic()
     user_memory_type = memory_type
     stage0_inventory = None
@@ -1277,6 +1326,9 @@ async def recursive_retrieve(
     # and scoring but must NOT narrow the search or it silently drops
     # memories stored under a different type (the "general" recall bug).
     effective_memory_type = memory_type
+    subject = (subject or "").strip()
+    purpose = (purpose or "").strip()
+    sensitivity = (sensitivity or "").strip()
     _initial_budget_type = "needle" if is_needle_query(query) else "default"
     _budget = LatencyBudget(max_ms=budget_for_query_type(_initial_budget_type))
 
@@ -1318,7 +1370,8 @@ async def recursive_retrieve(
     # replacement of `_trace_kw()`'s mutable-outer-scope-closure pattern.
 
     cache_extra = (
-        f"{agent_id}|{','.join(agent_ids or [])}|{team}|{date_from}|{date_to}|{limit}|{refine}"
+        f"{agent_id}|{','.join(agent_ids or [])}|{team}|{date_from}|{date_to}|"
+        f"{limit}|{refine}|{subject}|{purpose}|{sensitivity}"
     )
     cached = hot_cache.get(
         agent_id or "fleet",
@@ -1363,7 +1416,7 @@ async def recursive_retrieve(
         m.inc(m.SEARCH_TOTAL)
         m.observe(m.SEARCH_DURATION, elapsed)
         _observe_search_results(namespace, out.get("sources"))
-        return out
+        return attach_stable_memories(out)
 
     # ── Stage timings (ms) for retrieval trace ──
     _stage_timings: dict[str, float] = {}
@@ -1483,6 +1536,9 @@ async def recursive_retrieve(
         memory_type=effective_memory_type,
         limit=vector_limit,
         actor_type=actor_type,
+        subject=subject,
+        purpose=purpose,
+        sensitivity=sensitivity,
     )
 
     async def _search_one(q: str, vec: list[float] | None, topic: str = "") -> list[dict]:
@@ -1614,6 +1670,34 @@ async def recursive_retrieve(
         except Exception as e:
             logger.debug("Late HyDE pass failed: %s", e)
 
+    # INIT-003/SPEC-005 — pre-rank filters (visibility + tenant axes) before ranking
+    _known_superseded: set[str] = set()
+    if namespace:
+        try:
+            from archivist.storage.chunk_lifecycle import list_superseded_loser_ids
+
+            _known_superseded = await list_superseded_loser_ids(namespace)
+        except Exception as e:
+            logger.debug("list_superseded_loser_ids failed: %s", e)
+
+    def _prerank(rows: list[dict]) -> list[dict]:
+        return apply_prerank_filters(
+            rows,
+            namespace=namespace,
+            subject=subject,
+            purpose=purpose,
+            sensitivity=sensitivity,
+            known_superseded_ids=_known_superseded,
+        )
+
+    coarse = _prerank(coarse)
+    vec_results = [_prerank(vr) for vr in vec_results]
+    bm25_hits = _prerank(bm25_hits)
+    literal_hits = _prerank(literal_hits)
+    _registry_hits = _prerank(_registry_hits)
+    n_coarse = len(coarse)
+    n_bm25 = len(bm25_hits)
+
     # Trace fields fixed by this point in the pipeline (see `_static_trace_fields`
     # docstring) — computed once and threaded through to whichever branch runs.
     trace_static = _static_trace_fields(
@@ -1663,7 +1747,7 @@ async def recursive_retrieve(
         }
         _attach_stage0(empty, stage0_inventory, auto_type, user_memory_type)
         _observe_search_results(namespace, [])
-        return empty
+        return attach_stable_memories(empty)
 
     # ── Post-retrieval processing ──
     _t_post = time.monotonic()
@@ -1725,11 +1809,11 @@ async def recursive_retrieve(
 
     if outcome.early_response is not None:
         if outcome.early_response_is_final:
-            return outcome.early_response
+            return attach_stable_memories(outcome.early_response)
         early = outcome.early_response
         _attach_stage0(early, stage0_inventory, auto_type, user_memory_type)
         _observe_search_results(namespace, early.get("sources"))
-        return early
+        return attach_stable_memories(early)
 
     enriched = outcome.enriched
     filtered = outcome.filtered
@@ -1880,6 +1964,7 @@ async def recursive_retrieve(
             "retrieval_trace": _retrieval_trace(**_common_trace),
         }
         _attach_stage0(no_refine, stage0_inventory, auto_type, user_memory_type)
+        attach_stable_memories(no_refine)
         _observe_search_results(namespace, no_refine.get("sources"))
         return no_refine
 
@@ -1892,12 +1977,22 @@ async def recursive_retrieve(
     if REFINE_SKIP_THRESHOLD > 0 and top_score >= REFINE_SKIP_THRESHOLD:
         refined = [
             {
+                "id": str(hit.get("id", hit.get("qdrant_id", ""))),
                 "extraction": select_tier(hit, tier),
+                "text": select_tier(hit, tier),
                 "source": hit["file_path"],
+                "file_path": hit.get("file_path", ""),
                 "date": hit["date"],
                 "agent_id": hit["agent_id"],
                 "score": hit["score"],
                 "rerank_score": hit.get("rerank_score"),
+                "namespace": hit.get("namespace", ""),
+                "subject": hit.get("subject", ""),
+                "purpose": hit.get("purpose", ""),
+                "sensitivity": hit.get("sensitivity", ""),
+                "source_label": hit.get("source", ""),
+                "confidence": hit.get("confidence"),
+                "statement_kind": hit.get("statement_kind", ""),
             }
             for hit in enriched
         ]
@@ -1927,7 +2022,7 @@ async def recursive_retrieve(
         }
         _attach_stage0(no_rel, stage0_inventory, auto_type, user_memory_type)
         _observe_search_results(namespace, [])
-        return no_rel
+        return attach_stable_memories(no_rel)
 
     # Stage 6: Synthesis
     extractions_text = "\n\n".join(
@@ -1974,11 +2069,23 @@ async def recursive_retrieve(
         "over_budget": _over_budget,
         "sources": [
             {
+                "id": r.get("id", ""),
                 "file": r["source"],
+                "file_path": r.get("file_path") or r["source"],
                 "date": r["date"],
                 "agent": r["agent_id"],
+                "agent_id": r["agent_id"],
                 "score": r["score"],
                 "rerank_score": r.get("rerank_score"),
+                # INIT-003/SPEC-005 — usable text for stable memories[] (compat keys kept)
+                "text": r.get("text") or r.get("extraction") or "",
+                "namespace": r.get("namespace", ""),
+                "subject": r.get("subject", ""),
+                "purpose": r.get("purpose", ""),
+                "sensitivity": r.get("sensitivity", ""),
+                "source": r.get("source_label", ""),
+                "confidence": r.get("confidence"),
+                "statement_kind": r.get("statement_kind", ""),
             }
             for r in refined
         ],
@@ -1990,6 +2097,7 @@ async def recursive_retrieve(
         "retrieval_trace": _retrieval_trace(**_common_trace),
     }
     _attach_stage0(final_result, stage0_inventory, auto_type, user_memory_type)
+    attach_stable_memories(final_result)
     _observe_search_results(namespace, final_result.get("sources"))
 
     elapsed = int((time.monotonic() - t0) * 1000)

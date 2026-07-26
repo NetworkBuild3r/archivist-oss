@@ -4,7 +4,15 @@
 
 **Goal** — Be the most **trustworthy and production-ready** open multi-agent memory layer in 2026: observable, RBAC-aware, safe under fleet load, and the best answer finder in the industry.
 
-**Next milestones (engineering)** — **Pydantic v2 config validation is mostly done**: `ArchivistSettings` (`core/config.py`) is the single validated source of truth for env + invalid combinations; the remaining work is **Phase B** — removing the ~51 module-level `UPPER_CASE` backward-compat aliases once call-sites migrate to `settings.foo` (tracked as INIT-001/SPEC-002, not greenfield). Next differentiator work is **Phase 8** intelligent lifecycle management, sequenced in [ADR-001](adr/ADR-001-platform-coherence-sequencing.md) after the platform-debt specs (shim removal, `graph.py` split, outbox default-on).
+**Next milestones (engineering)** — Immediate focus is **coach-core reliability**
+([ADR-003](adr/ADR-003-coach-core-reliability.md), INIT-003): freeze and harden the
+five-tool coach path (`store` / `search` / `get_context` / `index` / `forget`)
+with provenance, pre-rank filters, supersede/suppress, ≤4s durable write ack, and
+a stable recall shape — default **core** tool profile. Phase 7–10 differentiators
+remain documented below as longer-horizon product track; they are **not** the
+recommended next engineering work. (INIT-001 / [ADR-001](adr/ADR-001-platform-coherence-sequencing.md)
+platform-coherence sequencing remains historical context for that initiative.)
+<!-- INIT-003/SPEC-001 -->
 
 ---
 
@@ -54,28 +62,23 @@ These six features combined will make Archivist the **most trustworthy and produ
 
 ## Immediate Next Steps (Recommended)
 
-Sequencing below matches [ADR-001: Platform coherence sequencing](adr/ADR-001-platform-coherence-sequencing.md)
-(INIT-001), which locks in the order after ASMT-001 found doc/inspiration
-thrash and compounding platform debt (import shims, `graph.py` monolith,
-outbox dual-path):
+<!-- INIT-003/SPEC-001 -->
 
-1. **Platform coherence + debt (P0–P1)** — this doc/ADR sync, then shim
-   removal, `graph.py` decomposition, and transactional-outbox-as-default.
-   Compounding debt first so later phases build on a clean surface.
-2. **Phase 8** (Intelligent Lifecycle Management) — contradiction resolution
-   + reflection hooks on top of existing detect/decay/compress. Chosen ahead
-   of Phase 7 because self-curation de-risks the checkpoint/time-travel data
-   model (GR-002: keep it out of the L0–L2 Answer Finder taxonomy).
-3. **Phase 7** (Multi-Tier Memory + Checkpointing) — data model + resume/replay
-   MCP API, as a store distinct from L0–L2 delivery tiers.
-4. **Memory as a Product** (fork/export/version) — builds on `versioning.py`
-   + backup fragments once checkpoint storage patterns exist.
-5. **Phase 10** (Coordination beyond handoff) — selective share + conflict/
-   consensus primitives, after both lifecycle (step 2) and Memory-as-Product
-   (step 4) land.
-6. **Phase 9** (Observability depth) — lineage + cost/token-dollar signals;
-   independent of the product track, parallelizable after CI ratchet (P1).
-7. Optional: add a **domain-specific long-document fixture** (your own docs +
+**Authoritative next work:** [ADR-003: Coach-core reliability](adr/ADR-003-coach-core-reliability.md)
+(INIT-003) — personal-production north star from the BRAIN-001 amendment. Make the
+five-tool coach core boringly reliable; enrich that contract; default to a **core**
+`list_tools` profile. Do **not** treat Phase 7–10 breadth as the immediate plan.
+
+1. **Coach-core contract + reliability (INIT-003)** — ADR-003 freeze, then
+   provenance/supersede schema, core tool profile, ≤4s durable store ack,
+   stable recall + pre-rank filters, index freshness, forget/suppress lifecycle,
+   and coach-path CI evals.
+2. **Parked for later (not next)** — Phase 8 lifecycle productization, Phase 7
+   checkpoint UX, MaP MCP / fleet demos, `share_*` depth, Phase 9 observability
+   billboard. INIT-001 / [ADR-001](adr/ADR-001-platform-coherence-sequencing.md)
+   documented that product order for its own initiative; it is historical context,
+   not the current recommended queue.
+3. Optional: add a **domain-specific long-document fixture** (your own docs +
    questions) locally to tune retrieval beyond the public toy corpus — keep
    private data out of the public repo.
 

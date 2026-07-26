@@ -40,7 +40,10 @@ TOOLS: list[Tool] = [
             "Semantic search across agent memories with RLM recursive retrieval. "
             "Supports fleet-wide search or a list of agent_ids (multi-agent memory). "
             "Set caller_agent_id when reading other agents' memories so RBAC can apply. "
-            "Returns synthesized answer with source citations."
+            "Returns a stable recall payload: canonical memories[{id,text,score,provenance}] "
+            "with usable text when hits exist (answer may be empty when refine=false), "
+            "plus legacy sources/answer keys. Pre-rank filters omit suppressed/superseded "
+            "memories; optional subject/purpose/sensitivity narrow within the namespace."
         ),
         inputSchema={
             "type": "object",
@@ -62,7 +65,7 @@ TOOLS: list[Tool] = [
                 },
                 "namespace": {
                     "type": "string",
-                    "description": "Memory namespace to search (optional, auto-detect from agent_id)",
+                    "description": "Memory namespace to search (optional, auto-detect from agent_id). When set, results are hard-scoped to this tenant.",
                     "default": "",
                 },
                 "team": {
@@ -70,9 +73,24 @@ TOOLS: list[Tool] = [
                     "description": "Filter by team (optional)",
                     "default": "",
                 },
+                "subject": {
+                    "type": "string",
+                    "description": "Optional pre-rank subject filter (exact). Narrows within namespace; cannot widen tenants.",
+                    "default": "",
+                },
+                "purpose": {
+                    "type": "string",
+                    "description": "Optional pre-rank purpose filter. Empty = no purpose restriction within namespace.",
+                    "default": "",
+                },
+                "sensitivity": {
+                    "type": "string",
+                    "description": "Optional pre-rank sensitivity filter (e.g. standard, sensitive).",
+                    "default": "",
+                },
                 "refine": {
                     "type": "boolean",
-                    "description": "Use LLM refinement for higher quality (slower). Default false.",
+                    "description": "Use LLM refinement for higher quality (slower). Default false. When false, answer may be empty — use memories[].text.",
                     "default": False,
                 },
                 "limit": {
@@ -255,7 +273,11 @@ TOOLS: list[Tool] = [
         description=(
             "Get a compressed navigational index of what knowledge exists in a namespace. "
             "Returns a short text (~500 tokens) listing entity categories and top topics — "
-            "useful for cross-domain bridging and deciding what to search for."
+            "useful for cross-domain bridging and deciding what to search for. "
+            "Freshness (INIT-003/SPEC-006): rebuilt from the live graph on every call "
+            "(no TTL cache). After archivist_store, the next index call reflects new "
+            "entities/facts; store also invalidates the search hot cache (≤ HOT_CACHE_TTL, "
+            "well under 24h) so recall stays coherent with the index."
         ),
         inputSchema={
             "type": "object",
@@ -432,6 +454,7 @@ async def _handle_search(arguments: dict) -> list[TextContent]:
     min_score = arguments.get("min_score")
     threshold = float(min_score) if min_score is not None else None
 
+    # INIT-003/SPEC-005 — optional pre-rank axes (narrow only; no widen/bypass args)
     result = await recursive_retrieve(
         query=arguments["query"],
         agent_id="" if agent_ids else agent_id,
@@ -447,6 +470,9 @@ async def _handle_search(arguments: dict) -> list[TextContent]:
         max_tokens=arguments.get("max_tokens"),
         memory_type=arguments.get("memory_type", ""),
         actor_type=arguments.get("actor_type", ""),
+        subject=(arguments.get("subject") or ""),
+        purpose=(arguments.get("purpose") or ""),
+        sensitivity=(arguments.get("sensitivity") or ""),
     )
     return success_response(result)
 
@@ -675,7 +701,12 @@ async def _handle_deref(arguments: dict) -> list[TextContent]:
 
 
 async def _handle_index(arguments: dict) -> list[TextContent]:
-    """Return a compressed navigational index for a namespace."""
+    """Return a compressed navigational index for a namespace.
+
+    INIT-003/SPEC-006: live rebuild each call (no index TTL). Post-store freshness
+    relies on durable graph writes before store ack; callers should re-invoke index
+    after store when they need an updated MEMORY INDEX.
+    """
     agent_id = arguments.get("agent_id", "")
     namespace = arguments.get("namespace", "")
 

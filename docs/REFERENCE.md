@@ -2,6 +2,22 @@
 
 Quick reference for **47** MCP tools exposed by the Archivist server. For full parameter schemas, defaults, and examples, see [`CURSOR_SKILL.md`](CURSOR_SKILL.md).
 
+## Tool profiles (`ARCHIVIST_TOOL_PROFILE`)
+
+<!-- INIT-003/SPEC-003 -->
+
+`list_tools` / `call_tool` honor **`ARCHIVIST_TOOL_PROFILE`** (default **`core`**):
+
+| Profile | Surface |
+|---------|---------|
+| `core` | Coach-path tools only: `archivist_store`, `archivist_search`, `archivist_get_context`, `archivist_index`, `archivist_delete` (forget path), plus small helpers (`archivist_health_dashboard`, `archivist_namespaces`, `archivist_get_reference_docs`). ≤12 tools. |
+| `ops` | Operator-oriented middle set — all tools except unfinished `archivist_share_*` and `archivist_checkpoint_*` wedges. |
+| `full` | Entire registry (prior default). |
+
+Hidden tools remain in the codebase but are omitted from `list_tools` and **fail closed** on `call_tool` with a clear error. Set `ARCHIVIST_TOOL_PROFILE=full` (or `ops`) when you need the broader surface. See [ADR-003](adr/ADR-003-coach-core-reliability.md).
+
+The tables below describe the **full** registry; only the active profile is advertised to MCP clients.
+
 ## Search & Retrieval (9)
 
 | Tool | Purpose |
@@ -11,21 +27,42 @@ Quick reference for **47** MCP tools exposed by the Archivist server. For full p
 | `archivist_timeline` | Chronological slice for a topic with configurable lookback |
 | `archivist_insights` | Cross-agent topic discovery across accessible namespaces |
 | `archivist_deref` | Dereference a memory by ID for full L2 detail (drill-down after L0/L1 search) |
-| `archivist_index` | Compressed navigational index of namespace knowledge (~500 tokens) |
+| `archivist_index` | Compressed navigational index of namespace knowledge (~500 tokens); live rebuild each call |
 | `archivist_contradictions` | Surface contradicting facts about an entity across agents |
 | `archivist_entity_brief` | Structured knowledge card for an entity: facts, relationships, retention class, mention count, timeline. Supports `as_of` for point-in-time views. |
 | `archivist_wake_up` | Bootstrap session context — agent identity, critical pinned facts, namespace overview in ~200 tokens |
 
 ## Storage & Memory Management (6)
 
+<!-- INIT-003/SPEC-004: store ack = durable outbox commit, not Qdrant sync -->
+<!-- INIT-003/SPEC-006: store provenance + forget modes -->
+
+With **`OUTBOX_ENABLED=true` (default)**, `archivist_store` acknowledges after the
+durable graph + outbox commit. Qdrant upsert runs asynchronously via the outbox
+drain. Pre-store similarity queries are fail-open and timeout-bounded
+(`CONFLICT_QUERY_TIMEOUT_S`) so a dead Qdrant cannot stall the coach write path.
+See [ADR-003 § Store ack semantics](adr/ADR-003-coach-core-reliability.md#store-ack-semantics-init-003spec-004).
+
 | Tool | Purpose |
 |------|---------|
-| `archivist_store` | Write a memory with entity extraction, conflict checks, LLM dedup |
-| `archivist_delete` | Soft-delete a memory by ID — hides from all search paths in ~5 ms, background hard-cascade |
+| `archivist_store` | Write a memory with entity extraction, conflict checks, LLM dedup, optional provenance envelope; ack after durable outbox commit |
+| `archivist_delete` | Forget path: `mode=delete` (default soft-delete) or `mode=suppress` (hide, keep record). Namespace write RBAC required. |
 | `archivist_merge` | Merge conflicting entries (latest / concat / semantic / manual) |
 | `archivist_compress` | Archive memories and return compact summaries (flat or structured Goal/Progress/Decisions/Next Steps) |
 | `archivist_pin` | Pin a memory or entity to retention class `permanent` — sets importance to 1.0 |
 | `archivist_unpin` | Remove the permanent pin from a memory or entity |
+
+## Store / Index / Forget contract
+
+<!-- INIT-003/SPEC-006 -->
+
+Coach-path enrichment of the ADR-003 five-tool contract (no net-new core tools):
+
+| Tool | Contract |
+|------|----------|
+| **`archivist_store`** | Additive provenance args: `source`, `subject`, `purpose`, `sensitivity` (`standard`\|`sensitive`\|`secret`\|`health`\|`public`), `statement_kind` (`user`\|`inferred`), plus existing `actor_*` / `confidence`. Persisted on `memory_chunks` (+ Qdrant payload). Optional `correction_of` links the new id as superseding the prior via SPEC-007 `correct_memory`. Size/enum validated. Namespace **write** RBAC. |
+| **`archivist_index`** | Rebuilds from the **live graph every call** (no index TTL cache). After a successful store, the next index call includes new entities/facts. Store also invalidates the search hot cache (`HOT_CACHE_TTL_SECONDS`, default 600s — well under a 24h bust). Recommended sequence: `store` → `index` → `search`/`get_context`. |
+| **`archivist_delete`** (ADR: forget) | `mode=delete` (default): governed soft-delete via SPEC-007 `delete_memory`. `mode=suppress`: SPEC-007 `suppress_memory` — hidden from default recall, row remains. Cross-namespace mutations require write RBAC on the target namespace. |
 
 ## Trajectory & Feedback (5)
 
@@ -118,10 +155,57 @@ All three require `caller_agent_id` and enforce namespace RBAC. Distinct from Ph
 |------|---------|
 | `archivist_get_reference_docs` | Return the full Archivist tool skill reference from inside the server. Optionally pass `section` to filter to a heading (e.g. `search`, `storage`, `admin`). |
 
+## Stable recall (search / get_context)
+
+<!-- INIT-003/SPEC-005 -->
+
+Both `archivist_search` and `archivist_get_context` return a **canonical**
+`memories` array alongside existing keys (`sources`, `answer`, …) for
+backward compatibility:
+
+```json
+{
+  "answer": "",
+  "memories": [
+    {
+      "id": "<memory_id>",
+      "text": "<non-empty usable text when hits exist>",
+      "score": 0.87,
+      "provenance": {
+        "namespace": "agents-alice",
+        "subject": "optional",
+        "purpose": "optional",
+        "sensitivity": "standard",
+        "source": "user|system|…",
+        "confidence": 0.9,
+        "statement_kind": "user|inferred",
+        "agent_id": "alice",
+        "date": "2026-07-25"
+      }
+    }
+  ],
+  "sources": [ "…legacy shape preserved…" ]
+}
+```
+
+**Contract notes**
+
+- When hits exist, each `memories[].text` is non-empty and usable. Prefer
+  `memories` over dual-calling search + get_context for text. `answer` may
+  still be empty when `refine=false` (search) / default get_context path.
+- **Pre-rank filters** (applied before ranking; cannot be disabled to widen
+  tenants): suppressed rows omitted; superseded losers omitted by default
+  (SPEC-007 visibility helpers); `namespace` / optional `subject` hard-scope
+  isolation; optional `purpose` / `sensitivity` further narrow (default = no
+  purpose restriction within namespace).
+- RBAC / namespace read gates remain on both handlers.
+- Provenance in the response is a **safe subset** (ids, axes, timestamps) —
+  never API keys, tokens, passwords, or other secrets.
+
 ## Usage Hints
 
 - `min_score` / `RETRIEVAL_THRESHOLD`: set to `0` to disable score filtering for a single call when debugging recall.
-- Prefer `archivist_get_context` for agent pre-prompt injection — it assembles tiers, graph facts, and tips in one token-budgeted call.
+- Prefer `archivist_get_context` for agent pre-prompt injection — it assembles tiers, graph facts, and tips in one token-budgeted call. Read `memories[].text` for usable recall when `answer` is empty.
 - Use `archivist_search` for explicit queries; `archivist_recall` when entity names are known.
 - Use `archivist_entity_brief` when you need a structured knowledge card — faster than multiple search/recall calls.
 - Call `archivist_wake_up` once at session start to pre-load critical context in ~200 tokens.
@@ -198,6 +282,26 @@ The **`/admin/invalidate`** endpoint scans Qdrant for points whose `ttl_expires_
 ## Curator vs vector TTL
 
 The background **`curator.cycle`** log line (one per successful loop) summarizes file processing, graph fact decay, hotness scoring, tip consolidation, and wake-up cache refreshes. **Graph decay** (`facts_decayed`) soft-deactivates old or superseded facts in SQLite; **vector TTL** is enforced separately via `/admin/invalidate` and payload `ttl_expires_at`. They address different layers: the graph ages knowledge; Qdrant TTL removes embedded chunks after expiry.
+
+## Lifecycle (suppress / supersede / delete)
+
+<!-- INIT-003/SPEC-007 -->
+
+Service APIs in `archivist.lifecycle.correct` (and visibility helpers in
+`archivist.lifecycle.visibility`) govern coach-path memory state. Handlers
+(SPEC-006) and retrieval (SPEC-005) should call these — not flip flags ad hoc.
+
+| Operation | Effect | Default recall |
+|-----------|--------|----------------|
+| **suppress** (`suppress_memory`) | Sets `memory_chunks.is_suppressed=1` (namespace-scoped). Record remains for audit/ops. Not a hard erase. | Hidden |
+| **unsuppress** (`unsuppress_memory`) | Explicit restore only — no silent resurrection of suppressed rows as instruction-grade. | Visible again |
+| **supersede / correct** (`supersede_memory` / `correct_memory`) | Winner links `supersedes_id` → prior id. Loser stays on disk. Prefer `correct_memory` when store has `correction_of`. | Loser hidden; winner present |
+| **delete** (`delete_memory`) | Soft-delete / tombstone via existing `soft_delete_memory` + background cascade. Second delete is idempotent (`already_deleted`). | Hidden |
+
+Default recall predicates (`is_recall_visible`, `recall_visible_sql_chunks` /
+`recall_visible_sql_facts`) exclude suppressed rows and superseded losers
+unless the caller opts in. Lifecycle audit metadata carries ids/status only —
+never memory text or secrets.
 
 ## See Also
 

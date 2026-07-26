@@ -70,11 +70,21 @@ CREATE TABLE IF NOT EXISTS facts (
     confidence REAL NOT NULL DEFAULT 1.0,
     provenance TEXT NOT NULL DEFAULT 'unknown',
     actor_id TEXT NOT NULL DEFAULT '',
-    namespace TEXT NOT NULL DEFAULT 'global'
+    namespace TEXT NOT NULL DEFAULT 'global',
+    -- INIT-003/SPEC-002
+    source TEXT NOT NULL DEFAULT '',
+    subject TEXT NOT NULL DEFAULT '',
+    sensitivity TEXT NOT NULL DEFAULT 'standard',
+    purpose TEXT NOT NULL DEFAULT '',
+    statement_kind TEXT NOT NULL DEFAULT 'user',
+    updated_at TEXT NOT NULL DEFAULT '',
+    is_suppressed INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_facts_entity ON facts(entity_id);
 CREATE INDEX IF NOT EXISTS idx_facts_active ON facts(is_active);
 CREATE INDEX IF NOT EXISTS idx_facts_memory_id ON facts(memory_id);
+CREATE INDEX IF NOT EXISTS idx_facts_subject ON facts(subject);
+CREATE INDEX IF NOT EXISTS idx_facts_suppressed ON facts(is_suppressed);
 
 CREATE TABLE IF NOT EXISTS curator_state (
     key TEXT PRIMARY KEY,
@@ -109,13 +119,28 @@ CREATE TABLE IF NOT EXISTS memory_chunks (
     importance REAL NOT NULL DEFAULT 0.5,
     tier_label TEXT NOT NULL DEFAULT 'l2',
     ttl_at TEXT,
-    decay_rate REAL NOT NULL DEFAULT 0.0
+    decay_rate REAL NOT NULL DEFAULT 0.0,
+    -- INIT-003/SPEC-002
+    source TEXT NOT NULL DEFAULT '',
+    subject TEXT NOT NULL DEFAULT '',
+    confidence REAL NOT NULL DEFAULT 1.0,
+    sensitivity TEXT NOT NULL DEFAULT 'standard',
+    purpose TEXT NOT NULL DEFAULT '',
+    statement_kind TEXT NOT NULL DEFAULT 'user',
+    created_at TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT '',
+    supersedes_id TEXT NOT NULL DEFAULT '',
+    is_suppressed INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_mc_qdrant ON memory_chunks(qdrant_id);
 CREATE INDEX IF NOT EXISTS idx_mc_namespace ON memory_chunks(namespace);
 CREATE INDEX IF NOT EXISTS idx_mc_importance ON memory_chunks(importance DESC);
 CREATE INDEX IF NOT EXISTS idx_mc_tier ON memory_chunks(tier_label);
 CREATE INDEX IF NOT EXISTS idx_mc_ttl ON memory_chunks(ttl_at) WHERE ttl_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_mc_subject ON memory_chunks(subject);
+CREATE INDEX IF NOT EXISTS idx_mc_suppressed ON memory_chunks(is_suppressed);
+CREATE INDEX IF NOT EXISTS idx_mc_supersedes ON memory_chunks(supersedes_id);
+CREATE INDEX IF NOT EXISTS idx_mc_ns_suppressed ON memory_chunks(namespace, is_suppressed);
 
 CREATE TABLE IF NOT EXISTS memory_points (
     memory_id   TEXT NOT NULL,

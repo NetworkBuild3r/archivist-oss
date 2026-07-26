@@ -2,8 +2,11 @@
 
 v1.0: adds LLM-adjudicated dedup for high-similarity matches.
 v1.11: consolidated query — single embed + single Qdrant search for both conflict + dedup.
+INIT-003/SPEC-004: pre-txn similarity query is fail-fast / budgeted so a dead
+Qdrant cannot stall store ack toward the ~30s client timeout.
 """
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass
@@ -69,10 +72,17 @@ async def _query_similar(
     namespace: str,
     limit: int = 10,
     vec: list[float] | None = None,
+    *,
+    timeout_s: float | None = None,
 ) -> tuple[list[float], list]:
     """Single Qdrant similarity query for both conflict + dedup paths.
 
     Returns (embedding_vector, qdrant_scored_points).
+
+    Runs the sync Qdrant client off the event loop and bounds wait with
+    ``CONFLICT_QUERY_TIMEOUT_S`` (or *timeout_s*). On timeout/failure returns
+    empty results so store can fail-open and still ack via outbox
+    (INIT-003/SPEC-004).
     """
     if vec is None:
         vec = await embed_text(text)
@@ -82,14 +92,31 @@ async def _query_similar(
     must_filters = [
         FieldCondition(key="namespace", match=MatchValue(value=namespace)),
     ]
-    try:
-        results = client.query_points(
+    # Re-read at call time so monkeypatches / env reloads are honored.
+    from archivist.core.config import CONFLICT_QUERY_TIMEOUT_S as _timeout_cfg
+
+    bound_s = float(timeout_s if timeout_s is not None else _timeout_cfg)
+    # Qdrant client timeout is integer seconds; keep ≥1 while asyncio bound can be sub-second.
+    client_timeout_s = max(1, int(bound_s) if bound_s >= 1 else 1)
+
+    def _sync_query() -> list:
+        return client.query_points(
             collection_name=_coll,
             query=vec,
             query_filter=Filter(must=must_filters),
             limit=limit,
             with_payload=True,
+            timeout=client_timeout_s,
         ).points
+
+    try:
+        results = await asyncio.wait_for(asyncio.to_thread(_sync_query), timeout=bound_s)
+    except TimeoutError:
+        logger.warning(
+            "Similarity query timed out after %.2fs (fail-open for store ack)",
+            bound_s,
+        )
+        results = []
     except Exception as e:
         logger.warning("Similarity query failed: %s", e)
         results = []

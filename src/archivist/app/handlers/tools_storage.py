@@ -67,6 +67,99 @@ from ._common import error_response, require_rbac, resolve_actor, success_respon
 
 logger = logging.getLogger("archivist.mcp")
 
+# INIT-003/SPEC-006 — coach provenance envelope validation (size/enum).
+_SENSITIVITY_VALUES = frozenset({"standard", "sensitive", "secret", "health", "public"})
+_STATEMENT_KINDS = frozenset({"user", "inferred"})
+_MAX_SUBJECT_LEN = 128
+_MAX_PURPOSE_LEN = 128
+_MAX_SOURCE_LEN = 256
+_MAX_CORRECTION_OF_LEN = 64
+
+
+def _validate_store_provenance(arguments: dict) -> dict | list[TextContent]:
+    """Parse additive provenance args; return dict or an error response list.
+
+    INIT-003/SPEC-006 — validates size/enum so free-form fields cannot become
+    unbounded secret exfil channels. Empty/omitted fields keep defaults so
+    older clients keep working.
+    """
+    source = str(arguments.get("source") or "").strip()
+    subject = str(arguments.get("subject") or "").strip()
+    purpose = str(arguments.get("purpose") or "").strip()
+    sensitivity = str(arguments.get("sensitivity") or "standard").strip().lower() or "standard"
+    statement_kind = str(arguments.get("statement_kind") or "user").strip().lower() or "user"
+    correction_of = str(arguments.get("correction_of") or "").strip()
+
+    if len(source) > _MAX_SOURCE_LEN:
+        return error_response(
+            {
+                "error": "invalid_provenance",
+                "field": "source",
+                "reason": f"max {_MAX_SOURCE_LEN} chars",
+            }
+        )
+    if len(subject) > _MAX_SUBJECT_LEN:
+        return error_response(
+            {
+                "error": "invalid_provenance",
+                "field": "subject",
+                "reason": f"max {_MAX_SUBJECT_LEN} chars",
+            }
+        )
+    if len(purpose) > _MAX_PURPOSE_LEN:
+        return error_response(
+            {
+                "error": "invalid_provenance",
+                "field": "purpose",
+                "reason": f"max {_MAX_PURPOSE_LEN} chars",
+            }
+        )
+    if sensitivity not in _SENSITIVITY_VALUES:
+        return error_response(
+            {
+                "error": "invalid_provenance",
+                "field": "sensitivity",
+                "reason": f"must be one of {sorted(_SENSITIVITY_VALUES)}",
+            }
+        )
+    if statement_kind not in _STATEMENT_KINDS:
+        return error_response(
+            {
+                "error": "invalid_provenance",
+                "field": "statement_kind",
+                "reason": "must be 'user' or 'inferred'",
+            }
+        )
+    if len(correction_of) > _MAX_CORRECTION_OF_LEN:
+        return error_response(
+            {
+                "error": "invalid_provenance",
+                "field": "correction_of",
+                "reason": f"max {_MAX_CORRECTION_OF_LEN} chars",
+            }
+        )
+
+    raw_confidence = arguments.get("confidence", -1)
+    if isinstance(raw_confidence, int | float) and raw_confidence >= 0:
+        if raw_confidence > 1.0:
+            return error_response(
+                {
+                    "error": "invalid_provenance",
+                    "field": "confidence",
+                    "reason": "must be between 0.0 and 1.0",
+                }
+            )
+
+    return {
+        "source": source,
+        "subject": subject,
+        "purpose": purpose,
+        "sensitivity": sensitivity,
+        "statement_kind": statement_kind,
+        "correction_of": correction_of,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Tool definitions
 # ---------------------------------------------------------------------------
@@ -75,8 +168,10 @@ TOOLS: list[Tool] = [
     Tool(
         name="archivist_store",
         description=(
-            "Explicitly store a memory/fact with entity extraction. "
-            "Use when you want to ensure something specific is remembered."
+            "Explicitly store a memory/fact with entity extraction and optional "
+            "coach provenance (source, subject, sensitivity, purpose, statement_kind). "
+            "Ack after durable outbox commit; call archivist_index afterward for a "
+            "fresh navigational index (live rebuild; store also busts search hot cache)."
         ),
         inputSchema={
             "type": "object",
@@ -152,6 +247,41 @@ TOOLS: list[Tool] = [
                     "description": "Structured origin context: {tool, session_id, upstream_source, parent_memory_id, extra}.",
                     "default": {},
                 },
+                "source": {
+                    "type": "string",
+                    "description": "Provenance source label (e.g. session, harness, import). Max 256 chars.",
+                    "default": "",
+                },
+                "subject": {
+                    "type": "string",
+                    "description": "Subject/topic key for pre-rank filters (max 128 chars).",
+                    "default": "",
+                },
+                "sensitivity": {
+                    "type": "string",
+                    "enum": ["standard", "sensitive", "secret", "health", "public"],
+                    "description": "Sensitivity class for pre-rank filters.",
+                    "default": "standard",
+                },
+                "purpose": {
+                    "type": "string",
+                    "description": "Purpose/use tag for pre-rank filters (max 128 chars).",
+                    "default": "",
+                },
+                "statement_kind": {
+                    "type": "string",
+                    "enum": ["user", "inferred"],
+                    "description": "Whether the statement is user-stated or inferred.",
+                    "default": "user",
+                },
+                "correction_of": {
+                    "type": "string",
+                    "description": (
+                        "Prior memory_id this store corrects. After durable write, "
+                        "links the new memory as superseding the prior id (SPEC-007)."
+                    ),
+                    "default": "",
+                },
             },
             "required": ["text", "agent_id"],
         },
@@ -159,21 +289,35 @@ TOOLS: list[Tool] = [
     Tool(
         name="archivist_delete",
         description=(
-            "Soft-delete a memory by ID. Immediately hides it from all search paths "
-            "(vector, BM25, needle registry) by marking it deleted in Qdrant and FTS, "
-            "then enqueues a background hard-cascade. Returns in ~5 ms."
+            "Forget path (ADR archivist_forget): mode=delete soft-deletes with "
+            "background hard-cascade; mode=suppress hides from default recall "
+            "without erase. Namespace write RBAC required. Alias name: forget → delete."
         ),
         inputSchema={
             "type": "object",
             "properties": {
                 "memory_id": {
                     "type": "string",
-                    "description": "Qdrant point ID of the memory to delete",
+                    "description": "Qdrant point ID of the memory to forget",
                 },
-                "agent_id": {"type": "string", "description": "Agent requesting the deletion"},
+                "agent_id": {"type": "string", "description": "Agent requesting the mutation"},
                 "namespace": {
                     "type": "string",
                     "description": "Namespace (default: auto-detect from agent_id)",
+                    "default": "",
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["delete", "suppress"],
+                    "description": (
+                        "delete (default): soft-delete/tombstone. "
+                        "suppress: hide from default search/recall; record remains."
+                    ),
+                    "default": "delete",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Optional audit reason (not stored as memory text).",
                     "default": "",
                 },
             },
@@ -534,6 +678,14 @@ async def _synthetic_questions_background(
     )
 
 
+def _is_graph_pool_uninitialized(exc: BaseException) -> bool:
+    """True when SQLite/Postgres graph pool was never started (INIT-003/SPEC-004)."""
+    msg = str(exc).lower()
+    return "not initialized" in msg and (
+        "pool" in msg or "sqlite" in msg or "asyncpg" in msg or "graph" in msg
+    )
+
+
 async def _handle_store(arguments: dict) -> list[TextContent]:
     _t_store = time.monotonic()
     text = arguments["text"]
@@ -543,6 +695,11 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
     importance = arguments.get("importance_score", 0.5)
     retention = arguments.get("retention_class", "standard")
     force_skip = bool(arguments.get("force_skip_conflict_check", False))
+
+    # INIT-003/SPEC-006: validate additive provenance before RBAC/side effects.
+    provenance = _validate_store_provenance(arguments)
+    if isinstance(provenance, list):
+        return provenance
 
     actor_id, actor_type = resolve_actor(arguments)
 
@@ -566,7 +723,78 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
     if denied:
         return denied
 
+    try:
+        return await _handle_store_inner(
+            arguments=arguments,
+            text=text,
+            agent_id=agent_id,
+            namespace=namespace,
+            entity_names=entity_names,
+            importance=importance,
+            retention=retention,
+            force_skip=force_skip,
+            actor_id=actor_id,
+            actor_type=actor_type,
+            confidence=confidence,
+            source_trace=source_trace,
+            provenance=provenance,
+            t_store=_t_store,
+        )
+    except RuntimeError as exc:
+        # Fail-fast when the graph pool was never initialized — do not wait on Qdrant.
+        if _is_graph_pool_uninitialized(exc):
+            logger.error(
+                "store_pipeline.graph_pool_unavailable",
+                extra={
+                    "namespace": namespace,
+                    "agent_id": agent_id,
+                    "error": str(exc),
+                    "duration_ms": int((time.monotonic() - _t_store) * 1000),
+                },
+            )
+            return error_response(
+                {
+                    "stored": False,
+                    "error": "graph_pool_unavailable",
+                    "reason": "Graph storage pool is not initialized",
+                    # Namespace only — never echo other tenants' data.
+                    "namespace": namespace,
+                }
+            )
+        raise
+
+
+async def _handle_store_inner(
+    *,
+    arguments: dict,
+    text: str,
+    agent_id: str,
+    namespace: str,
+    entity_names: list,
+    importance: float,
+    retention: str,
+    force_skip: bool,
+    actor_id: str,
+    actor_type: str,
+    confidence: float,
+    source_trace: SourceTrace,
+    provenance: dict,
+    t_store: float,
+) -> list[TextContent]:
+    """Durable store body after RBAC (INIT-003/SPEC-004 ack path)."""
+    from archivist.core.config import STORE_ACK_BUDGET_MS
+    from archivist.core.latency_budget import LatencyBudget
+
+    ack_budget = LatencyBudget(max_ms=STORE_ACK_BUDGET_MS)
+    prov_source = provenance.get("source", "")
+    prov_subject = provenance.get("subject", "")
+    prov_purpose = provenance.get("purpose", "")
+    prov_sensitivity = provenance.get("sensitivity", "standard")
+    prov_statement_kind = provenance.get("statement_kind", "user")
+    correction_of = provenance.get("correction_of", "")
+
     if CONFLICT_CHECK_ON_STORE and not force_skip:
+        # Bound pre-txn Qdrant similarity; fail-open on timeout/dead backend.
         _shared_vec, _shared_results = await _query_similar(text, namespace)
         cr = await check_for_conflicts(
             text, namespace, agent_id, _shared_vec=_shared_vec, _shared_results=_shared_results
@@ -596,9 +824,18 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
         _shared_results = None
 
     if not force_skip:
-        dedup = await llm_adjudicated_dedup(
-            text, namespace, agent_id, _shared_results=_shared_results
-        )
+        # Skip LLM dedup when the soft ack budget is already exhausted so embed/LLM
+        # cannot dominate the coach write path (still keeps outbox on).
+        if ack_budget.is_expired():
+            dedup = None
+            logger.info(
+                "store_pipeline.skip_dedup_budget",
+                extra={"namespace": namespace, "budget": ack_budget.summary()},
+            )
+        else:
+            dedup = await llm_adjudicated_dedup(
+                text, namespace, agent_id, _shared_results=_shared_results
+            )
         if dedup and dedup.action == "skip":
             return error_response(
                 {
@@ -732,6 +969,12 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
         "confidence": confidence,
         "source_trace": source_trace.to_dict(),
         "tier_label": "l2",
+        # INIT-003/SPEC-006 — coach provenance envelope (also on memory_chunks)
+        "source": prov_source,
+        "subject": prov_subject,
+        "purpose": prov_purpose,
+        "sensitivity": prov_sensitivity,
+        "statement_kind": prov_statement_kind,
     }
     if retention in ("durable", "permanent"):
         ttl_expires_at = None
@@ -798,6 +1041,8 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
 
     # Single atomic transaction: FTS5, needle registry, memory_points, and outbox
     # all commit together.  A crash at any point leaves nothing half-written.
+    # Ack boundary (OUTBOX_ENABLED default-on): durable SQLite/Postgres + outbox
+    # row — not Qdrant sync (INIT-003/SPEC-004).
     _now_iso = datetime.now(UTC).isoformat()
     async with MemoryTransaction() as txn:
         if BM25_ENABLED:
@@ -861,6 +1106,48 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
                    VALUES (?, ?, ?, ?)""",
                 [(pid, str(mp.id), "micro_chunk", _now_iso) for mp in _micro_points],
             )
+        # INIT-003/SPEC-006: persist SPEC-002 provenance columns on primary chunk.
+        # When BM25 upsert already created the row, ON CONFLICT patches envelope fields;
+        # when BM25 is off, this INSERT is the durable chunk row.
+        await txn.execute(
+            """INSERT INTO memory_chunks (
+                   qdrant_id, text, file_path, chunk_index, agent_id, namespace, date,
+                   memory_type, actor_id, actor_type, importance, tier_label,
+                   source, subject, confidence, sensitivity, purpose, statement_kind,
+                   created_at, updated_at
+               ) VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(qdrant_id) DO UPDATE SET
+                   source=excluded.source,
+                   subject=excluded.subject,
+                   confidence=excluded.confidence,
+                   sensitivity=excluded.sensitivity,
+                   purpose=excluded.purpose,
+                   statement_kind=excluded.statement_kind,
+                   updated_at=excluded.updated_at,
+                   actor_id=excluded.actor_id,
+                   actor_type=excluded.actor_type""",
+            (
+                pid,
+                text,
+                payload["file_path"],
+                agent_id,
+                namespace,
+                payload["date"],
+                arguments.get("memory_type", "general"),
+                actor_id,
+                actor_type,
+                importance,
+                payload.get("tier_label", "l2"),
+                prov_source,
+                prov_subject,
+                confidence,
+                prov_sensitivity,
+                prov_purpose,
+                prov_statement_kind,
+                _now_iso,
+                _now_iso,
+            ),
+        )
         txn.enqueue_qdrant_upsert(_coll, [_primary_point], memory_id=pid)
         if _micro_points:
             txn.enqueue_qdrant_upsert(_coll, _micro_points, memory_id=pid)
@@ -984,6 +1271,20 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
         importance=importance,
     )
 
+    _duration_ms = int((time.monotonic() - t_store) * 1000)
+    _budget_summary = ack_budget.summary()
+    if _duration_ms > STORE_ACK_BUDGET_MS:
+        logger.warning(
+            "store_pipeline.ack_budget_exceeded",
+            extra={
+                "memory_id": pid,
+                "namespace": namespace,
+                "duration_ms": _duration_ms,
+                "budget_ms": STORE_ACK_BUDGET_MS,
+                "outbox_enabled": OUTBOX_ENABLED,
+            },
+        )
+
     logger.info(
         "store_pipeline.complete",
         extra={
@@ -994,20 +1295,78 @@ async def _handle_store(arguments: dict) -> list[TextContent]:
             "micro_chunk_count": len(_micro_chunks),
             "entity_count": len(entity_names) if entity_names else 1,
             "reverse_hyde_queued": REVERSE_HYDE_ENABLED,
-            "duration_ms": int((time.monotonic() - _t_store) * 1000),
+            "duration_ms": _duration_ms,
+            "ack_budget_ms": STORE_ACK_BUDGET_MS,
+            "ack_budget": _budget_summary,
+            "outbox_enabled": OUTBOX_ENABLED,
         },
     )
 
-    return success_response(
-        {
-            "stored": True,
-            "memory_id": pid,
-            "uri": memory_uri(namespace, pid),
-            "namespace": namespace,
-            "entities": entity_names or [agent_id],
-            "version": 1,
-        }
-    )
+    # INIT-003/SPEC-006: optional correction link via SPEC-007 lifecycle.
+    # INIT-003/SPEC-009 (SEC-001): prior chunk must belong to *namespace*.
+    correction_status = None
+    if correction_of:
+        from archivist.lifecycle.correct import correct_memory
+        from archivist.storage.chunk_lifecycle import get_chunk_lifecycle_row
+
+        prior = await get_chunk_lifecycle_row(correction_of, namespace)
+        if prior is None:
+            logger.warning(
+                "store_pipeline.correction_failed",
+                extra={
+                    "memory_id": pid,
+                    "correction_of": correction_of,
+                    "namespace": namespace,
+                    "error": "prior memory not found in namespace",
+                },
+            )
+            correction_status = {
+                "status": "correction_failed",
+                "error": "prior memory not found in namespace",
+            }
+        else:
+            try:
+                correction_status = await correct_memory(
+                    correction_of,
+                    pid,
+                    namespace,
+                    agent_id=agent_id,
+                    reason="store.correction_of",
+                )
+            except Exception as exc:
+                logger.warning(
+                    "store_pipeline.correction_failed",
+                    extra={
+                        "memory_id": pid,
+                        "correction_of": correction_of,
+                        "namespace": namespace,
+                        "error": str(exc),
+                    },
+                )
+                correction_status = {"status": "correction_failed", "error": str(exc)}
+
+    response: dict = {
+        "stored": True,
+        "memory_id": pid,
+        "uri": memory_uri(namespace, pid),
+        "namespace": namespace,
+        "entities": entity_names or [agent_id],
+        "version": 1,
+        "provenance": {
+            "source": prov_source,
+            "subject": prov_subject,
+            "purpose": prov_purpose,
+            "sensitivity": prov_sensitivity,
+            "statement_kind": prov_statement_kind,
+            "actor_id": actor_id,
+            "actor_type": actor_type,
+            "confidence": confidence,
+        },
+    }
+    if correction_of:
+        response["correction_of"] = correction_of
+        response["correction"] = correction_status
+    return success_response(response)
 
 
 async def _handle_merge(arguments: dict) -> list[TextContent]:
@@ -1283,36 +1642,59 @@ async def _handle_unpin(arguments: dict) -> list[TextContent]:
 
 
 async def _handle_delete(arguments: dict) -> list[TextContent]:
-    """Soft-delete a memory by ID.
+    """Forget path: ``mode=delete`` (default) or ``mode=suppress``.
 
-    Sets ``deleted=True`` on the Qdrant point immediately (so it vanishes from
-    all search paths), marks the FTS entry as excluded, then enqueues a
-    background hard-cascade via ``curator_queue``.  Returns in ~5 ms.
+    INIT-003/SPEC-006 — ADR names this ``archivist_forget``; the core tool remains
+    ``archivist_delete`` with a ``mode`` arg (GR-PROD-002). Namespace write RBAC
+    is enforced after namespace resolution so cross-namespace calls cannot skip
+    the check via an empty namespace default.
     """
-    from archivist.core.rbac import get_namespace_for_agent
-    from archivist.lifecycle.memory_lifecycle import soft_delete_memory
+    from archivist.lifecycle.correct import delete_memory, suppress_memory
 
     memory_id = arguments.get("memory_id", "").strip()
     agent_id = arguments.get("agent_id", "").strip()
-    namespace = arguments.get("namespace", "").strip()
+    namespace = arguments.get("namespace", "").strip() or get_namespace_for_agent(agent_id)
+    mode = str(arguments.get("mode") or "delete").strip().lower() or "delete"
+    reason = str(arguments.get("reason") or "").strip()
 
     if not memory_id:
         return error_response({"error": "memory_id is required"})
     if not agent_id:
         return error_response({"error": "agent_id is required"})
+    if mode not in ("delete", "suppress"):
+        return error_response(
+            {
+                "error": "invalid_mode",
+                "reason": "mode must be 'delete' or 'suppress'",
+            }
+        )
 
     denied = require_rbac(agent_id, "write", namespace)
     if denied:
-        # INIT-022/SPEC-008 (H3) fixed this site's bug (was returning the bare error
-        # string instead of the structured payload); INIT-022/SPEC-009 (M9) then
-        # extracted the shared pattern into `require_rbac` so every handler uses one
-        # authorization chokepoint.
         return denied
-    if not namespace:
-        namespace = get_namespace_for_agent(agent_id)
 
     try:
-        result = await soft_delete_memory(memory_id, namespace)
+        if mode == "suppress":
+            result = await suppress_memory(
+                memory_id,
+                namespace,
+                agent_id=agent_id,
+                reason=reason,
+            )
+            hot_cache.invalidate_namespace(namespace)
+            return success_response(
+                {
+                    "forgotten": True,
+                    "deleted": False,
+                    "suppressed": True,
+                    "mode": "suppress",
+                    "memory_id": memory_id,
+                    "namespace": namespace,
+                    **result,
+                }
+            )
+
+        result = await delete_memory(memory_id, namespace, agent_id=agent_id)
     except Exception as e:
         logger.error("archivist_delete failed for %s: %s", memory_id, e)
         return error_response({"error": str(e)})
@@ -1321,7 +1703,10 @@ async def _handle_delete(arguments: dict) -> list[TextContent]:
 
     return success_response(
         {
+            "forgotten": True,
             "deleted": True,
+            "suppressed": False,
+            "mode": "delete",
             "memory_id": memory_id,
             "namespace": namespace,
             **result,
