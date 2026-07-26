@@ -50,12 +50,13 @@ class TestConfigFeatureFlagLogging:
 
 
 class TestStorePipelineLog:
-    """tools_storage._handle_store emits store_pipeline.complete."""
+    """tools_storage store path emits store_pipeline.complete."""
 
     def test_store_log_contains_required_fields(self):
         import archivist.app.handlers.tools_storage as ts
 
-        source = inspect.getsource(ts._handle_store)
+        # INIT-003/SPEC-004 split wrapper (_handle_store) vs body (_handle_store_inner).
+        source = inspect.getsource(ts._handle_store_inner)
         assert "store_pipeline.complete" in source
         for field in [
             "memory_id",
@@ -74,6 +75,7 @@ class TestStorePipelineLog:
 
         source = inspect.getsource(ts)
         assert "import time" in source
+        assert "store_pipeline.complete" in inspect.getsource(ts._handle_store_inner)
 
 
 class TestRetrievalPipelineLog:

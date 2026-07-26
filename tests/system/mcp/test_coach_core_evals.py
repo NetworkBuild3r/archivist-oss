@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from contextlib import ExitStack, contextmanager
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -37,6 +38,36 @@ def _configure_coach_store_flags(monkeypatch) -> None:
     monkeypatch.setattr("archivist.core.config.CONTEXTUAL_AUGMENTATION_ENABLED", False)
     monkeypatch.setattr("archivist.core.config.TOPIC_ROUTING_ENABLED", False)
     monkeypatch.setattr("archivist.core.config.DEDUP_LLM_ENABLED", False)
+
+
+@contextmanager
+def _allow_search_rbac():
+    """Patch search-path RBAC so coach evals can pass namespace + agent_id."""
+    with ExitStack() as stack:
+        stack.enter_context(
+            patch("archivist.app.handlers.tools_search.require_rbac", return_value=None)
+        )
+        stack.enter_context(
+            patch(
+                "archivist.app.handlers.tools_search.filter_agents_for_read",
+                side_effect=lambda caller, ids: (list(ids), []),
+            )
+        )
+        stack.enter_context(
+            patch(
+                "archivist.app.handlers.tools_search.get_namespace_for_agent",
+                side_effect=lambda aid: {
+                    "coach-agent-rt": "coach-ns-rt",
+                    "agent-a": "coach-ns-a",
+                    "agent-b": "coach-ns-b",
+                    "coach-agent": "coach-ns",
+                }.get(aid, aid),
+            )
+        )
+        stack.enter_context(
+            patch("archivist.app.handlers.tools_search.is_permissive_mode", return_value=True)
+        )
+        yield
 
 
 def _row_to_hit(row: Any, *, score: float = 0.91) -> dict[str, Any]:
@@ -164,14 +195,7 @@ class TestCoachRoundTrip:
         assert row["namespace"] == ns
         assert row["subject"] == "sleep"
 
-        with (
-            patch("archivist.app.handlers.tools_search.require_rbac", return_value=None),
-            patch(
-                "archivist.app.handlers.tools_search.get_namespace_for_agent",
-                return_value=ns,
-            ),
-            patch("archivist.app.handlers.tools_search.is_permissive_mode", return_value=True),
-        ):
+        with _allow_search_rbac():
             from archivist.app.handlers._registry import dispatch_tool
 
             index_result = await dispatch_tool(
@@ -208,7 +232,7 @@ class TestCoachRoundTrip:
                 "archivist.app.handlers.tools_search.recursive_retrieve",
                 new=AsyncMock(side_effect=_retrieve_from_sqlite),
             ),
-            patch("archivist.app.handlers.tools_search.require_rbac", return_value=None),
+            _allow_search_rbac(),
         ):
             from archivist.app.handlers._registry import dispatch_tool
 
@@ -447,7 +471,7 @@ class TestCoachNamespaceIsolation:
                 "archivist.app.handlers.tools_search.recursive_retrieve",
                 new=AsyncMock(side_effect=_retrieve_ns),
             ),
-            patch("archivist.app.handlers.tools_search.require_rbac", return_value=None),
+            _allow_search_rbac(),
         ):
             from archivist.app.handlers._registry import dispatch_tool
 
