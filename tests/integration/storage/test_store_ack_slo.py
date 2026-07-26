@@ -200,12 +200,8 @@ class TestStoreAckUnderDeadQdrant:
         monkeypatch.setattr("archivist.core.config.CONFLICT_BLOCK_ON_STORE", False)
         monkeypatch.setattr("archivist.core.config.CONFLICT_QUERY_TIMEOUT_S", 0.05)
         # Hoisted imports in tools_storage — patch the bound names too.
-        monkeypatch.setattr(
-            "archivist.app.handlers.tools_storage.CONFLICT_CHECK_ON_STORE", True
-        )
-        monkeypatch.setattr(
-            "archivist.app.handlers.tools_storage.CONFLICT_BLOCK_ON_STORE", False
-        )
+        monkeypatch.setattr("archivist.app.handlers.tools_storage.CONFLICT_CHECK_ON_STORE", True)
+        monkeypatch.setattr("archivist.app.handlers.tools_storage.CONFLICT_BLOCK_ON_STORE", False)
         monkeypatch.setattr("archivist.core.config.REVERSE_HYDE_ENABLED", False)
         monkeypatch.setattr("archivist.core.config.BM25_ENABLED", False)
         monkeypatch.setattr("archivist.core.config.SYNTHETIC_QUESTIONS_ENABLED", False)
@@ -255,9 +251,7 @@ class TestStoreAckUnderDeadQdrant:
     async def test_store_succeeds_when_conflict_query_fails(self, async_pool, monkeypatch):
         monkeypatch.setattr("archivist.core.config.OUTBOX_ENABLED", True)
         monkeypatch.setattr("archivist.core.config.CONFLICT_CHECK_ON_STORE", True)
-        monkeypatch.setattr(
-            "archivist.app.handlers.tools_storage.CONFLICT_CHECK_ON_STORE", True
-        )
+        monkeypatch.setattr("archivist.app.handlers.tools_storage.CONFLICT_CHECK_ON_STORE", True)
         monkeypatch.setattr("archivist.core.config.REVERSE_HYDE_ENABLED", False)
         monkeypatch.setattr("archivist.core.config.BM25_ENABLED", False)
         monkeypatch.setattr("archivist.core.config.SYNTHETIC_QUESTIONS_ENABLED", False)
