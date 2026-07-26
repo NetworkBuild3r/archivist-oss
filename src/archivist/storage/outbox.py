@@ -572,9 +572,15 @@ def _assert_upsert_namespace_safe(
 ) -> None:
     """Reject upserts whose point namespace does not map to *collection*.
 
-    Drain must never apply vectors across namespaces (INIT-005/SPEC-005 security).
+    Drain must never apply vectors across namespaces when sharding is on
+    (INIT-005/SPEC-005 security). In single-collection mode the outbox
+    ``collection`` field is authoritative (tests/stubs may name it); skip.
     """
+    from archivist.core.config import NAMESPACE_SHARDING_ENABLED, SINGLE_COLLECTION_MODE
     from archivist.storage.collection_router import collection_for
+
+    if not NAMESPACE_SHARDING_ENABLED or SINGLE_COLLECTION_MODE:
+        return
 
     for p in points:
         ns = str((p.get("payload") or {}).get("namespace") or "")

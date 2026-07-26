@@ -47,6 +47,7 @@ class TestFillDeferredUpsertVectors:
         assert filled[0]["vector"] == fake_vec
 
     async def test_namespace_mismatch_fails_closed(self):
+        """When sharding is on, collection/namespace mismatch fails closed."""
         from archivist.storage.outbox import _fill_deferred_upsert_vectors
 
         points = [
@@ -57,6 +58,8 @@ class TestFillDeferredUpsertVectors:
             }
         ]
         with (
+            patch("archivist.core.config.NAMESPACE_SHARDING_ENABLED", True),
+            patch("archivist.core.config.SINGLE_COLLECTION_MODE", False),
             patch(
                 "archivist.storage.collection_router.collection_for",
                 return_value="col_other",

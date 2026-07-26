@@ -191,9 +191,9 @@ def _assert_no_secret_or_vector_payload(obj: object, *, path: str = "$") -> None
         for i, item in enumerate(obj):
             # Numeric vectors would be long float lists — reject large numeric lists.
             if (
-                isinstance(item, (int, float))
+                isinstance(item, int | float)
                 and len(obj) >= 8
-                and all(isinstance(x, (int, float)) for x in obj)
+                and all(isinstance(x, int | float) for x in obj)
             ):
                 raise AssertionError(f"numeric vector-like list at {path} (len={len(obj)})")
             _assert_no_secret_or_vector_payload(item, path=f"{path}[{i}]")
@@ -217,7 +217,7 @@ class TestStoreLagContract:
         assert data["searchable_lag_metric"] == "archivist_outbox_lag_seconds"
         assert isinstance(data.get("stage_timings"), dict)
         assert "embed_ms" in data["stage_timings"]
-        assert isinstance(data["stage_timings"]["embed_ms"], (int, float))
+        assert isinstance(data["stage_timings"]["embed_ms"], int | float)
         # Existing ack fields preserved (additive contract).
         assert data.get("memory_id")
         assert data.get("namespace") == "coach-ns"
