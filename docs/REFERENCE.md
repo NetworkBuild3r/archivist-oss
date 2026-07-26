@@ -110,7 +110,7 @@ Ack still means **durable graph + outbox** ([ADR-003](adr/ADR-003-coach-core-rel
 
 | Tool | Purpose |
 |------|---------|
-| `archivist_get_context` | High-level token-budgeted context assembly — tiers, graph facts, procedural tips in one call. Supports `mode=normal\|bootstrap` (INIT-004/SPEC-004). Replaces multi-step search patterns. |
+| `archivist_get_context` | High-level token-budgeted context assembly — tiers, graph facts, procedural tips in one call. Supports `mode=normal\|bootstrap` (INIT-004/SPEC-004). Replaces multi-step search patterns. Tips: `include_tips` (default true) returns `tips[]` as strings from SQLite `tip_text`, ranked by task/query when provided (INIT-007 / [ADR-007](adr/ADR-007-procedural-memory-wedge.md)). |
 | `archivist_handoff` | Package a session's summary, goals, tips, hottest memories, and knowledge snapshot into a structured `HandoffPacket`. |
 | `archivist_receive_handoff` | Inject a `HandoffPacket` into the receiving agent's ephemeral `SessionStore`. |
 

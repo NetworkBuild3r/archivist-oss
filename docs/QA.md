@@ -73,13 +73,14 @@ selection is a **test-only oracle** under `tests/system/mcp/agentic_memory_harne
 | `tests/system/mcp/test_agentic_memory_harness_smoke.py` | `TestAgenticMemoryHarnessSmoke` — oracle + SQLite store smoke |
 | `tests/system/mcp/test_agentic_memory_positive.py` | `TestAgenticMemoryPositive` — Session A→B `order_express`; omit-store refuse; TOC not evidence; ns isolation |
 | `tests/system/mcp/test_agentic_memory_negative.py` | `TestAgenticMemoryNegative` — suppressed stale; eligible+ineligible → `needs_clarification`; ambiguous/empty; index TOC never sufficient |
+| `tests/system/mcp/test_agentic_memory_procedure.py` | `TestAgenticMemoryProcedureAction` — procedure tips → action (INIT-007); omit/archived tip refuse |
 
 **Baselines / contracts:** see [ADR-006](adr/ADR-006-agentic-memory-eval-gym.md). SQLite CI path +
 fake embed / stub Qdrant only (GR-EVAL-002). Index markdown alone is never action evidence
-(GR-CE-001).
+(GR-CE-001). Procedure→action tip contracts: [ADR-007](adr/ADR-007-procedural-memory-wedge.md).
 
 ```bash
-# Focused agentic-memory suite (Memory→Action)
+# Focused agentic-memory suite (Memory→Action + procedure tips)
 python -m pytest -m agentic_memory -q --tb=short
 
 # Explicit modules
@@ -87,10 +88,60 @@ python -m pytest \
   tests/system/mcp/test_agentic_memory_harness_smoke.py \
   tests/system/mcp/test_agentic_memory_positive.py \
   tests/system/mcp/test_agentic_memory_negative.py \
+  tests/system/mcp/test_agentic_memory_procedure.py \
   -q --tb=short
 
 # coach_core remains required (run both for full coach+agentic coverage)
 python -m pytest -m coach_core -q --tb=short
+```
+
+### Procedural tips / procedure evals (INIT-007 / ADR-007)
+
+<!-- INIT-007/SPEC-005 -->
+
+Tips-first procedural memory on the existing trajectory→`tips`→`get_context`
+path ([ADR-007](adr/ADR-007-procedural-memory-wedge.md)). **Not** a skill OS and
+**not** a skill-registry→core merge (GR-SKILL-001 / GR-LAYER-001).
+
+**How tips reach `archivist_get_context` (core read path):**
+
+| Step | Behavior |
+|------|----------|
+| Storage | SQLite `tips.tip_text` (rows from trajectory extraction / curator / test seed) |
+| Surfacing | `include_tips=true` (default) maps **`tip_text`** into response `tips[]` (list of strings) — INIT-007/SPEC-002 |
+| Ranking | Non-empty `task_description` → keyword/fingerprint-conditioned recall (not pure recency); empty query → recency fallback — INIT-007/SPEC-003 |
+| Usage | Successful conditioned retrieves may bump `usage_count` / `last_used_at` |
+| Bootstrap | Fleet tips via wake-up builder (`tip_text`); `include_tips` ignored in bootstrap mode (existing ADR-004 behavior) |
+
+**Core vs ops/full write tools:**
+
+| Profile | Tip-related tools |
+|---------|-------------------|
+| **core** (default) | **Read** tips via `archivist_get_context` only. No `log_trajectory` / `archivist_tips` in core. |
+| **ops** / **full** | `archivist_log_trajectory` (extract tips), `archivist_tips` (direct tip list), plus skill-registry tools — still separate from tips productization |
+
+CI procedure scenarios **seed** the `tips` table directly in the harness (no ops profile required).
+
+**Procedure→action (SM-003 spirit):** under `-m agentic_memory`,
+`TestAgenticMemoryProcedureAction` requires `PROCEDURE_EXPRESS_CUE` in **tips**
+from get_context. Memories / index TOC alone must **not** unlock `order_express`
+when `require_tip_evidence=True`. Omit tip / archived tip → `refuse`.
+
+**Still required (do not drop):**
+
+```bash
+# Procedure scenarios are part of agentic_memory (not a new marker)
+python -m pytest -m agentic_memory -q --tb=short
+
+# coach_core remains mandatory (ADR-006 GR-COACH-001 / ADR-007 GR-COACH-001)
+python -m pytest -m coach_core -q --tb=short
+
+# Tip mapping + conditioned recall unit/integration (optional focused)
+python -m pytest \
+  tests/unit/core/test_tip_row_text.py \
+  tests/unit/core/test_tip_conditioned_recall.py \
+  tests/integration/features/test_trajectory.py \
+  -q --tb=short
 ```
 
 ### Coach-path stage timing baselines (INIT-004/SPEC-001)

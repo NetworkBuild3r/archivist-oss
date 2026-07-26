@@ -10,6 +10,7 @@ from archivist.retrieval.context_api import (
     ContextChunk,
     HandoffPacket,
     RelevantContext,
+    create_handoff_packet,
     format_context_for_prompt,
     get_relevant_context,
     receive_handoff_packet,
@@ -152,7 +153,8 @@ class TestGetRelevantContext:
 
     @pytest.mark.asyncio
     async def test_tips_are_included(self):
-        tip_rows = [{"content": "always call session_end at task end"}]
+        # INIT-007/SPEC-002: production rows use tip_text (not content/tip)
+        tip_rows = [{"tip_text": "always call session_end at task end"}]
         mock_result = _mock_retrieval_result()
         with (
             patch(
@@ -167,6 +169,46 @@ class TestGetRelevantContext:
             ctx = await get_relevant_context("alice", "some task", include_tips=True)
 
         assert "always call session_end at task end" in ctx.tips
+
+    @pytest.mark.asyncio
+    async def test_tips_legacy_content_key_still_works(self):
+        tip_rows = [{"content": "legacy mock tip key"}]
+        mock_result = _mock_retrieval_result()
+        with (
+            patch(
+                "archivist.retrieval.context_api.recursive_retrieve",
+                new=AsyncMock(return_value=mock_result),
+            ),
+            patch("archivist.retrieval.context_api.count_tokens", return_value=50),
+            patch(
+                "archivist.retrieval.context_api.search_tips", new=AsyncMock(return_value=tip_rows)
+            ),
+        ):
+            ctx = await get_relevant_context("alice", "some task", include_tips=True)
+
+        assert "legacy mock tip key" in ctx.tips
+
+    @pytest.mark.asyncio
+    async def test_tips_pass_task_query_to_search(self):
+        """INIT-007/SPEC-003: get_relevant_context wires task_description into search_tips."""
+        tip_rows = [{"tip_text": "Prefer express shipping"}]
+        mock_result = _mock_retrieval_result()
+        mock_search = AsyncMock(return_value=tip_rows)
+        with (
+            patch(
+                "archivist.retrieval.context_api.recursive_retrieve",
+                new=AsyncMock(return_value=mock_result),
+            ),
+            patch("archivist.retrieval.context_api.count_tokens", return_value=50),
+            patch("archivist.retrieval.context_api.search_tips", new=mock_search),
+        ):
+            ctx = await get_relevant_context("alice", "express shipping rush", include_tips=True)
+
+        assert "Prefer express shipping" in ctx.tips
+        mock_search.assert_awaited()
+        kwargs = mock_search.await_args.kwargs
+        assert kwargs.get("query") == "express shipping rush"
+        assert kwargs.get("record_usage") is True
 
     @pytest.mark.asyncio
     async def test_include_tips_false_skips_tips(self):
@@ -339,6 +381,39 @@ class TestFormatContextForPrompt:
         text = format_context_for_prompt(ctx)
         assert "500/8000 tokens" in text
         assert "55.0% savings" in text
+
+
+# ---------------------------------------------------------------------------
+# create_handoff_packet — recovery tips (INIT-007/SPEC-002)
+# ---------------------------------------------------------------------------
+
+
+class TestCreateHandoffPacketTips:
+    @pytest.mark.asyncio
+    async def test_recovery_tips_use_tip_text(self):
+        tip_rows = [{"tip_text": "retry with backoff on 429", "category": "recovery"}]
+        mock_pool = MagicMock()
+        mock_pool.fetchall = AsyncMock(return_value=[])
+
+        with (
+            patch(
+                "archivist.core.trajectory.session_end_summary",
+                new=AsyncMock(return_value={"summary": "done"}),
+            ),
+            patch(
+                "archivist.retrieval.context_api.search_tips",
+                new=AsyncMock(return_value=tip_rows),
+            ),
+            patch("archivist.storage.sqlite_pool.pool", mock_pool),
+            patch(
+                "archivist.core.hotness.get_hotness_scores",
+                new=AsyncMock(return_value={}),
+            ),
+            patch("archivist.core.trajectory._ensure_trajectory_schema"),
+        ):
+            pkt = await create_handoff_packet("alice", "sess-1", "bob")
+
+        assert "retry with backoff on 429" in pkt.open_questions
 
 
 # ---------------------------------------------------------------------------

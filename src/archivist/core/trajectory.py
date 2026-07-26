@@ -326,23 +326,190 @@ async def get_outcome_adjustments(memory_ids: list[str]) -> dict[str, float]:
     return adjustments
 
 
-async def search_tips(agent_id: str, category: str = "", limit: int = 10) -> list[dict]:
-    """Retrieve non-archived tips for an agent, optionally filtered by category."""
+def tip_row_text(row: dict | None) -> str:
+    """Extract display text from a tips-table row (or legacy mock keys).
+
+    INIT-007/SPEC-002: SQLite ``tips`` rows use ``tip_text``. Older callers and
+    unit mocks sometimes used ``content`` / ``tip`` — accept those as fallbacks
+    so get_context / handoff never silently drop real tips.
+    """
+    if not row:
+        return ""
+    raw = row.get("tip_text") or row.get("content") or row.get("tip") or ""
+    text = str(raw).strip()
+    return text
+
+
+def tip_rows_to_strings(rows: list[dict] | None) -> list[str]:
+    """Map tip rows to non-empty tip strings (preserves order)."""
+    if not rows:
+        return []
+    return [text for row in rows if (text := tip_row_text(row))]
+
+
+# INIT-007/SPEC-003 — deterministic tip ranking (no embed dependency)
+_TIP_STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "the",
+        "and",
+        "or",
+        "to",
+        "of",
+        "in",
+        "on",
+        "for",
+        "is",
+        "are",
+        "be",
+        "with",
+        "at",
+        "by",
+        "from",
+        "as",
+        "it",
+        "this",
+        "that",
+        "when",
+        "how",
+        "what",
+        "use",
+        "using",
+        "call",
+        "always",
+        "never",
+        "do",
+        "not",
+        "if",
+        "then",
+    }
+)
+
+
+def tokenize_tip_query(text: str) -> list[str]:
+    """Lowercase alphanumeric tokens (≥2 chars), stopwords removed."""
+    import re
+
+    raw = re.findall(r"[a-z0-9_]{2,}", (text or "").lower())
+    return [t for t in raw if t not in _TIP_STOPWORDS]
+
+
+def score_tip_relevance(row: dict, query: str) -> float:
+    """Keyword overlap score over tip_text + context + category.
+
+    Empty / stopword-only query → 0.0 (caller keeps recency order).
+    Bonus when task fingerprint appears in tip ``context``.
+    """
+    tokens = tokenize_tip_query(query)
+    if not tokens:
+        return 0.0
+    hay = " ".join(
+        [
+            tip_row_text(row).lower(),
+            str(row.get("context") or "").lower(),
+            str(row.get("category") or "").lower(),
+        ]
+    )
+    score = float(sum(1 for t in tokens if t in hay))
+    q = (query or "").strip()
+    if q:
+        fp = compute_task_fingerprint(q)
+        if fp and fp in str(row.get("context") or ""):
+            score += 2.0
+    return score
+
+
+def rank_tip_rows(rows: list[dict], query: str, limit: int) -> list[dict]:
+    """Rank tips by relevance desc, then created_at desc.
+
+    Empty query / no tokens → preserve input order (recency if caller sorted)
+    and truncate to *limit*.
+    """
+    if not rows:
+        return []
+    lim = max(0, int(limit))
+    tokens = tokenize_tip_query(query)
+    if not tokens:
+        return list(rows)[:lim]
+    scored: list[tuple[float, str, dict]] = [
+        (score_tip_relevance(r, query), str(r.get("created_at") or ""), r) for r in rows
+    ]
+    scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return [r for _, __, r in scored[:lim]]
+
+
+async def _bump_tip_usage(tip_ids: list[str], *, agent_id: str) -> None:
+    """Increment usage_count and set last_used_at for returned tip ids.
+
+    INIT-007/SPEC-006: also scope UPDATE by ``agent_id`` (defense in depth —
+    usage bumps stay tied to the search scope).
+    """
+    if not tip_ids or not agent_id:
+        return
+    from archivist.storage.sqlite_pool import pool
+
+    now = datetime.now(UTC).isoformat()
+    async with pool.write() as conn:
+        for tip_id in tip_ids:
+            await conn.execute(
+                "UPDATE tips SET usage_count = COALESCE(usage_count, 0) + 1, "
+                "last_used_at = ? WHERE id = ? AND agent_id = ?",
+                (now, tip_id, agent_id),
+            )
+
+
+async def search_tips(
+    agent_id: str,
+    category: str = "",
+    limit: int = 10,
+    query: str = "",
+    *,
+    record_usage: bool = False,
+) -> list[dict]:
+    """Retrieve non-archived tips for an agent, optionally filtered by category.
+
+    INIT-007/SPEC-003:
+    - Non-empty *query*: over-fetch then rank by keyword/fingerprint relevance
+      (deterministic; no embed). Relevant tips beat newer-but-irrelevant ones.
+    - Empty *query*: recency-only (``ORDER BY created_at DESC``) — documented
+      fallback for handoff / ops tools without a task string.
+    - *record_usage*: bump ``usage_count`` / ``last_used_at`` for returned rows.
+    """
     from archivist.storage.sqlite_pool import pool
 
     _ensure_trajectory_schema()
+    lim = max(0, int(limit))
+    if lim == 0:
+        return []
+
+    q = (query or "").strip()
+    # Over-fetch when ranking so older relevant tips are not clipped by recency LIMIT
+    fetch_limit = lim if not q else max(lim * 10, 50)
+
     async with pool.read() as conn:
         if category:
             rows = await conn.fetchall(
-                "SELECT * FROM tips WHERE agent_id=? AND category=? AND archived=0 ORDER BY created_at DESC LIMIT ?",
-                (agent_id, category, limit),
+                "SELECT * FROM tips WHERE agent_id=? AND category=? AND archived=0 "
+                "ORDER BY created_at DESC LIMIT ?",
+                (agent_id, category, fetch_limit),
             )
         else:
             rows = await conn.fetchall(
-                "SELECT * FROM tips WHERE agent_id=? AND archived=0 ORDER BY created_at DESC LIMIT ?",
-                (agent_id, limit),
+                "SELECT * FROM tips WHERE agent_id=? AND archived=0 "
+                "ORDER BY created_at DESC LIMIT ?",
+                (agent_id, fetch_limit),
             )
-    return [dict(r) for r in rows]
+    tip_rows = [dict(r) for r in rows]
+    tip_rows = rank_tip_rows(tip_rows, q, lim) if q else tip_rows[:lim]
+
+    if record_usage:
+        await _bump_tip_usage(
+            [str(r["id"]) for r in tip_rows if r.get("id")],
+            agent_id=agent_id,
+        )
+
+    return tip_rows
 
 
 async def add_annotation(

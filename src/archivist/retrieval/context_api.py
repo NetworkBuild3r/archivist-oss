@@ -19,7 +19,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
-from archivist.core.trajectory import search_tips
+from archivist.core.trajectory import search_tips, tip_rows_to_strings
 from archivist.retrieval.context_packer import pack_context
 from archivist.retrieval.rlm_retriever import recursive_retrieve
 from archivist.retrieval.session_store import get_session_store
@@ -365,15 +365,18 @@ async def get_relevant_context(
             logger.debug("graph_facts extraction failed: %s", e)
 
     # --- Step 5: fetch procedural tips ---
+    # INIT-007/SPEC-002: map tip_text (SQLite) via tip_rows_to_strings
+    # INIT-007/SPEC-003: pass task_description for conditioned recall + usage
     tips: list[str] = []
     if include_tips:
         try:
-            tip_rows = await search_tips(agent_id=agent_id, limit=5)
-            tips = [
-                r.get("content") or r.get("tip", "")
-                for r in tip_rows
-                if r.get("content") or r.get("tip")
-            ]
+            tip_rows = await search_tips(
+                agent_id=agent_id,
+                limit=5,
+                query=task_description or "",
+                record_usage=True,
+            )
+            tips = tip_rows_to_strings(tip_rows)
         except Exception as e:
             logger.debug("tips fetch failed: %s", e)
 
@@ -530,14 +533,11 @@ async def create_handoff_packet(
         logger.debug("handoff active_goals failed: %s", e)
 
     # --- 3. Recovery tips ---
+    # INIT-007/SPEC-002: recovery tips also use tip_text via shared helper
     open_questions: list[str] = []
     try:
         tip_rows = await search_tips(agent_id=agent_id, category="recovery", limit=10)
-        open_questions = [
-            r.get("content") or r.get("tip", "")
-            for r in tip_rows
-            if r.get("content") or r.get("tip")
-        ]
+        open_questions = tip_rows_to_strings(tip_rows)
     except Exception as e:
         logger.debug("handoff tips failed: %s", e)
 
