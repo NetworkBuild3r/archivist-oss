@@ -27,6 +27,10 @@ EXPRESS_ELIGIBLE_CUE = "EXPRESS_ELIGIBLE"
 # oracle must not invent a single resolution (ADR-006 / SPEC-004).
 EXPRESS_INELIGIBLE_CUE = "EXPRESS_INELIGIBLE"
 
+# INIT-007/SPEC-004 — tip/procedure cue (must appear in get_context tips[], not
+# only in memories / index TOC, when require_tip_evidence=True).
+PROCEDURE_EXPRESS_CUE = "PROCEDURE_EXPRESS"
+
 # Synthetic agent → namespace map (fail-closed: unknown agent_id → "").
 _AGENT_NAMESPACE: dict[str, str] = {
     "agentic-agent-a": "agentic-ns-a",
@@ -212,10 +216,12 @@ def choose_action(
     memories: list[dict[str, Any]] | None = None,
     *,
     context: dict[str, Any] | None = None,
+    tips: list[str] | None = None,
+    require_tip_evidence: bool = False,
 ) -> str:
-    """Test-only action oracle: map retrieved memories → discrete action id.
+    """Test-only action oracle: map retrieved memories/tips → discrete action id.
 
-    Rules (SPEC-002…004):
+    Rules (SPEC-002…004 / INIT-007/SPEC-004):
     - empty / missing **active** evidence → ``refuse`` (empty-OK)
     - suppressed rows (``is_suppressed``) are ignored (stale / superseded)
     - both ``EXPRESS_ELIGIBLE`` and ``EXPRESS_INELIGIBLE`` in active text →
@@ -223,13 +229,32 @@ def choose_action(
     - else any active ``EXPRESS_ELIGIBLE`` → ``order_express``
     - otherwise → ``needs_clarification``
 
-    ``context`` may supply ``memories`` when the get_context pack is passed whole.
-    Index TOC / markdown alone must never be passed as ``memories``.
+    When ``require_tip_evidence=True`` (procedure→action scenarios):
+    - ``PROCEDURE_EXPRESS_CUE`` must appear in **tips** from get_context.
+    - Memories / index TOC alone must **not** unlock ``order_express``.
+    - Missing tip cue → ``refuse``.
+
+    ``context`` may supply ``memories`` / ``tips`` when the get_context pack is
+    passed whole. Index TOC / markdown alone must never be passed as ``memories``.
     """
     mems = memories
-    if mems is None and isinstance(context, dict):
-        raw = context.get("memories")
-        mems = raw if isinstance(raw, list) else None
+    tip_list = tips
+    if isinstance(context, dict):
+        if mems is None:
+            raw = context.get("memories")
+            mems = raw if isinstance(raw, list) else None
+        if tip_list is None:
+            raw_tips = context.get("tips")
+            tip_list = raw_tips if isinstance(raw_tips, list) else None
+
+    tip_blob = "\n".join(t for t in (tip_list or []) if isinstance(t, str) and t.strip())
+
+    if require_tip_evidence:
+        # Procedure path: tips are the only admissible evidence for express.
+        if PROCEDURE_EXPRESS_CUE not in tip_blob:
+            return ACTION_REFUSE
+        return ACTION_ORDER_EXPRESS
+
     blob = memories_text_blob(mems)
     if not blob.strip():
         return ACTION_REFUSE
@@ -240,6 +265,64 @@ def choose_action(
     if has_eligible:
         return ACTION_ORDER_EXPRESS
     return ACTION_NEEDS_CLARIFICATION
+
+
+async def seed_tip(
+    *,
+    session: AgenticSession,
+    tip_text: str,
+    category: str = "strategy",
+    context: str = "",
+    archived: int = 0,
+) -> str:
+    """Insert a tips-table row for procedure evals (INIT-007/SPEC-004).
+
+    Direct SQLite seed — core profile does not expose log_trajectory (GR-PROD-002).
+    Uses columns present on both fixture ``qa_pool`` schema and trajectory guard.
+    Returns tip id.
+    """
+    import uuid
+    from datetime import UTC, datetime
+
+    from archivist.core.trajectory import _ensure_trajectory_schema
+    from archivist.storage.sqlite_pool import pool
+
+    _ensure_trajectory_schema()
+    tip_id = str(uuid.uuid4())
+    traj_id = str(uuid.uuid4())
+    now = datetime.now(UTC).isoformat()
+    async with pool.write() as conn:
+        # Fixture qa_pool trajectories is a slim schema (no task_fingerprint).
+        await conn.execute(
+            """INSERT INTO trajectories
+               (id, agent_id, session_id, task_description, outcome, created_at)
+               VALUES (?,?,?,?,?,?)""",
+            (
+                traj_id,
+                session.agent_id,
+                "agentic-proc",
+                "procedure eval seed",
+                "success",
+                now,
+            ),
+        )
+        await conn.execute(
+            """INSERT INTO tips
+               (id, trajectory_id, agent_id, category, tip_text, context,
+                archived, created_at, usage_count)
+               VALUES (?,?,?,?,?,?,?,?,0)""",
+            (
+                tip_id,
+                traj_id,
+                session.agent_id,
+                category,
+                tip_text,
+                context,
+                int(archived),
+                now,
+            ),
+        )
+    return tip_id
 
 
 async def store_memory(
@@ -327,13 +410,19 @@ async def get_context_with_hits(
     session: AgenticSession,
     hits: list[dict[str, Any]],
     task_description: str = "decide return action",
+    include_tips: bool = False,
 ) -> dict[str, Any]:
     """Session B: ``archivist_get_context`` over provenance-bearing hits (SQLite CI).
 
     Patches ``get_relevant_context`` so CI needs no live Qdrant (GR-EVAL-002).
     Applies ``apply_prerank_filters`` for the session namespace (SEC Low-002).
+
+    INIT-007/SPEC-004: when ``include_tips=True``, load tips via real
+    ``search_tips`` + ``tip_rows_to_strings`` (SPEC-002/003 path) into the
+    mocked context pack — not invented oracle strings.
     """
     from archivist.app.handlers._registry import dispatch_tool
+    from archivist.core.trajectory import search_tips, tip_rows_to_strings
     from archivist.retrieval.context_api import ContextChunk, RelevantContext
     from archivist.retrieval.retrieval_filters import (
         apply_prerank_filters,
@@ -361,11 +450,20 @@ async def get_context_with_hits(
         )
         for h in filtered
     ]
+    tips: list[str] = []
+    if include_tips:
+        tip_rows = await search_tips(
+            agent_id=session.agent_id,
+            limit=5,
+            query=task_description or "",
+            record_usage=False,
+        )
+        tips = tip_rows_to_strings(tip_rows)
     ctx = RelevantContext(
         answer="",
         sources=sources,
         graph_facts=[],
-        tips=[],
+        tips=tips,
         total_tokens=max(1, sum(len(str(h.get("text") or "")) // 4 for h in filtered)),
         budget_tokens=8000,
         over_budget=False,
@@ -390,6 +488,7 @@ async def get_context_with_hits(
                 "namespace": session.namespace,
                 "subject": "returns",
                 "purpose": "agentic_eval",
+                "include_tips": include_tips,
             },
         )
     return json.loads(out[0].text)
