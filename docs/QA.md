@@ -47,6 +47,52 @@ python -m pytest -m coach_core -q --tb=short
 python -m pytest tests/system/mcp/test_coach_core_evals.py -q --tb=short
 ```
 
+### Agentic memory evals (INIT-006 / ADR-006)
+
+<!-- INIT-006/SPEC-005 -->
+
+MemoryArena-*inspired* multi-session **Memory→Action** scenarios (not a full
+MemoryArena / web-nav port). Sibling pytest marker **`agentic_memory`** — keep
+**`-m coach_core` required and green** (ADR-006 GR-COACH-001 / REQ-006). Action
+selection is a **test-only oracle** under `tests/system/mcp/agentic_memory_harness.py`
+(GR-LAYER-001); no production agent runtime.
+
+**Success metrics locked by these evals:**
+
+| ID | Intent |
+|----|--------|
+| SM-001 | Omit Session-A store → Session-B action fails or **refuse** (memory is necessary) |
+| SM-002 | Stale / contradictory / ambiguous evidence does **not** invent `order_express` |
+| SM-003 | `pytest -m coach_core` remains green |
+
+**Scenario inventory (shipped):**
+
+| File | Classes / focus |
+|------|-----------------|
+| `tests/system/mcp/agentic_memory_harness.py` | Shared harness: store flags, fake-embed patches, `AgenticSession`, `choose_action` |
+| `tests/system/mcp/test_agentic_memory_harness_smoke.py` | `TestAgenticMemoryHarnessSmoke` — oracle + SQLite store smoke |
+| `tests/system/mcp/test_agentic_memory_positive.py` | `TestAgenticMemoryPositive` — Session A→B `order_express`; omit-store refuse; TOC not evidence; ns isolation |
+| `tests/system/mcp/test_agentic_memory_negative.py` | `TestAgenticMemoryNegative` — suppressed stale; eligible+ineligible → `needs_clarification`; ambiguous/empty; index TOC never sufficient |
+
+**Baselines / contracts:** see [ADR-006](adr/ADR-006-agentic-memory-eval-gym.md). SQLite CI path +
+fake embed / stub Qdrant only (GR-EVAL-002). Index markdown alone is never action evidence
+(GR-CE-001).
+
+```bash
+# Focused agentic-memory suite (Memory→Action)
+python -m pytest -m agentic_memory -q --tb=short
+
+# Explicit modules
+python -m pytest \
+  tests/system/mcp/test_agentic_memory_harness_smoke.py \
+  tests/system/mcp/test_agentic_memory_positive.py \
+  tests/system/mcp/test_agentic_memory_negative.py \
+  -q --tb=short
+
+# coach_core remains required (run both for full coach+agentic coverage)
+python -m pytest -m coach_core -q --tb=short
+```
+
 ### Coach-path stage timing baselines (INIT-004/SPEC-001)
 
 Measure-before-optimize hooks for the personal-production coach path. Prefer

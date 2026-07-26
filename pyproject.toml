@@ -22,6 +22,8 @@ markers = [
     "benchmark: performance benchmarks (run with 'pytest benchmarks/')",
     # Coach-core reliability (INIT-003/SPEC-008)
     "coach_core: coach-path CI evals (store/index/search/get_context, ack SLO, namespace isolation)",
+    # Agentic memory eval gym (INIT-006/SPEC-002) — sibling to coach_core; Memory→Action
+    "agentic_memory: multi-session Memory→Action CI evals (omit-store / poisoned-memory; ADR-006)",
 ]
 addopts = ["--strict-markers", "--tb=short", "-q"]
 

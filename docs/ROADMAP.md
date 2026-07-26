@@ -4,17 +4,18 @@
 
 **Goal** — Be the most **trustworthy and production-ready** open multi-agent memory layer in 2026: observable, RBAC-aware, safe under fleet load, and the best answer finder in the industry.
 
-**Next milestones (engineering)** — Immediate focus is **coach-path performance**
-([ADR-005](adr/ADR-005-coach-path-performance.md), INIT-005): cut write-path
-latency with ack-budget hard-skips, safe embed reuse, and opt-in embed-deferred
-store under an explicit searchable-lag SLO — without weakening ADR-003 durable
-graph+outbox ack or ADR-004 CE surfaces. INIT-004 / [ADR-004](adr/ADR-004-llm-native-coach-memory-surfaces.md)
-(LLM-native coach memory surfaces) is **complete / historical**. Phase 7–10
-differentiators remain longer-horizon — they are **not** the recommended next
-engineering work. (INIT-001 / [ADR-001](adr/ADR-001-platform-coherence-sequencing.md)
-and INIT-003 / [ADR-003](adr/ADR-003-coach-core-reliability.md) remain
-foundational context.)
-<!-- INIT-005/SPEC-001 -->
+**Next milestones (engineering)** — Immediate focus is the **agentic memory eval
+gym** ([ADR-006](adr/ADR-006-agentic-memory-eval-gym.md), INIT-006): CI-shaped
+multi-session Memory→Action scenarios (MemoryArena-*inspired*, not a full port)
+that prove stored memory changes later action selection — without becoming an
+agent runtime and without regressing `-m coach_core`. INIT-005 /
+[ADR-005](adr/ADR-005-coach-path-performance.md) (coach-path performance; PR #47
+merged) and INIT-004 / [ADR-004](adr/ADR-004-llm-native-coach-memory-surfaces.md)
+are **complete / historical**. Phase 7–10 differentiators remain longer-horizon —
+they are **not** the recommended next engineering work. (INIT-001 /
+[ADR-001](adr/ADR-001-platform-coherence-sequencing.md) and INIT-003 /
+[ADR-003](adr/ADR-003-coach-core-reliability.md) remain foundational context.)
+<!-- INIT-006/SPEC-001 -->
 
 ---
 
@@ -64,26 +65,28 @@ These six features combined will make Archivist the **most trustworthy and produ
 
 ## Immediate Next Steps (Recommended)
 
-<!-- INIT-005/SPEC-001 -->
+<!-- INIT-006/SPEC-001 -->
 
-**Authoritative next work:** [ADR-005: Coach-path performance](adr/ADR-005-coach-path-performance.md)
-(INIT-005) — write-path latency contract on top of ADR-003 durable store-ack and
-completed INIT-004 / [ADR-004](adr/ADR-004-llm-native-coach-memory-surfaces.md)
-CE surfaces. Hard-skip optional pre-ack gates under budget (never skip outbox),
-reuse conflict embeds when text is unchanged, opt-in `ARCHIVIST_EMBED_DEFER`
-with explicit searchable-lag SLO. Do **not** treat Phase 7–10 breadth or
-re-opening INIT-004 CE as the immediate plan.
+**Authoritative next work:** [ADR-006: Agentic memory eval gym](adr/ADR-006-agentic-memory-eval-gym.md)
+(INIT-006) — MemoryArena-*inspired* multi-session Memory→Action CI evals on top
+of ADR-003 durable store-ack, ADR-004 CE surfaces, and completed INIT-005 /
+[ADR-005](adr/ADR-005-coach-path-performance.md) (PR #47 merged). Sibling pytest
+marker `agentic_memory`; test-only action oracle; `coach_core` must stay green.
+Do **not** treat Phase 7–10 breadth, a full MemoryArena port, or a production
+agent runtime as the immediate plan.
 
-1. **Coach-path performance (INIT-005)** — ADR-005 freeze, then store stage
-   timings, ack-budget hard-skips, embed reuse, embed-deferred store + drain,
-   store lag API contract, and coach_core perf/lag/durability evals.
-2. **Complete / historical (not next)** — **INIT-004** (LLM-native coach memory
-   surfaces / ADR-004). Foundational context: INIT-001 /
+1. **Agentic memory eval gym (INIT-006)** — ADR-006 freeze, then harness +
+   `agentic_memory` marker, positive omit-store controls, stale/contradictory
+   negatives, QA playbook, security review, and architecture diagrams.
+2. **Complete / historical (not next)** — **INIT-005** (coach-path performance /
+   ADR-005), **INIT-004** (LLM-native coach memory surfaces / ADR-004).
+   Foundational context: INIT-001 /
    [ADR-001](adr/ADR-001-platform-coherence-sequencing.md), INIT-003 /
    [ADR-003](adr/ADR-003-coach-core-reliability.md).
-3. **Parked for later (not next)** — Phase 8 lifecycle productization, Phase 7
-   checkpoint UX, MaP MCP / fleet demos, `share_*` depth, Phase 9 observability
-   billboard.
+3. **Parked for later (not next)** — Procedural skill-library product (INIT-007
+   candidate), hierarchical reconsolidation, multi-agent coherence depth, Phase
+   7 checkpoint UX, MaP MCP / fleet demos, `share_*` depth, Phase 9
+   observability billboard.
 4. Optional: add a **domain-specific long-document fixture** (your own docs +
    questions) locally to tune retrieval beyond the public toy corpus — keep
    private data out of the public repo.
