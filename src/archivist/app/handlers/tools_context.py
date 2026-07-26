@@ -7,7 +7,7 @@ import logging
 
 from mcp.types import TextContent, Tool
 
-from ._common import error_response, require_caller, success_response
+from ._common import error_response, require_caller, require_rbac, success_response
 
 logger = logging.getLogger("archivist.mcp")
 
@@ -21,9 +21,12 @@ TOOLS: list[Tool] = [
         description=(
             "Assemble token-budgeted, tier-aware context for an agent task in a single call. "
             "Replaces the pattern of calling archivist_search + archivist_tips + archivist_context_check "
-            "separately. Returns a synthesized answer (when available), ranked memory chunks packed "
-            "to fit max_tokens, relevant graph facts, and procedural tips. "
-            "Metadata includes token savings, tier distribution, and provenance IDs."
+            "separately. Returns a stable recall payload with canonical "
+            "memories[{id,text,score,provenance}] (usable text when hits exist), "
+            "legacy sources/answer keys, ranked chunks packed to max_tokens, graph facts, "
+            "and tips. Pre-rank filters omit suppressed/superseded; optional "
+            "subject/purpose/sensitivity narrow within the namespace. "
+            "Metadata includes token savings, tier distribution, and safe provenance IDs."
         ),
         inputSchema={
             "type": "object",
@@ -43,7 +46,22 @@ TOOLS: list[Tool] = [
                 },
                 "namespace": {
                     "type": "string",
-                    "description": "Restrict retrieval to this namespace (empty = all).",
+                    "description": "Restrict retrieval to this namespace (RBAC-gated when set).",
+                    "default": "",
+                },
+                "subject": {
+                    "type": "string",
+                    "description": "Optional pre-rank subject filter (exact). Narrows within namespace.",
+                    "default": "",
+                },
+                "purpose": {
+                    "type": "string",
+                    "description": "Optional pre-rank purpose filter. Empty = no purpose restriction.",
+                    "default": "",
+                },
+                "sensitivity": {
+                    "type": "string",
+                    "description": "Optional pre-rank sensitivity filter.",
                     "default": "",
                 },
                 "tier_policy": {
@@ -159,22 +177,32 @@ async def _handle_get_context(arguments: dict) -> list[TextContent]:
 
     agent_id = (arguments.get("agent_id") or "").strip()
     task = (arguments.get("task_description") or "").strip()
+    namespace = (arguments.get("namespace") or "").strip()
 
     if err := require_caller(agent_id):
         return err
     if not task:
         return error_response({"error": "task_description is required"})
 
+    # INIT-003/SPEC-005 — RBAC/namespace gate remains on the handler
+    if namespace:
+        denied = require_rbac(agent_id, "read", namespace)
+        if denied:
+            return denied
+
     try:
         ctx: RelevantContext = await get_relevant_context(
             agent_id=agent_id,
             task_description=task,
             max_tokens=int(arguments.get("max_tokens") or 8000),
-            namespace=(arguments.get("namespace") or ""),
+            namespace=namespace,
             tier_policy=(arguments.get("tier_policy") or "adaptive"),
             include_graph=bool(arguments.get("include_graph", True)),
             include_tips=bool(arguments.get("include_tips", True)),
             extra_memory_ids=arguments.get("extra_memory_ids") or [],
+            subject=(arguments.get("subject") or ""),
+            purpose=(arguments.get("purpose") or ""),
+            sensitivity=(arguments.get("sensitivity") or ""),
         )
     except Exception as exc:
         logger.exception("archivist_get_context failed")
@@ -184,6 +212,8 @@ async def _handle_get_context(arguments: dict) -> list[TextContent]:
         "agent_id": agent_id,
         "task_description": task,
         "answer": ctx.answer,
+        # INIT-003/SPEC-005 — canonical stable recall shape
+        "memories": list(ctx.memories),
         "sources": [
             {
                 "memory_id": c.memory_id,
@@ -198,7 +228,8 @@ async def _handle_get_context(arguments: dict) -> list[TextContent]:
         ],
         "graph_facts": ctx.graph_facts,
         "tips": ctx.tips,
-        "provenance": ctx.provenance,
+        # Safe id list only — never secrets
+        "provenance": list(ctx.provenance),
         "context_status": {
             "total_tokens": ctx.total_tokens,
             "budget_tokens": ctx.budget_tokens,

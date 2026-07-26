@@ -2,6 +2,7 @@
 
 Split from the former monolithic ``storage/graph.py`` (INIT-001/SPEC-003).
 Provenance: INIT-001/SPEC-003.
+Coach provenance envelope + supersede/suppress columns: INIT-003/SPEC-002.
 """
 
 from __future__ import annotations
@@ -199,12 +200,26 @@ def init_schema():
             retention_class TEXT NOT NULL DEFAULT 'standard',
             valid_from TEXT NOT NULL DEFAULT '',
             valid_until TEXT NOT NULL DEFAULT '',
-            memory_id TEXT NOT NULL DEFAULT ''
+            memory_id TEXT NOT NULL DEFAULT '',
+            -- INIT-003/SPEC-002: coach provenance envelope + suppress
+            source TEXT NOT NULL DEFAULT '',
+            subject TEXT NOT NULL DEFAULT '',
+            sensitivity TEXT NOT NULL DEFAULT 'standard',
+            purpose TEXT NOT NULL DEFAULT '',
+            statement_kind TEXT NOT NULL DEFAULT 'user',
+            updated_at TEXT NOT NULL DEFAULT '',
+            is_suppressed INTEGER NOT NULL DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS idx_facts_entity ON facts(entity_id);
         CREATE INDEX IF NOT EXISTS idx_facts_active ON facts(is_active);
         CREATE INDEX IF NOT EXISTS idx_facts_valid_from ON facts(valid_from);
         CREATE INDEX IF NOT EXISTS idx_facts_memory_id ON facts(memory_id);
+        CREATE INDEX IF NOT EXISTS idx_facts_subject ON facts(subject);
+        CREATE INDEX IF NOT EXISTS idx_facts_purpose ON facts(purpose);
+        CREATE INDEX IF NOT EXISTS idx_facts_sensitivity ON facts(sensitivity);
+        CREATE INDEX IF NOT EXISTS idx_facts_statement_kind ON facts(statement_kind);
+        CREATE INDEX IF NOT EXISTS idx_facts_suppressed ON facts(is_suppressed);
+        CREATE INDEX IF NOT EXISTS idx_facts_superseded_by ON facts(superseded_by);
 
         CREATE TABLE IF NOT EXISTS curator_state (
             key TEXT PRIMARY KEY,
@@ -241,13 +256,33 @@ def init_schema():
             importance REAL NOT NULL DEFAULT 0.5,
             tier_label TEXT NOT NULL DEFAULT 'l2',
             ttl_at TEXT,
-            decay_rate REAL NOT NULL DEFAULT 0.0
+            decay_rate REAL NOT NULL DEFAULT 0.0,
+            -- INIT-003/SPEC-002: coach provenance envelope + supersede/suppress
+            source TEXT NOT NULL DEFAULT '',
+            subject TEXT NOT NULL DEFAULT '',
+            confidence REAL NOT NULL DEFAULT 1.0,
+            sensitivity TEXT NOT NULL DEFAULT 'standard',
+            purpose TEXT NOT NULL DEFAULT '',
+            statement_kind TEXT NOT NULL DEFAULT 'user',
+            created_at TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT '',
+            supersedes_id TEXT NOT NULL DEFAULT '',
+            is_suppressed INTEGER NOT NULL DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS idx_mc_qdrant ON memory_chunks(qdrant_id);
         CREATE INDEX IF NOT EXISTS idx_mc_namespace ON memory_chunks(namespace);
         CREATE INDEX IF NOT EXISTS idx_mc_agent ON memory_chunks(agent_id);
         CREATE INDEX IF NOT EXISTS idx_mc_importance ON memory_chunks(importance DESC);
         CREATE INDEX IF NOT EXISTS idx_mc_tier ON memory_chunks(tier_label);
+        CREATE INDEX IF NOT EXISTS idx_mc_subject ON memory_chunks(subject);
+        CREATE INDEX IF NOT EXISTS idx_mc_purpose ON memory_chunks(purpose);
+        CREATE INDEX IF NOT EXISTS idx_mc_sensitivity ON memory_chunks(sensitivity);
+        CREATE INDEX IF NOT EXISTS idx_mc_statement_kind ON memory_chunks(statement_kind);
+        CREATE INDEX IF NOT EXISTS idx_mc_suppressed ON memory_chunks(is_suppressed);
+        CREATE INDEX IF NOT EXISTS idx_mc_supersedes ON memory_chunks(supersedes_id);
+        CREATE INDEX IF NOT EXISTS idx_mc_ns_suppressed
+            ON memory_chunks(namespace, is_suppressed);
+        CREATE INDEX IF NOT EXISTS idx_mc_created_at ON memory_chunks(created_at);
 
         -- Tracks all Qdrant point IDs created for each memory (Phase 2).
         CREATE TABLE IF NOT EXISTS memory_points (
@@ -459,6 +494,25 @@ def _migrate_schema():
         ("retrieval_logs", "tokens_naive", "INTEGER"),
         ("retrieval_logs", "savings_pct", "REAL"),
         ("retrieval_logs", "pack_policy", "TEXT DEFAULT " + "''"),
+        # INIT-003/SPEC-002: coach provenance envelope on facts
+        ("facts", "source", "TEXT NOT NULL DEFAULT ''"),
+        ("facts", "subject", "TEXT NOT NULL DEFAULT ''"),
+        ("facts", "sensitivity", "TEXT NOT NULL DEFAULT 'standard'"),
+        ("facts", "purpose", "TEXT NOT NULL DEFAULT ''"),
+        ("facts", "statement_kind", "TEXT NOT NULL DEFAULT 'user'"),
+        ("facts", "updated_at", "TEXT NOT NULL DEFAULT ''"),
+        ("facts", "is_suppressed", "INTEGER NOT NULL DEFAULT 0"),
+        # INIT-003/SPEC-002: coach provenance + supersede/suppress on memory_chunks
+        ("memory_chunks", "source", "TEXT NOT NULL DEFAULT ''"),
+        ("memory_chunks", "subject", "TEXT NOT NULL DEFAULT ''"),
+        ("memory_chunks", "confidence", "REAL NOT NULL DEFAULT 1.0"),
+        ("memory_chunks", "sensitivity", "TEXT NOT NULL DEFAULT 'standard'"),
+        ("memory_chunks", "purpose", "TEXT NOT NULL DEFAULT ''"),
+        ("memory_chunks", "statement_kind", "TEXT NOT NULL DEFAULT 'user'"),
+        ("memory_chunks", "created_at", "TEXT NOT NULL DEFAULT ''"),
+        ("memory_chunks", "updated_at", "TEXT NOT NULL DEFAULT ''"),
+        ("memory_chunks", "supersedes_id", "TEXT NOT NULL DEFAULT ''"),
+        ("memory_chunks", "is_suppressed", "INTEGER NOT NULL DEFAULT 0"),
     ]
     # needle_registry may not exist yet (schema_guard creates it lazily),
     # so these ALTER TABLEs are attempted but silently skipped on failure.
@@ -485,6 +539,22 @@ def _migrate_schema():
         "CREATE INDEX IF NOT EXISTS idx_mc_tier ON memory_chunks(tier_label)",
         # Phase 5 answer-finder: pack_policy index on retrieval_logs
         "CREATE INDEX IF NOT EXISTS idx_rl_pack_policy ON retrieval_logs(pack_policy)",
+        # INIT-003/SPEC-002: pre-rank filter indexes (facts)
+        "CREATE INDEX IF NOT EXISTS idx_facts_subject ON facts(subject)",
+        "CREATE INDEX IF NOT EXISTS idx_facts_purpose ON facts(purpose)",
+        "CREATE INDEX IF NOT EXISTS idx_facts_sensitivity ON facts(sensitivity)",
+        "CREATE INDEX IF NOT EXISTS idx_facts_statement_kind ON facts(statement_kind)",
+        "CREATE INDEX IF NOT EXISTS idx_facts_suppressed ON facts(is_suppressed)",
+        "CREATE INDEX IF NOT EXISTS idx_facts_superseded_by ON facts(superseded_by)",
+        # INIT-003/SPEC-002: pre-rank filter indexes (memory_chunks)
+        "CREATE INDEX IF NOT EXISTS idx_mc_subject ON memory_chunks(subject)",
+        "CREATE INDEX IF NOT EXISTS idx_mc_purpose ON memory_chunks(purpose)",
+        "CREATE INDEX IF NOT EXISTS idx_mc_sensitivity ON memory_chunks(sensitivity)",
+        "CREATE INDEX IF NOT EXISTS idx_mc_statement_kind ON memory_chunks(statement_kind)",
+        "CREATE INDEX IF NOT EXISTS idx_mc_suppressed ON memory_chunks(is_suppressed)",
+        "CREATE INDEX IF NOT EXISTS idx_mc_supersedes ON memory_chunks(supersedes_id)",
+        "CREATE INDEX IF NOT EXISTS idx_mc_ns_suppressed ON memory_chunks(namespace, is_suppressed)",
+        "CREATE INDEX IF NOT EXISTS idx_mc_created_at ON memory_chunks(created_at)",
     ]
     with GRAPH_WRITE_LOCK:
         conn = get_db()

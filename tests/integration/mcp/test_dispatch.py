@@ -98,18 +98,23 @@ class TestDispatch:
         data = json.loads(result[0].text)
         assert "error" in data
 
-    async def test_context_check_no_args(self):
+    async def test_context_check_no_args(self, monkeypatch):
+        import archivist.core.config as config
         from archivist.app.handlers._registry import dispatch_tool
 
+        # context_check is outside the default core profile (INIT-003/SPEC-003)
+        monkeypatch.setattr(config, "TOOL_PROFILE", "full")
         result = await dispatch_tool("archivist_context_check", {})
         assert len(result) == 1
         data = json.loads(result[0].text)
         assert data["hint"] == "ok"
         assert data["total_tokens"] == 0
 
-    async def test_context_check_with_messages(self):
+    async def test_context_check_with_messages(self, monkeypatch):
+        import archivist.core.config as config
         from archivist.app.handlers._registry import dispatch_tool
 
+        monkeypatch.setattr(config, "TOOL_PROFILE", "full")
         result = await dispatch_tool(
             "archivist_context_check",
             {

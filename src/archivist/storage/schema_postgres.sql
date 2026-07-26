@@ -86,7 +86,15 @@ CREATE TABLE IF NOT EXISTS facts (
     confidence       DOUBLE PRECISION NOT NULL DEFAULT 1.0,
     provenance       TEXT NOT NULL DEFAULT 'unknown',
     actor_id         TEXT NOT NULL DEFAULT '',
-    actor_type       TEXT NOT NULL DEFAULT ''
+    actor_type       TEXT NOT NULL DEFAULT '',
+    -- INIT-003/SPEC-002: coach provenance envelope + suppress
+    source           TEXT NOT NULL DEFAULT '',
+    subject          TEXT NOT NULL DEFAULT '',
+    sensitivity      TEXT NOT NULL DEFAULT 'standard',
+    purpose          TEXT NOT NULL DEFAULT '',
+    statement_kind   TEXT NOT NULL DEFAULT 'user',
+    updated_at       TEXT NOT NULL DEFAULT '',
+    is_suppressed    INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_facts_entity      ON facts (entity_id);
@@ -96,6 +104,12 @@ CREATE INDEX IF NOT EXISTS idx_facts_memory_id   ON facts (memory_id);
 CREATE INDEX IF NOT EXISTS idx_facts_retention   ON facts (retention_class);
 CREATE INDEX IF NOT EXISTS idx_facts_namespace   ON facts (namespace);
 CREATE INDEX IF NOT EXISTS idx_facts_actor       ON facts (actor_id);
+CREATE INDEX IF NOT EXISTS idx_facts_subject     ON facts (subject);
+CREATE INDEX IF NOT EXISTS idx_facts_purpose     ON facts (purpose);
+CREATE INDEX IF NOT EXISTS idx_facts_sensitivity ON facts (sensitivity);
+CREATE INDEX IF NOT EXISTS idx_facts_statement_kind ON facts (statement_kind);
+CREATE INDEX IF NOT EXISTS idx_facts_suppressed  ON facts (is_suppressed);
+CREATE INDEX IF NOT EXISTS idx_facts_superseded_by ON facts (superseded_by);
 
 
 CREATE TABLE IF NOT EXISTS curator_state (
@@ -142,6 +156,17 @@ CREATE TABLE IF NOT EXISTS memory_chunks (
     tier_label   TEXT NOT NULL DEFAULT 'l2',
     ttl_at       TEXT,
     decay_rate   REAL NOT NULL DEFAULT 0.0,
+    -- INIT-003/SPEC-002: coach provenance envelope + supersede/suppress
+    source           TEXT NOT NULL DEFAULT '',
+    subject          TEXT NOT NULL DEFAULT '',
+    confidence       DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+    sensitivity      TEXT NOT NULL DEFAULT 'standard',
+    purpose          TEXT NOT NULL DEFAULT '',
+    statement_kind   TEXT NOT NULL DEFAULT 'user',
+    created_at       TEXT NOT NULL DEFAULT '',
+    updated_at       TEXT NOT NULL DEFAULT '',
+    supersedes_id    TEXT NOT NULL DEFAULT '',
+    is_suppressed    INTEGER NOT NULL DEFAULT 0,
     -- tsvector for stemmed search (Porter/english -- equivalent of FTS5 'porter unicode61')
     fts_vector        tsvector GENERATED ALWAYS AS (to_tsvector('english', text)) STORED,
     -- tsvector for exact/unstemmed search (equivalent of FTS5 'unicode61' / memory_fts_exact)
@@ -158,6 +183,14 @@ CREATE INDEX IF NOT EXISTS idx_mc_actor_type    ON memory_chunks (actor_type);
 CREATE INDEX IF NOT EXISTS idx_mc_importance    ON memory_chunks (importance DESC);
 CREATE INDEX IF NOT EXISTS idx_mc_tier          ON memory_chunks (tier_label);
 CREATE INDEX IF NOT EXISTS idx_mc_ttl           ON memory_chunks (ttl_at) WHERE ttl_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_mc_subject       ON memory_chunks (subject);
+CREATE INDEX IF NOT EXISTS idx_mc_purpose       ON memory_chunks (purpose);
+CREATE INDEX IF NOT EXISTS idx_mc_sensitivity   ON memory_chunks (sensitivity);
+CREATE INDEX IF NOT EXISTS idx_mc_statement_kind ON memory_chunks (statement_kind);
+CREATE INDEX IF NOT EXISTS idx_mc_suppressed    ON memory_chunks (is_suppressed);
+CREATE INDEX IF NOT EXISTS idx_mc_supersedes    ON memory_chunks (supersedes_id);
+CREATE INDEX IF NOT EXISTS idx_mc_ns_suppressed ON memory_chunks (namespace, is_suppressed);
+CREATE INDEX IF NOT EXISTS idx_mc_created_at    ON memory_chunks (created_at);
 -- GIN indexes accelerate tsvector full-text search (equivalent of FTS5 BM25 index)
 CREATE INDEX IF NOT EXISTS idx_mc_fts           ON memory_chunks USING GIN (fts_vector);
 CREATE INDEX IF NOT EXISTS idx_mc_fts_simple    ON memory_chunks USING GIN (fts_vector_simple);
@@ -215,6 +248,140 @@ BEGIN
     END IF;
 END
 $$;
+
+-- ---------------------------------------------------------------------------
+-- Migration: INIT-003/SPEC-002 coach provenance + supersede/suppress columns.
+-- Previous head: pre-INIT-003 schema (memory_chunks through decay_rate /
+-- facts through actor_type; no coach envelope / is_suppressed / supersedes_id).
+-- Idempotent — each column is added only if it does not already exist.
+-- Rollback: DROP COLUMN for each added column listed below (see completion
+-- summary); indexes drop with IF EXISTS counterparts.
+-- ---------------------------------------------------------------------------
+DO $$
+BEGIN
+    -- facts envelope
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_name = 'facts' AND column_name = 'source'
+    ) THEN
+        ALTER TABLE facts ADD COLUMN source TEXT NOT NULL DEFAULT '';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_name = 'facts' AND column_name = 'subject'
+    ) THEN
+        ALTER TABLE facts ADD COLUMN subject TEXT NOT NULL DEFAULT '';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_name = 'facts' AND column_name = 'sensitivity'
+    ) THEN
+        ALTER TABLE facts ADD COLUMN sensitivity TEXT NOT NULL DEFAULT 'standard';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_name = 'facts' AND column_name = 'purpose'
+    ) THEN
+        ALTER TABLE facts ADD COLUMN purpose TEXT NOT NULL DEFAULT '';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_name = 'facts' AND column_name = 'statement_kind'
+    ) THEN
+        ALTER TABLE facts ADD COLUMN statement_kind TEXT NOT NULL DEFAULT 'user';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_name = 'facts' AND column_name = 'updated_at'
+    ) THEN
+        ALTER TABLE facts ADD COLUMN updated_at TEXT NOT NULL DEFAULT '';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_name = 'facts' AND column_name = 'is_suppressed'
+    ) THEN
+        ALTER TABLE facts ADD COLUMN is_suppressed INTEGER NOT NULL DEFAULT 0;
+    END IF;
+
+    -- memory_chunks envelope + supersede/suppress
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_name = 'memory_chunks' AND column_name = 'source'
+    ) THEN
+        ALTER TABLE memory_chunks ADD COLUMN source TEXT NOT NULL DEFAULT '';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_name = 'memory_chunks' AND column_name = 'subject'
+    ) THEN
+        ALTER TABLE memory_chunks ADD COLUMN subject TEXT NOT NULL DEFAULT '';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_name = 'memory_chunks' AND column_name = 'confidence'
+    ) THEN
+        ALTER TABLE memory_chunks ADD COLUMN confidence DOUBLE PRECISION NOT NULL DEFAULT 1.0;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_name = 'memory_chunks' AND column_name = 'sensitivity'
+    ) THEN
+        ALTER TABLE memory_chunks ADD COLUMN sensitivity TEXT NOT NULL DEFAULT 'standard';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_name = 'memory_chunks' AND column_name = 'purpose'
+    ) THEN
+        ALTER TABLE memory_chunks ADD COLUMN purpose TEXT NOT NULL DEFAULT '';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_name = 'memory_chunks' AND column_name = 'statement_kind'
+    ) THEN
+        ALTER TABLE memory_chunks ADD COLUMN statement_kind TEXT NOT NULL DEFAULT 'user';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_name = 'memory_chunks' AND column_name = 'created_at'
+    ) THEN
+        ALTER TABLE memory_chunks ADD COLUMN created_at TEXT NOT NULL DEFAULT '';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_name = 'memory_chunks' AND column_name = 'updated_at'
+    ) THEN
+        ALTER TABLE memory_chunks ADD COLUMN updated_at TEXT NOT NULL DEFAULT '';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_name = 'memory_chunks' AND column_name = 'supersedes_id'
+    ) THEN
+        ALTER TABLE memory_chunks ADD COLUMN supersedes_id TEXT NOT NULL DEFAULT '';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_name = 'memory_chunks' AND column_name = 'is_suppressed'
+    ) THEN
+        ALTER TABLE memory_chunks ADD COLUMN is_suppressed INTEGER NOT NULL DEFAULT 0;
+    END IF;
+END
+$$;
+
+-- INIT-003/SPEC-002 pre-rank indexes (safe on fresh + upgraded DBs)
+CREATE INDEX IF NOT EXISTS idx_facts_subject     ON facts (subject);
+CREATE INDEX IF NOT EXISTS idx_facts_purpose     ON facts (purpose);
+CREATE INDEX IF NOT EXISTS idx_facts_sensitivity ON facts (sensitivity);
+CREATE INDEX IF NOT EXISTS idx_facts_statement_kind ON facts (statement_kind);
+CREATE INDEX IF NOT EXISTS idx_facts_suppressed  ON facts (is_suppressed);
+CREATE INDEX IF NOT EXISTS idx_facts_superseded_by ON facts (superseded_by);
+CREATE INDEX IF NOT EXISTS idx_mc_subject       ON memory_chunks (subject);
+CREATE INDEX IF NOT EXISTS idx_mc_purpose       ON memory_chunks (purpose);
+CREATE INDEX IF NOT EXISTS idx_mc_sensitivity   ON memory_chunks (sensitivity);
+CREATE INDEX IF NOT EXISTS idx_mc_statement_kind ON memory_chunks (statement_kind);
+CREATE INDEX IF NOT EXISTS idx_mc_suppressed    ON memory_chunks (is_suppressed);
+CREATE INDEX IF NOT EXISTS idx_mc_supersedes    ON memory_chunks (supersedes_id);
+CREATE INDEX IF NOT EXISTS idx_mc_ns_suppressed ON memory_chunks (namespace, is_suppressed);
+CREATE INDEX IF NOT EXISTS idx_mc_created_at    ON memory_chunks (created_at);
 
 
 CREATE TABLE IF NOT EXISTS memory_points (

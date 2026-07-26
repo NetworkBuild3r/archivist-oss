@@ -216,10 +216,13 @@ class TestUnauthorizedShare:
 
 class TestHandoffBackwardCompatible:
     @pytest.mark.asyncio
-    async def test_handoff_tools_still_dispatch(self, async_pool):
+    async def test_handoff_tools_still_dispatch(self, async_pool, monkeypatch):
+        import archivist.core.config as config
         from archivist.app.handlers._registry import TOOL_REGISTRY, dispatch_tool
         from archivist.app.handlers.tools_context import HANDLERS as CONTEXT_HANDLERS
 
+        # handoff is outside default core profile (INIT-003/SPEC-003)
+        monkeypatch.setattr(config, "TOOL_PROFILE", "full")
         assert "archivist_handoff" in TOOL_REGISTRY
         assert "archivist_receive_handoff" in TOOL_REGISTRY
         assert "archivist_share_propose" in TOOL_REGISTRY

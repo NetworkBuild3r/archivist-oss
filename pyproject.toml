@@ -20,6 +20,8 @@ markers = [
     # Utility markers
     "slow: tests taking more than 2 seconds (deselect during development)",
     "benchmark: performance benchmarks (run with 'pytest benchmarks/')",
+    # Coach-core reliability (INIT-003/SPEC-008)
+    "coach_core: coach-path CI evals (store/index/search/get_context, ack SLO, namespace isolation)",
 ]
 addopts = ["--strict-markers", "--tb=short", "-q"]
 

@@ -1,4 +1,9 @@
-"""Central tool registry — aggregates tool definitions and handlers from domain modules."""
+"""Central tool registry — aggregates tool definitions and handlers from domain modules.
+
+INIT-003/SPEC-003: ``get_all_tools`` / ``dispatch_tool`` honor
+``ARCHIVIST_TOOL_PROFILE`` (core|ops|full). Non-core tools stay registered;
+the profile only gates discovery and invocation.
+"""
 
 import logging
 import time
@@ -7,6 +12,7 @@ from typing import cast
 
 from mcp.types import TextContent, Tool
 
+import archivist.core.config as config
 import archivist.core.metrics as m
 from archivist.core.observability import get_request_id, tool_span
 
@@ -65,13 +71,65 @@ ALL_TOOLS: list[Tool] = (
     + DOCS_TOOLS
 )
 
+# Coach-core surface (ADR-003 five-tool contract + small read helpers). ≤12.
+# Forget path: ADR names ``archivist_forget``; core tool is ``archivist_delete``
+# with ``mode=delete|suppress`` (INIT-003/SPEC-006). No separate forget tool —
+# keeps core ≤12 (GR-PROD-002).
+# INIT-003/SPEC-003
+CORE_TOOL_NAMES: frozenset[str] = frozenset(
+    {
+        "archivist_store",
+        "archivist_search",
+        "archivist_get_context",
+        "archivist_index",
+        "archivist_delete",
+        "archivist_health_dashboard",
+        "archivist_namespaces",
+        "archivist_get_reference_docs",
+    }
+)
+
+_HIDDEN_PREFIXES: tuple[str, ...] = ("archivist_share_", "archivist_checkpoint_")
+
+
+def allowed_tool_names(profile: str | None = None) -> frozenset[str]:
+    """Return tool names visible/callable for ``profile`` (default: config)."""
+    resolved = (profile if profile is not None else config.TOOL_PROFILE).strip().lower()
+    if resolved == "full":
+        return frozenset(t.name for t in ALL_TOOLS)
+    if resolved == "ops":
+        return frozenset(
+            t.name for t in ALL_TOOLS if not any(t.name.startswith(p) for p in _HIDDEN_PREFIXES)
+        )
+    # Default / unknown → core (fail closed to smallest surface)
+    return CORE_TOOL_NAMES
+
 
 def get_all_tools() -> list[Tool]:
-    return ALL_TOOLS
+    """Tools exposed via MCP ``list_tools`` for the active profile."""
+    allowed = allowed_tool_names()
+    return [t for t in ALL_TOOLS if t.name in allowed]
 
 
 async def dispatch_tool(name: str, arguments: dict) -> list[TextContent]:
-    """Look up a handler by tool name and call it, with top-level error handling."""
+    """Look up a handler by tool name and call it, with top-level error handling.
+
+    Hidden-by-profile tools fail closed with a clear error (INIT-003/SPEC-003).
+    """
+    allowed = allowed_tool_names()
+    if name not in allowed:
+        if name in TOOL_REGISTRY:
+            return error_response(
+                {
+                    "error": (
+                        f"Tool '{name}' is not available in tool profile "
+                        f"'{config.TOOL_PROFILE}'. Set ARCHIVIST_TOOL_PROFILE=full "
+                        "(or ops) to enable."
+                    )
+                }
+            )
+        return error_response({"error": f"Unknown tool: {name}"})
+
     handler = TOOL_REGISTRY.get(name)
     if not handler:
         return error_response({"error": f"Unknown tool: {name}"})

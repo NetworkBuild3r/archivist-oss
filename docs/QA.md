@@ -13,6 +13,22 @@ python -m pytest tests/ -q --tb=no
 
 CI runs this matrix on Python 3.12 and 3.13 with coverage gates; see [`.github/workflows/ci.yml`](https://github.com/NetworkBuild3r/archivist-oss/blob/main/.github/workflows/ci.yml).
 
+### Coach-path evals (INIT-003/SPEC-008)
+
+Personal-production coach-path scenarios (store → index → search/`get_context`,
+dead-Qdrant store ack, two-namespace isolation) live under `tests/system/mcp/`
+with the focused pytest marker `coach_core`. They run on the SQLite CI path
+(no live Qdrant; no myaifitness harness). The Integration & System CI job already
+collects `tests/system/`, so no dedicated workflow job is required.
+
+```bash
+# Focused coach-core suite
+python -m pytest -m coach_core -q --tb=short
+
+# Explicit module path
+python -m pytest tests/system/mcp/test_coach_core_evals.py -q --tb=short
+```
+
 ### QA package (Phase 3 + 3.5)
 
 The `tests/qa/` directory exercises `MemoryTransaction`, the SQLite `outbox` table, `OutboxProcessor`, and fault-injection paths **without** a live Qdrant instance.

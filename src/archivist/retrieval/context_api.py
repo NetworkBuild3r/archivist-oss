@@ -44,6 +44,14 @@ class ContextChunk:
     file_path: str
     date: str
     agent_id: str
+    # INIT-003/SPEC-005 — optional coach provenance axes (safe fields only)
+    namespace: str = ""
+    subject: str = ""
+    purpose: str = ""
+    sensitivity: str = ""
+    source: str = ""
+    confidence: float | str | None = None
+    statement_kind: str = ""
 
 
 @dataclass
@@ -78,10 +86,13 @@ class RelevantContext:
     """Estimated savings vs returning all results at L2 (0–100)."""
 
     provenance: list[str]
-    """Memory IDs of all sources used."""
+    """Memory IDs of all sources used (ids only — never secrets)."""
 
     pack_policy: str
     """The tier-packing policy that was applied."""
+
+    memories: list[dict] = field(default_factory=list)
+    """INIT-003/SPEC-005 canonical recall shape: [{id, text, score, provenance}]."""
 
 
 @dataclass
@@ -127,6 +138,9 @@ async def get_relevant_context(
     include_tips: bool = True,
     include_hotness: bool = True,
     extra_memory_ids: list[str] | None = None,
+    subject: str = "",
+    purpose: str = "",
+    sensitivity: str = "",
 ) -> RelevantContext:
     """Assemble minimal, token-budgeted context for *agent_id* and *task_description*.
 
@@ -150,11 +164,15 @@ async def get_relevant_context(
         include_hotness: When True, hotness scoring is applied to results.
         extra_memory_ids: Additional memory IDs to inject as context
             (e.g. from HandoffPacket.key_memory_ids).
+        subject: Optional pre-rank subject filter (INIT-003/SPEC-005).
+        purpose: Optional pre-rank purpose filter; empty = no restriction.
+        sensitivity: Optional pre-rank sensitivity filter.
 
     Returns:
         :class:`RelevantContext` ready to format as a system prompt prefix.
     """
     from archivist.core.config import CONTEXT_L0_BUDGET_SHARE, CONTEXT_MIN_FULL_RESULTS
+    from archivist.retrieval.retrieval_filters import build_stable_memories
 
     # --- Step 1: run the full retrieval pipeline ---
     retrieval_result = await recursive_retrieve(
@@ -164,6 +182,9 @@ async def get_relevant_context(
         max_tokens=max_tokens,
         refine=False,
         tier=tier_policy if tier_policy in ("l0", "l1", "l2") else "l2",
+        subject=subject or "",
+        purpose=purpose or "",
+        sensitivity=sensitivity or "",
     )
 
     raw_sources = retrieval_result.get("sources", [])
@@ -253,11 +274,39 @@ async def get_relevant_context(
             file_path=r.get("file_path", ""),
             date=r.get("date", ""),
             agent_id=r.get("agent_id", ""),
+            namespace=str(r.get("namespace", "") or ""),
+            subject=str(r.get("subject", "") or ""),
+            purpose=str(r.get("purpose", "") or ""),
+            sensitivity=str(r.get("sensitivity", "") or ""),
+            source=str(r.get("source", "") or ""),
+            confidence=r.get("confidence"),
+            statement_kind=str(r.get("statement_kind", "") or ""),
         )
         for r in packed_sources
     ]
 
     provenance = [c.memory_id for c in chunks if c.memory_id]
+    memories = build_stable_memories(
+        [
+            {
+                "id": c.memory_id,
+                "text": c.text,
+                "score": c.score,
+                "namespace": c.namespace,
+                "subject": c.subject,
+                "purpose": c.purpose,
+                "sensitivity": c.sensitivity,
+                "source": c.source,
+                "confidence": c.confidence,
+                "statement_kind": c.statement_kind,
+                "agent_id": c.agent_id,
+                "date": c.date,
+                "file_path": c.file_path,
+                "tier": c.tier,
+            }
+            for c in chunks
+        ]
+    )
 
     return RelevantContext(
         answer=answer,
@@ -271,6 +320,7 @@ async def get_relevant_context(
         token_savings_pct=float(savings_pct),
         provenance=provenance,
         pack_policy=tier_policy,
+        memories=memories,
     )
 
 

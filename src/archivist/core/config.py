@@ -327,10 +327,22 @@ class ArchivistSettings(BaseSettings):
     mcp_port: int = Field(default=3100, ge=1, le=65535)
     mcp_sse_enabled: bool = True
     archivist_api_key: str = ""
+    # MCP tool surface profile (INIT-003/SPEC-003). Default ``core`` exposes the
+    # coach-path tools only; ``ops`` adds operator tools (still hides share /
+    # checkpoint wedges); ``full`` restores the entire registry.
+    # Env: ARCHIVIST_TOOL_PROFILE
+    archivist_tool_profile: str = "core"
 
     # ── Conflict detection ────────────────────────────────────────────────────
     conflict_check_on_store: bool = False
     conflict_block_on_store: bool = False
+    # Pre-txn Qdrant similarity query timeout (seconds). Keeps conflict/dedup
+    # from approaching the ~30s client default when Qdrant is dead/hanging
+    # (INIT-003/SPEC-004 — coach store ack SLO).
+    conflict_query_timeout_s: float = Field(default=1.0, ge=0.05, le=30.0)
+    # Soft ack budget for archivist_store logging/metrics (ms). Durable outbox
+    # commit is the ack boundary — not Qdrant sync (INIT-003/SPEC-004).
+    store_ack_budget_ms: int = Field(default=4000, ge=100)
 
     # ── Agent → team mapping ──────────────────────────────────────────────────
     team_map_path: str = ""
@@ -404,6 +416,15 @@ class ArchivistSettings(BaseSettings):
     def _lowercase_cache_backend(cls, v: Any) -> str:
         """Normalize cache backend to lowercase."""
         return str(v).lower().strip() if v else "memory"
+
+    @field_validator("archivist_tool_profile", mode="before")
+    @classmethod
+    def _normalize_tool_profile(cls, v: Any) -> str:
+        """Normalize ARCHIVIST_TOOL_PROFILE to core|ops|full (INIT-003/SPEC-003)."""
+        val = str(v).strip().lower() if v else "core"
+        if val not in ("core", "ops", "full"):
+            raise ValueError(f"ARCHIVIST_TOOL_PROFILE must be one of: core, ops, full; got {val!r}")
+        return val
 
     @field_validator("metrics_collect_interval_seconds", mode="before")
     @classmethod
@@ -830,9 +851,12 @@ JOURNAL_DIR = _settings.journal_dir
 MCP_PORT = _settings.mcp_port
 MCP_SSE_ENABLED = _settings.mcp_sse_enabled
 ARCHIVIST_API_KEY = _settings.archivist_api_key
+TOOL_PROFILE = _settings.archivist_tool_profile
 
 CONFLICT_CHECK_ON_STORE = _settings.conflict_check_on_store
 CONFLICT_BLOCK_ON_STORE = _settings.conflict_block_on_store
+CONFLICT_QUERY_TIMEOUT_S = _settings.conflict_query_timeout_s
+STORE_ACK_BUDGET_MS = _settings.store_ack_budget_ms
 
 TEAM_MAP_PATH = _settings.team_map_path
 TEAM_MAP: dict[str, str] = _settings._load_team_map()

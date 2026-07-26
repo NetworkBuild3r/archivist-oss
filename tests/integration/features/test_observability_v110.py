@@ -68,10 +68,13 @@ def test_slow_embed_no_warning_when_disabled(monkeypatch, caplog):
     assert "slow_path" not in caplog.text
 
 
-async def test_dispatch_tool_records_tool_duration():
+async def test_dispatch_tool_records_tool_duration(monkeypatch):
+    import archivist.core.config as config
     import archivist.core.metrics as m
     from archivist.app.handlers._registry import dispatch_tool
 
+    # context_check is outside default core profile (INIT-003/SPEC-003)
+    monkeypatch.setattr(config, "TOOL_PROFILE", "full")
     m._counters.clear()
     m._gauges.clear()
     m._histogram_buckets.clear()
