@@ -257,6 +257,9 @@ class TestRegistryWiring:
             "archivist_checkpoint_get",
             "archivist_checkpoint_resume",
             "archivist_checkpoint_replay",
+            "archivist_checkpoint_branch",
+            "archivist_checkpoint_interrupt",
+            "archivist_checkpoint_approve",
         }
         tool_names = {t.name for t in ALL_TOOLS}
         assert names <= tool_names
@@ -269,3 +272,243 @@ class TestRegistryWiring:
         assert "archivist_handoff" in TOOL_REGISTRY
         assert "archivist_receive_handoff" in TOOL_REGISTRY
         assert "archivist_get_context" in TOOL_REGISTRY
+
+
+class TestBranchAndHitlHandlers:
+    """INIT-012/SPEC-003 — branch / interrupt / approve MCP + resume gate."""
+
+    @pytest.mark.asyncio
+    async def test_branch_happy_path(self, allow_rbac):
+        from archivist.app.handlers.tools_checkpoint import _handle_checkpoint_branch
+
+        child = _record(id="ckpt-child", parent_checkpoint_id="ckpt-1")
+        with patch(
+            "archivist.storage.checkpoints.branch_checkpoint",
+            new=AsyncMock(return_value=child),
+        ) as mock_branch:
+            result = await _handle_checkpoint_branch(
+                {
+                    "agent_id": "agent-a",
+                    "parent_checkpoint_id": "ckpt-1",
+                    "namespace": "ns-a",
+                }
+            )
+        data = _parse(result)
+        assert data["checkpoint"]["id"] == "ckpt-child"
+        mock_branch.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_branch_owner_bind_denied(self, allow_rbac):
+        from archivist.app.handlers.tools_checkpoint import _handle_checkpoint_branch
+        from archivist.storage.checkpoints import CheckpointAuthzError
+
+        with patch(
+            "archivist.storage.checkpoints.branch_checkpoint",
+            new=AsyncMock(
+                side_effect=CheckpointAuthzError(
+                    "checkpoint belongs to another agent in this namespace"
+                )
+            ),
+        ):
+            result = await _handle_checkpoint_branch(
+                {
+                    "agent_id": "intruder",
+                    "parent_checkpoint_id": "ckpt-1",
+                    "namespace": "ns-a",
+                }
+            )
+        data = _parse(result)
+        assert data["error"] == "access_denied"
+
+    @pytest.mark.asyncio
+    async def test_branch_rbac_write_denied(self):
+        from mcp.types import TextContent
+
+        from archivist.app.handlers.tools_checkpoint import _handle_checkpoint_branch
+
+        denied = [
+            TextContent(
+                type="text",
+                text=json.dumps({"error": "access_denied", "reason": "no write"}),
+            )
+        ]
+        with (
+            patch("archivist.app.handlers.tools_checkpoint.require_caller", return_value=None),
+            patch("archivist.app.handlers.tools_checkpoint.require_rbac", return_value=denied),
+        ):
+            result = await _handle_checkpoint_branch(
+                {
+                    "agent_id": "agent-a",
+                    "parent_checkpoint_id": "ckpt-1",
+                    "namespace": "ns-a",
+                }
+            )
+        data = _parse(result)
+        assert data["error"] == "access_denied"
+
+    @pytest.mark.asyncio
+    async def test_interrupt_and_approve(self, allow_rbac):
+        from archivist.app.handlers.tools_checkpoint import (
+            _handle_checkpoint_approve,
+            _handle_checkpoint_interrupt,
+        )
+
+        interrupted = _record(metadata={"hitl_status": "interrupted"})
+        approved = _record(metadata={"hitl_status": "approved"})
+        with patch(
+            "archivist.storage.checkpoints.interrupt_checkpoint",
+            new=AsyncMock(return_value=interrupted),
+        ):
+            result = await _handle_checkpoint_interrupt(
+                {
+                    "agent_id": "agent-a",
+                    "checkpoint_id": "ckpt-1",
+                    "namespace": "ns-a",
+                    "reason": "need review",
+                }
+            )
+        assert _parse(result)["checkpoint"]["metadata"]["hitl_status"] == "interrupted"
+
+        with patch(
+            "archivist.storage.checkpoints.approve_checkpoint",
+            new=AsyncMock(return_value=approved),
+        ):
+            result = await _handle_checkpoint_approve(
+                {
+                    "agent_id": "agent-a",
+                    "checkpoint_id": "ckpt-1",
+                    "namespace": "ns-a",
+                }
+            )
+        assert _parse(result)["checkpoint"]["metadata"]["hitl_status"] == "approved"
+
+    @pytest.mark.asyncio
+    async def test_interrupt_owner_bind_denied(self, allow_rbac):
+        from archivist.app.handlers.tools_checkpoint import _handle_checkpoint_interrupt
+        from archivist.storage.checkpoints import CheckpointAuthzError
+
+        with patch(
+            "archivist.storage.checkpoints.interrupt_checkpoint",
+            new=AsyncMock(
+                side_effect=CheckpointAuthzError(
+                    "checkpoint belongs to another agent in this namespace"
+                )
+            ),
+        ):
+            result = await _handle_checkpoint_interrupt(
+                {
+                    "agent_id": "intruder",
+                    "checkpoint_id": "ckpt-1",
+                    "namespace": "ns-a",
+                }
+            )
+        assert _parse(result)["error"] == "access_denied"
+
+    @pytest.mark.asyncio
+    async def test_interrupt_rbac_write_denied(self):
+        from mcp.types import TextContent
+
+        from archivist.app.handlers.tools_checkpoint import _handle_checkpoint_interrupt
+
+        denied = [
+            TextContent(
+                type="text",
+                text=json.dumps({"error": "access_denied", "reason": "no write"}),
+            )
+        ]
+        with (
+            patch("archivist.app.handlers.tools_checkpoint.require_caller", return_value=None),
+            patch("archivist.app.handlers.tools_checkpoint.require_rbac", return_value=denied),
+        ):
+            result = await _handle_checkpoint_interrupt(
+                {
+                    "agent_id": "agent-a",
+                    "checkpoint_id": "ckpt-1",
+                    "namespace": "ns-a",
+                }
+            )
+        assert _parse(result)["error"] == "access_denied"
+
+    @pytest.mark.asyncio
+    async def test_approve_owner_bind_denied(self, allow_rbac):
+        from archivist.app.handlers.tools_checkpoint import _handle_checkpoint_approve
+        from archivist.storage.checkpoints import CheckpointAuthzError
+
+        with patch(
+            "archivist.storage.checkpoints.approve_checkpoint",
+            new=AsyncMock(
+                side_effect=CheckpointAuthzError(
+                    "checkpoint belongs to another agent in this namespace"
+                )
+            ),
+        ):
+            result = await _handle_checkpoint_approve(
+                {
+                    "agent_id": "intruder",
+                    "checkpoint_id": "ckpt-1",
+                    "namespace": "ns-a",
+                }
+            )
+        assert _parse(result)["error"] == "access_denied"
+
+    @pytest.mark.asyncio
+    async def test_approve_rbac_write_denied(self):
+        from mcp.types import TextContent
+
+        from archivist.app.handlers.tools_checkpoint import _handle_checkpoint_approve
+
+        denied = [
+            TextContent(
+                type="text",
+                text=json.dumps({"error": "access_denied", "reason": "no write"}),
+            )
+        ]
+        with (
+            patch("archivist.app.handlers.tools_checkpoint.require_caller", return_value=None),
+            patch("archivist.app.handlers.tools_checkpoint.require_rbac", return_value=denied),
+        ):
+            result = await _handle_checkpoint_approve(
+                {
+                    "agent_id": "agent-a",
+                    "checkpoint_id": "ckpt-1",
+                    "namespace": "ns-a",
+                }
+            )
+        assert _parse(result)["error"] == "access_denied"
+
+    @pytest.mark.asyncio
+    async def test_resume_blocked_while_interrupted(self, allow_rbac):
+        from archivist.app.handlers.tools_checkpoint import _handle_checkpoint_resume
+        from archivist.retrieval.session_store import SessionStore
+        from archivist.storage.checkpoints import CheckpointConflictError
+
+        store = SessionStore()
+        interrupted = _record(metadata={"hitl_status": "interrupted"})
+        with (
+            patch(
+                "archivist.storage.checkpoints.get_checkpoint",
+                new=AsyncMock(return_value=interrupted),
+            ),
+            patch(
+                "archivist.storage.checkpoints.ensure_resume_allowed",
+                side_effect=CheckpointConflictError(
+                    "checkpoint is interrupted; approve before resume",
+                    code="hitl_interrupted",
+                ),
+            ),
+            patch(
+                "archivist.retrieval.session_store.get_session_store",
+                return_value=store,
+            ),
+        ):
+            result = await _handle_checkpoint_resume(
+                {
+                    "agent_id": "agent-a",
+                    "session_id": "sess-1",
+                    "namespace": "ns-a",
+                    "checkpoint_id": "ckpt-1",
+                }
+            )
+        data = _parse(result)
+        assert data["error"] == "hitl_interrupted"
+        assert store.get("agent-a", "sess-1", "checkpoint_payload") is None

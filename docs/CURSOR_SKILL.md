@@ -400,9 +400,14 @@ Inject a `HandoffPacket` into the receiving agent's ephemeral `SessionStore`. Th
 
 ---
 
-## Agent Checkpoints (5 tools)
+## Agent Checkpoints (8 tools)
 
-Phase-7 agent-state checkpoints (resume / time-travel). Namespace-scoped; distinct from L0–L2 memory tiers and from handoff packets.
+<!-- INIT-012/SPEC-005 -->
+
+Diff #7 agent-state checkpoints (resume / time-travel / branch / thin HITL) —
+[ADR-012](adr/ADR-012-checkpoint-time-travel.md). On **ops** and **full** (not **core**).
+Namespace-scoped; distinct from L0–L2 memory tiers and from handoff packets.
+Do **not** store API keys or other secrets in checkpoint payloads.
 
 ### archivist_checkpoint_save
 
@@ -426,11 +431,23 @@ Fetch one checkpoint by `checkpoint_id` **and** `namespace`. Id alone is never s
 
 ### archivist_checkpoint_resume
 
-Load a checkpoint and inject a resume packet into the caller's `SessionStore` for `session_id` only (does not mutate other agents). Returns `resume_packet` with `injected_keys`, `extra_memory_ids`, and `summary` for `archivist_get_context`.
+Load a checkpoint and inject a resume packet into the caller's `SessionStore` for `session_id` only (does not mutate other agents). Returns `resume_packet` with `injected_keys`, `extra_memory_ids`, and `summary` for `archivist_get_context`. Owner-agent bind required. Fails with `hitl_interrupted` until `archivist_checkpoint_approve` if interrupted.
 
 ### archivist_checkpoint_replay
 
 Read-only parent-chain walk from a leaf checkpoint (root → leaf). No SessionStore mutation.
+
+### archivist_checkpoint_branch
+
+Create a child checkpoint from a **required** `parent_checkpoint_id` in the same namespace. Owner must match the parent. Optional `payload` overrides the parent copy.
+
+### archivist_checkpoint_interrupt
+
+Mark a checkpoint HITL-interrupted (`hitl_status=interrupted` in metadata). Optional `reason`.
+
+### archivist_checkpoint_approve
+
+Clear HITL interrupt (`hitl_status=approved`) so resume may proceed. Idempotent if already approved.
 
 ---
 
@@ -565,5 +582,5 @@ Return the full Archivist agent skill reference (this document) or a single name
 13. **Attach conflict outcomes** with `archivist_share_attach_conflict` (`supersede` / `merge` / `keep_both`; optional `apply` → resolver; mutating apply needs write + `CONTRADICTION_RESOLVE_ENABLED`)
 14. **Version / fork / export / import memory scopes** with `archivist_map_*` on **ops**/**full** (Diff #4 / ADR-011; not on **core**; opaque `archive_id` under `BACKUP_DIR`)
 15. **Self-curation** is flag-driven in the curator (Diff #6 / ADR-010) — do not invent core MCP tools; stage `RECONSOLIDATION_*` / `RELEVANCE_FORGET_*` / `CONTRADICTION_RESOLVE_*`
-16. **Resume agent state** with `archivist_checkpoint_save` + `archivist_checkpoint_resume` (**full** profile; use `replay` for chain inspection)
+16. **Resume / branch / HITL agent state** with `archivist_checkpoint_*` on **ops**/**full** (Diff #7 / ADR-012; not on **core**; interrupt→approve before resume when gated; no secrets in payloads)
 17. **Monitor token savings** with `archivist_savings_dashboard` to confirm the Answer Finder is reducing noise

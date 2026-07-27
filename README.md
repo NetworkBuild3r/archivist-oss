@@ -75,6 +75,7 @@ context = await archivist_get_context(
 | **Multi-agent handoff** | `archivist_handoff` packages goals + memories + knowledge snapshot; `archivist_receive_handoff` injects them into the new agent's session. |
 | **Selective share + consensus** | `archivist_share_propose` / `accept` / `reject` on **ops**/**full** (not **core**); optional `tip_ids`; conflict `apply` → resolver (Diff #5 / ADR-009; extends handoff). |
 | **Memory as a Product** | `archivist_map_*` snapshot / fork / export / import on **ops**/**full** (not **core**) — Diff #4 / ADR-011. |
+| **Checkpoint / time-travel** | `archivist_checkpoint_*` save/resume/replay/**branch**/HITL on **ops**/**full** (not **core**) — Diff #7 / ADR-012. |
 | **Token savings observability** | Every retrieval logs `tokens_returned` / `tokens_naive` / `savings_pct`; view trends via `archivist_savings_dashboard`. |
 
 ### Measured token savings
@@ -180,7 +181,7 @@ INIT-009 architecture diagrams under `sdd/initiatives/INIT-009-…/design/`.
 | **Dual database backends** | SQLite (default, zero-config) or PostgreSQL (`GRAPH_BACKEND=postgres`) — hot paths, backups, and tests work on both. See [docs/DOCKER.md](docs/DOCKER.md#postgresql-backend-production-grade). |
 | **Transactional outbox** | Optional `OUTBOX_ENABLED=true`: SQLite/Postgres FTS, needle registry, `memory_points`, graph rows, and outbox events commit atomically; Qdrant work is drained by a background processor with retries. Default `false` keeps legacy inline Qdrant writes. |
 | **Hybrid retrieval** | Vector + BM25 fusion, graph augmentation, hotness-weighted FTS, tier-aware packing, reranking — see [How It Works](#how-it-works). |
-| **MCP tool surface** | 46 tools for search, storage, trajectories, admin, cache, context, handoff, checkpoints, selective share, and docs — stable signatures. |
+| **MCP tool surface** | 55 tools for search, storage, trajectories, admin, cache, context, handoff, checkpoints (ops), selective share, MaP, and docs — stable signatures. |
 | **RBAC** | Namespace-level ACLs via optional `namespaces.yaml`. |
 | **Active curation** | Background curator, queue, compaction, hotness — configurable. |
 
@@ -975,7 +976,8 @@ Manual MCP and HTTP validation: [`QA_CHECKLIST.md`](QA_CHECKLIST.md). Full guide
 | **Diff #5 Native Multi-Agent Coordination** — `share_*` on ops, tip_ids, conflict→resolver | **Productized (INIT-009 / [ADR-009](docs/adr/ADR-009-native-multi-agent-coordination.md))** |
 | **Diff #6 Intelligent Self-Curation** — curator reconsolidate / forget / resolve | **Done (INIT-010 / [ADR-010](docs/adr/ADR-010-intelligent-self-curation.md))** |
 | **Diff #4 Memory as a Product** — `archivist_map_*` on ops (+ import) | **Done (INIT-011 / [ADR-011](docs/adr/ADR-011-memory-as-product-mcp.md))** |
-| Immediate next — Diff #7 checkpoint productize | **INIT-012** (BRAIN-005) |
+| **Diff #7 Checkpoint / time-travel** — ops + branch + thin HITL | **Done scoped (INIT-012 / [ADR-012](docs/adr/ADR-012-checkpoint-time-travel.md))** |
+| Immediate next — Diff #8 observability billboard | **INIT-013** (BRAIN-005) |
 | Pydantic config validation + stronger env validation | Planned |
 
 Full phased plan: [`docs/ROADMAP.md`](docs/ROADMAP.md).

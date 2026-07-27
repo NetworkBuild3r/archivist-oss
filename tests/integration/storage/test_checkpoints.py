@@ -83,6 +83,46 @@ async def test_parent_chain_walk(async_pool):
     assert chain_ids == [c2.id, c1.id, c0.id]
 
 
+@pytest.mark.asyncio
+async def test_branch_then_hitl_round_trip(async_pool):
+    """INIT-012/SPEC-002: create → branch → interrupt → approve → resume gate."""
+    from archivist.storage import checkpoints as ckpt
+
+    root = await ckpt.create_checkpoint(
+        agent_id="agent-b",
+        session_id="sess-b",
+        namespace="ns-b",
+        payload={"n": 0},
+    )
+    child = await ckpt.branch_checkpoint(
+        parent_checkpoint_id=root.id,
+        namespace="ns-b",
+        agent_id="agent-b",
+        payload={"n": 1, "fork": True},
+    )
+    assert child.parent_checkpoint_id == root.id
+    assert child.payload["fork"] is True
+
+    walked = await ckpt.get_checkpoint(child.id, namespace="ns-b")
+    assert walked is not None
+    assert walked.parent_checkpoint_id == root.id
+
+    waiting = await ckpt.interrupt_checkpoint(
+        child.id,
+        namespace="ns-b",
+        agent_id="agent-b",
+    )
+    with pytest.raises(ckpt.CheckpointConflictError):
+        ckpt.ensure_resume_allowed(waiting, agent_id="agent-b")
+
+    ready = await ckpt.approve_checkpoint(
+        child.id,
+        namespace="ns-b",
+        agent_id="agent-b",
+    )
+    ckpt.ensure_resume_allowed(ready, agent_id="agent-b")
+
+
 def test_postgres_sql_artifact_present_for_dual_backend():
     """ac-4: Postgres SQL present even when live Postgres is unavailable."""
     assert _POSTGRES_SQL.is_file()

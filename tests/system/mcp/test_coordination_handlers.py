@@ -154,7 +154,8 @@ class TestOpsProfileShareVisibility:
         ops_names = {t.name for t in get_all_tools()}
         assert "archivist_share_propose" in ops_names
         assert "archivist_share_accept" in ops_names
-        assert not any(n.startswith("archivist_checkpoint_") for n in ops_names)
+        # INIT-012/SPEC-003: checkpoint promoted to ops
+        assert "archivist_checkpoint_save" in ops_names
 
         monkeypatch.setattr(config, "TOOL_PROFILE", "core")
         core_names = {t.name for t in get_all_tools()}

@@ -1,4 +1,7 @@
-"""System smoke tests for checkpoint MCP tools (INIT-001/SPEC-008)."""
+"""System smoke tests for checkpoint MCP tools.
+
+Provenance: INIT-001/SPEC-008; INIT-012/SPEC-004 (branch + HITL product bar).
+"""
 
 from __future__ import annotations
 
@@ -6,6 +9,7 @@ import json
 from unittest.mock import patch
 
 import pytest
+from mcp.types import TextContent
 
 pytestmark = [pytest.mark.system, pytest.mark.mcp]
 
@@ -140,9 +144,113 @@ class TestCheckpointHandlerSmoke:
         assert [c["id"] for c in replay["chain"]] == [ckpt_id, child_id]
 
     @pytest.mark.asyncio
-    async def test_unauthorized_namespace_denied(self, async_pool):
-        from mcp.types import TextContent
+    async def test_branch_interrupt_approve_resume_replay(self, async_pool, allow_rbac):
+        """INIT-012/SPEC-004 ac-2: save → branch → interrupt → approve → resume → replay."""
+        from archivist.app.handlers.tools_checkpoint import (
+            _handle_checkpoint_approve,
+            _handle_checkpoint_branch,
+            _handle_checkpoint_interrupt,
+            _handle_checkpoint_replay,
+            _handle_checkpoint_resume,
+            _handle_checkpoint_save,
+        )
+        from archivist.retrieval.session_store import SessionStore
 
+        root = _parse(
+            await _handle_checkpoint_save(
+                {
+                    "agent_id": "sys-agent",
+                    "session_id": "sys-sess",
+                    "namespace": "sys-ns",
+                    "payload": {"summary": "root", "step": 0},
+                }
+            )
+        )["checkpoint"]["id"]
+
+        branched = _parse(
+            await _handle_checkpoint_branch(
+                {
+                    "agent_id": "sys-agent",
+                    "parent_checkpoint_id": root,
+                    "namespace": "sys-ns",
+                    "payload": {"summary": "fork", "step": 1},
+                }
+            )
+        )
+        branch_id = branched["checkpoint"]["id"]
+        assert branched["checkpoint"]["parent_checkpoint_id"] == root
+
+        interrupted = _parse(
+            await _handle_checkpoint_interrupt(
+                {
+                    "agent_id": "sys-agent",
+                    "checkpoint_id": branch_id,
+                    "namespace": "sys-ns",
+                    "reason": "human review",
+                }
+            )
+        )
+        assert interrupted["checkpoint"]["metadata"]["hitl_status"] == "interrupted"
+
+        store = SessionStore()
+        with patch(
+            "archivist.retrieval.session_store.get_session_store",
+            return_value=store,
+        ):
+            blocked = _parse(
+                await _handle_checkpoint_resume(
+                    {
+                        "agent_id": "sys-agent",
+                        "session_id": "sys-sess",
+                        "namespace": "sys-ns",
+                        "checkpoint_id": branch_id,
+                    }
+                )
+            )
+        assert blocked["error"] == "hitl_interrupted"
+        assert store.get("sys-agent", "sys-sess", "checkpoint_payload") is None
+
+        approved = _parse(
+            await _handle_checkpoint_approve(
+                {
+                    "agent_id": "sys-agent",
+                    "checkpoint_id": branch_id,
+                    "namespace": "sys-ns",
+                }
+            )
+        )
+        assert approved["checkpoint"]["metadata"]["hitl_status"] == "approved"
+
+        with patch(
+            "archivist.retrieval.session_store.get_session_store",
+            return_value=store,
+        ):
+            resume = _parse(
+                await _handle_checkpoint_resume(
+                    {
+                        "agent_id": "sys-agent",
+                        "session_id": "sys-sess",
+                        "namespace": "sys-ns",
+                        "checkpoint_id": branch_id,
+                    }
+                )
+            )
+        assert resume["resume_packet"]["checkpoint_id"] == branch_id
+        assert store.get("sys-agent", "sys-sess", "checkpoint_id") == branch_id
+
+        replay = _parse(
+            await _handle_checkpoint_replay(
+                {
+                    "agent_id": "sys-agent",
+                    "checkpoint_id": branch_id,
+                    "namespace": "sys-ns",
+                }
+            )
+        )
+        assert [c["id"] for c in replay["chain"]] == [root, branch_id]
+
+    @pytest.mark.asyncio
+    async def test_unauthorized_namespace_denied(self, async_pool):
         from archivist.app.handlers.tools_checkpoint import _handle_checkpoint_list
 
         denied = [
@@ -168,9 +276,61 @@ class TestCheckpointHandlerSmoke:
         assert result is denied
         assert _parse(result)["error"] == "access_denied"
 
+    @pytest.mark.asyncio
+    async def test_branch_hitl_rbac_deny(self, async_pool):
+        """SPEC-004 security: branch/HITL fail closed without write."""
+        from archivist.app.handlers.tools_checkpoint import (
+            _handle_checkpoint_approve,
+            _handle_checkpoint_branch,
+            _handle_checkpoint_interrupt,
+        )
+
+        denied = [
+            TextContent(
+                type="text",
+                text=json.dumps({"error": "access_denied", "reason": "no write"}),
+            )
+        ]
+        with (
+            patch("archivist.app.handlers.tools_checkpoint.require_caller", return_value=None),
+            patch(
+                "archivist.app.handlers.tools_checkpoint.require_rbac",
+                return_value=denied,
+            ),
+        ):
+            for handler, args in (
+                (
+                    _handle_checkpoint_branch,
+                    {
+                        "agent_id": "sys-agent",
+                        "parent_checkpoint_id": "any",
+                        "namespace": "forbidden",
+                    },
+                ),
+                (
+                    _handle_checkpoint_interrupt,
+                    {
+                        "agent_id": "sys-agent",
+                        "checkpoint_id": "any",
+                        "namespace": "forbidden",
+                    },
+                ),
+                (
+                    _handle_checkpoint_approve,
+                    {
+                        "agent_id": "sys-agent",
+                        "checkpoint_id": "any",
+                        "namespace": "forbidden",
+                    },
+                ),
+            ):
+                result = await handler(args)
+                assert result is denied
+                assert _parse(result)["error"] == "access_denied"
+
 
 class TestCheckpointToolsRegistered:
-    def test_five_checkpoint_tools_in_registry(self):
+    def test_eight_checkpoint_tools_in_registry(self):
         from archivist.app.handlers._registry import ALL_TOOLS, TOOL_REGISTRY
 
         expected = {
@@ -179,9 +339,26 @@ class TestCheckpointToolsRegistered:
             "archivist_checkpoint_get",
             "archivist_checkpoint_resume",
             "archivist_checkpoint_replay",
+            "archivist_checkpoint_branch",
+            "archivist_checkpoint_interrupt",
+            "archivist_checkpoint_approve",
         }
         assert expected <= {t.name for t in ALL_TOOLS}
         assert expected <= set(TOOL_REGISTRY)
         # Every advertised tool must have exactly one handler — the absolute
         # count moves as later specs add tools, the 1:1 invariant does not.
         assert len(ALL_TOOLS) == len(TOOL_REGISTRY)
+
+    def test_smoke_inventory_includes_branch_hitl(self):
+        """ac-4: smoke expected-tool list includes new tool names."""
+        from tests.system.mcp.test_smoke_all_handlers import _ALL_EXPECTED_TOOLS
+
+        from archivist.app.handlers._registry import TOOL_REGISTRY
+
+        expected = {
+            "archivist_checkpoint_branch",
+            "archivist_checkpoint_interrupt",
+            "archivist_checkpoint_approve",
+        }
+        assert expected <= set(_ALL_EXPECTED_TOOLS)
+        assert expected <= set(TOOL_REGISTRY)
