@@ -482,6 +482,28 @@ Fetch one grant by `grant_id` + `namespace`. Visible to proposer or recipient wi
 
 ---
 
+## Intelligent Self-Curation (Diff #6)
+
+<!-- INIT-010/SPEC-005 · ADR-010 -->
+
+Runs in the **background curator cycle** — not new MCP tools on **core**. Defaults
+stay safe: masters **off**, dry-run **on** when you enable a path.
+
+| Path | Env (defaults) | Effect when applied |
+|------|----------------|---------------------|
+| Reconsolidation | `RECONSOLIDATION_ENABLED=false`, `RECONSOLIDATION_DRY_RUN=true` | Summarize L2 groups → L1 chunk (same agent/namespace) |
+| Relevance forget | `RELEVANCE_FORGET_ENABLED=false`, `RELEVANCE_FORGET_DRY_RUN=true` | Suppress cold/low-importance chunks from default recall |
+| Contradiction resolve | `CONTRADICTION_RESOLVE_ENABLED=false`, `CONTRADICTION_RESOLVE_DRY_RUN=true` | Propose/apply supersede/merge/keep_both |
+| Reflection (optional) | `REFLECTION_ENABLED=false`, `REFLECTION_DRY_RUN=true` | Tip artifacts from trajectories |
+
+**Operator ladder:** enable with dry-run → review audit → flip dry-run false.
+Mutating share `attach_conflict` still needs namespace **write** + resolve enabled.
+Full flag matrix: [REFERENCE.md](REFERENCE.md#intelligent-self-curation-diff-6) /
+[ADR-010](adr/ADR-010-intelligent-self-curation.md). Prefer `archivist_pin` for
+facts that must never decay/forget.
+
+---
+
 ## Reference Docs (1 tool)
 
 ### archivist_get_reference_docs
@@ -507,6 +529,7 @@ Return the full Archivist agent skill reference (this document) or a single name
 10. **Log trajectories** with `archivist_log_trajectory` so future searches benefit from outcome-aware retrieval
 11. **Hand off sessions** with `archivist_handoff` + `archivist_receive_handoff` to transfer context **and tips** between agents (primary tip-transfer channel)
 12. **Selectively share memories / tip_ids** with `archivist_share_propose` / `accept` / `reject` on **ops**/**full** (Diff #5 / ADR-009; not on **core**; does not replace handoff)
-13. **Attach conflict outcomes** with `archivist_share_attach_conflict` (`supersede` / `merge` / `keep_both`; optional `apply` → resolver)
-14. **Resume agent state** with `archivist_checkpoint_save` + `archivist_checkpoint_resume` (**full** profile; use `replay` for chain inspection)
-15. **Monitor token savings** with `archivist_savings_dashboard` to confirm the Answer Finder is reducing noise
+13. **Attach conflict outcomes** with `archivist_share_attach_conflict` (`supersede` / `merge` / `keep_both`; optional `apply` → resolver; mutating apply needs write + `CONTRADICTION_RESOLVE_ENABLED`)
+14. **Self-curation** is flag-driven in the curator (Diff #6 / ADR-010) — do not invent core MCP tools; stage `RECONSOLIDATION_*` / `RELEVANCE_FORGET_*` / `CONTRADICTION_RESOLVE_*`
+15. **Resume agent state** with `archivist_checkpoint_save` + `archivist_checkpoint_resume` (**full** profile; use `replay` for chain inspection)
+16. **Monitor token savings** with `archivist_savings_dashboard` to confirm the Answer Finder is reducing noise

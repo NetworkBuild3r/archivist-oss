@@ -108,7 +108,7 @@ Code lives under `src/archivist/`.
 | **Storage** | `storage/graph.py` (thin facade — see below), `storage/graph_schema.py`, `storage/graph_entities.py`, `storage/graph_fts.py`, `storage/graph_needles.py`, `storage/graph_points.py`, `storage/checkpoints.py`, `storage/memory_product.py`, `storage/versioning.py`, `storage/sqlite_pool.py`, `storage/asyncpg_backend.py`, `storage/backend_factory.py`, `storage/fts_search.py`, `storage/transaction.py`, `storage/outbox.py`, `storage/backends.py`, `storage/collection_router.py`, `storage/backup_manager.py` |
 | **Retrieval** | `retrieval/rlm_retriever.py`, `retrieval/graph_retrieval.py`, `retrieval/reranker.py`, `retrieval/context_packer.py`, `retrieval/context_api.py`, `retrieval/session_store.py`, `retrieval/retrieval_log.py` |
 | **Write** | `write/indexer.py`, `write/chunking.py` |
-| **Lifecycle** | `lifecycle/memory_lifecycle.py`, `lifecycle/merge.py`, `lifecycle/cascade.py`, `lifecycle/curator_queue.py`, `lifecycle/contradiction_resolve.py`, `lifecycle/reflection.py` (Phase 8 wedge — INIT-001/SPEC-006) |
+| **Lifecycle** | `lifecycle/memory_lifecycle.py`, `lifecycle/merge.py`, `lifecycle/cascade.py`, `lifecycle/curator_queue.py`, `lifecycle/reconsolidation.py`, `lifecycle/relevance_forget.py`, `lifecycle/contradiction_resolve.py`, `lifecycle/reflection.py` (Diff #6 / Phase 8 — INIT-010 / ADR-010) |
 | **Features** | `features/embeddings.py`, `features/llm.py`, … |
 | **Core** | `core/config.py`, `core/rbac.py`, `core/audit.py`, `core/metrics.py`, … |
 
@@ -248,6 +248,10 @@ The following sections record behaviour and operational guidance by release (con
   `lifecycle/contradiction_resolve.py` and `lifecycle/reflection.py`; curator
   optionally runs them when `CONTRADICTION_RESOLVE_ENABLED` /
   `REFLECTION_ENABLED` are on (dry-run defaults true).
+- **Intelligent Self-Curation (Diff #6 / INIT-010 / ADR-010)** — curator product
+  loop adds hierarchical reconsolidation (`lifecycle/reconsolidation.py`) and
+  relevance forget (`lifecycle/relevance_forget.py`) behind safe defaults; see
+  `sdd/initiatives/INIT-010-intelligent-self-curation/design/INIT-010-intelligent-self-curation-architecture.md`.
 - **Date range filters** — `date_from` / `date_to` on search.
 
 ### v0.6.0

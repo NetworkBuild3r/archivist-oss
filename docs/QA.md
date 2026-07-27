@@ -75,10 +75,14 @@ selection is a **test-only oracle** under `tests/system/mcp/agentic_memory_harne
 | `tests/system/mcp/test_agentic_memory_negative.py` | `TestAgenticMemoryNegative` — suppressed stale; eligible+ineligible → `needs_clarification`; ambiguous/empty; index TOC never sufficient |
 | `tests/system/mcp/test_agentic_memory_procedure.py` | `TestAgenticMemoryProcedureAction` — procedure tips → action (INIT-007); omit/archived tip refuse |
 | `tests/system/mcp/test_agentic_memory_coordination.py` | Tip-via-handoff + share `tip_ids` multi-agent scenarios (INIT-009 Diff #5) |
+| `tests/system/mcp/test_agentic_memory_self_curation.py` | Relevance forget → suppress blocks `order_express` (INIT-010 Diff #6) |
 
 **Baselines / contracts:** see [ADR-006](adr/ADR-006-agentic-memory-eval-gym.md). SQLite CI path +
 fake embed / stub Qdrant only (GR-EVAL-002). Index markdown alone is never action evidence
 (GR-CE-001). Procedure→action tip contracts: [ADR-007](adr/ADR-007-procedural-memory-wedge.md).
+Diff #6 self-curation product loop + flags: [ADR-010](adr/ADR-010-intelligent-self-curation.md) /
+[REFERENCE.md](REFERENCE.md#intelligent-self-curation-diff-6). Integration coverage:
+`tests/integration/lifecycle/test_self_curation_product.py`.
 
 ```bash
 # Focused agentic-memory suite (Memory→Action + procedure tips)
@@ -91,6 +95,7 @@ python -m pytest \
   tests/system/mcp/test_agentic_memory_negative.py \
   tests/system/mcp/test_agentic_memory_procedure.py \
   tests/system/mcp/test_agentic_memory_coordination.py \
+  tests/system/mcp/test_agentic_memory_self_curation.py \
   -q --tb=short
 
 # coach_core remains required (run both for full coach+agentic coverage)

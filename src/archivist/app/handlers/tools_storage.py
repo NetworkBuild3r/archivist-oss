@@ -1694,6 +1694,15 @@ async def _handle_pin(arguments: dict) -> list[TextContent]:
                     payload={"retention_class": "permanent", "importance_score": 1.0},
                     points=[memory_id],
                 )
+                # INIT-010/SPEC-006 (SEC-010-01): sync pin into SQLite so relevance
+                # forget candidates (importance-gated) honor archivist_pin.
+                from archivist.storage.sqlite_pool import pool as _pin_pool
+
+                async with _pin_pool.write() as conn:
+                    await conn.execute(
+                        "UPDATE memory_chunks SET importance=1.0 WHERE qdrant_id=? AND namespace=?",
+                        (memory_id, namespace or ""),
+                    )
                 pinned.append({"type": "memory", "id": memory_id})
             else:
                 return error_response({"error": f"Memory {memory_id} not found"})
@@ -1773,6 +1782,13 @@ async def _handle_unpin(arguments: dict) -> list[TextContent]:
                 payload={"retention_class": "standard", "importance_score": 0.5},
                 points=[memory_id],
             )
+            from archivist.storage.sqlite_pool import pool as _unpin_pool
+
+            async with _unpin_pool.write() as conn:
+                await conn.execute(
+                    "UPDATE memory_chunks SET importance=0.5 WHERE qdrant_id=? AND namespace=?",
+                    (memory_id, namespace or ""),
+                )
             unpinned.append({"type": "memory", "id": memory_id})
         except Exception as e:
             return error_response({"error": f"Failed to unpin memory: {e}"})

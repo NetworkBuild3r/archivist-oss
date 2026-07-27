@@ -261,9 +261,12 @@ backward compatibility:
 - Use `archivist_compress` with `format: structured` for Goal/Progress/Decisions/Next Steps summaries.
 - Log trajectories so future searches benefit from outcome-aware retrieval scoring.
 - Pin critical facts (host IPs, credentials, ownership) with `archivist_pin` so the curator never forgets them.
+- Enable Diff #6 self-curation only via staged flags (`RECONSOLIDATION_*` /
+  `RELEVANCE_FORGET_*` / `CONTRADICTION_RESOLVE_*`) — defaults stay off / dry-run
+  ([ADR-010](adr/ADR-010-intelligent-self-curation.md); see **Intelligent Self-Curation**).
 - Use `archivist_handoff` + `archivist_receive_handoff` to transfer session context **and tips** between agents (primary tip-transfer channel).
 - Use `archivist_share_propose` / `accept` / `reject` on **ops**/**full** for selective memory/`tip_ids` grants (Diff #5; does not replace handoff; not on **core**).
-- Use `archivist_share_attach_conflict` to record conflict outcomes (`supersede` / `merge` / `keep_both`); set `apply=true` to invoke the contradiction resolver (dry_run default).
+- Use `archivist_share_attach_conflict` to record conflict outcomes (`supersede` / `merge` / `keep_both`); set `apply=true` to invoke the contradiction resolver (dry_run default; mutating apply needs write + `CONTRADICTION_RESOLVE_ENABLED`).
 - Use `archivist_checkpoint_save` / `resume` / `replay` for Phase-7 agent-state time-travel (**full** profile; distinct from handoff and from L0–L2 tiers).
 - Check `archivist_savings_dashboard` to measure how much token waste the Answer Finder is eliminating (set `TOKEN_USD_PER_1K` for estimated USD fields).
 - Use `archivist_memory_lineage` to inspect provenance/version/audit/retrieval edges for a memory or entity (requires namespace read access).
@@ -330,6 +333,43 @@ The **`/admin/invalidate`** endpoint scans Qdrant for points whose `ttl_expires_
 ## Curator vs vector TTL
 
 The background **`curator.cycle`** log line (one per successful loop) summarizes file processing, graph fact decay, hotness scoring, tip consolidation, and wake-up cache refreshes. **Graph decay** (`facts_decayed`) soft-deactivates old or superseded facts in SQLite; **vector TTL** is enforced separately via `/admin/invalidate` and payload `ttl_expires_at`. They address different layers: the graph ages knowledge; Qdrant TTL removes embedded chunks after expiry.
+
+## Intelligent Self-Curation (Diff #6)
+
+<!-- INIT-010/SPEC-005 · ADR-010 -->
+
+Product loop runs **inside the curator cycle** (no new **core** MCP tools). Manual
+`archivist_compress` remains available; Diff #6 adds automatic reconsolidation,
+relevance forget, and contradiction resolve behind flags.
+
+| Concern | Module | Master flag (default) | Dry-run default |
+|---------|--------|----------------------|-----------------|
+| Hierarchical reconsolidation (L2 groups → L1 summary chunk) | `lifecycle/reconsolidation.py` | `RECONSOLIDATION_ENABLED=false` | `RECONSOLIDATION_DRY_RUN=true` |
+| Relevance forget (cold / low-importance → namespace-scoped **suppress**) | `lifecycle/relevance_forget.py` | `RELEVANCE_FORGET_ENABLED=false` | `RELEVANCE_FORGET_DRY_RUN=true` |
+| Contradiction resolve | `lifecycle/contradiction_resolve.py` | `CONTRADICTION_RESOLVE_ENABLED=false` | `CONTRADICTION_RESOLVE_DRY_RUN=true` |
+| Reflection tips (optional) | `lifecycle/reflection.py` | `REFLECTION_ENABLED=false` | `REFLECTION_DRY_RUN=true` |
+
+**Knobs:** `RECONSOLIDATION_MAX_GROUPS_PER_CYCLE`, `RECONSOLIDATION_MIN_CHUNKS`,
+`RELEVANCE_FORGET_MAX_PER_CYCLE`, `RELEVANCE_FORGET_HOTNESS_MAX`,
+`RELEVANCE_FORGET_IMPORTANCE_MAX`, `RELEVANCE_FORGET_MIN_AGE_DAYS`,
+`CONTRADICTION_RESOLVE_MAX_PER_CYCLE`, `CONTRADICTION_RESOLVE_LLM_ENABLED`,
+`CURATOR_INTERVAL_MINUTES`. See `.env.example` and
+[ADR-010](adr/ADR-010-intelligent-self-curation.md).
+
+**Staged enablement (operators):**
+
+1. Leave masters **off** (OSS default) — no silent fleet mutation.
+2. Enable one path at a time with **`*_DRY_RUN=true`** — audit proposals
+   (`reconsolidation_proposed`, `relevance_forget_proposed`, resolve proposals).
+3. Flip dry-run **false** only after reviewing audit volume.
+4. Share `archivist_share_attach_conflict` with `apply=true` + `dry_run=false`
+   still requires namespace **write** + `CONTRADICTION_RESOLVE_ENABLED` (INIT-009).
+
+Relevance forget is **not** coach `archivist_delete` alone: it suppresses cold
+chunks from default recall using hotness / age / TTL signals. Pin durable facts
+with `archivist_pin` so they stay out of aggressive decay/forget paths
+(`archivist_pin` syncs SQLite `importance=1.0` and Qdrant `retention_class=permanent`;
+forget skips both — SEC-010-01).
 
 ## Lifecycle (suppress / supersede / delete)
 
