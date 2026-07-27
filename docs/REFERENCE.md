@@ -1,6 +1,6 @@
 # Archivist MCP tool reference
 
-Quick reference for **47** MCP tools exposed by the Archivist server. For full parameter schemas, defaults, and examples, see [`CURSOR_SKILL.md`](CURSOR_SKILL.md).
+Quick reference for **52** MCP tools exposed by the Archivist server. For full parameter schemas, defaults, and examples, see [`CURSOR_SKILL.md`](CURSOR_SKILL.md).
 
 ## Tool profiles (`ARCHIVIST_TOOL_PROFILE`)
 
@@ -11,7 +11,7 @@ Quick reference for **47** MCP tools exposed by the Archivist server. For full p
 | Profile | Surface |
 |---------|---------|
 | `core` | Coach-path tools only: `archivist_store`, `archivist_search`, `archivist_get_context`, `archivist_index`, `archivist_delete` (forget path), plus small helpers (`archivist_health_dashboard`, `archivist_namespaces`, `archivist_get_reference_docs`). ≤12 tools. |
-| `ops` | Operator-oriented middle set — all tools except unfinished `archivist_checkpoint_*` wedge. Includes **`archivist_share_*`** (Diff #5 / [ADR-009](adr/ADR-009-native-multi-agent-coordination.md)). |
+| `ops` | Operator-oriented middle set — all tools except unfinished `archivist_checkpoint_*` wedge. Includes **`archivist_share_*`** (Diff #5 / [ADR-009](adr/ADR-009-native-multi-agent-coordination.md)) and **`archivist_map_*`** (Diff #4 / [ADR-011](adr/ADR-011-memory-as-product-mcp.md)). |
 | `full` | Entire registry (including checkpoints). |
 
 Hidden tools remain in the codebase but are omitted from `list_tools` and **fail closed** on `call_tool` with a clear error. Set `ARCHIVIST_TOOL_PROFILE=full` (or `ops`) when you need the broader surface. See [ADR-003](adr/ADR-003-coach-core-reliability.md).
@@ -138,6 +138,30 @@ Optional `apply=true` on attach invokes `apply_resolution` (dry_run defaults tru
 | `archivist_share_attach_conflict` | Attach conflict outcome (`supersede` / `merge` / `keep_both`); optional `apply` → resolver. |
 | `archivist_share_get` | Fetch one grant by id + namespace (proposer or recipient). |
 
+## Memory as a Product (6)
+
+<!-- INIT-011/SPEC-005 · ADR-011 -->
+
+Versioned scope snapshot / fork / export / **import** — Unique Differentiator
+**#4** ([ADR-011](adr/ADR-011-memory-as-product-mcp.md)). Available on **ops** and
+**full** (not **core**). Archives live under `BACKUP_DIR` via opaque `archive_id`
+(path confinement / `SnapshotPathError`). Do **not** put secrets in manifests;
+audit logs record IDs and paths only.
+
+**Round-trip:** `archivist_map_snapshot` → `archivist_map_export` →
+`archivist_map_import` (fail-closed if the target agent scope is nonempty).
+Fork clones from a `version_id` into a target namespace (source read + target write).
+Recipe: [`demos/map-roundtrip.md`](demos/map-roundtrip.md).
+
+| Tool | Purpose |
+|------|---------|
+| `archivist_map_list` | List scope versions for a namespace (optional `agent_id` filter). Namespace **read**. |
+| `archivist_map_get` | Get one scope version by `version_id`. Namespace **read** on the record’s source ns. |
+| `archivist_map_snapshot` | Create a versioned archive of a memory scope under `BACKUP_DIR`. |
+| `archivist_map_fork` | Fork a version into `target_namespace` with lineage (source **read** + target **write**). |
+| `archivist_map_export` | Export a scope or existing version (manifest + archive path; lineage row). |
+| `archivist_map_import` | Restore an archive into a target namespace (source **read** + target **write**; fail-closed if nonempty). |
+
 ## Admin & Context Management (10)
 
 | Tool | Purpose |
@@ -155,15 +179,19 @@ Optional `apply=true` on attach invokes `apply_resolution` (dry_run defaults tru
 
 ### Memory-as-Product (service layer)
 
-Service APIs in `archivist.storage.memory_product` (INIT-001/SPEC-009) — not MCP tools yet:
+Service APIs in `archivist.storage.memory_product` (INIT-001/SPEC-009;
+**import** INIT-011/SPEC-002). MCP surface: **`archivist_map_*`** on **ops**/**full**
+([ADR-011](adr/ADR-011-memory-as-product-mcp.md); see section above).
 
 | API | Purpose |
 |-----|---------|
 | `create_scope_snapshot` | Versioned snapshot of a namespace (optional `agent_id` filter); archive under `BACKUP_DIR` |
 | `fork_from_snapshot` | Copy snapshot into a target namespace with `parent_version_id` lineage; vectors via outbox |
 | `export_scope` | Export archive path + manifest (counts/versions); paths confined by `SnapshotPathError` / `_snapshot_dir` |
+| `import_scope` | Restore archive into a target namespace (write RBAC; fail-closed if nonempty) |
+| `list_scope_versions` / `get_scope_version` | Lineage listing / fetch |
 
-All three require `caller_agent_id` and enforce namespace RBAC. Distinct from Phase-7 `agent_checkpoints`.
+All require `caller_agent_id` and enforce namespace RBAC. Distinct from Phase-7 `agent_checkpoints`.
 
 ## Cache Management (2)
 
@@ -267,6 +295,7 @@ backward compatibility:
 - Use `archivist_handoff` + `archivist_receive_handoff` to transfer session context **and tips** between agents (primary tip-transfer channel).
 - Use `archivist_share_propose` / `accept` / `reject` on **ops**/**full** for selective memory/`tip_ids` grants (Diff #5; does not replace handoff; not on **core**).
 - Use `archivist_share_attach_conflict` to record conflict outcomes (`supersede` / `merge` / `keep_both`); set `apply=true` to invoke the contradiction resolver (dry_run default; mutating apply needs write + `CONTRADICTION_RESOLVE_ENABLED`).
+- Use `archivist_map_*` on **ops**/**full** for Memory-as-Product snapshot/fork/export/import (Diff #4 / ADR-011; not on **core**; opaque `archive_id` only — never client absolute paths outside `BACKUP_DIR`).
 - Use `archivist_checkpoint_save` / `resume` / `replay` for Phase-7 agent-state time-travel (**full** profile; distinct from handoff and from L0–L2 tiers).
 - Check `archivist_savings_dashboard` to measure how much token waste the Answer Finder is eliminating (set `TOKEN_USD_PER_1K` for estimated USD fields).
 - Use `archivist_memory_lineage` to inspect provenance/version/audit/retrieval edges for a memory or entity (requires namespace read access).

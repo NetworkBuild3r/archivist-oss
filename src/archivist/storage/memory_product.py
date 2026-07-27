@@ -1,15 +1,18 @@
-"""Memory-as-Product: scope snapshot, fork, and export (INIT-001/SPEC-009).
+"""Memory-as-Product: scope snapshot, fork, export, and import.
 
 Service-layer operations over a namespace (optionally agent-filtered) memory set:
 
 * **Snapshot** — versioned archive of ``memory_chunks`` (+ optional vectors)
 * **Fork** — derive a new target scope from a snapshot with lineage pointer
 * **Export** — auditable bundle under ``BACKUP_DIR`` with a counts/versions manifest
+* **Import** — restore an archive under ``BACKUP_DIR`` into a target scope (INIT-011/SPEC-002)
 
 Path containment reuses ``SnapshotPathError`` / ``_snapshot_dir`` from
 ``backup_manager`` (PR #39). Vector mutations go through ``MemoryTransaction``
 + outbox when vectors are present. Callers must pass ``caller_agent_id`` so
 namespace RBAC is enforced at this layer.
+
+Provenance: INIT-001/SPEC-009; INIT-011/SPEC-002 (import + caps).
 """
 
 from __future__ import annotations
@@ -30,6 +33,10 @@ logger = logging.getLogger("archivist.memory_product")
 
 MANIFEST_KIND = "memory_scope"
 MANIFEST_VERSION = 1
+
+# ADR-011 import blast-radius caps (INIT-011/SPEC-002).
+MAP_IMPORT_MAX_CHUNKS = 50_000
+MAP_IMPORT_MAX_BYTES = 256 * 1024 * 1024  # 256 MiB
 
 # Keys that must never appear in exported manifests (defense in depth).
 _SECRET_MANIFEST_KEYS = frozenset(
@@ -361,6 +368,58 @@ def _read_archive(
                 if line:
                     vectors.append(json.loads(line))
     return manifest, chunks, vectors
+
+
+def _archive_payload_bytes(archive_id: str) -> int:
+    """Sum on-disk size of archive files under BACKUP_DIR (fail closed on escape)."""
+    snap_dir = _snapshot_dir(archive_id)
+    if not snap_dir.is_dir():
+        raise MemoryProductNotFoundError(f"Archive '{archive_id}' not found")
+    total = 0
+    for path in snap_dir.iterdir():
+        if path.is_file():
+            total += path.stat().st_size
+    return total
+
+
+def _validate_import_manifest(manifest: dict[str, Any]) -> None:
+    kind = str(manifest.get("kind") or "")
+    if kind != MANIFEST_KIND:
+        raise MemoryProductConflictError(
+            f"unsupported archive kind '{kind}' (expected '{MANIFEST_KIND}')"
+        )
+    try:
+        version = int(manifest.get("manifest_version") or 0)
+    except (TypeError, ValueError) as exc:
+        raise MemoryProductConflictError("invalid manifest_version") from exc
+    if version < 1 or version > MANIFEST_VERSION:
+        raise MemoryProductConflictError(
+            f"unsupported manifest_version {version} (max {MANIFEST_VERSION})"
+        )
+
+
+async def _target_scope_chunk_count(namespace: str, agent_id: str = "") -> int:
+    from archivist.storage.sqlite_pool import pool
+
+    async with pool.read() as conn:
+        if agent_id:
+            cur = await conn.execute(
+                """
+                SELECT COUNT(*) AS c FROM memory_chunks
+                WHERE namespace = ? AND agent_id = ? AND is_excluded = 0
+                """,
+                (namespace, agent_id),
+            )
+        else:
+            cur = await conn.execute(
+                """
+                SELECT COUNT(*) AS c FROM memory_chunks
+                WHERE namespace = ? AND is_excluded = 0
+                """,
+                (namespace,),
+            )
+        row = await cur.fetchone()
+    return int(row["c"] if row is not None else 0)
 
 
 def _build_manifest(
@@ -796,3 +855,228 @@ async def export_scope(
         "chunk_count": record.chunk_count,
         "point_count": record.point_count,
     }
+
+
+async def import_scope(
+    *,
+    archive_id: str,
+    target_namespace: str,
+    caller_agent_id: str,
+    target_agent_id: str = "",
+    label: str = "",
+    vector_factory: Callable[[dict[str, Any]], list[float] | None] | None = None,
+) -> ScopeVersionRecord:
+    """Restore an archive under BACKUP_DIR into a target scope (INIT-011/SPEC-002).
+
+    Fail-closed when the target agent scope already has non-excluded chunks
+    (ADR-011 conflict policy). Vectors are best-effort via MemoryTransaction /
+    outbox when present in the archive or supplied by ``vector_factory``.
+    """
+    if not archive_id:
+        raise ValueError("archive_id is required")
+
+    _require_rbac(caller_agent_id, "write", target_namespace)
+
+    # Path confinement first — SnapshotPathError must surface for escapes.
+    try:
+        payload_bytes = _archive_payload_bytes(archive_id)
+    except SnapshotPathError:
+        raise
+    except MemoryProductNotFoundError:
+        raise
+
+    if payload_bytes > MAP_IMPORT_MAX_BYTES:
+        raise MemoryProductConflictError(
+            f"archive exceeds max bytes ({payload_bytes} > {MAP_IMPORT_MAX_BYTES})"
+        )
+
+    try:
+        manifest, chunks, vectors = _read_archive(archive_id)
+    except SnapshotPathError:
+        raise
+    except MemoryProductNotFoundError:
+        raise
+    except Exception as exc:
+        raise MemoryProductError(f"failed to read import archive: {exc}") from exc
+
+    _validate_import_manifest(manifest if isinstance(manifest, dict) else {})
+
+    source_namespace = str(manifest.get("namespace") or "").strip()
+    if not source_namespace:
+        raise MemoryProductConflictError("import archive missing source namespace in manifest")
+    # SEC-011-01: require source read (symmetric with fork) so archive_id is not
+    # an unscoped capability to materialize another namespace's memory.
+    _require_rbac(caller_agent_id, "read", source_namespace)
+
+    if len(chunks) > MAP_IMPORT_MAX_CHUNKS:
+        raise MemoryProductConflictError(
+            f"archive exceeds max chunks ({len(chunks)} > {MAP_IMPORT_MAX_CHUNKS})"
+        )
+
+    existing = await _target_scope_chunk_count(target_namespace, target_agent_id)
+    if existing > 0:
+        raise MemoryProductConflictError(
+            "target scope is not empty; import refuses silent merge "
+            "(fork into a fresh scope or clear the target first)"
+        )
+
+    vectors_by_id = {str(v.get("id", "")): v for v in vectors if v.get("id")}
+    created_at = datetime.now(UTC).isoformat()
+    version = await _next_scope_version(target_namespace, target_agent_id)
+    version_id = str(uuid.uuid4())
+    import_archive_id = _new_archive_id(label or "import")
+    parent_version_id = str(manifest.get("version_id") or "") or None
+    imported_chunks: list[dict[str, Any]] = []
+    imported_vectors: list[dict[str, Any]] = []
+    id_map: dict[str, str] = {}
+
+    from archivist.storage.collection_router import collection_for
+    from archivist.storage.transaction import MemoryTransaction
+
+    collection = collection_for(target_namespace)
+    source_agent_id = str(manifest.get("agent_id") or "")
+
+    try:
+        async with MemoryTransaction() as txn:
+            for chunk in chunks:
+                old_id = str(chunk.get("qdrant_id") or "")
+                new_id = str(uuid.uuid4())
+                if old_id:
+                    id_map[old_id] = new_id
+                dest_agent = target_agent_id or str(chunk.get("agent_id") or "")
+                new_chunk = {
+                    **chunk,
+                    "qdrant_id": new_id,
+                    "namespace": target_namespace,
+                    "agent_id": dest_agent,
+                }
+                imported_chunks.append(new_chunk)
+                await txn.upsert_fts_chunk(
+                    qdrant_id=new_id,
+                    text=str(new_chunk.get("text") or ""),
+                    file_path=str(new_chunk.get("file_path") or ""),
+                    chunk_index=int(new_chunk.get("chunk_index") or 0),
+                    agent_id=dest_agent,
+                    namespace=target_namespace,
+                    date=str(new_chunk.get("date") or ""),
+                    memory_type=str(new_chunk.get("memory_type") or "general"),
+                    actor_id=str(new_chunk.get("actor_id") or ""),
+                    actor_type=str(new_chunk.get("actor_type") or ""),
+                    importance=float(new_chunk.get("importance") or 0.5),
+                    tier_label=str(new_chunk.get("tier_label") or "l2"),
+                )
+
+                vector: list[float] | None = None
+                src_vec = vectors_by_id.get(old_id)
+                if src_vec and isinstance(src_vec.get("vector"), list):
+                    vector = list(src_vec["vector"])
+                elif vector_factory is not None:
+                    vector = vector_factory(new_chunk)
+
+                if vector is not None:
+                    payload = {
+                        "text": new_chunk.get("text") or "",
+                        "file_path": new_chunk.get("file_path") or "",
+                        "chunk_index": int(new_chunk.get("chunk_index") or 0),
+                        "agent_id": dest_agent,
+                        "namespace": target_namespace,
+                        "memory_type": new_chunk.get("memory_type") or "general",
+                        "imported_from_archive": archive_id,
+                        "imported_from_qdrant_id": old_id,
+                    }
+                    point = {
+                        "id": new_id,
+                        "vector": vector,
+                        "payload": payload,
+                    }
+                    imported_vectors.append(point)
+                    txn.enqueue_qdrant_upsert(
+                        collection,
+                        [point],
+                        memory_id=new_id,
+                    )
+
+            lineage = _strip_secrets(
+                {
+                    "parent_version_id": parent_version_id,
+                    "source_archive_id": archive_id,
+                    "source_namespace": source_namespace,
+                    "source_agent_id": source_agent_id,
+                    "target_namespace": target_namespace,
+                    "target_agent_id": target_agent_id,
+                    "id_map_count": len(id_map),
+                    "operation": "import",
+                }
+            )
+            await txn.execute(
+                """
+                INSERT INTO memory_scope_versions (
+                    id, source_namespace, source_agent_id, version, label,
+                    parent_version_id, chunk_count, point_count, archive_id,
+                    operation, created_by, created_at, lineage_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    version_id,
+                    target_namespace,
+                    target_agent_id,
+                    version,
+                    label,
+                    parent_version_id,
+                    len(imported_chunks),
+                    len(imported_vectors),
+                    import_archive_id,
+                    "import",
+                    caller_agent_id,
+                    created_at,
+                    json.dumps(lineage, separators=(",", ":")),
+                ),
+            )
+    except MemoryProductAuthzError:
+        raise
+    except MemoryProductConflictError:
+        raise
+    except Exception as exc:
+        raise MemoryProductError(f"import failed (rolled back): {exc}") from exc
+
+    manifest_out = _build_manifest(
+        archive_id=import_archive_id,
+        version_id=version_id,
+        namespace=target_namespace,
+        agent_id=target_agent_id,
+        version=version,
+        label=label,
+        operation="import",
+        chunk_count=len(imported_chunks),
+        point_count=len(imported_vectors),
+        parent_version_id=parent_version_id,
+        created_by=caller_agent_id,
+        created_at=created_at,
+        extra={"source_archive_id": archive_id},
+    )
+    try:
+        _write_archive(
+            import_archive_id,
+            chunks=imported_chunks,
+            vectors=imported_vectors,
+            manifest=manifest_out,
+        )
+    except Exception as exc:
+        logger.warning(
+            "import archive write failed version_id=%s archive_id=%s: %s",
+            version_id,
+            import_archive_id,
+            exc,
+        )
+
+    logger.info(
+        "scope import complete version_id=%s source_archive=%s target_ns=%s chunks=%d",
+        version_id,
+        archive_id,
+        target_namespace,
+        len(imported_chunks),
+    )
+    record = await get_scope_version(version_id)
+    if record is None:
+        raise MemoryProductError("import committed but version row missing")
+    return record

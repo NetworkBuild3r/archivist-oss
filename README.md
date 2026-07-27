@@ -74,6 +74,7 @@ context = await archivist_get_context(
 | **Ephemeral session tier** | `SessionStore` holds per-session scratch notes in-process, flushed to durable memory at session end. |
 | **Multi-agent handoff** | `archivist_handoff` packages goals + memories + knowledge snapshot; `archivist_receive_handoff` injects them into the new agent's session. |
 | **Selective share + consensus** | `archivist_share_propose` / `accept` / `reject` on **ops**/**full** (not **core**); optional `tip_ids`; conflict `apply` → resolver (Diff #5 / ADR-009; extends handoff). |
+| **Memory as a Product** | `archivist_map_*` snapshot / fork / export / import on **ops**/**full** (not **core**) — Diff #4 / ADR-011. |
 | **Token savings observability** | Every retrieval logs `tokens_returned` / `tokens_naive` / `savings_pct`; view trends via `archivist_savings_dashboard`. |
 
 ### Measured token savings
@@ -973,7 +974,8 @@ Manual MCP and HTTP validation: [`QA_CHECKLIST.md`](QA_CHECKLIST.md). Full guide
 | **Answer Finder** — tiered memory, adaptive packing, get_relevant_context, handoff, observability | **Shipped (v2.3)** |
 | **Diff #5 Native Multi-Agent Coordination** — `share_*` on ops, tip_ids, conflict→resolver | **Productized (INIT-009 / [ADR-009](docs/adr/ADR-009-native-multi-agent-coordination.md))** |
 | **Diff #6 Intelligent Self-Curation** — curator reconsolidate / forget / resolve | **Done (INIT-010 / [ADR-010](docs/adr/ADR-010-intelligent-self-curation.md))** |
-| Immediate next — Diff #4 MaP MCP (+ import) | **INIT-011** (BRAIN-005) |
+| **Diff #4 Memory as a Product** — `archivist_map_*` on ops (+ import) | **Done (INIT-011 / [ADR-011](docs/adr/ADR-011-memory-as-product-mcp.md))** |
+| Immediate next — Diff #7 checkpoint productize | **INIT-012** (BRAIN-005) |
 | Pydantic config validation + stronger env validation | Planned |
 
 Full phased plan: [`docs/ROADMAP.md`](docs/ROADMAP.md).

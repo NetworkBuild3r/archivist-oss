@@ -41,6 +41,7 @@ class TestCoreProfileMembership:
         }
         assert not any(n.startswith("archivist_share_") for n in names)
         assert not any(n.startswith("archivist_checkpoint_") for n in names)
+        assert not any(n.startswith("archivist_map_") for n in names)
 
     def test_default_profile_is_core(self):
         from archivist.core.config import ArchivistSettings
@@ -62,6 +63,8 @@ class TestOpsAndFullProfiles:
         assert "archivist_context_check" in names
         assert "archivist_share_propose" in names
         assert "archivist_share_attach_conflict" in names
+        assert "archivist_map_list" in names
+        assert "archivist_map_import" in names
         assert not any(n.startswith("archivist_checkpoint_") for n in names)
         # ops is a middle set — smaller than full, larger than core
         assert len(names) < len(ALL_TOOLS)

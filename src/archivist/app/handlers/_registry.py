@@ -29,6 +29,8 @@ from .tools_coordination import HANDLERS as COORDINATION_HANDLERS
 from .tools_coordination import TOOLS as COORDINATION_TOOLS
 from .tools_docs import HANDLERS as DOCS_HANDLERS
 from .tools_docs import TOOLS as DOCS_TOOLS
+from .tools_memory_product import HANDLERS as MAP_HANDLERS
+from .tools_memory_product import TOOLS as MAP_TOOLS
 from .tools_search import HANDLERS as SEARCH_HANDLERS
 from .tools_search import TOOLS as SEARCH_TOOLS
 from .tools_storage import HANDLERS as STORAGE_HANDLERS
@@ -51,6 +53,7 @@ for _handlers in (
     CHECKPOINT_HANDLERS,
     COORDINATION_HANDLERS,
     DOCS_HANDLERS,
+    MAP_HANDLERS,
 ):
     # Domain modules type HANDLERS as dict[str, object]; values are HandlerFn.
     TOOL_REGISTRY.update(cast(dict[str, HandlerFn], _handlers))
@@ -65,6 +68,7 @@ ALL_TOOLS: list[Tool] = (
     + CHECKPOINT_TOOLS
     + COORDINATION_TOOLS
     + DOCS_TOOLS
+    + MAP_TOOLS
 )
 
 # Coach-core surface (ADR-003 five-tool contract + small read helpers). ≤12.
@@ -87,6 +91,8 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset(
 
 # Ops hides unfinished checkpoint wedge only. ``archivist_share_*`` is promoted
 # to ops under INIT-009/SPEC-002 (ADR-009 GR-PROD-002 — still off core).
+# ``archivist_map_*`` is promoted to ops under INIT-011/SPEC-003 (ADR-011) —
+# do **not** add ``archivist_map_`` here.
 _OPS_HIDDEN_PREFIXES: tuple[str, ...] = ("archivist_checkpoint_",)
 
 

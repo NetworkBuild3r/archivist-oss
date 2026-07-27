@@ -7,6 +7,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- **Diff #4 productize (INIT-011 / ADR-011)** — Memory as a Product is a first-class
+  **ops**/**full** MCP surface: `archivist_map_list|get|snapshot|fork|export|import`
+  wrapping `storage/memory_product.py` (INIT-001/SPEC-009) plus durable **`import_scope`**
+  round-trip. Archives confined to `BACKUP_DIR`; import fail-closed on nonempty target;
+  chunk/byte caps; no new **core** tools (GR-PROD-002). Docs: REFERENCE / CURSOR_SKILL /
+  ROADMAP (#4 → Done; Immediate Next → INIT-012); recipe
+  [`docs/demos/map-roundtrip.md`](docs/demos/map-roundtrip.md).
+
 - **Diff #6 productize (INIT-010 / ADR-010)** — Intelligent Self-Curation is a
   first-class **curator product loop**: hierarchical reconsolidation
   (`lifecycle/reconsolidation.py`), relevance-based forget
