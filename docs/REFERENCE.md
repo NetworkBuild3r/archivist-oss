@@ -11,8 +11,8 @@ Quick reference for **47** MCP tools exposed by the Archivist server. For full p
 | Profile | Surface |
 |---------|---------|
 | `core` | Coach-path tools only: `archivist_store`, `archivist_search`, `archivist_get_context`, `archivist_index`, `archivist_delete` (forget path), plus small helpers (`archivist_health_dashboard`, `archivist_namespaces`, `archivist_get_reference_docs`). ≤12 tools. |
-| `ops` | Operator-oriented middle set — all tools except unfinished `archivist_share_*` and `archivist_checkpoint_*` wedges. |
-| `full` | Entire registry (prior default). |
+| `ops` | Operator-oriented middle set — all tools except unfinished `archivist_checkpoint_*` wedge. Includes **`archivist_share_*`** (Diff #5 / [ADR-009](adr/ADR-009-native-multi-agent-coordination.md)). |
+| `full` | Entire registry (including checkpoints). |
 
 Hidden tools remain in the codebase but are omitted from `list_tools` and **fail closed** on `call_tool` with a clear error. Set `ARCHIVIST_TOOL_PROFILE=full` (or `ops`) when you need the broader surface. See [ADR-003](adr/ADR-003-coach-core-reliability.md).
 
@@ -115,14 +115,27 @@ Ack still means **durable graph + outbox** ([ADR-003](adr/ADR-003-coach-core-rel
 
 ## Coordination Beyond Handoff (5)
 
-Selective share + consensus v1 (explicit accept/reject + audit). Extends — does not replace — `archivist_handoff` / `archivist_receive_handoff` (GR-003). Conflict outcomes use SPEC-006 actions: `supersede` \| `merge` \| `keep_both`.
+<!-- INIT-009/SPEC-004 -->
+
+Selective share + consensus v1 (explicit accept/reject + audit) — Unique Differentiator
+**#5** productized ([ADR-009](adr/ADR-009-native-multi-agent-coordination.md)). Available on
+**ops** and **full** (not **core**). Extends — does not replace —
+`archivist_handoff` / `archivist_receive_handoff` (GR-HANDOFF-001).
+
+**Lessons / tips:** Procedural lessons remain tip-only ([ADR-007](adr/ADR-007-procedural-memory-wedge.md) /
+[ADR-008](adr/ADR-008-retire-skills-tip-lessons.md)). Cross-agent tip transfer:
+(1) primary — tips in `HandoffPacket`; (2) selective — `tip_ids` on
+`archivist_share_propose` (grant metadata + SessionStore `share_tip_ids` on accept).
+
+Conflict outcomes use `contradiction_resolve` actions: `supersede` \| `merge` \| `keep_both`.
+Optional `apply=true` on attach invokes `apply_resolution` (dry_run defaults true).
 
 | Tool | Purpose |
 |------|---------|
-| `archivist_share_propose` | Propose a selective share of memory IDs and/or scope to another agent (pending grant). Proposer needs namespace read. |
-| `archivist_share_accept` | Recipient accepts a grant (audited; idempotent). Optional `materialize_namespace` requires write RBAC. |
+| `archivist_share_propose` | Propose selective share of `memory_ids`, `tip_ids`, and/or `scope` to another agent (pending grant). Proposer needs namespace read. |
+| `archivist_share_accept` | Recipient accepts a grant (audited; idempotent). Injects `share_memory_ids` / `share_tip_ids` into SessionStore when present. Optional `materialize_namespace` requires write RBAC. |
 | `archivist_share_reject` | Recipient rejects a grant (audited; idempotent). |
-| `archivist_share_attach_conflict` | Attach a conflict/consensus outcome using SPEC-006 resolution types. |
+| `archivist_share_attach_conflict` | Attach conflict outcome (`supersede` / `merge` / `keep_both`); optional `apply` → resolver. |
 | `archivist_share_get` | Fetch one grant by id + namespace (proposer or recipient). |
 
 ## Admin & Context Management (10)
@@ -248,10 +261,10 @@ backward compatibility:
 - Use `archivist_compress` with `format: structured` for Goal/Progress/Decisions/Next Steps summaries.
 - Log trajectories so future searches benefit from outcome-aware retrieval scoring.
 - Pin critical facts (host IPs, credentials, ownership) with `archivist_pin` so the curator never forgets them.
-- Use `archivist_handoff` + `archivist_receive_handoff` to transfer session context between agents with minimal token overhead.
-- Use `archivist_share_propose` / `accept` / `reject` for selective memory grants between agents (consensus v1 = explicit decision + audit; does not replace handoff).
-- Use `archivist_share_attach_conflict` to record conflict outcomes with SPEC-006 actions (`supersede` / `merge` / `keep_both`).
-- Use `archivist_checkpoint_save` / `resume` / `replay` for Phase-7 agent-state time-travel (namespace-scoped; distinct from handoff and from L0–L2 tiers).
+- Use `archivist_handoff` + `archivist_receive_handoff` to transfer session context **and tips** between agents (primary tip-transfer channel).
+- Use `archivist_share_propose` / `accept` / `reject` on **ops**/**full** for selective memory/`tip_ids` grants (Diff #5; does not replace handoff; not on **core**).
+- Use `archivist_share_attach_conflict` to record conflict outcomes (`supersede` / `merge` / `keep_both`); set `apply=true` to invoke the contradiction resolver (dry_run default).
+- Use `archivist_checkpoint_save` / `resume` / `replay` for Phase-7 agent-state time-travel (**full** profile; distinct from handoff and from L0–L2 tiers).
 - Check `archivist_savings_dashboard` to measure how much token waste the Answer Finder is eliminating (set `TOKEN_USD_PER_1K` for estimated USD fields).
 - Use `archivist_memory_lineage` to inspect provenance/version/audit/retrieval edges for a memory or entity (requires namespace read access).
 

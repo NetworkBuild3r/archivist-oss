@@ -100,8 +100,67 @@ class TestShareHappyPath:
         assert got["grant"]["id"] == grant_id
         assert got["grant"]["conflict_outcome"]["action"] == "merge"
 
+    @pytest.mark.asyncio
+    async def test_propose_tip_ids_accept_injects_share_tip_ids(self, async_pool, allow_rbac):
+        """INIT-009/SPEC-003: tip_ids selective share → SessionStore share_tip_ids."""
+        from archivist.app.handlers.tools_coordination import (
+            _handle_share_accept,
+            _handle_share_propose,
+        )
+        from archivist.retrieval.session_store import SessionStore
 
-class TestUnauthorizedShare:
+        propose = await _handle_share_propose(
+            {
+                "agent_id": "agent-a",
+                "recipient_agent_id": "agent-b",
+                "namespace": "coord-ns",
+                "tip_ids": ["tip-proc-1", "tip-proc-2"],
+                "reason": "share procedural lessons",
+            }
+        )
+        data = _parse(propose)
+        grant_id = data["grant"]["id"]
+        assert data["grant"]["metadata"]["tip_ids"] == ["tip-proc-1", "tip-proc-2"]
+        assert data["grant"]["metadata"]["lesson_channel"] == "tips"
+
+        store = SessionStore()
+        with patch(
+            "archivist.retrieval.session_store.get_session_store",
+            return_value=store,
+        ):
+            accepted = _parse(
+                await _handle_share_accept(
+                    {
+                        "agent_id": "agent-b",
+                        "grant_id": grant_id,
+                        "namespace": "coord-ns",
+                        "session_id": "sess-b",
+                    }
+                )
+            )
+        assert accepted["grant"]["status"] == "accepted"
+        assert "share_tip_ids" in accepted["injected_keys"]
+        raw = store.get("agent-b", "sess-b", "share_tip_ids")
+        assert json.loads(raw) == ["tip-proc-1", "tip-proc-2"]
+
+
+class TestOpsProfileShareVisibility:
+    def test_ops_lists_share_tools(self, monkeypatch):
+        """INIT-009/SPEC-003 ac-2: share_* visible on ops, hidden on core."""
+        import archivist.core.config as config
+        from archivist.app.handlers._registry import CORE_TOOL_NAMES, get_all_tools
+
+        monkeypatch.setattr(config, "TOOL_PROFILE", "ops")
+        ops_names = {t.name for t in get_all_tools()}
+        assert "archivist_share_propose" in ops_names
+        assert "archivist_share_accept" in ops_names
+        assert not any(n.startswith("archivist_checkpoint_") for n in ops_names)
+
+        monkeypatch.setattr(config, "TOOL_PROFILE", "core")
+        core_names = {t.name for t in get_all_tools()}
+        assert core_names == set(CORE_TOOL_NAMES)
+        assert not any(n.startswith("archivist_share_") for n in core_names)
+
     @pytest.mark.asyncio
     async def test_propose_denied_without_read(self, async_pool):
         from archivist.app.handlers.tools_coordination import _handle_share_propose

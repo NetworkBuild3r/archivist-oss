@@ -5,6 +5,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Diff #5 productize (INIT-009 / ADR-009)** — `archivist_share_*` promoted to **ops**
+  (still off **core**; checkpoints remain **full**-only). `archivist_share_propose`
+  accepts `tip_ids` for selective tip/lesson grants; accept injects `share_tip_ids`.
+  `archivist_share_attach_conflict` can `apply=true` → `contradiction_resolve.apply_resolution`
+  (dry_run default). Tip-only lessons unchanged ([ADR-007](docs/adr/ADR-007-procedural-memory-wedge.md) /
+  [ADR-008](docs/adr/ADR-008-retire-skills-tip-lessons.md)); handoff remains the primary
+  tip-transfer channel. Docs: REFERENCE / CURSOR_SKILL / ROADMAP.
+
 ### Removed
 
 - **Skill registry retired (INIT-008 / ADR-008)** — removed six ops/full MCP tools

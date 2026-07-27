@@ -73,7 +73,7 @@ context = await archivist_get_context(
 | **Auto-compression** | When results overflow the budget, dropped chunks are LLM-summarized and injected as a synthetic L1 result (opt-in via `AUTO_COMPRESS_ENABLED=true`). |
 | **Ephemeral session tier** | `SessionStore` holds per-session scratch notes in-process, flushed to durable memory at session end. |
 | **Multi-agent handoff** | `archivist_handoff` packages goals + memories + knowledge snapshot; `archivist_receive_handoff` injects them into the new agent's session. |
-| **Selective share + consensus** | `archivist_share_propose` / `accept` / `reject` for audited grants; conflict outcomes use `supersede` / `merge` / `keep_both` (extends handoff). |
+| **Selective share + consensus** | `archivist_share_propose` / `accept` / `reject` on **ops**/**full** (not **core**); optional `tip_ids`; conflict `apply` → resolver (Diff #5 / ADR-009; extends handoff). |
 | **Token savings observability** | Every retrieval logs `tokens_returned` / `tokens_naive` / `savings_pct`; view trends via `archivist_savings_dashboard`. |
 
 ### Measured token savings
@@ -102,7 +102,7 @@ packet = await archivist_handoff(
     receiving_agent_id="agent_b",
 )
 # packet contains: session_summary, active_goals, open_questions,
-#                  key_memory_ids, knowledge_snapshot, ephemeral_notes
+#                  key_memory_ids, knowledge_snapshot, ephemeral_notes, tips
 
 # Agent B starts and immediately has full context
 await archivist_receive_handoff(
@@ -112,6 +112,42 @@ await archivist_receive_handoff(
 )
 # B's first archivist_get_context call already includes A's goals and notes
 ```
+
+### Selective share walkthrough (ops / full — Diff #5)
+
+Handoff remains the **primary** tip-transfer channel. On **ops** or **full**
+profiles, selective share adds audited grants (not available on **core**):
+
+```python
+# Agent A proposes a selective share (memories and/or tip_ids)
+grant = await archivist_share_propose(
+    agent_id="agent_a",
+    recipient_agent_id="agent_b",
+    namespace="ops",
+    memory_ids=["mem-1"],
+    tip_ids=["tip-42"],  # optional; IDs only — tip text stays agent_id-scoped
+)
+
+# Agent B accepts (injects share_memory_ids / share_tip_ids into SessionStore)
+await archivist_share_accept(
+    agent_id="agent_b",
+    grant_id=grant["id"],
+    namespace="ops",
+    session_id="session-456",
+)
+
+# Optional: attach a conflict outcome; apply=true dry_run defaults true.
+# Mutating apply (dry_run=false) needs namespace write + resolve enabled.
+await archivist_share_attach_conflict(
+    agent_id="agent_a",
+    grant_id=grant["id"],
+    namespace="ops",
+    action="keep_both",
+)
+```
+
+See [ADR-009](docs/adr/ADR-009-native-multi-agent-coordination.md) and the
+INIT-009 architecture diagrams under `sdd/initiatives/INIT-009-…/design/`.
 
 ### Competitor comparison
 
@@ -572,10 +608,10 @@ Raw MD trees **do not scale**: they blow the context window, repeat facts, and d
 
 | Tool | What it does |
 |------|-------------|
-| `archivist_share_propose` | Propose a selective share of memory IDs and/or scope to another agent (pending grant; proposer needs namespace read). |
-| `archivist_share_accept` | Recipient accepts (audited, idempotent). Optional `materialize_namespace` requires write RBAC. |
+| `archivist_share_propose` | Propose selective share of memory IDs, `tip_ids`, and/or scope (pending grant; proposer needs namespace read; **ops**/**full**). |
+| `archivist_share_accept` | Recipient accepts (audited, idempotent). Injects `share_memory_ids` / `share_tip_ids`. Optional `materialize_namespace` requires write RBAC. |
 | `archivist_share_reject` | Recipient rejects (audited, idempotent). |
-| `archivist_share_attach_conflict` | Attach conflict/consensus outcome using SPEC-006 actions: `supersede` / `merge` / `keep_both`. |
+| `archivist_share_attach_conflict` | Attach conflict outcome (`supersede` / `merge` / `keep_both`); optional `apply` → contradiction resolver. |
 | `archivist_share_get` | Fetch one grant by id + namespace (proposer or recipient). |
 
 ### Cache Management (2)
@@ -935,6 +971,8 @@ Manual MCP and HTTP validation: [`QA_CHECKLIST.md`](QA_CHECKLIST.md). Full guide
 | Phase 3 + 3.5 — transactional outbox, atomic SQLite + queued Qdrant | Shipped ([`docs/rearchitect_storage_phase3.md`](docs/rearchitect_storage_phase3.md)) |
 | **PostgreSQL first-class backend** — all hot paths, backup, tests, Docker | **Shipped (v2.2)** |
 | **Answer Finder** — tiered memory, adaptive packing, get_relevant_context, handoff, observability | **Shipped (v2.3)** |
+| **Diff #5 Native Multi-Agent Coordination** — `share_*` on ops, tip_ids, conflict→resolver | **Productized (INIT-009 / [ADR-009](docs/adr/ADR-009-native-multi-agent-coordination.md))** |
+| Suggested next — Diff #6 Intelligent Self-Curation | Parked (choose INIT after INIT-009 merges) |
 | Pydantic config validation + stronger env validation | Planned |
 
 Full phased plan: [`docs/ROADMAP.md`](docs/ROADMAP.md).
@@ -989,6 +1027,7 @@ Archivist is integration and execution on top of public work from the agent-memo
 | [`docs/CURSOR_SKILL.md`](docs/CURSOR_SKILL.md) | Full parameter schemas and examples for all 47 MCP tools |
 | [`docs/REFERENCE.md`](docs/REFERENCE.md) | Condensed tool reference table |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | Phased roadmap and differentiation goals |
+| [`docs/adr/ADR-009-native-multi-agent-coordination.md`](docs/adr/ADR-009-native-multi-agent-coordination.md) | Diff #5 productize — share on ops, tip/share paths, guardrails |
 | [`docs/INSPIRATION.md`](docs/INSPIRATION.md) | Credits, research lineage, ReMe comparison |
 | [`docs/REMOTES.md`](docs/REMOTES.md) | Multi-remote Git workflow for internal + public repos |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Development conventions and PR guidelines |

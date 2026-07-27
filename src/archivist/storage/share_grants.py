@@ -141,13 +141,26 @@ async def create_share_grant(
 
     ids = [str(x) for x in (memory_ids or []) if x is not None and str(x)]
     scope_s = (scope or "").strip()
-    if not ids and not scope_s:
-        raise ValueError("memory_ids or scope is required")
+    meta = dict(metadata or {}) if isinstance(metadata, dict) else {}
+    tip_ids_raw = meta.get("tip_ids")
+    tip_ids: list[str] = []
+    if isinstance(tip_ids_raw, list):
+        tip_ids = [str(x).strip() for x in tip_ids_raw if x is not None and str(x).strip()]
+    # Defense in depth for SEC-009-02 (handler also strips client metadata tip_ids).
+    _MAX_TIP_IDS = 500
+    if len(tip_ids) > _MAX_TIP_IDS:
+        raise ValueError(f"tip_ids exceeds {_MAX_TIP_IDS}")
+    if tip_ids:
+        meta["tip_ids"] = tip_ids
+    has_tip_ids = bool(tip_ids)
+    # INIT-009/SPEC-002–003: tip_ids on metadata are a valid selective-share target.
+    if not ids and not scope_s and not has_tip_ids:
+        raise ValueError("memory_ids, scope, or tip_ids (metadata) is required")
 
     gid = grant_id or str(uuid.uuid4())
     created_at = datetime.now(UTC).isoformat()
     memory_json = json.dumps(ids, separators=(",", ":"))
-    meta_json = json.dumps(metadata or {}, separators=(",", ":"))
+    meta_json = json.dumps(meta, separators=(",", ":"))
 
     async with pool.write() as conn:
         await conn.execute(
@@ -188,7 +201,7 @@ async def create_share_grant(
         status="pending",
         conflict_outcome=None,
         reason=reason or "",
-        metadata=metadata or {},
+        metadata=meta,
         created_at=created_at,
         decided_at=None,
         decided_by=None,

@@ -436,27 +436,45 @@ Read-only parent-chain walk from a leaf checkpoint (root → leaf). No SessionSt
 
 ## Coordination Beyond Handoff (5 tools)
 
-Selective share + consensus v1 (explicit accept/reject + audit). Extends — does not replace — handoff (GR-003). Conflict outcomes use SPEC-006 actions: `supersede` | `merge` | `keep_both`.
+<!-- INIT-009/SPEC-004 -->
+
+Selective share + consensus v1 (explicit accept/reject + audit) — Diff #5 /
+[ADR-009](adr/ADR-009-native-multi-agent-coordination.md). On **ops** and **full**
+(not **core**). Extends — does not replace — handoff (GR-HANDOFF-001).
+
+**Tip / lesson share:** Tips are the only procedural lesson API ([ADR-007](adr/ADR-007-procedural-memory-wedge.md) /
+[ADR-008](adr/ADR-008-retire-skills-tip-lessons.md)). Prefer `archivist_handoff` for tip
+strings in `HandoffPacket`. Optionally pass `tip_ids` on propose for selective tip-id
+grants (metadata + SessionStore `share_tip_ids` on accept).
 
 ### archivist_share_propose
 
-Propose a selective share of `memory_ids` and/or `scope` to `recipient_agent_id` in a `namespace`. Proposer needs namespace **read**. Creates a pending grant.
+Propose a selective share of `memory_ids`, `tip_ids`, and/or `scope` to `recipient_agent_id`
+in a `namespace`. Proposer needs namespace **read**. Creates a pending grant.
 
 **Parameters:**
 - `agent_id` (string, **required**) -- Proposer
 - `recipient_agent_id` (string, **required**)
 - `namespace` (string, **required**)
-- `memory_ids` (array of string) -- Selective IDs (required if `scope` empty)
+- `memory_ids` (array of string) -- Selective memory IDs
+- `tip_ids` (array of string) -- Optional tip/lesson IDs (stored on grant metadata)
 - `scope` (string) -- Optional Memory-as-Product scope label
 - `reason` (string) -- Audited rationale
 
+At least one of `memory_ids`, `tip_ids`, or `scope` is required.
+
 ### archivist_share_accept / archivist_share_reject
 
-Recipient-only decisions. Audited; idempotent when already in the target status. Accept may inject shared IDs into the recipient `SessionStore` for `session_id`. Optional `materialize_namespace` on accept requires **write** RBAC (cannot write unauthorized namespaces).
+Recipient-only decisions. Audited; idempotent when already in the target status. Accept may
+inject `share_memory_ids` / `share_tip_ids` / `share_scope` into the recipient `SessionStore`
+for `session_id`. Optional `materialize_namespace` on accept requires **write** RBAC.
 
 ### archivist_share_attach_conflict
 
-Attach a conflict/consensus outcome to a grant. `action` must be `supersede`, `merge`, or `keep_both`.
+Attach a conflict/consensus outcome to a grant. `action` must be `supersede`, `merge`, or
+`keep_both` (same vocabulary as `contradiction_resolve`). Optional `apply=true` builds a
+`ResolutionProposal` and calls `apply_resolution` (`dry_run` defaults **true** — set
+`dry_run=false` to mutate facts; requires `entity_id` + fact pair ids).
 
 ### archivist_share_get
 
@@ -487,7 +505,8 @@ Return the full Archivist agent skill reference (this document) or a single name
 8. **Use `archivist_context_check`** before reasoning to decide if compaction is needed
 9. **Use `archivist_compress` with `format: structured`** for Goal/Progress/Decisions/Next Steps summaries
 10. **Log trajectories** with `archivist_log_trajectory` so future searches benefit from outcome-aware retrieval
-11. **Hand off sessions** with `archivist_handoff` + `archivist_receive_handoff` to transfer context between agents
-12. **Selectively share memories** with `archivist_share_propose` / `accept` / `reject` (consensus v1 = explicit decision + audit; does not replace handoff)
-13. **Resume agent state** with `archivist_checkpoint_save` + `archivist_checkpoint_resume` (namespace-scoped; use `replay` for chain inspection)
-14. **Monitor token savings** with `archivist_savings_dashboard` to confirm the Answer Finder is reducing noise
+11. **Hand off sessions** with `archivist_handoff` + `archivist_receive_handoff` to transfer context **and tips** between agents (primary tip-transfer channel)
+12. **Selectively share memories / tip_ids** with `archivist_share_propose` / `accept` / `reject` on **ops**/**full** (Diff #5 / ADR-009; not on **core**; does not replace handoff)
+13. **Attach conflict outcomes** with `archivist_share_attach_conflict` (`supersede` / `merge` / `keep_both`; optional `apply` → resolver)
+14. **Resume agent state** with `archivist_checkpoint_save` + `archivist_checkpoint_resume` (**full** profile; use `replay` for chain inspection)
+15. **Monitor token savings** with `archivist_savings_dashboard` to confirm the Answer Finder is reducing noise
