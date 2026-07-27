@@ -689,6 +689,7 @@ class TestShareProposeTipIds:
         assert kwargs["memory_ids"] == []
         assert kwargs["metadata"]["tip_ids"] == ["t1", "t2"]
         assert kwargs["metadata"]["lesson_channel"] == "tips"
+
     @pytest.mark.asyncio
     async def test_get_rejects_spoofed_party_via_agent_id(self, allow_rbac):
         """SEC-012-08: spoofing agent_id as a party must not authorize get."""

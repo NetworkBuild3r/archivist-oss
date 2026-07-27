@@ -928,19 +928,13 @@ async def _handle_share_attach_conflict(arguments: dict) -> list[TextContent]:
             fact_a_id=pending_apply["fact_a_id"],
             fact_b_id=pending_apply["fact_b_id"],
             winner_fact_id=(
-                pending_apply["fact_a_id"]
-                if pending_apply["action"] == "supersede"
-                else None
+                pending_apply["fact_a_id"] if pending_apply["action"] == "supersede" else None
             ),
             loser_fact_id=(
-                pending_apply["fact_b_id"]
-                if pending_apply["action"] == "supersede"
-                else None
+                pending_apply["fact_b_id"] if pending_apply["action"] == "supersede" else None
             ),
             merge_text=(
-                pending_apply["merge_text"]
-                if pending_apply["action"] == "merge"
-                else None
+                pending_apply["merge_text"] if pending_apply["action"] == "merge" else None
             ),
             reason=outcome["reason"] or "share_attach_conflict apply",
             rule="share_attach_conflict",

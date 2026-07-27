@@ -160,6 +160,7 @@ class TestOpsProfileShareVisibility:
         core_names = {t.name for t in get_all_tools()}
         assert core_names == set(CORE_TOOL_NAMES)
         assert not any(n.startswith("archivist_share_") for n in core_names)
+
     @pytest.mark.asyncio
     async def test_propose_denied_without_read(self, async_pool):
         from archivist.app.handlers.tools_coordination import _handle_share_propose

@@ -97,9 +97,7 @@ def allowed_tool_names(profile: str | None = None) -> frozenset[str]:
         return frozenset(t.name for t in ALL_TOOLS)
     if resolved == "ops":
         return frozenset(
-            t.name
-            for t in ALL_TOOLS
-            if not any(t.name.startswith(p) for p in _OPS_HIDDEN_PREFIXES)
+            t.name for t in ALL_TOOLS if not any(t.name.startswith(p) for p in _OPS_HIDDEN_PREFIXES)
         )
     # Default / unknown → core (fail closed to smallest surface)
     return CORE_TOOL_NAMES
