@@ -158,7 +158,6 @@ tests/
 │   │   └── test_storage_handlers.py # tools_storage handlers (store/merge/pin/delete)
 │   └── features/
 │       ├── test_trajectory.py      # trajectory log, annotations, ratings, tips
-│       ├── test_skills.py          # skill register, events, health, lessons
 │       ├── test_curator.py         # curator_queue scheduling, hotness scoring
 │       └── test_background_tasks.py # task tracking, exception logging
 │
@@ -348,7 +347,7 @@ addopts = [
 | `test_phase1_foundations.py` | `unit/core/test_rbac.py` + `unit/retrieval/test_retrieval_trace.py` | Split |
 | `test_phase2_tiered_context.py` | `unit/retrieval/test_tiering.py` + `unit/retrieval/test_graph_retrieval.py` | |
 | `test_phase3_trajectory.py` | `integration/features/test_trajectory.py` | |
-| `test_phase4_skills.py` | `integration/features/test_skills.py` | |
+| `test_phase4_skills.py` | *(removed — skill registry retired INIT-008/ADR-008)* | |
 | `test_phase5_memory_arch.py` | `integration/features/test_hot_cache.py` + `unit/core/test_archivist_uri.py` | Split |
 | `test_phase6_observability.py` | `integration/features/test_observability.py` | Merge with metrics |
 | `test_phase7_curator_intelligence.py` | `integration/features/test_curator.py` | |

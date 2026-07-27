@@ -87,7 +87,8 @@ class TestDashboardPoolWiring:
         assert "generated_at" in result
         assert "conflicts" in result
         assert "retrieval" in result
-        assert "skills" in result
+        assert "cache" in result
+        assert "skills" not in result  # INIT-008/SPEC-002: skill registry retired
 
     async def test_hotness_heatmap_returns_seeded_row(self, dashboard_pool):
         """Content-based assertion, not just "did not raise": ``_hotness_heatmap``

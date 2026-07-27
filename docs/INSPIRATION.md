@@ -47,8 +47,8 @@ fleet index; `archivist_index`). No zer0dex source copied in.
 **Upstream:** Context tooling for agents (see their README).
 
 **In Archivist:** No code paths or comments reference this repo yet—listed as
-related reading. Skill/context work here is homegrown (`skills.py`, MCP tools,
-roadmap).
+related reading. Context/tip work here is homegrown (trajectory tips, MCP tools,
+roadmap); the MCP skill registry was retired (ADR-008).
 
 ---
 
@@ -63,9 +63,9 @@ implement their RL training stack.
 
 ### arXiv [2603.04448](https://arxiv.org/abs/2603.04448) — *SkillNet: … AI Skills*
 
-**In Archivist:** We have a skill registry and tools in the same broad area;
-nothing in-tree is attributed to SkillNet specifically. Cite the paper if we
-borrow a concrete mechanism later.
+**In Archivist:** Skill-registry productization was retired ([ADR-008](adr/ADR-008-retire-skills-tip-lessons.md)).
+Procedural lessons live on trajectory **tips** → `get_context`. Cite SkillNet if we borrow a
+concrete mechanism later — not as a parallel skill catalog.
 
 ---
 
@@ -97,8 +97,8 @@ paper reference code.
 
 **In Archivist:** “When things are unhealthy, work in smaller batches” as an
 operational metaphor → `batch_heuristic()` / `archivist_batch_heuristic` in
-`dashboard.py` (1–10 score from conflicts, staleness, cache hits, degraded
-skills). Inspired by the article’s framing, not a transcription of it.
+`dashboard.py` (1–10 score from conflicts, staleness, and cache hits).
+Inspired by the article’s framing, not a transcription of it.
 
 ---
 
@@ -167,7 +167,6 @@ named `src/mcp/`, renamed to avoid shadowing the pip `mcp` package):
 | `tools_search.py` | Core retrieval | 7 (search, recall, timeline, insights, deref, index, contradictions) |
 | `tools_storage.py` | Memory write path | 3 (store, merge, compress) |
 | `tools_trajectory.py` | Execution learning | 5 (log_trajectory, annotate, rate, tips, session_end) |
-| `tools_skills.py` | Skill registry | 6 (register, event, lesson, health, relate, dependencies) |
 | `tools_admin.py` | Ops and admin | 6 (namespaces, audit_trail, resolve_uri, retrieval_logs, health_dashboard, batch_heuristic) |
 | `tools_cache.py` | Hot cache control | 2 (cache_stats, cache_invalidate) |
 
@@ -299,7 +298,7 @@ the same weight ratio but chose SQLite FTS5 as the implementation.
 
 #### Why FTS5 over rank_bm25
 
-- Archivist already uses SQLite for the knowledge graph, audit logs, skills,
+- Archivist already uses SQLite for the knowledge graph, audit logs, tips,
   and trajectory. FTS5 is a built-in extension — zero new dependencies.
 - The index is persistent. `rank_bm25` requires loading all chunk texts into
   RAM on startup and re-fitting on every new document. FTS5 updates are

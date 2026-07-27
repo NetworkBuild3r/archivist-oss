@@ -37,7 +37,7 @@ TOOLS: list[Tool] = [
             "Call this on first connection or whenever you are unsure how to use "
             "a tool. "
             "Optionally pass `section` to return only the matching heading block "
-            "(e.g. 'search', 'storage', 'trajectory', 'skills', 'admin', 'tips')."
+            "(e.g. 'search', 'storage', 'trajectory', 'admin', 'tips')."
         ),
         inputSchema={
             "type": "object",

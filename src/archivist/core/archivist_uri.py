@@ -7,13 +7,13 @@ Resource types:
   memory/{point_id}     — a Qdrant memory point
   entity/{entity_id}    — a knowledge graph entity
   namespace/{name}      — browsable namespace root
-  skill/{skill_id}      — a registered skill
 
 Examples:
   archivist://agents-nova/memory/abc123-def456
   archivist://shared/entity/42
-  archivist://agents-nova/skill/web_search
 """
+
+# INIT-008/SPEC-002: skill resource type removed with skill registry retirement.
 
 import re
 from dataclasses import dataclass
@@ -45,13 +45,9 @@ class ArchivistURI:
     def is_namespace(self) -> bool:
         return self.resource_type == "namespace"
 
-    @property
-    def is_skill(self) -> bool:
-        return self.resource_type == "skill"
-
 
 _URI_PATTERN = re.compile(
-    r"^archivist://(?P<namespace>[^/]+)/(?P<resource_type>memory|entity|namespace|skill)/(?P<resource_id>[^?]+)(?:\?(?P<params>.+))?$"
+    r"^archivist://(?P<namespace>[^/]+)/(?P<resource_type>memory|entity|namespace)/(?P<resource_id>[^?]+)(?:\?(?P<params>.+))?$"
 )
 
 
@@ -91,13 +87,5 @@ def namespace_uri(namespace: str, **params) -> str:
     return str(
         ArchivistURI(
             namespace=namespace, resource_type="namespace", resource_id=namespace, params=params
-        )
-    )
-
-
-def skill_uri(namespace: str, skill_id: str, **params) -> str:
-    return str(
-        ArchivistURI(
-            namespace=namespace, resource_type="skill", resource_id=skill_id, params=params
         )
     )

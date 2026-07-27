@@ -33,7 +33,6 @@ def _isolate_env(monkeypatch, tmp_path):
     _schema_guards = [
         ("archivist.storage.graph", "_ensure_needle_registry"),
         ("archivist.core.trajectory", "_ensure_trajectory_schema"),
-        ("archivist.features.skills", "_ensure_skill_schema"),
         ("archivist.lifecycle.curator_queue", "_ensure_schema"),
         ("archivist.retrieval.retrieval_log", "_ensure_schema"),
         ("archivist.core.hotness", "_ensure_schema"),

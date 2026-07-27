@@ -67,13 +67,6 @@ _ALL_EXPECTED_TOOLS = [
     "archivist_rate",
     "archivist_tips",
     "archivist_session_end",
-    # tools_skills (6)
-    "archivist_register_skill",
-    "archivist_skill_event",
-    "archivist_skill_lesson",
-    "archivist_skill_health",
-    "archivist_skill_relate",
-    "archivist_skill_dependencies",
     # tools_admin (10)
     "archivist_context_check",
     "archivist_namespaces",
@@ -120,7 +113,6 @@ def test_tool_registered_in_handlers(tool_name: str) -> None:
         tools_coordination,
         tools_docs,
         tools_search,
-        tools_skills,
         tools_storage,
         tools_trajectory,
     )
@@ -130,7 +122,6 @@ def test_tool_registered_in_handlers(tool_name: str) -> None:
         tools_search,
         tools_storage,
         tools_trajectory,
-        tools_skills,
         tools_admin,
         tools_cache,
         tools_context,
@@ -318,87 +309,6 @@ class TestAdminHandlers:
         ):
             result = await _handle_backup({"action": "list"})
         _assert_text_response(result)
-
-
-# ---------------------------------------------------------------------------
-# tools_skills — 6 tools
-# ---------------------------------------------------------------------------
-
-
-class TestSkillHandlers:
-    async def test_register_skill_returns_text(self, qa_pool) -> None:
-        from archivist.app.handlers.tools_skills import _handle_register_skill
-
-        result = await _handle_register_skill(
-            {
-                "name": "test_skill_smoke",
-                "agent_id": "agent-smoke",
-                "version": "1.0.0",
-                "description": "Smoke test skill",
-            }
-        )
-        _assert_text_response(result)
-
-    async def test_skill_event_not_found_returns_error(self, qa_pool) -> None:
-        from archivist.app.handlers.tools_skills import _handle_skill_event
-
-        result = await _handle_skill_event(
-            {
-                "skill_name": "nonexistent_skill_xyz",
-                "agent_id": "agent-1",
-                "outcome": "success",
-            }
-        )
-        assert isinstance(result, list) and result
-        data = json.loads(result[0].text)
-        assert data.get("error") == "skill_not_found"
-        assert "coroutine" not in result[0].text
-
-    async def test_skill_lesson_not_found_returns_error(self, qa_pool) -> None:
-        from archivist.app.handlers.tools_skills import _handle_skill_lesson
-
-        result = await _handle_skill_lesson(
-            {
-                "skill_name": "nonexistent_skill_xyz",
-                "agent_id": "agent-1",
-                "title": "Lesson title",
-                "content": "Lesson content",
-            }
-        )
-        assert isinstance(result, list) and result
-        data = json.loads(result[0].text)
-        assert data.get("error") == "skill_not_found"
-
-    async def test_skill_health_not_found_returns_error(self, qa_pool) -> None:
-        from archivist.app.handlers.tools_skills import _handle_skill_health
-
-        result = await _handle_skill_health({"skill_name": "nonexistent_skill_xyz"})
-        assert isinstance(result, list) and result
-        data = json.loads(result[0].text)
-        assert data.get("error") == "skill_not_found"
-
-    async def test_skill_relate_not_found_returns_error(self, qa_pool) -> None:
-        from archivist.app.handlers.tools_skills import _handle_skill_relate
-
-        result = await _handle_skill_relate(
-            {
-                "skill_a": "nonexistent_a",
-                "skill_b": "nonexistent_b",
-                "relation_type": "depends_on",
-                "agent_id": "agent-1",
-            }
-        )
-        assert isinstance(result, list) and result
-        data = json.loads(result[0].text)
-        assert data.get("error") == "skill_not_found"
-
-    async def test_skill_dependencies_not_found_returns_error(self, qa_pool) -> None:
-        from archivist.app.handlers.tools_skills import _handle_skill_dependencies
-
-        result = await _handle_skill_dependencies({"skill_name": "nonexistent_skill_xyz"})
-        assert isinstance(result, list) and result
-        data = json.loads(result[0].text)
-        assert data.get("error") == "skill_not_found"
 
 
 # ---------------------------------------------------------------------------

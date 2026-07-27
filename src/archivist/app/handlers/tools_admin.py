@@ -7,7 +7,6 @@ from mcp.types import TextContent, Tool
 
 from archivist.app.dashboard import batch_heuristic, build_dashboard
 from archivist.core.rbac import get_namespace_for_agent, list_accessible_namespaces
-from archivist.features.skills import find_skill, get_lessons, get_skill_health
 from archivist.retrieval.retrieval_log import get_retrieval_logs, get_retrieval_stats
 
 from ._common import (
@@ -107,7 +106,7 @@ TOOLS: list[Tool] = [
         name="archivist_resolve_uri",
         description=(
             "Resolve an archivist:// URI to its underlying resource. "
-            "Supports memory, entity, namespace, and skill URIs."
+            "Supports memory, entity, and namespace URIs."
         ),
         inputSchema={
             "type": "object",
@@ -117,9 +116,9 @@ TOOLS: list[Tool] = [
                     "description": (
                         "An archivist:// URI to resolve. "
                         "Format: archivist://{namespace}/{resource_type}/{id} "
-                        "where resource_type is one of: memory, entity, namespace, skill. "
+                        "where resource_type is one of: memory, entity, namespace. "
                         "Examples: archivist://agents-nova/memory/abc123, "
-                        "archivist://shared/entity/42, archivist://agents-nova/skill/web_search"
+                        "archivist://shared/entity/42"
                     ),
                 },
                 "agent_id": {
@@ -174,7 +173,7 @@ TOOLS: list[Tool] = [
         name="archivist_health_dashboard",
         description=(
             "Get a comprehensive health dashboard: memory counts, stale %, conflict rate, "
-            "retrieval stats, skill health, cache status — all in one view."
+            "retrieval stats, cache status — all in one view."
         ),
         inputSchema={
             "type": "object",
@@ -192,7 +191,7 @@ TOOLS: list[Tool] = [
         name="archivist_batch_heuristic",
         description=(
             "Recommend a safe batch size based on memory health signals. "
-            "Considers conflict rate, stale memory %, cache hit rate, and degraded skills. "
+            "Considers conflict rate, stale memory %, and cache hit rate. "
             "When health degrades, use smaller batches."
         ),
         inputSchema={
@@ -412,11 +411,10 @@ async def _handle_resolve_uri(arguments: dict) -> list[TextContent]:
                 "uri": raw_uri,
                 "diagnostic": diag,
                 "expected_format": "archivist://{namespace}/{resource_type}/{resource_id}",
-                "valid_resource_types": ["memory", "entity", "namespace", "skill"],
+                "valid_resource_types": ["memory", "entity", "namespace"],
                 "examples": [
                     "archivist://agents-nova/memory/abc123-def456",
                     "archivist://shared/entity/42",
-                    "archivist://agents-nova/skill/web_search",
                 ],
             }
         )
@@ -449,14 +447,6 @@ async def _handle_resolve_uri(arguments: dict) -> list[TextContent]:
         return await _handle_index(
             {"agent_id": agent_id, "caller_agent_id": caller_agent_id, "namespace": uri.namespace}
         )
-
-    if uri.is_skill:
-        skill = await find_skill(uri.resource_id)
-        if skill:
-            health = await get_skill_health(skill["id"])
-            health["recent_lessons"] = await get_lessons(skill["id"], limit=5)
-            return success_response(health)
-        return error_response({"error": "skill_not_found", "name": uri.resource_id})
 
     return error_response({"error": "unsupported_resource_type", "type": uri.resource_type})
 

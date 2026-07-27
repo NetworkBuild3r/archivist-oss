@@ -100,8 +100,10 @@ python -m pytest -m coach_core -q --tb=short
 <!-- INIT-007/SPEC-005 -->
 
 Tips-first procedural memory on the existing trajectory→`tips`→`get_context`
-path ([ADR-007](adr/ADR-007-procedural-memory-wedge.md)). **Not** a skill OS and
-**not** a skill-registry→core merge (GR-SKILL-001 / GR-LAYER-001).
+path ([ADR-007](adr/ADR-007-procedural-memory-wedge.md)). **Tip-only lessons** —
+the MCP skill registry is **retired** ([ADR-008](adr/ADR-008-retire-skills-tip-lessons.md));
+do not use or reintroduce `archivist_*skill*` tools. Cross-agent lesson sharing
+beyond handoff is Unique Differentiator **#5** (INIT-009) — not built in INIT-008.
 
 **How tips reach `archivist_get_context` (core read path):**
 
@@ -118,7 +120,7 @@ path ([ADR-007](adr/ADR-007-procedural-memory-wedge.md)). **Not** a skill OS and
 | Profile | Tip-related tools |
 |---------|-------------------|
 | **core** (default) | **Read** tips via `archivist_get_context` only. No `log_trajectory` / `archivist_tips` in core. |
-| **ops** / **full** | `archivist_log_trajectory` (extract tips), `archivist_tips` (direct tip list), plus skill-registry tools — still separate from tips productization |
+| **ops** / **full** | `archivist_log_trajectory` (extract tips), `archivist_tips` (direct tip list). No skill-registry tools (ADR-008). |
 
 CI procedure scenarios **seed** the `tips` table directly in the harness (no ops profile required).
 

@@ -31,8 +31,6 @@ from .tools_docs import HANDLERS as DOCS_HANDLERS
 from .tools_docs import TOOLS as DOCS_TOOLS
 from .tools_search import HANDLERS as SEARCH_HANDLERS
 from .tools_search import TOOLS as SEARCH_TOOLS
-from .tools_skills import HANDLERS as SKILL_HANDLERS
-from .tools_skills import TOOLS as SKILL_TOOLS
 from .tools_storage import HANDLERS as STORAGE_HANDLERS
 from .tools_storage import TOOLS as STORAGE_TOOLS
 from .tools_trajectory import HANDLERS as TRAJECTORY_HANDLERS
@@ -47,7 +45,6 @@ for _handlers in (
     SEARCH_HANDLERS,
     STORAGE_HANDLERS,
     TRAJECTORY_HANDLERS,
-    SKILL_HANDLERS,
     ADMIN_HANDLERS,
     CACHE_HANDLERS,
     CONTEXT_HANDLERS,
@@ -62,7 +59,6 @@ ALL_TOOLS: list[Tool] = (
     SEARCH_TOOLS
     + STORAGE_TOOLS
     + TRAJECTORY_TOOLS
-    + SKILL_TOOLS
     + ADMIN_TOOLS
     + CACHE_TOOLS
     + CONTEXT_TOOLS

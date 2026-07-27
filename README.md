@@ -143,7 +143,7 @@ await archivist_receive_handoff(
 | **Dual database backends** | SQLite (default, zero-config) or PostgreSQL (`GRAPH_BACKEND=postgres`) — hot paths, backups, and tests work on both. See [docs/DOCKER.md](docs/DOCKER.md#postgresql-backend-production-grade). |
 | **Transactional outbox** | Optional `OUTBOX_ENABLED=true`: SQLite/Postgres FTS, needle registry, `memory_points`, graph rows, and outbox events commit atomically; Qdrant work is drained by a background processor with retries. Default `false` keeps legacy inline Qdrant writes. |
 | **Hybrid retrieval** | Vector + BM25 fusion, graph augmentation, hotness-weighted FTS, tier-aware packing, reranking — see [How It Works](#how-it-works). |
-| **MCP tool surface** | 52 tools for search, storage, trajectories, skills, admin, cache, context, handoff, checkpoints, selective share, and docs — stable signatures. |
+| **MCP tool surface** | 46 tools for search, storage, trajectories, admin, cache, context, handoff, checkpoints, selective share, and docs — stable signatures. |
 | **RBAC** | Namespace-level ACLs via optional `namespaces.yaml`. |
 | **Active curation** | Background curator, queue, compaction, hotness — configurable. |
 
@@ -251,8 +251,7 @@ Each stage is observable via `retrieval_trace` in every response.
 | Hybrid search | Vector + BM25 weighted fusion | Vector only | Vector only |
 | Active curation | Background entity extraction, contradiction resolution, stale compression | No | No |
 | Context management | Token budgets, tiered summaries, structured compaction | No | No |
-| Trajectory learning | Outcome-aware retrieval scoring from past successes/failures | No | No |
-| Skill registry | Track tool health, failure modes, substitutes | No | No |
+| Trajectory learning | Outcome-aware retrieval scoring from past successes/failures; tip-only procedural lessons | No | No |
 | Observability | Prometheus metrics, retrieval traces, health dashboard | Varies | No |
 | Protocol | MCP (language-agnostic) | Client library | Framework-specific |
 | Deployment | `docker compose up` | DIY | DIY |
@@ -547,17 +546,6 @@ Raw MD trees **do not scale**: they blow the context window, repeat facts, and d
 | `archivist_tips` | Retrieve strategy/recovery/optimization tips from past trajectories |
 | `archivist_session_end` | Summarize a session into durable memory |
 
-### Skill Registry (6)
-
-| Tool | What it does |
-|------|-------------|
-| `archivist_register_skill` | Register/update a skill (MCP tool) with provider, version, endpoint |
-| `archivist_skill_event` | Log invocation outcome (success/partial/failure) for health scoring |
-| `archivist_skill_lesson` | Record failure modes, workarounds, best practices |
-| `archivist_skill_health` | Health grade, success rate, recent failures, substitutes |
-| `archivist_skill_relate` | Create relations (similar_to, depend_on, compose_with, replaced_by) |
-| `archivist_skill_dependencies` | Skill dependency/relation graph |
-
 ### Admin & Context Management (9)
 
 | Tool | What it does |
@@ -567,7 +555,7 @@ Raw MD trees **do not scale**: they blow the context window, repeat facts, and d
 | `archivist_audit_trail` | Immutable audit log of all memory operations |
 | `archivist_resolve_uri` | Resolve `archivist://` URIs to underlying resources |
 | `archivist_retrieval_logs` | Export/analyze retrieval pipeline execution traces |
-| `archivist_health_dashboard` | Single-pane health: memory counts, stale %, conflict rate, skills, cache |
+| `archivist_health_dashboard` | Single-pane health: memory counts, stale %, conflict rate, cache |
 | `archivist_savings_dashboard` | Token savings analytics: avg/min/max savings %, tokens saved, hotness heatmap |
 | `archivist_batch_heuristic` | Recommended batch size (1-10) from health signals |
 | `archivist_backup` | Create, list, restore, or delete memory snapshots (Qdrant + SQLite/Postgres). Supports `export_agent` / `import_agent` for agent migration. |
@@ -648,7 +636,7 @@ graph TB
 
     subgraph Storage ["Storage"]
         Qdrant[("Qdrant\nvectors")]
-        SQLite[("SQLite / Postgres\ngraph + FTS + outbox\n+ audit + skills")]
+        SQLite[("SQLite / Postgres\ngraph + FTS + outbox\n+ audit + tips")]
         Files[("Markdown\nMEMORY_ROOT")]
     end
 
@@ -686,7 +674,6 @@ The codebase is organized by domain:
 | ↳ `tools_search.py` | 7 search/retrieval handlers |
 | ↳ `tools_storage.py` | 3 storage handlers |
 | ↳ `tools_trajectory.py` | 5 trajectory handlers |
-| ↳ `tools_skills.py` | 6 skill registry handlers |
 | ↳ `tools_admin.py` | 7 admin handlers |
 | ↳ `tools_cache.py` | 2 cache handlers |
 | **Core** | |
@@ -721,7 +708,6 @@ The codebase is organized by domain:
 | `metrics.py` | Prometheus-compatible counters, histograms, gauges |
 | `webhooks.py` | Async event dispatch |
 | `dashboard.py` | Health aggregation + batch heuristic |
-| `skills.py` | Skill registry, health scoring, lesson tracking |
 | `trajectory.py` | Trajectory logging, tips, annotations, ratings |
 | `tiering.py` | L0/L1/L2 summary generation |
 | `archivist_uri.py` | `archivist://` URI scheme |
@@ -752,7 +738,7 @@ The codebase is organized by domain:
 
 **SQLite / PostgreSQL tables (23+):**
 
-`entities`, `relationships`, `facts`, `memory_chunks`, `memory_fts` (FTS5 / tsvector), `memory_fts_exact` (FTS5 / tsvector), `needle_registry`, `curator_state`, `audit_log`, `memory_versions`, `trajectories`, `tips`, `annotations`, `ratings`, `memory_outcomes`, `skills`, `skill_versions`, `skill_lessons`, `skill_events`, `retrieval_logs`, `curator_queue`, `memory_hotness`, `skill_relations`, `outbox`
+`entities`, `relationships`, `facts`, `memory_chunks`, `memory_fts` (FTS5 / tsvector), `memory_fts_exact` (FTS5 / tsvector), `needle_registry`, `curator_state`, `audit_log`, `memory_versions`, `trajectories`, `tips`, `annotations`, `ratings`, `memory_outcomes`, `retrieval_logs`, `curator_queue`, `memory_hotness`, `outbox`
 
 ### Three-Layer Memory Hierarchy
 
@@ -859,9 +845,9 @@ Archivist is production-observable out of the box:
 
 - **Prometheus `/metrics`** — Same port as MCP (`MCP_PORT`). Counters, histograms (durations in ms; search result counts in `archivist_search_results`), and gauges including storage and dependency availability. Set `METRICS_ENABLED=false` to disable recording and return 404 on `/metrics`; use `METRICS_AUTH_EXEMPT=true` if Prometheus must scrape without `ARCHIVIST_API_KEY`. Full list: [docs/REFERENCE.md](docs/REFERENCE.md#prometheus-metrics).
 - **Retrieval traces** — Every `archivist_search` response includes `retrieval_trace` with per-stage counts and timings.
-- **Health dashboard** — `archivist_health_dashboard` MCP tool or `GET /admin/dashboard`: memory counts, stale %, conflict rate, cache hit rate, skill health overview.
+- **Health dashboard** — `archivist_health_dashboard` MCP tool or `GET /admin/dashboard`: memory counts, stale %, conflict rate, cache hit rate.
 - **Audit trail** — Immutable log of all memory operations, queryable via `archivist_audit_trail`.
-- **Webhooks** — HTTP POST on `memory_store`, `memory_conflict`, `skill_event`. Configure via `WEBHOOK_URL`.
+- **Webhooks** — HTTP POST on `memory_store`, `memory_conflict`, `trajectory_logged`. Configure via `WEBHOOK_URL`.
 
 ---
 
