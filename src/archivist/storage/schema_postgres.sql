@@ -104,11 +104,10 @@ CREATE INDEX IF NOT EXISTS idx_facts_memory_id   ON facts (memory_id);
 CREATE INDEX IF NOT EXISTS idx_facts_retention   ON facts (retention_class);
 CREATE INDEX IF NOT EXISTS idx_facts_namespace   ON facts (namespace);
 CREATE INDEX IF NOT EXISTS idx_facts_actor       ON facts (actor_id);
-CREATE INDEX IF NOT EXISTS idx_facts_subject     ON facts (subject);
-CREATE INDEX IF NOT EXISTS idx_facts_purpose     ON facts (purpose);
-CREATE INDEX IF NOT EXISTS idx_facts_sensitivity ON facts (sensitivity);
-CREATE INDEX IF NOT EXISTS idx_facts_statement_kind ON facts (statement_kind);
-CREATE INDEX IF NOT EXISTS idx_facts_suppressed  ON facts (is_suppressed);
+-- INIT-003 provenance indexes (subject/purpose/…) are created AFTER the
+-- ALTER TABLE migration block below. On existing DBs, CREATE TABLE IF NOT
+-- EXISTS is a no-op and those columns are absent until ALTER runs — early
+-- CREATE INDEX here would abort the whole script (UndefinedColumnError).
 CREATE INDEX IF NOT EXISTS idx_facts_superseded_by ON facts (superseded_by);
 
 
@@ -183,14 +182,7 @@ CREATE INDEX IF NOT EXISTS idx_mc_actor_type    ON memory_chunks (actor_type);
 CREATE INDEX IF NOT EXISTS idx_mc_importance    ON memory_chunks (importance DESC);
 CREATE INDEX IF NOT EXISTS idx_mc_tier          ON memory_chunks (tier_label);
 CREATE INDEX IF NOT EXISTS idx_mc_ttl           ON memory_chunks (ttl_at) WHERE ttl_at IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_mc_subject       ON memory_chunks (subject);
-CREATE INDEX IF NOT EXISTS idx_mc_purpose       ON memory_chunks (purpose);
-CREATE INDEX IF NOT EXISTS idx_mc_sensitivity   ON memory_chunks (sensitivity);
-CREATE INDEX IF NOT EXISTS idx_mc_statement_kind ON memory_chunks (statement_kind);
-CREATE INDEX IF NOT EXISTS idx_mc_suppressed    ON memory_chunks (is_suppressed);
-CREATE INDEX IF NOT EXISTS idx_mc_supersedes    ON memory_chunks (supersedes_id);
-CREATE INDEX IF NOT EXISTS idx_mc_ns_suppressed ON memory_chunks (namespace, is_suppressed);
-CREATE INDEX IF NOT EXISTS idx_mc_created_at    ON memory_chunks (created_at);
+-- INIT-003 provenance indexes created after ALTER migration (see below).
 -- GIN indexes accelerate tsvector full-text search (equivalent of FTS5 BM25 index)
 CREATE INDEX IF NOT EXISTS idx_mc_fts           ON memory_chunks USING GIN (fts_vector);
 CREATE INDEX IF NOT EXISTS idx_mc_fts_simple    ON memory_chunks USING GIN (fts_vector_simple);
