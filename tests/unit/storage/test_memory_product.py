@@ -1,7 +1,8 @@
-"""Unit tests for Memory-as-Product service (INIT-001/SPEC-009).
+"""Unit tests for Memory-as-Product service (INIT-001/SPEC-009; INIT-011/SPEC-002).
 
-Covers scope snapshot, fork lineage, export manifest, RBAC boundaries, and
-BACKUP_DIR path containment — without a live Qdrant (vectors mocked / omitted).
+Covers scope snapshot, fork lineage, export manifest, import restore, RBAC
+boundaries, and BACKUP_DIR path containment — without a live Qdrant
+(vectors mocked / omitted).
 """
 
 from __future__ import annotations
@@ -369,3 +370,280 @@ async def test_fork_rolls_back_on_mid_transaction_failure(
             "SELECT COUNT(*) AS c FROM memory_scope_versions WHERE operation = 'fork'"
         )
         assert int((await cur.fetchone())["c"]) == 0
+
+
+# --- INIT-011/SPEC-002: import_scope ---
+
+
+def _map_backup_patches(monkeypatch, backup: Path) -> None:
+    from archivist.storage.backup_manager import _snapshot_dir, delete_snapshot
+
+    monkeypatch.setattr("archivist.storage.backup_manager.BACKUP_DIR", str(backup))
+    monkeypatch.setattr("archivist.storage.memory_product._snapshot_dir", _snapshot_dir)
+    monkeypatch.setattr("archivist.storage.memory_product.delete_snapshot", delete_snapshot)
+
+
+@pytest.mark.asyncio
+async def test_import_scope_restores_chunks_and_lineage(
+    async_pool, tmp_path, monkeypatch, rbac_config
+):
+    """ac-1 / ac-4 / ac-5: import restores chunks; lineage operation=import; vectors optional."""
+    from archivist.storage import memory_product as mp
+
+    backup = tmp_path / "backups"
+    backup.mkdir()
+    _map_backup_patches(monkeypatch, backup)
+
+    await _seed_chunks(async_pool, namespace="shared", agent_id="chief", n=2)
+    source = await mp.create_scope_snapshot(
+        namespace="shared",
+        caller_agent_id="chief",
+        agent_id="chief",
+        label="export-src",
+        vectors=[
+            {"id": "q-shared-0", "vector": [1.0, 0.0], "payload": {}},
+            {"id": "q-shared-1", "vector": [0.0, 1.0], "payload": {}},
+        ],
+    )
+
+    imported = await mp.import_scope(
+        archive_id=source.archive_id,
+        target_namespace="pipeline",
+        caller_agent_id="gitbob",
+        target_agent_id="gitbob",
+        label="import-1",
+    )
+    assert imported.operation == "import"
+    assert imported.source_namespace == "pipeline"
+    assert imported.chunk_count == 2
+    assert imported.point_count == 2
+    assert imported.lineage.get("source_archive_id") == source.archive_id
+    assert imported.lineage.get("operation") == "import"
+    assert imported.parent_version_id == source.id
+    assert "api_key" not in json.dumps(imported.lineage).lower()
+
+    async with async_pool.read() as conn:
+        cur = await conn.execute(
+            "SELECT COUNT(*) AS c FROM memory_chunks WHERE namespace = ? AND agent_id = ?",
+            ("pipeline", "gitbob"),
+        )
+        assert int((await cur.fetchone())["c"]) == 2
+        cur = await conn.execute(
+            "SELECT COUNT(*) AS c FROM memory_scope_versions WHERE operation = 'import'"
+        )
+        assert int((await cur.fetchone())["c"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_import_scope_chunks_without_vectors(async_pool, tmp_path, monkeypatch, rbac_config):
+    """ac-5: chunks durable when archive has no vectors."""
+    from archivist.storage import memory_product as mp
+
+    backup = tmp_path / "backups"
+    backup.mkdir()
+    _map_backup_patches(monkeypatch, backup)
+
+    await _seed_chunks(async_pool, namespace="shared", agent_id="chief", n=1)
+    source = await mp.create_scope_snapshot(
+        namespace="shared",
+        caller_agent_id="chief",
+        agent_id="chief",
+        vectors=[],
+    )
+    imported = await mp.import_scope(
+        archive_id=source.archive_id,
+        target_namespace="pipeline",
+        caller_agent_id="gitbob",
+        target_agent_id="gitbob",
+    )
+    assert imported.chunk_count == 1
+    assert imported.point_count == 0
+
+
+@pytest.mark.asyncio
+async def test_import_rbac_requires_write_on_target(async_pool, tmp_path, monkeypatch, rbac_config):
+    """ac-3: import denied without namespace write."""
+    from archivist.storage import memory_product as mp
+
+    backup = tmp_path / "backups"
+    backup.mkdir()
+    _map_backup_patches(monkeypatch, backup)
+
+    await _seed_chunks(async_pool, namespace="shared", agent_id="chief", n=1)
+    source = await mp.create_scope_snapshot(
+        namespace="shared",
+        caller_agent_id="chief",
+        label="src",
+    )
+    with pytest.raises(mp.MemoryProductAuthzError):
+        await mp.import_scope(
+            archive_id=source.archive_id,
+            target_namespace="deployer",
+            caller_agent_id="gitbob",
+        )
+
+
+@pytest.mark.asyncio
+async def test_import_rbac_requires_read_on_source(async_pool, tmp_path, monkeypatch, rbac_config):
+    """SEC-011-01: import denied without read on archive source namespace."""
+    from archivist.storage import memory_product as mp
+
+    backup = tmp_path / "backups"
+    backup.mkdir()
+    _map_backup_patches(monkeypatch, backup)
+
+    await _seed_chunks(async_pool, namespace="deployer", agent_id="argo", n=1)
+    source = await mp.create_scope_snapshot(
+        namespace="deployer",
+        caller_agent_id="argo",
+        agent_id="argo",
+        label="secret-src",
+    )
+    # gitbob can write pipeline but cannot read deployer
+    with pytest.raises(mp.MemoryProductAuthzError):
+        await mp.import_scope(
+            archive_id=source.archive_id,
+            target_namespace="pipeline",
+            caller_agent_id="gitbob",
+            target_agent_id="gitbob",
+        )
+
+
+@pytest.mark.asyncio
+async def test_import_path_traversal_rejected(async_pool, tmp_path, monkeypatch, rbac_config):
+    """ac-2: path escape via archive_id fails closed (SnapshotPathError)."""
+    from archivist.storage import memory_product as mp
+    from archivist.storage.backup_manager import SnapshotPathError
+
+    backup = tmp_path / "backups"
+    backup.mkdir()
+    _map_backup_patches(monkeypatch, backup)
+
+    with pytest.raises(SnapshotPathError):
+        await mp.import_scope(
+            archive_id="../../etc/passwd",
+            target_namespace="pipeline",
+            caller_agent_id="gitbob",
+            target_agent_id="gitbob",
+        )
+
+
+@pytest.mark.asyncio
+async def test_import_missing_archive_not_found(async_pool, tmp_path, monkeypatch, rbac_config):
+    """ac-2: missing archive raises MemoryProductNotFoundError."""
+    from archivist.storage import memory_product as mp
+
+    backup = tmp_path / "backups"
+    backup.mkdir()
+    _map_backup_patches(monkeypatch, backup)
+
+    with pytest.raises(mp.MemoryProductNotFoundError):
+        await mp.import_scope(
+            archive_id="memprod_missing_does_not_exist",
+            target_namespace="pipeline",
+            caller_agent_id="gitbob",
+            target_agent_id="gitbob",
+        )
+
+
+@pytest.mark.asyncio
+async def test_import_rejects_nonempty_target(async_pool, tmp_path, monkeypatch, rbac_config):
+    """ADR-011: fail-closed when target scope already has chunks."""
+    from archivist.storage import memory_product as mp
+
+    backup = tmp_path / "backups"
+    backup.mkdir()
+    _map_backup_patches(monkeypatch, backup)
+
+    await _seed_chunks(async_pool, namespace="shared", agent_id="chief", n=1)
+    await _seed_chunks(async_pool, namespace="pipeline", agent_id="gitbob", n=1)
+    source = await mp.create_scope_snapshot(
+        namespace="shared",
+        caller_agent_id="chief",
+        agent_id="chief",
+    )
+    with pytest.raises(mp.MemoryProductConflictError, match="not empty"):
+        await mp.import_scope(
+            archive_id=source.archive_id,
+            target_namespace="pipeline",
+            caller_agent_id="gitbob",
+            target_agent_id="gitbob",
+        )
+
+
+@pytest.mark.asyncio
+async def test_import_rejects_oversized_chunk_count(async_pool, tmp_path, monkeypatch, rbac_config):
+    """Security: oversized archive rejected per ADR caps."""
+    from archivist.storage import memory_product as mp
+
+    backup = tmp_path / "backups"
+    backup.mkdir()
+    _map_backup_patches(monkeypatch, backup)
+    monkeypatch.setattr(mp, "MAP_IMPORT_MAX_CHUNKS", 1)
+
+    await _seed_chunks(async_pool, namespace="shared", agent_id="chief", n=2)
+    source = await mp.create_scope_snapshot(
+        namespace="shared",
+        caller_agent_id="chief",
+        agent_id="chief",
+    )
+    with pytest.raises(mp.MemoryProductConflictError, match="max chunks"):
+        await mp.import_scope(
+            archive_id=source.archive_id,
+            target_namespace="pipeline",
+            caller_agent_id="gitbob",
+            target_agent_id="gitbob",
+        )
+
+
+@pytest.mark.asyncio
+async def test_import_rejects_oversized_bytes(async_pool, tmp_path, monkeypatch, rbac_config):
+    """Security: archive byte cap rejected per ADR-011."""
+    from archivist.storage import memory_product as mp
+
+    backup = tmp_path / "backups"
+    backup.mkdir()
+    _map_backup_patches(monkeypatch, backup)
+    monkeypatch.setattr(mp, "MAP_IMPORT_MAX_BYTES", 10)
+
+    await _seed_chunks(async_pool, namespace="shared", agent_id="chief", n=1)
+    source = await mp.create_scope_snapshot(
+        namespace="shared",
+        caller_agent_id="chief",
+        agent_id="chief",
+    )
+    with pytest.raises(mp.MemoryProductConflictError, match="max bytes"):
+        await mp.import_scope(
+            archive_id=source.archive_id,
+            target_namespace="pipeline",
+            caller_agent_id="gitbob",
+            target_agent_id="gitbob",
+        )
+
+
+@pytest.mark.asyncio
+async def test_import_rejects_wrong_manifest_kind(async_pool, tmp_path, monkeypatch, rbac_config):
+    """Edge: corrupt / wrong MANIFEST_KIND fails closed."""
+    from archivist.storage import memory_product as mp
+    from archivist.storage.backup_manager import _snapshot_dir
+
+    backup = tmp_path / "backups"
+    backup.mkdir()
+    _map_backup_patches(monkeypatch, backup)
+
+    archive_id = "memprod_bad_kind"
+    snap = _snapshot_dir(archive_id)
+    snap.mkdir(parents=True)
+    (snap / "manifest.json").write_text(
+        json.dumps({"kind": "not_memory_scope", "manifest_version": 1}),
+        encoding="utf-8",
+    )
+    (snap / "chunks.ndjson").write_text("", encoding="utf-8")
+
+    with pytest.raises(mp.MemoryProductConflictError, match="unsupported archive kind"):
+        await mp.import_scope(
+            archive_id=archive_id,
+            target_namespace="pipeline",
+            caller_agent_id="gitbob",
+            target_agent_id="gitbob",
+        )

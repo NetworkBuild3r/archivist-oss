@@ -482,6 +482,39 @@ Fetch one grant by `grant_id` + `namespace`. Visible to proposer or recipient wi
 
 ---
 
+## Memory as a Product (6 tools)
+
+<!-- INIT-011/SPEC-005 · ADR-011 -->
+
+Versioned scope snapshot / fork / export / **import** — Diff #4 /
+[ADR-011](adr/ADR-011-memory-as-product-mcp.md). On **ops** and **full** (not **core**).
+Archives use opaque `archive_id` under `BACKUP_DIR` (no client absolute paths).
+Do not put secrets in manifests. Short recipe: [`demos/map-roundtrip.md`](demos/map-roundtrip.md).
+
+### archivist_map_list / archivist_map_get
+
+List or fetch scope versions. Requires `caller_agent_id` + namespace **read**.
+
+### archivist_map_snapshot
+
+Create a versioned archive of a memory scope (`namespace`, optional `agent_id` / `label`).
+
+### archivist_map_fork
+
+Fork a `source_version_id` into `target_namespace` (source **read** + target **write**).
+
+### archivist_map_export
+
+Export a scope or existing `version_id` to `BACKUP_DIR` (returns `archive_id`, path, manifest metadata).
+
+### archivist_map_import
+
+Restore `archive_id` into `target_namespace` (source namespace **read** from
+manifest + target **write**). Fail-closed if the target agent scope is already
+nonempty — fork into a fresh scope or clear first.
+
+---
+
 ## Intelligent Self-Curation (Diff #6)
 
 <!-- INIT-010/SPEC-005 · ADR-010 -->
@@ -530,6 +563,7 @@ Return the full Archivist agent skill reference (this document) or a single name
 11. **Hand off sessions** with `archivist_handoff` + `archivist_receive_handoff` to transfer context **and tips** between agents (primary tip-transfer channel)
 12. **Selectively share memories / tip_ids** with `archivist_share_propose` / `accept` / `reject` on **ops**/**full** (Diff #5 / ADR-009; not on **core**; does not replace handoff)
 13. **Attach conflict outcomes** with `archivist_share_attach_conflict` (`supersede` / `merge` / `keep_both`; optional `apply` → resolver; mutating apply needs write + `CONTRADICTION_RESOLVE_ENABLED`)
-14. **Self-curation** is flag-driven in the curator (Diff #6 / ADR-010) — do not invent core MCP tools; stage `RECONSOLIDATION_*` / `RELEVANCE_FORGET_*` / `CONTRADICTION_RESOLVE_*`
-15. **Resume agent state** with `archivist_checkpoint_save` + `archivist_checkpoint_resume` (**full** profile; use `replay` for chain inspection)
-16. **Monitor token savings** with `archivist_savings_dashboard` to confirm the Answer Finder is reducing noise
+14. **Version / fork / export / import memory scopes** with `archivist_map_*` on **ops**/**full** (Diff #4 / ADR-011; not on **core**; opaque `archive_id` under `BACKUP_DIR`)
+15. **Self-curation** is flag-driven in the curator (Diff #6 / ADR-010) — do not invent core MCP tools; stage `RECONSOLIDATION_*` / `RELEVANCE_FORGET_*` / `CONTRADICTION_RESOLVE_*`
+16. **Resume agent state** with `archivist_checkpoint_save` + `archivist_checkpoint_resume` (**full** profile; use `replay` for chain inspection)
+17. **Monitor token savings** with `archivist_savings_dashboard` to confirm the Answer Finder is reducing noise

@@ -128,7 +128,7 @@ do not use or reintroduce `archivist_*skill*` tools. Cross-agent lesson sharing:
 | Profile | Tip-related tools |
 |---------|-------------------|
 | **core** (default) | **Read** tips via `archivist_get_context` only. No `log_trajectory` / `archivist_tips` in core. |
-| **ops** / **full** | `archivist_log_trajectory` (extract tips), `archivist_tips` (direct tip list); **`archivist_share_*`** on ops+full for selective `tip_ids` / memory grants (ADR-009). No skill-registry tools (ADR-008). Checkpoints remain **full**-only. |
+| **ops** / **full** | `archivist_log_trajectory` (extract tips), `archivist_tips` (direct tip list); **`archivist_share_*`** on ops+full for selective `tip_ids` / memory grants (ADR-009); **`archivist_map_*`** on ops+full for Memory-as-Product snapshot/fork/export/import (ADR-011). No skill-registry tools (ADR-008). Checkpoints remain **full**-only. |
 
 CI procedure scenarios **seed** the `tips` table directly in the harness (no ops profile required).
 

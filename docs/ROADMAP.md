@@ -6,14 +6,16 @@
 
 **Next milestones (engineering)** — Unique Differentiators completion program
 ([BRAIN-005](../sdd/brainstorms/BRAIN-005-complete-unique-differentiators/decision-document.md)):
-**Immediate next — INIT-011** Diff **#4** MaP MCP → **INIT-012** Diff **#7**
-checkpoint productize → **INIT-013** Diff **#8** observability billboard.
-Diff **#6** Self-Curation **Done** ([INIT-010](../sdd/initiatives/INIT-010-intelligent-self-curation/) /
+**Immediate next — INIT-012** Diff **#7** checkpoint productize → **INIT-013** Diff
+**#8** observability billboard. Diff **#4** Memory as a Product **Done**
+([INIT-011](../sdd/initiatives/INIT-011-memory-as-product-mcp/) /
+[ADR-011](adr/ADR-011-memory-as-product-mcp.md)). Diff **#6** Self-Curation **Done**
+([INIT-010](../sdd/initiatives/INIT-010-intelligent-self-curation/) /
 [ADR-010](adr/ADR-010-intelligent-self-curation.md)). Diff **#5** (INIT-009 /
 [ADR-009](adr/ADR-009-native-multi-agent-coordination.md)) **merged** (PR #53).
 Tip-only lessons remain ([ADR-007](adr/ADR-007-procedural-memory-wedge.md) /
 [ADR-008](adr/ADR-008-retire-skills-tip-lessons.md)).
-<!-- BRAIN-005 / INIT-010/SPEC-005 -->
+<!-- BRAIN-005 / INIT-011/SPEC-005 -->
 
 ---
 
@@ -38,13 +40,13 @@ We now shift from “great retrieval” to “great memory system for collaborat
 | 1 | **Full Provenance & Actor-Aware Memory** | Every fact knows *who* said it, when, and with what confidence | Done (Phase 6) |
 | 2 | **Answer Finder — Token-Efficient Context** | Hierarchical tiers + token-budgeted packing + auto-compress; ≥60% token reduction vs naive retrieval | Done (v2.3.0) |
 | 3 | **Multi-Agent Handoff Protocol** | Typed `HandoffPacket` transfers session summary, goals, tips, and knowledge snapshot between agents | Done (v2.3.0) |
-| 4 | **Memory as a Product** | Versioned, exportable, forkable, auditable memory graphs (Git for agent knowledge) | **Partial** — service snapshot/fork/export (INIT-001/SPEC-009); MCP + import = **INIT-011** |
+| 4 | **Memory as a Product** | Versioned, exportable, forkable, auditable memory graphs (Git for agent knowledge) | **Done (INIT-011 / [ADR-011](adr/ADR-011-memory-as-product-mcp.md))** — `archivist_map_*` on **ops**/**full** (snapshot/fork/export/**import**); service from INIT-001/SPEC-009 |
 | 5 | **Native Multi-Agent Coordination** | Built-in shared/institutional *use* of memory with selective sharing, conflict resolution, and negotiation | **Done (INIT-009 / ADR-009 / PR #53)** — `share_*` on ops; tip_ids + handoff; conflict→resolver |
 | 6 | **Intelligent Self-Curation** | Automatic summarization, relevance-based forgetting, contradiction detection | **Done (INIT-010 / [ADR-010](adr/ADR-010-intelligent-self-curation.md))** — curator product loop: reconsolidation + relevance forget + contradiction resolve (safe defaults / staged enablement) |
 | 7 | **Full Checkpointing + Time-Travel** | LangGraph-style resume, replay, branch, human-in-the-loop | **Partial** — checkpoint MCP on **full** (resume/replay); ops/branch/HITL = **INIT-012** (not “Not started”) |
 | 8 | **Observability Dashboard** | Memory lineage, audit trails, cost tracking, visualization | **Partial** — JSON lineage/savings/audit; UI billboard = **INIT-013** |
 
-These six features combined will make Archivist the **most trustworthy and production-ready** memory layer.
+These eight features combined will make Archivist the **most trustworthy and production-ready** memory layer.
 
 ---
 
@@ -68,17 +70,20 @@ These six features combined will make Archivist the **most trustworthy and produ
 **Authoritative next work:** [BRAIN-005](../sdd/brainstorms/BRAIN-005-complete-unique-differentiators/decision-document.md)
 completion program — productize remaining Partial differentiators **one INIT at a time**.
 
-1. **Immediate next** — **INIT-011** Diff **#4** Memory-as-Product MCP (+ import)
-   ([BRAIN-005](../sdd/brainstorms/BRAIN-005-complete-unique-differentiators/decision-document.md)).
-   Then INIT-012 (#7 checkpoint ops/HITL/branch) → INIT-013 (#8 UI billboard).
-2. **Done** — Diff **#1–#3**, Diff **#5** (INIT-009 / PR #53), Diff **#6**
-   (INIT-010 / [ADR-010](adr/ADR-010-intelligent-self-curation.md)). Historical:
-   INIT-008…004. Foundational: INIT-001 / [ADR-001](adr/ADR-001-platform-coherence-sequencing.md),
+1. **Immediate next** — **INIT-012** Diff **#7** checkpoint productize
+   (ops promotion / branch UX / HITL; institutional tier DDL only if ADR-012
+   locks it). Then **INIT-013** Diff **#8** observability billboard.
+2. **Done** — Diff **#1–#6** including Diff **#4** (INIT-011 /
+   [ADR-011](adr/ADR-011-memory-as-product-mcp.md)), Diff **#5** (INIT-009 /
+   PR #53), Diff **#6** (INIT-010 / [ADR-010](adr/ADR-010-intelligent-self-curation.md)).
+   Historical: INIT-008…004. Foundational: INIT-001 /
+   [ADR-001](adr/ADR-001-platform-coherence-sequencing.md),
    INIT-003 / [ADR-003](adr/ADR-003-coach-core-reliability.md).
-3. **Still Partial until their INIT** — #4 MaP MCP, #7 checkpoint ops/HITL/branch,
+3. **Still Partial until their INIT** — #7 checkpoint ops/HITL/branch,
    #8 UI billboard. Phase 7 institutional **tier DDL** only if INIT-012 ADR includes it.
    Skill OS remains cancelled (ADR-008).
 4. Optional: domain-specific long-document fixture locally (keep private data out of repo).
+   Short MaP round-trip recipe: [`demos/map-roundtrip.md`](demos/map-roundtrip.md).
 
 ---
 
@@ -163,5 +168,5 @@ Expected console flow: `Encoding Batch …` → tqdm batch bar → nDCG / MAP / 
 
 _Add new rows when you change default embed models, BEIR limits, or the thin harness._
 
-**Last Updated**: INIT-010/SPEC-005 — Diff #6 Self-Curation Done; Immediate Next → INIT-011 (2026-07-27)
+**Last Updated**: INIT-011/SPEC-005 — Diff #4 Memory as a Product Done; Immediate Next → INIT-012 (2026-07-27)
 **Goal**: Become the most trustworthy, observable, and production-ready multi-agent memory system in 2026.

@@ -1,4 +1,4 @@
-"""Smoke tests for all 47 MCP tool handlers across handler modules.
+"""Smoke tests for all MCP tool handlers across handler modules.
 
 Each test calls the handler directly (no MCP transport), mocks all external I/O,
 and asserts the response is a valid ``list[TextContent]`` with:
@@ -99,6 +99,13 @@ _ALL_EXPECTED_TOOLS = [
     "archivist_share_get",
     # tools_docs (1)
     "archivist_get_reference_docs",
+    # tools_memory_product (6) — INIT-011/SPEC-003
+    "archivist_map_list",
+    "archivist_map_get",
+    "archivist_map_snapshot",
+    "archivist_map_fork",
+    "archivist_map_export",
+    "archivist_map_import",
 ]
 
 
@@ -112,6 +119,7 @@ def test_tool_registered_in_handlers(tool_name: str) -> None:
         tools_context,
         tools_coordination,
         tools_docs,
+        tools_memory_product,
         tools_search,
         tools_storage,
         tools_trajectory,
@@ -128,6 +136,7 @@ def test_tool_registered_in_handlers(tool_name: str) -> None:
         tools_checkpoint,
         tools_coordination,
         tools_docs,
+        tools_memory_product,
     ):
         all_handlers.update(mod.HANDLERS)  # type: ignore[arg-type]
 
