@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Archivist — Observability</title>
+  <!-- INIT-013/SPEC-003 -->
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="shell">
+    <header class="top">
+      <div class="brand">
+        <p class="brand-mark">Archivist</p>
+        <h1>Observability</h1>
+        <p class="lede">Lineage, audit, savings, and retrieval — read-only control plane.</p>
+      </div>
+      <form id="auth-form" class="auth" autocomplete="off">
+        <label for="api-key">API key</label>
+        <input id="api-key" name="api-key" type="password" placeholder="X-API-Key (optional if server open)" />
+        <label class="check">
+          <input id="remember-key" type="checkbox" />
+          Remember in sessionStorage
+        </label>
+        <button type="submit">Apply</button>
+        <p id="auth-status" class="auth-status" role="status"></p>
+      </form>
+    </header>
+
+    <nav class="tabs" role="tablist" aria-label="Panels">
+      <button type="button" role="tab" aria-selected="true" data-panel="health">Health &amp; savings</button>
+      <button type="button" role="tab" aria-selected="false" data-panel="lineage">Lineage</button>
+      <button type="button" role="tab" aria-selected="false" data-panel="audit">Audit</button>
+      <button type="button" role="tab" aria-selected="false" data-panel="retrieval">Retrieval</button>
+    </nav>
+
+    <main>
+      <section id="panel-health" class="panel active" role="tabpanel">
+        <div class="panel-head">
+          <h2>Health &amp; savings</h2>
+          <button type="button" id="btn-refresh-health">Refresh</button>
+        </div>
+        <div id="kpi-row" class="kpi-row"></div>
+        <pre id="health-detail" class="code-block" hidden></pre>
+      </section>
+
+      <section id="panel-lineage" class="panel" role="tabpanel" hidden>
+        <div class="panel-head">
+          <h2>Lineage</h2>
+        </div>
+        <form id="lineage-form" class="filters">
+          <label>Memory id <input name="memory_id" /></label>
+          <label>Entity id <input name="entity_id" /></label>
+          <label>Namespace <input name="namespace" /></label>
+          <label>Agent id <input name="agent_id" placeholder="RBAC caller" /></label>
+          <label>Limit <input name="limit" type="number" value="50" min="1" max="200" /></label>
+          <button type="submit">Load</button>
+        </form>
+        <div id="lineage-meta" class="meta"></div>
+        <div id="lineage-edges" class="list"></div>
+      </section>
+
+      <section id="panel-audit" class="panel" role="tabpanel" hidden>
+        <div class="panel-head">
+          <h2>Audit trail</h2>
+        </div>
+        <form id="audit-form" class="filters">
+          <label>Memory id <input name="memory_id" /></label>
+          <label>Agent id <input name="agent_id" /></label>
+          <label>Limit <input name="limit" type="number" value="50" min="1" max="200" /></label>
+          <button type="submit">Load</button>
+        </form>
+        <div id="audit-meta" class="meta"></div>
+        <div id="audit-entries" class="list"></div>
+      </section>
+
+      <section id="panel-retrieval" class="panel" role="tabpanel" hidden>
+        <div class="panel-head">
+          <h2>Retrieval logs</h2>
+          <button type="button" id="btn-refresh-retrieval">Refresh</button>
+        </div>
+        <form id="retrieval-form" class="filters">
+          <label>Agent id <input name="agent_id" /></label>
+          <label>Limit <input name="limit" type="number" value="50" min="1" max="200" /></label>
+          <button type="submit">Load</button>
+        </form>
+        <div id="retrieval-meta" class="meta"></div>
+        <div id="retrieval-rows" class="list"></div>
+      </section>
+    </main>
+
+    <footer>
+      <p>Read-only billboard · Diff #8 · Set <code>ARCHIVIST_API_KEY</code> on shared networks.</p>
+    </footer>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

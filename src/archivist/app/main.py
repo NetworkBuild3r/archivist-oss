@@ -8,6 +8,7 @@ import sys
 import time
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from pathlib import Path
 
 from mcp.server.sse import SseServerTransport
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
@@ -16,9 +17,11 @@ from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse, PlainTextResponse, Response
 from starlette.routing import Mount, Route
+from starlette.staticfiles import StaticFiles
 from watchfiles import Change, awatch
 
 import archivist.core.health as health
+from archivist.app.admin_observability import handle_audit, handle_lineage
 from archivist.app.mcp_server import server
 from archivist.core.config import (
     ARCHIVIST_API_KEY,
@@ -736,6 +739,9 @@ _sse_routes = (
     else []
 )
 
+# INIT-013/SPEC-002 — Diff #8 billboard static assets
+_ADMIN_UI_DIR = Path(__file__).resolve().parent / "static" / "admin_ui"
+
 app = Starlette(
     routes=[
         Route("/health", handle_health),
@@ -744,6 +750,8 @@ app = Starlette(
         Route("/admin/invalidate", handle_invalidate, methods=["POST", "GET"]),
         Route("/admin/retrieval-logs", handle_retrieval_export),
         Route("/admin/dashboard", handle_dashboard),
+        Route("/admin/lineage", handle_lineage, methods=["GET"]),
+        Route("/admin/audit", handle_audit, methods=["GET"]),
         Route("/admin/namespace-index", handle_namespace_index, methods=["GET"]),
         Route("/admin/backup", handle_backup_create, methods=["POST"]),
         Route("/admin/backups", handle_backup_list, methods=["GET"]),
@@ -751,6 +759,9 @@ app = Starlette(
         Route("/admin/backup/{snapshot_id}", handle_backup_delete, methods=["DELETE"]),
         Route("/admin/export-agent", handle_agent_export, methods=["POST"]),
         Route("/admin/import-agent", handle_agent_import, methods=["POST"]),
+        Mount(
+            "/admin/ui", app=StaticFiles(directory=str(_ADMIN_UI_DIR), html=True), name="admin_ui"
+        ),
         Route("/mcp", endpoint=streamable_http_app, methods=["GET", "POST", "DELETE"]),
         *_sse_routes,
     ],
