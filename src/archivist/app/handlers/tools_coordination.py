@@ -1,22 +1,30 @@
-"""MCP tool handlers — Phase 10 selective share + consensus (beyond handoff).
+"""MCP tool handlers — Phase 10 selective share + Diff #5 productize.
 
 Extends multi-agent coordination without replacing ``archivist_handoff`` /
-``archivist_receive_handoff`` (GR-003). Consensus v1 = explicit accept/reject
-plus audit trail; conflict outcomes use SPEC-006 resolution action types.
+``archivist_receive_handoff`` (GR-HANDOFF-001 / GR-003). Consensus v1 =
+explicit accept/reject plus audit trail; conflict outcomes use
+``contradiction_resolve.ResolutionAction`` types and may optionally apply
+a resolution (dry-run by default).
+
+Procedural lessons: tips travel in ``HandoffPacket``; selective share may
+also carry ``tip_ids`` (metadata) alongside ``memory_ids`` / ``scope``.
 
 Security: propose cannot escalate beyond proposer's read rights; accept cannot
 write into an unauthorized namespace; every mutation is audited.
 
-Provenance: INIT-001/SPEC-010.
+Provenance: INIT-001/SPEC-010; INIT-009/SPEC-002 (ops profile + conflict wire);
+INIT-009/SPEC-005 (apply write gate + tip_ids metadata hardening).
 """
 
 from __future__ import annotations
 
 import json
 import logging
-from typing import Any
+from typing import Any, get_args
 
 from mcp.types import TextContent, Tool
+
+from archivist.lifecycle.contradiction_resolve import ResolutionAction
 
 from ._common import (
     error_response,
@@ -28,9 +36,10 @@ from ._common import (
 
 logger = logging.getLogger("archivist.mcp")
 
-# SPEC-006 ResolutionAction set — keep in sync with contradiction_resolve.
-_RESOLUTION_ACTIONS = frozenset({"supersede", "merge", "keep_both"})
+# Single source of truth with lifecycle/contradiction_resolve (INIT-009/SPEC-002).
+_RESOLUTION_ACTIONS = frozenset(get_args(ResolutionAction))
 _MAX_MEMORY_IDS = 500
+_MAX_TIP_IDS = 500
 _MAX_REASON_CHARS = 4000
 _MAX_METADATA_BYTES = 64 * 1024
 _MAX_MERGE_TEXT_CHARS = 64 * 1024
@@ -45,7 +54,9 @@ TOOLS: list[Tool] = [
         description=(
             "Propose a selective share of memory IDs and/or a scope to another agent. "
             "Creates a pending grant; the recipient must accept or reject. "
-            "Does not replace archivist_handoff (GR-003). "
+            "Does not replace archivist_handoff (GR-HANDOFF-001). "
+            "Procedural lessons: tip strings travel in HandoffPacket; optional tip_ids "
+            "on this propose carry tip identifiers for selective lesson share. "
             "Proposer must have read access to the source namespace."
         ),
         inputSchema={
@@ -66,7 +77,15 @@ TOOLS: list[Tool] = [
                 "memory_ids": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Selective memory IDs to share (optional if scope set).",
+                    "description": "Selective memory IDs to share (optional if scope/tip_ids set).",
+                },
+                "tip_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Optional tip/lesson IDs to share (stored on grant metadata; "
+                        "handoff remains the primary tip-transfer channel)."
+                    ),
                 },
                 "scope": {
                     "type": "string",
@@ -167,9 +186,12 @@ TOOLS: list[Tool] = [
     Tool(
         name="archivist_share_attach_conflict",
         description=(
-            "Attach a conflict/consensus outcome to a share grant using SPEC-006 "
-            "resolution action types: supersede | merge | keep_both. "
-            "Proposer or recipient may attach; namespace read required."
+            "Attach a conflict/consensus outcome to a share grant using "
+            "contradiction_resolve ResolutionAction types: supersede | merge | keep_both. "
+            "Proposer or recipient may attach; namespace read required. "
+            "Optional apply=true builds a ResolutionProposal and calls apply_resolution "
+            "(dry_run defaults true). Mutating apply (dry_run=false) requires namespace "
+            "write, CONTRADICTION_RESOLVE_ENABLED, and facts bound to entity_id+namespace."
         ),
         inputSchema={
             "type": "object",
@@ -189,7 +211,7 @@ TOOLS: list[Tool] = [
                 "action": {
                     "type": "string",
                     "enum": ["supersede", "merge", "keep_both"],
-                    "description": "SPEC-006 ResolutionAction (required).",
+                    "description": "ResolutionAction (required).",
                 },
                 "reason": {
                     "type": "string",
@@ -206,6 +228,24 @@ TOOLS: list[Tool] = [
                 "merge_text": {
                     "type": "string",
                     "description": "Merged text when action=merge.",
+                },
+                "entity_id": {
+                    "type": "integer",
+                    "description": "Entity id required when apply=true.",
+                },
+                "apply": {
+                    "type": "boolean",
+                    "description": (
+                        "When true, invoke contradiction_resolve.apply_resolution "
+                        "with a proposal built from this outcome (default false)."
+                    ),
+                },
+                "dry_run": {
+                    "type": "boolean",
+                    "description": (
+                        "When apply=true, dry-run the resolution (default true). "
+                        "dry_run=false requires namespace write + resolve enabled."
+                    ),
                 },
                 "metadata": {
                     "type": "object",
@@ -273,19 +313,32 @@ def _json_size_bytes(obj: Any) -> int:
 
 def _normalize_memory_ids(raw: Any) -> tuple[list[str] | None, list[TextContent] | None]:
     """Return ``(ids, None)`` on success or ``(None, error_response)`` on failure."""
+    return _normalize_id_list(raw, field="memory_ids", max_count=_MAX_MEMORY_IDS)
+
+
+def _normalize_id_list(
+    raw: Any,
+    *,
+    field: str,
+    max_count: int,
+) -> tuple[list[str] | None, list[TextContent] | None]:
+    """Normalize a string-id array field (memory_ids / tip_ids)."""
     if raw is None:
         return [], None
     if not isinstance(raw, list):
         return None, error_response(
-            {"error": "invalid_memory_ids", "reason": "memory_ids must be an array of strings"}
+            {
+                "error": f"invalid_{field}",
+                "reason": f"{field} must be an array of strings",
+            }
         )
-    if len(raw) > _MAX_MEMORY_IDS:
+    if len(raw) > max_count:
         return None, error_response(
             {
-                "error": "memory_ids_too_many",
-                "reason": f"memory_ids exceeds {_MAX_MEMORY_IDS}",
+                "error": f"{field}_too_many",
+                "reason": f"{field} exceeds {max_count}",
                 "count": len(raw),
-                "max": _MAX_MEMORY_IDS,
+                "max": max_count,
             }
         )
     out: list[str] = []
@@ -321,6 +374,50 @@ async def _audit_share(
 
 def _party_of_grant(caller: str, record: Any) -> bool:
     return caller in (record.proposer_agent_id, record.recipient_agent_id)
+
+
+async def _facts_bound_to_entity_namespace(
+    fact_ids: list[int],
+    *,
+    entity_id: int,
+    namespace: str,
+) -> list[TextContent] | None:
+    """Reject apply when any fact is missing or outside entity_id+namespace (SEC-009-01)."""
+    from archivist.storage.sqlite_pool import pool
+
+    async with pool.read() as conn:
+        for fid in fact_ids:
+            row = await conn.fetchone(
+                "SELECT id, entity_id, namespace FROM facts WHERE id=?",
+                (fid,),
+            )
+            if row is None:
+                return error_response(
+                    {
+                        "error": "fact_not_found",
+                        "reason": f"fact id {fid} does not exist",
+                        "fact_id": fid,
+                    }
+                )
+            if int(row["entity_id"]) != int(entity_id):
+                return error_response(
+                    {
+                        "error": "fact_entity_mismatch",
+                        "reason": "fact does not belong to entity_id",
+                        "fact_id": fid,
+                        "entity_id": entity_id,
+                    }
+                )
+            if (row["namespace"] or "") != namespace:
+                return error_response(
+                    {
+                        "error": "fact_namespace_mismatch",
+                        "reason": "fact does not belong to grant namespace",
+                        "fact_id": fid,
+                        "namespace": namespace,
+                    }
+                )
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -363,12 +460,21 @@ async def _handle_share_propose(arguments: dict) -> list[TextContent]:
         return mem_err
     assert memory_ids is not None
 
+    tip_ids, tip_err = _normalize_id_list(
+        arguments.get("tip_ids"),
+        field="tip_ids",
+        max_count=_MAX_TIP_IDS,
+    )
+    if tip_err is not None:
+        return tip_err
+    assert tip_ids is not None
+
     scope = (arguments.get("scope") or "").strip()
-    if not memory_ids and not scope:
+    if not memory_ids and not scope and not tip_ids:
         return error_response(
             {
                 "error": "share_target_required",
-                "reason": "Provide memory_ids and/or scope for a selective share",
+                "reason": "Provide memory_ids, tip_ids, and/or scope for a selective share",
             }
         )
 
@@ -381,8 +487,19 @@ async def _handle_share_propose(arguments: dict) -> list[TextContent]:
             )
         if _json_size_bytes(metadata) > _MAX_METADATA_BYTES:
             return error_response({"error": "metadata_too_large"})
+        metadata = dict(metadata)
+        # SEC-009-02: tip_ids are server-set only from the tip_ids argument —
+        # ignore client-supplied metadata.tip_ids to prevent limit bypass.
+        metadata.pop("tip_ids", None)
+        metadata.pop("lesson_channel", None)
     else:
         metadata = {}
+
+    # Tip/lesson share path (INIT-009/SPEC-002): tip_ids ride on grant metadata;
+    # handoff remains the primary tip-transfer channel (GR-HANDOFF-001).
+    if tip_ids:
+        metadata["tip_ids"] = tip_ids
+        metadata["lesson_channel"] = "tips"
 
     try:
         record = await sg.create_share_grant(
@@ -408,6 +525,7 @@ async def _handle_share_propose(arguments: dict) -> list[TextContent]:
         metadata={
             "recipient_agent_id": recipient,
             "memory_id_count": len(record.memory_ids),
+            "tip_id_count": len(tip_ids),
             "scope": scope,
             "status": record.status,
         },
@@ -505,6 +623,15 @@ async def _handle_share_accept(arguments: dict) -> list[TextContent]:
         if record.scope:
             ss.put(recipient, session_id, "share_scope", record.scope)
             injected.append("share_scope")
+        tip_ids = record.metadata.get("tip_ids") if isinstance(record.metadata, dict) else None
+        if isinstance(tip_ids, list) and tip_ids:
+            ss.put(
+                recipient,
+                session_id,
+                "share_tip_ids",
+                json.dumps(tip_ids, separators=(",", ":")),
+            )
+            injected.append("share_tip_ids")
 
     await _audit_share(
         agent_id=caller,
@@ -523,8 +650,10 @@ async def _handle_share_accept(arguments: dict) -> list[TextContent]:
             "grant": sg.record_to_dict(record),
             "injected_keys": injected,
             "hint": (
-                "Pass share_memory_ids to archivist_get_context as extra_memory_ids; "
-                "existing archivist_handoff / archivist_receive_handoff remain unchanged."
+                "Pass share_memory_ids to archivist_get_context as extra_memory_ids. "
+                "Procedural lessons: tips travel via archivist_handoff / "
+                "archivist_receive_handoff; tip_ids on the grant metadata are the "
+                "selective tip-share channel (INIT-009)."
             ),
         },
         default=str,
@@ -692,6 +821,87 @@ async def _handle_share_attach_conflict(arguments: dict) -> list[TextContent]:
             }
         )
 
+    apply = bool(arguments.get("apply", False))
+    resolution_payload: dict[str, Any] | None = None
+    dry_run_effective: bool | None = None
+    pending_apply: dict[str, Any] | None = None
+    if apply:
+        from archivist.core.config import CONTRADICTION_RESOLVE_ENABLED
+
+        entity_raw = arguments.get("entity_id")
+        try:
+            entity_id = int(entity_raw)
+        except (TypeError, ValueError):
+            return error_response(
+                {
+                    "error": "entity_id_required",
+                    "reason": "entity_id (int) is required when apply=true",
+                }
+            )
+        fact_a = arguments.get("winner_fact_id")
+        fact_b = arguments.get("loser_fact_id")
+        if action == "merge" and not (merge_text or "").strip():
+            return error_response(
+                {
+                    "error": "merge_text_required",
+                    "reason": "merge_text is required when apply=true and action=merge",
+                }
+            )
+        try:
+            fact_a_id = int(fact_a)
+            fact_b_id = int(fact_b)
+        except (TypeError, ValueError):
+            return error_response(
+                {
+                    "error": "fact_ids_required",
+                    "reason": (
+                        "winner_fact_id and loser_fact_id (int pair members) "
+                        "are required when apply=true"
+                    ),
+                }
+            )
+
+        dry_run_effective = (
+            True if arguments.get("dry_run") is None else bool(arguments.get("dry_run"))
+        )
+        # SEC-009-01 / SEC-009-04: mutating apply needs write RBAC + master resolve flag.
+        if not dry_run_effective:
+            if denied := require_rbac(caller, "write", namespace):
+                return denied
+            if not CONTRADICTION_RESOLVE_ENABLED:
+                return error_response(
+                    {
+                        "error": "resolve_disabled",
+                        "reason": (
+                            "CONTRADICTION_RESOLVE_ENABLED must be true for "
+                            "apply=true with dry_run=false"
+                        ),
+                    }
+                )
+            if bound_err := await _facts_bound_to_entity_namespace(
+                [fact_a_id, fact_b_id],
+                entity_id=entity_id,
+                namespace=namespace,
+            ):
+                return bound_err
+
+        pending_apply = {
+            "action": action,
+            "entity_id": entity_id,
+            "fact_a_id": fact_a_id,
+            "fact_b_id": fact_b_id,
+            "merge_text": merge_text,
+            "dry_run": dry_run_effective,
+        }
+        outcome["resolution"] = {
+            "pending_apply": True,
+            "dry_run": dry_run_effective,
+            "entity_id": entity_id,
+            "fact_a_id": fact_a_id,
+            "fact_b_id": fact_b_id,
+        }
+
+    # SEC-009-03: persist conflict outcome before any graph mutation.
     try:
         record = await sg.attach_conflict_outcome(grant_id, namespace=namespace, outcome=outcome)
     except ValueError as exc:
@@ -705,14 +915,71 @@ async def _handle_share_attach_conflict(arguments: dict) -> list[TextContent]:
             {"error": "not_found", "reason": "share grant not found in namespace"}
         )
 
+    if pending_apply is not None:
+        from archivist.lifecycle.contradiction_resolve import (
+            ResolutionProposal,
+            apply_resolution,
+        )
+
+        proposal = ResolutionProposal(
+            action=pending_apply["action"],  # type: ignore[arg-type]
+            entity_id=pending_apply["entity_id"],
+            namespace=namespace,
+            fact_a_id=pending_apply["fact_a_id"],
+            fact_b_id=pending_apply["fact_b_id"],
+            winner_fact_id=(
+                pending_apply["fact_a_id"]
+                if pending_apply["action"] == "supersede"
+                else None
+            ),
+            loser_fact_id=(
+                pending_apply["fact_b_id"]
+                if pending_apply["action"] == "supersede"
+                else None
+            ),
+            merge_text=(
+                pending_apply["merge_text"]
+                if pending_apply["action"] == "merge"
+                else None
+            ),
+            reason=outcome["reason"] or "share_attach_conflict apply",
+            rule="share_attach_conflict",
+            trigger="share_grant",
+        )
+        try:
+            applied = await apply_resolution(
+                proposal,
+                dry_run=pending_apply["dry_run"],
+                agent_id=caller,
+            )
+        except Exception as exc:
+            logger.exception("share_attach_conflict apply_resolution failed")
+            return error_response(
+                {
+                    "error": "resolution_apply_failed",
+                    "reason": str(exc),
+                    "grant": sg.record_to_dict(record),
+                    "partial": "conflict_outcome_attached",
+                }
+            )
+        resolution_payload = applied.to_dict()
+
     await _audit_share(
         agent_id=caller,
         action="share_attach_conflict",
         grant_id=record.id,
         namespace=namespace,
-        metadata={"resolution_action": action, "grant_status": record.status},
+        metadata={
+            "resolution_action": action,
+            "grant_status": record.status,
+            "apply": apply,
+            "dry_run": dry_run_effective,
+        },
     )
-    return success_response({"grant": sg.record_to_dict(record)}, default=str)
+    payload: dict[str, Any] = {"grant": sg.record_to_dict(record)}
+    if resolution_payload is not None:
+        payload["resolution"] = resolution_payload
+    return success_response(payload, default=str)
 
 
 async def _handle_share_get(arguments: dict) -> list[TextContent]:

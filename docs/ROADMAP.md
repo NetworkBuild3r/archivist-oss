@@ -4,20 +4,20 @@
 
 **Goal** — Be the most **trustworthy and production-ready** open multi-agent memory layer in 2026: observable, RBAC-aware, safe under fleet load, and the best answer finder in the industry.
 
-**Next milestones (engineering)** — Immediate focus is **INIT-008** /
-[ADR-008](adr/ADR-008-retire-skills-tip-lessons.md): **retire the skill
-registry** (MCP tools, wiring, docs, tests) and freeze **tip-only lessons**
-(trajectory → tips → `get_context` / handoff). Next mechanism bet after
-retirement is Unique Differentiator **#5** (Native Multi-Agent Coordination) as
-**INIT-009** — not a skill OS, not a skill↔tips bridge, not Phase 7–10 breadth.
-INIT-007 / [ADR-007](adr/ADR-007-procedural-memory-wedge.md) (PR #49), INIT-006 /
+**Next milestones (engineering)** — **INIT-009** / [ADR-009](adr/ADR-009-native-multi-agent-coordination.md)
+(Diff #5 productize: `share_*` on **ops**, conflict→resolver, tip/lesson share via
+handoff + `tip_ids`) is **complete** (architecture:
+[`INIT-009-…-architecture.md`](../sdd/initiatives/INIT-009-native-multi-agent-coordination/design/INIT-009-native-multi-agent-coordination-architecture.md)).
+Suggested next differentiator wedge: Unique Differentiator **#6** (Intelligent
+Self-Curation / hierarchical reconsolidation) — choose explicitly; do not
+auto-start. INIT-008 / [ADR-008](adr/ADR-008-retire-skills-tip-lessons.md)
+(PR #52), INIT-007 / [ADR-007](adr/ADR-007-procedural-memory-wedge.md) (PR #49), INIT-006 /
 [ADR-006](adr/ADR-006-agentic-memory-eval-gym.md) (PR #48), INIT-005 /
 [ADR-005](adr/ADR-005-coach-path-performance.md), and INIT-004 /
-[ADR-004](adr/ADR-004-llm-native-coach-memory-surfaces.md) are **complete /
-historical**. (INIT-001 / [ADR-001](adr/ADR-001-platform-coherence-sequencing.md)
-and INIT-003 / [ADR-003](adr/ADR-003-coach-core-reliability.md) remain
-foundational context.)
-<!-- INIT-008/SPEC-001 -->
+[ADR-004](adr/ADR-004-llm-native-coach-memory-surfaces.md) are **historical**.
+(INIT-001 / [ADR-001](adr/ADR-001-platform-coherence-sequencing.md)
+and INIT-003 / [ADR-003](adr/ADR-003-coach-core-reliability.md) remain foundational.)
+<!-- INIT-009/SPEC-006 -->
 
 ---
 
@@ -43,7 +43,7 @@ We now shift from “great retrieval” to “great memory system for collaborat
 | 2 | **Answer Finder — Token-Efficient Context** | Hierarchical tiers + token-budgeted packing + auto-compress; ≥60% token reduction vs naive retrieval | Done (v2.3.0) |
 | 3 | **Multi-Agent Handoff Protocol** | Typed `HandoffPacket` transfers session summary, goals, tips, and knowledge snapshot between agents | Done (v2.3.0) |
 | 4 | **Memory as a Product** | Versioned, exportable, forkable, auditable memory graphs (Git for agent knowledge) | In progress (service core — INIT-001/SPEC-009) |
-| 5 | **Native Multi-Agent Coordination** | Built-in shared/institutional memory with selective sharing, conflict resolution, and negotiation | Not started |
+| 5 | **Native Multi-Agent Coordination** | Built-in shared/institutional *use* of memory with selective sharing, conflict resolution, and negotiation | **Productized (INIT-009 / ADR-009)** — `share_*` on ops; tip_ids + handoff tip share; conflict apply→resolver |
 | 6 | **Intelligent Self-Curation** | Automatic summarization, relevance-based forgetting, contradiction detection | Partial |
 | 7 | **Full Checkpointing + Time-Travel** | LangGraph-style resume, replay, branch, human-in-the-loop | Not started |
 | 8 | **Observability Dashboard** | Memory lineage, audit trails, cost tracking, visualization | Partial (token savings heatmap done) |
@@ -61,38 +61,34 @@ These six features combined will make Archivist the **most trustworthy and produ
 | **7** | Multi-Tier Memory + Checkpointing | Explicit tiers (working/episodic/semantic/procedural/institutional) + LangGraph-style checkpointing | 2–3 weeks | — | Full tier support + time-travel/resume |
 | **8** | Intelligent Lifecycle Management | Auto-summarization, relevance-based forgetting, contradiction resolution, reflection loops | 3–4 weeks | — | Self-curation works without manual tuning |
 | **9** | Observability & Control Plane | Memory explorer dashboard, audit logs, cost tracking, lineage visualization | 2–3 weeks | — | Full visibility into memory state |
-| **10** | Multi-Agent Coordination Primitives | Built-in planner/researcher/executor/verifier patterns with shared memory & consensus | 2–3 weeks | — | Native support for complex agent teams |
+| **10** | Multi-Agent Coordination Primitives | Selective share + accept/reject consensus (`archivist_share_*`; INIT-001/SPEC-010) | 2–3 weeks | Plumbing done | Diff #5 product maturity = INIT-009 (not a second invent) |
 
 ---
 
 ## Immediate Next Steps (Recommended)
 
-<!-- INIT-008/SPEC-001 -->
+<!-- INIT-009/SPEC-006 -->
 
-**Authoritative next work:** [ADR-008: Retire skill registry; tip-only
-lessons](adr/ADR-008-retire-skills-tip-lessons.md) (**INIT-008**) — remove the
-six skill-registry MCP tools and related wiring/docs/tests; keep procedural
-lessons on the ADR-007 tip path only. Do **not** bridge `skill_lessons` into
-tips, keep deprecated skill tools, or treat a skill OS / Phase 7–10 dump as the
-plan.
+**Authoritative next work (suggested):** Unique Differentiator **#6 Intelligent
+Self-Curation** (hierarchical reconsolidation / contradiction depth) — park until
+chosen as a formal INIT. Do **not** invent a skill OS; tip-only lessons remain
+([ADR-007](adr/ADR-007-procedural-memory-wedge.md) / [ADR-008](adr/ADR-008-retire-skills-tip-lessons.md)).
 
-1. **Retire skills / tip-only lessons (INIT-008)** — ADR-008 freeze, then delete
-   skill MCP surface + feature module, fix tests, rewrite product docs, security
-   review, architecture diagrams.
-2. **Next after INIT-008 (INIT-009)** — Unique Differentiator **#5 Native
-   Multi-Agent Coordination** (selective sharing / conflict / institutional
-   memory; share lessons via memory/`share_*` + handoff — not skills).
-3. **Complete / historical (not next)** — **INIT-007** (procedural tips wedge /
-   ADR-007, PR #49), **INIT-006** (agentic eval gym / ADR-006), **INIT-005**
-   (coach-path performance / ADR-005), **INIT-004** (LLM-native coach surfaces /
-   ADR-004). Foundational context: INIT-001 /
+1. **Suggested next (not started)** — Diff **#6** Self-Curation / reconsolidation
+   (choose INIT explicitly after INIT-009 Mode E / merge).
+2. **Complete — INIT-009** Diff #5 productize /
+   [ADR-009](adr/ADR-009-native-multi-agent-coordination.md) (`share_*` on ops,
+   conflict→resolver, tip/lesson share; architecture diagrams under
+   `sdd/initiatives/INIT-009-…/design/`). Historical: **INIT-008** (PR #52),
+   **INIT-007** (PR #49), **INIT-006**…**INIT-004**. Foundational: INIT-001 /
    [ADR-001](adr/ADR-001-platform-coherence-sequencing.md), INIT-003 /
    [ADR-003](adr/ADR-003-coach-core-reliability.md).
-4. **Parked for later (not next)** — Hierarchical reconsolidation (Diff #6),
-   Memory-as-Product finish (Diff #4), Phase 7 checkpoint UX (Diff #7), MaP /
-   recipe demos, Phase 9 observability billboard (Diff #8). **Skill-registry ↔
-   tips bridge is cancelled** (ADR-008).
-5. Optional: add a **domain-specific long-document fixture** (your own docs +
+3. **Parked for later** — Memory-as-Product finish (Diff #4), Phase 7 checkpoint
+   UX / institutional **tier** (Diff #7 — **future only**; not part of Diff #5),
+   MaP / recipe demos, Phase 9 observability billboard (Diff #8). Skill↔tips
+   bridge cancelled (ADR-008). Phase 10 `share_*` plumbing + Diff #5 product
+   maturity = INIT-009.
+4. Optional: add a **domain-specific long-document fixture** (your own docs +
    questions) locally to tune retrieval beyond the public toy corpus — keep
    private data out of the public repo.
 
@@ -163,7 +159,7 @@ reclaim the two extra routes.
 - [ ] Phase 7 — Multi-tier memory + checkpointing
 - [ ] Phase 8 — Intelligent Lifecycle Management
 - [ ] Phase 9 — Observability & Control Plane
-- [x] Phase 10 — Multi-Agent Coordination Primitives (`archivist_share_*`; INIT-001/SPEC-010)
+- [x] Phase 10 — Multi-Agent Coordination Primitives plumbing (`archivist_share_*`; INIT-001/SPEC-010) + Diff #5 **product** (INIT-009 / ADR-009)
 
 ---
 
@@ -179,5 +175,5 @@ Expected console flow: `Encoding Batch …` → tqdm batch bar → nDCG / MAP / 
 
 _Add new rows when you change default embed models, BEIR limits, or the thin harness._
 
-**Last Updated**: April 25, 2026 (content); doc-coherence pass 2026-07-24 (INIT-001/SPEC-001 — Phase 6.5 revised per PR #39, sequencing cross-linked to ADR-001)
+**Last Updated**: INIT-009 Diff #5 complete (SPEC-006 architecture); Immediate Next → Diff #6 suggested (2026-07-26)
 **Goal**: Become the most trustworthy, observable, and production-ready multi-agent memory system in 2026.

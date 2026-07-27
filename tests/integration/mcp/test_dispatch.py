@@ -128,3 +128,38 @@ class TestDispatch:
         result = await dispatch_tool("archivist_namespaces", {"agent_id": "chief"})
         data = json.loads(result[0].text)
         assert "accessible_namespaces" in data
+
+
+class TestProfileShareVisibility:
+    """INIT-009/SPEC-003: share_* on ops, blocked on core."""
+
+    async def test_share_propose_available_under_ops(self, monkeypatch):
+        import archivist.core.config as config
+        from archivist.app.handlers._registry import dispatch_tool
+
+        monkeypatch.setattr(config, "TOOL_PROFILE", "ops")
+        result = await dispatch_tool(
+            "archivist_share_propose",
+            {"agent_id": "a", "recipient_agent_id": "b", "namespace": ""},
+        )
+        data = json.loads(result[0].text)
+        assert "error" in data
+        assert "not available" not in data["error"]
+
+    async def test_share_propose_blocked_under_core(self, monkeypatch):
+        import archivist.core.config as config
+        from archivist.app.handlers._registry import dispatch_tool
+
+        monkeypatch.setattr(config, "TOOL_PROFILE", "core")
+        result = await dispatch_tool(
+            "archivist_share_propose",
+            {
+                "agent_id": "a",
+                "recipient_agent_id": "b",
+                "namespace": "ns",
+                "memory_ids": ["m1"],
+            },
+        )
+        data = json.loads(result[0].text)
+        assert "not available" in data["error"]
+        assert "core" in data["error"]

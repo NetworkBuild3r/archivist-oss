@@ -85,7 +85,9 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset(
     }
 )
 
-_HIDDEN_PREFIXES: tuple[str, ...] = ("archivist_share_", "archivist_checkpoint_")
+# Ops hides unfinished checkpoint wedge only. ``archivist_share_*`` is promoted
+# to ops under INIT-009/SPEC-002 (ADR-009 GR-PROD-002 — still off core).
+_OPS_HIDDEN_PREFIXES: tuple[str, ...] = ("archivist_checkpoint_",)
 
 
 def allowed_tool_names(profile: str | None = None) -> frozenset[str]:
@@ -95,7 +97,9 @@ def allowed_tool_names(profile: str | None = None) -> frozenset[str]:
         return frozenset(t.name for t in ALL_TOOLS)
     if resolved == "ops":
         return frozenset(
-            t.name for t in ALL_TOOLS if not any(t.name.startswith(p) for p in _HIDDEN_PREFIXES)
+            t.name
+            for t in ALL_TOOLS
+            if not any(t.name.startswith(p) for p in _OPS_HIDDEN_PREFIXES)
         )
     # Default / unknown → core (fail closed to smallest surface)
     return CORE_TOOL_NAMES

@@ -8,15 +8,32 @@ pytestmark = [pytest.mark.unit, pytest.mark.storage]
 
 
 @pytest.mark.asyncio
-async def test_create_requires_memory_ids_or_scope(async_pool):
+async def test_create_requires_memory_ids_or_scope_or_tip_ids(async_pool):
     from archivist.storage import share_grants as sg
 
-    with pytest.raises(ValueError, match="memory_ids or scope"):
+    with pytest.raises(ValueError, match="memory_ids, scope, or tip_ids"):
         await sg.create_share_grant(
             proposer_agent_id="a",
             recipient_agent_id="b",
             namespace="ns",
         )
+
+
+@pytest.mark.asyncio
+async def test_create_accepts_tip_ids_metadata_only(async_pool):
+    """INIT-009: tip_ids alone are a valid selective-share target."""
+    from archivist.storage import share_grants as sg
+
+    grant = await sg.create_share_grant(
+        proposer_agent_id="agent-a",
+        recipient_agent_id="agent-b",
+        namespace="ns-a",
+        memory_ids=[],
+        metadata={"tip_ids": ["tip-1"], "lesson_channel": "tips"},
+    )
+    assert grant.status == "pending"
+    assert grant.memory_ids == []
+    assert grant.metadata["tip_ids"] == ["tip-1"]
 
 
 @pytest.mark.asyncio

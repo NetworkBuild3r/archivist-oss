@@ -74,6 +74,7 @@ selection is a **test-only oracle** under `tests/system/mcp/agentic_memory_harne
 | `tests/system/mcp/test_agentic_memory_positive.py` | `TestAgenticMemoryPositive` — Session A→B `order_express`; omit-store refuse; TOC not evidence; ns isolation |
 | `tests/system/mcp/test_agentic_memory_negative.py` | `TestAgenticMemoryNegative` — suppressed stale; eligible+ineligible → `needs_clarification`; ambiguous/empty; index TOC never sufficient |
 | `tests/system/mcp/test_agentic_memory_procedure.py` | `TestAgenticMemoryProcedureAction` — procedure tips → action (INIT-007); omit/archived tip refuse |
+| `tests/system/mcp/test_agentic_memory_coordination.py` | Tip-via-handoff + share `tip_ids` multi-agent scenarios (INIT-009 Diff #5) |
 
 **Baselines / contracts:** see [ADR-006](adr/ADR-006-agentic-memory-eval-gym.md). SQLite CI path +
 fake embed / stub Qdrant only (GR-EVAL-002). Index markdown alone is never action evidence
@@ -89,6 +90,7 @@ python -m pytest \
   tests/system/mcp/test_agentic_memory_positive.py \
   tests/system/mcp/test_agentic_memory_negative.py \
   tests/system/mcp/test_agentic_memory_procedure.py \
+  tests/system/mcp/test_agentic_memory_coordination.py \
   -q --tb=short
 
 # coach_core remains required (run both for full coach+agentic coverage)
@@ -102,8 +104,9 @@ python -m pytest -m coach_core -q --tb=short
 Tips-first procedural memory on the existing trajectory→`tips`→`get_context`
 path ([ADR-007](adr/ADR-007-procedural-memory-wedge.md)). **Tip-only lessons** —
 the MCP skill registry is **retired** ([ADR-008](adr/ADR-008-retire-skills-tip-lessons.md));
-do not use or reintroduce `archivist_*skill*` tools. Cross-agent lesson sharing
-beyond handoff is Unique Differentiator **#5** (INIT-009) — not built in INIT-008.
+do not use or reintroduce `archivist_*skill*` tools. Cross-agent lesson sharing:
+**handoff tips** (primary) and **`archivist_share_*` `tip_ids`** on **ops**/**full**
+([ADR-009](adr/ADR-009-native-multi-agent-coordination.md) / INIT-009 Diff #5).
 
 **How tips reach `archivist_get_context` (core read path):**
 
@@ -120,7 +123,7 @@ beyond handoff is Unique Differentiator **#5** (INIT-009) — not built in INIT-
 | Profile | Tip-related tools |
 |---------|-------------------|
 | **core** (default) | **Read** tips via `archivist_get_context` only. No `log_trajectory` / `archivist_tips` in core. |
-| **ops** / **full** | `archivist_log_trajectory` (extract tips), `archivist_tips` (direct tip list). No skill-registry tools (ADR-008). |
+| **ops** / **full** | `archivist_log_trajectory` (extract tips), `archivist_tips` (direct tip list); **`archivist_share_*`** on ops+full for selective `tip_ids` / memory grants (ADR-009). No skill-registry tools (ADR-008). Checkpoints remain **full**-only. |
 
 CI procedure scenarios **seed** the `tips` table directly in the harness (no ops profile required).
 

@@ -51,7 +51,8 @@ class TestCoreProfileMembership:
 
 
 class TestOpsAndFullProfiles:
-    def test_ops_excludes_share_and_checkpoint(self, monkeypatch):
+    def test_ops_includes_share_excludes_checkpoint(self, monkeypatch):
+        """INIT-009/SPEC-002: share_* promoted to ops; checkpoint still full-only."""
         import archivist.core.config as config
         from archivist.app.handlers._registry import ALL_TOOLS, get_all_tools
 
@@ -59,7 +60,8 @@ class TestOpsAndFullProfiles:
         names = {t.name for t in get_all_tools()}
         assert "archivist_store" in names
         assert "archivist_context_check" in names
-        assert not any(n.startswith("archivist_share_") for n in names)
+        assert "archivist_share_propose" in names
+        assert "archivist_share_attach_conflict" in names
         assert not any(n.startswith("archivist_checkpoint_") for n in names)
         # ops is a middle set — smaller than full, larger than core
         assert len(names) < len(ALL_TOOLS)
@@ -89,6 +91,23 @@ class TestDispatchFailClosed:
         assert "error" in data
         assert "not available" in data["error"]
         assert "core" in data["error"]
+
+    @pytest.mark.asyncio
+    async def test_share_available_under_ops(self, monkeypatch):
+        """INIT-009/SPEC-002: share_* dispatchable on ops (checkpoint still blocked)."""
+        import archivist.core.config as config
+        from archivist.app.handlers._registry import TOOL_REGISTRY, dispatch_tool
+
+        monkeypatch.setattr(config, "TOOL_PROFILE", "ops")
+        assert "archivist_share_propose" in TOOL_REGISTRY
+        # Missing required args → handler error, not profile gate
+        result = await dispatch_tool(
+            "archivist_share_propose",
+            {"agent_id": "a", "recipient_agent_id": "b", "namespace": ""},
+        )
+        data = json.loads(result[0].text)
+        assert "error" in data
+        assert "not available" not in data["error"]
 
     @pytest.mark.asyncio
     async def test_checkpoint_blocked_under_ops(self, monkeypatch):

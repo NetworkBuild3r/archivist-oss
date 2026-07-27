@@ -198,7 +198,9 @@ The result is a `PackedContext` dataclass with `total_tokens`, `naive_tokens`, `
 2. Merges in top knowledge-graph facts and procedural tips
 3. Returns a `RelevantContext` with structured `ContextChunk` list and provenance
 
-`create_handoff_packet` / `receive_handoff_packet` implement the multi-agent handoff protocol.
+`create_handoff_packet` / `receive_handoff_packet` implement the multi-agent handoff protocol
+(tips travel in the packet). Selective share (`archivist_share_*`, ops+full) adds audited
+grants with optional `tip_ids` and conflict attach → resolver ([ADR-009](adr/ADR-009-native-multi-agent-coordination.md)).
 
 ### Ephemeral tier (`session_store.py`)
 
