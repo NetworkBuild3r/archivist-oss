@@ -7,6 +7,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- **Diff #6 productize (INIT-010 / ADR-010)** — Intelligent Self-Curation is a
+  first-class **curator product loop**: hierarchical reconsolidation
+  (`lifecycle/reconsolidation.py`), relevance-based forget
+  (`lifecycle/relevance_forget.py` → namespace-scoped suppress), and contradiction
+  resolve (existing `contradiction_resolve` cycle). Safe defaults stay off /
+  dry-run (`RECONSOLIDATION_*`, `RELEVANCE_FORGET_*`, `CONTRADICTION_RESOLVE_*`);
+  staged enablement documented in REFERENCE / ADR-010. No new **core** MCP tools.
+  Share `attach_conflict` mutating apply remains write + resolve gated (INIT-009).
+  Docs: REFERENCE / CURSOR_SKILL / ROADMAP (#6 → Done; Immediate Next → INIT-011).
+
 - **Diff #5 productize (INIT-009 / ADR-009)** — `archivist_share_*` promoted to **ops**
   (still off **core**; checkpoints remain **full**-only). `archivist_share_propose`
   accepts `tip_ids` for selective tip/lesson grants; accept injects `share_tip_ids`.

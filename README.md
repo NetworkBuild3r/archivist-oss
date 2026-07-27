@@ -972,7 +972,8 @@ Manual MCP and HTTP validation: [`QA_CHECKLIST.md`](QA_CHECKLIST.md). Full guide
 | **PostgreSQL first-class backend** — all hot paths, backup, tests, Docker | **Shipped (v2.2)** |
 | **Answer Finder** — tiered memory, adaptive packing, get_relevant_context, handoff, observability | **Shipped (v2.3)** |
 | **Diff #5 Native Multi-Agent Coordination** — `share_*` on ops, tip_ids, conflict→resolver | **Productized (INIT-009 / [ADR-009](docs/adr/ADR-009-native-multi-agent-coordination.md))** |
-| Suggested next — Diff #6 Intelligent Self-Curation | Parked (choose INIT after INIT-009 merges) |
+| **Diff #6 Intelligent Self-Curation** — curator reconsolidate / forget / resolve | **Done (INIT-010 / [ADR-010](docs/adr/ADR-010-intelligent-self-curation.md))** |
+| Immediate next — Diff #4 MaP MCP (+ import) | **INIT-011** (BRAIN-005) |
 | Pydantic config validation + stronger env validation | Planned |
 
 Full phased plan: [`docs/ROADMAP.md`](docs/ROADMAP.md).

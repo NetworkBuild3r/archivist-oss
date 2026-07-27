@@ -438,6 +438,23 @@ async def decay_old_entries() -> dict[str, int]:
             aged_out,
             superseded_out,
         )
+        try:
+            from archivist.core.audit import log_memory_event
+
+            await log_memory_event(
+                agent_id="system:curator",
+                action="fact_decay_applied",
+                memory_id="facts:decay_cycle",
+                namespace="*",
+                text_hash="facts:decay_cycle",
+                metadata={
+                    "aged_out": aged_out,
+                    "superseded_out": superseded_out,
+                    "total": total,
+                },
+            )
+        except Exception as e:
+            logger.debug("fact decay audit skipped: %s", e)
     return {"aged_out": aged_out, "superseded_out": superseded_out, "total": total}
 
 
@@ -501,6 +518,21 @@ async def curator_loop():
             except Exception as e:
                 logger.warning("Hotness update failed (non-fatal): %s", e)
 
+            # INIT-010/SPEC-003: relevance forget after hotness refresh (Diff #6).
+            try:
+                from archivist.lifecycle.relevance_forget import relevance_forget_cycle
+
+                forget_stats = await relevance_forget_cycle()
+                if forget_stats.get("enabled") and forget_stats.get("proposed"):
+                    logger.info(
+                        "Relevance forget: proposed=%d applied=%d dry_run=%s",
+                        forget_stats.get("proposed", 0),
+                        forget_stats.get("applied", 0),
+                        forget_stats.get("dry_run", True),
+                    )
+            except Exception as e:
+                logger.warning("Relevance forget failed (non-fatal): %s", e)
+
             tips_merged = 0
             try:
                 tip_result = await consolidate_tips(budget=CURATOR_TIP_BUDGET)
@@ -510,7 +542,22 @@ async def curator_loop():
             except Exception as e:
                 logger.warning("Tip consolidation failed (non-fatal): %s", e)
 
-            # Phase 8 wedge (INIT-001/SPEC-006): resolve + reflect behind safe flags.
+            # INIT-010/SPEC-002: hierarchical reconsolidation (Diff #6 product path).
+            try:
+                from archivist.lifecycle.reconsolidation import reconsolidation_cycle
+
+                recon_stats = await reconsolidation_cycle()
+                if recon_stats.get("enabled") and recon_stats.get("proposed"):
+                    logger.info(
+                        "Reconsolidation: proposed=%d applied=%d dry_run=%s",
+                        recon_stats.get("proposed", 0),
+                        recon_stats.get("applied", 0),
+                        recon_stats.get("dry_run", True),
+                    )
+            except Exception as e:
+                logger.warning("Reconsolidation failed (non-fatal): %s", e)
+
+            # INIT-010/SPEC-003: resolve + reflect behind ADR-010 safe flags.
             try:
                 from archivist.lifecycle.contradiction_resolve import resolve_contradictions_cycle
 

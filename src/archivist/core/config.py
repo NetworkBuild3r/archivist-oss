@@ -169,6 +169,21 @@ class ArchivistSettings(BaseSettings):
     reflection_enabled: bool = False
     reflection_dry_run: bool = True
     reflection_max_per_cycle: int = Field(default=20, ge=0)
+    # INIT-010/SPEC-002: hierarchical reconsolidation (Diff #6). Safe defaults —
+    # master off; when enabled, dry-run stays on until explicitly disabled.
+    reconsolidation_enabled: bool = False
+    reconsolidation_dry_run: bool = True
+    reconsolidation_max_groups_per_cycle: int = Field(default=10, ge=0)
+    reconsolidation_min_chunks: int = Field(default=3, ge=2)
+    reconsolidation_max_chunks_per_group: int = Field(default=8, ge=2)
+    # INIT-010/SPEC-003: relevance forget (Diff #6). Safe defaults — master off;
+    # when enabled, dry-run stays on. Suppresses cold/low-importance chunks.
+    relevance_forget_enabled: bool = False
+    relevance_forget_dry_run: bool = True
+    relevance_forget_max_per_cycle: int = Field(default=20, ge=0)
+    relevance_forget_hotness_max: float = Field(default=0.05, ge=0.0)
+    relevance_forget_importance_max: float = Field(default=0.4, ge=0.0, le=1.0)
+    relevance_forget_min_age_days: int = Field(default=14, ge=0)
     hotness_weight: float = 0.15
     hotness_halflife_days: int = Field(default=7, ge=1)
     importance_weight: float = 0.10
@@ -532,6 +547,10 @@ class ArchivistSettings(BaseSettings):
             "CONTRADICTION_RESOLVE_LLM_ENABLED": self.contradiction_resolve_llm_enabled,
             "REFLECTION_ENABLED": self.reflection_enabled,
             "REFLECTION_DRY_RUN": self.reflection_dry_run,
+            "RECONSOLIDATION_ENABLED": self.reconsolidation_enabled,
+            "RECONSOLIDATION_DRY_RUN": self.reconsolidation_dry_run,
+            "RELEVANCE_FORGET_ENABLED": self.relevance_forget_enabled,
+            "RELEVANCE_FORGET_DRY_RUN": self.relevance_forget_dry_run,
         }
 
     def _load_team_map(self) -> dict[str, str]:
@@ -750,6 +769,17 @@ CONTRADICTION_RESOLVE_MAX_PER_CYCLE = _settings.contradiction_resolve_max_per_cy
 REFLECTION_ENABLED = _settings.reflection_enabled
 REFLECTION_DRY_RUN = _settings.reflection_dry_run
 REFLECTION_MAX_PER_CYCLE = _settings.reflection_max_per_cycle
+RECONSOLIDATION_ENABLED = _settings.reconsolidation_enabled
+RECONSOLIDATION_DRY_RUN = _settings.reconsolidation_dry_run
+RECONSOLIDATION_MAX_GROUPS_PER_CYCLE = _settings.reconsolidation_max_groups_per_cycle
+RECONSOLIDATION_MIN_CHUNKS = _settings.reconsolidation_min_chunks
+RECONSOLIDATION_MAX_CHUNKS_PER_GROUP = _settings.reconsolidation_max_chunks_per_group
+RELEVANCE_FORGET_ENABLED = _settings.relevance_forget_enabled
+RELEVANCE_FORGET_DRY_RUN = _settings.relevance_forget_dry_run
+RELEVANCE_FORGET_MAX_PER_CYCLE = _settings.relevance_forget_max_per_cycle
+RELEVANCE_FORGET_HOTNESS_MAX = _settings.relevance_forget_hotness_max
+RELEVANCE_FORGET_IMPORTANCE_MAX = _settings.relevance_forget_importance_max
+RELEVANCE_FORGET_MIN_AGE_DAYS = _settings.relevance_forget_min_age_days
 HOTNESS_WEIGHT = _settings.hotness_weight
 HOTNESS_HALFLIFE_DAYS = _settings.hotness_halflife_days
 IMPORTANCE_WEIGHT = _settings.importance_weight
