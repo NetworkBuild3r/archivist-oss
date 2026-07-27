@@ -15,7 +15,7 @@ Hybrid retrieval · token-budgeted context · knowledge graph · RBAC · active 
   <a href="https://github.com/NetworkBuild3r/archivist-oss"><img src="https://img.shields.io/github/stars/NetworkBuild3r/archivist-oss?style=social" alt="GitHub stars" /></a>
   <img src="https://img.shields.io/badge/python-3.12%20%7C%203.13-blue?logo=python&logoColor=white" alt="Python 3.12+" />
   <img src="https://img.shields.io/badge/docker-compose-ready-2496ED?logo=docker&logoColor=white" alt="Docker Compose" />
-  <img src="https://img.shields.io/badge/version-v2.3.0-brightgreen" alt="Version" />
+  <img src="https://img.shields.io/badge/version-v2.4.0-brightgreen" alt="Version" />
   <img src="https://img.shields.io/badge/protocol-MCP-purple" alt="MCP" />
   <img src="https://img.shields.io/badge/models-OpenAI--compatible-orange" alt="Models" />
 </p>

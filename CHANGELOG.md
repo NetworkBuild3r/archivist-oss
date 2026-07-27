@@ -5,6 +5,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-07-27
+
 ### Changed
 
 - **Diff #7 productize (INIT-012 / ADR-012)** — Checkpoint / time-travel is a first-class

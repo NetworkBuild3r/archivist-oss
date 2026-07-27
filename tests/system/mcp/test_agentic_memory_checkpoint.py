@@ -41,9 +41,7 @@ class TestCheckpointProfileAndHitl:
         monkeypatch.setattr(config, "TOOL_PROFILE", "core")
         core_names = {t.name for t in get_all_tools()}
         assert not any(n.startswith("archivist_checkpoint_") for n in core_names)
-        assert not any(
-            n.startswith("archivist_checkpoint_") for n in allowed_tool_names("core")
-        )
+        assert not any(n.startswith("archivist_checkpoint_") for n in allowed_tool_names("core"))
 
         monkeypatch.setattr(config, "TOOL_PROFILE", "ops")
         ops_names = {t.name for t in get_all_tools()}

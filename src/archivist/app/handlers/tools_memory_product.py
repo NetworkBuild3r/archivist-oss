@@ -305,17 +305,8 @@ async def _handle_map_list(arguments: dict) -> list[TextContent]:
             limit=limit,
         )
     except Exception as exc:
-        if isinstance(
-            exc,
-            (
-                MemoryProductAuthzError,
-                MemoryProductNotFoundError,
-                MemoryProductConflictError,
-                MemoryProductError,
-                SnapshotPathError,
-                ValueError,
-            ),
-        ):
+        # MemoryProduct* + SnapshotPathError are covered by these bases.
+        if isinstance(exc, MemoryProductError | ValueError):
             return _map_error(exc)
         logger.exception("archivist_map_list failed")
         return _map_error(exc)
@@ -344,17 +335,8 @@ async def _handle_map_get(arguments: dict) -> list[TextContent]:
         if denied := require_rbac(caller, "read", record.source_namespace):
             return denied
     except Exception as exc:
-        if isinstance(
-            exc,
-            (
-                MemoryProductAuthzError,
-                MemoryProductNotFoundError,
-                MemoryProductConflictError,
-                MemoryProductError,
-                SnapshotPathError,
-                ValueError,
-            ),
-        ):
+        # MemoryProduct* + SnapshotPathError are covered by these bases.
+        if isinstance(exc, MemoryProductError | ValueError):
             return _map_error(exc)
         logger.exception("archivist_map_get failed")
         return _map_error(exc)
@@ -389,17 +371,8 @@ async def _handle_map_snapshot(arguments: dict) -> list[TextContent]:
             parent_version_id=parent_version_id,
         )
     except Exception as exc:
-        if isinstance(
-            exc,
-            (
-                MemoryProductAuthzError,
-                MemoryProductNotFoundError,
-                MemoryProductConflictError,
-                MemoryProductError,
-                SnapshotPathError,
-                ValueError,
-            ),
-        ):
+        # MemoryProduct* + SnapshotPathError are covered by these bases.
+        if isinstance(exc, MemoryProductError | ValueError):
             return _map_error(exc)
         logger.exception("archivist_map_snapshot failed")
         return _map_error(exc)
@@ -441,17 +414,8 @@ async def _handle_map_fork(arguments: dict) -> list[TextContent]:
             label=label,
         )
     except Exception as exc:
-        if isinstance(
-            exc,
-            (
-                MemoryProductAuthzError,
-                MemoryProductNotFoundError,
-                MemoryProductConflictError,
-                MemoryProductError,
-                SnapshotPathError,
-                ValueError,
-            ),
-        ):
+        # MemoryProduct* + SnapshotPathError are covered by these bases.
+        if isinstance(exc, MemoryProductError | ValueError):
             return _map_error(exc)
         logger.exception("archivist_map_fork failed")
         return _map_error(exc)
@@ -491,17 +455,8 @@ async def _handle_map_export(arguments: dict) -> list[TextContent]:
             label=label,
         )
     except Exception as exc:
-        if isinstance(
-            exc,
-            (
-                MemoryProductAuthzError,
-                MemoryProductNotFoundError,
-                MemoryProductConflictError,
-                MemoryProductError,
-                SnapshotPathError,
-                ValueError,
-            ),
-        ):
+        # MemoryProduct* + SnapshotPathError are covered by these bases.
+        if isinstance(exc, MemoryProductError | ValueError):
             return _map_error(exc)
         logger.exception("archivist_map_export failed")
         return _map_error(exc)
@@ -552,17 +507,8 @@ async def _handle_map_import(arguments: dict) -> list[TextContent]:
             label=label,
         )
     except Exception as exc:
-        if isinstance(
-            exc,
-            (
-                MemoryProductAuthzError,
-                MemoryProductNotFoundError,
-                MemoryProductConflictError,
-                MemoryProductError,
-                SnapshotPathError,
-                ValueError,
-            ),
-        ):
+        # MemoryProduct* + SnapshotPathError are covered by these bases.
+        if isinstance(exc, MemoryProductError | ValueError):
             return _map_error(exc)
         logger.exception("archivist_map_import failed")
         return _map_error(exc)

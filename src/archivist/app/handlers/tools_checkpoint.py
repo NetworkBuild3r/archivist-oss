@@ -416,7 +416,9 @@ def _map_checkpoint_error(exc: Exception) -> list[TextContent]:
     if isinstance(exc, ckpt.CheckpointConflictError):
         return error_response({"error": exc.code, "reason": str(exc)})
     if isinstance(exc, ckpt.CheckpointError):
-        return error_response({"error": getattr(exc, "code", "checkpoint_error"), "reason": str(exc)})
+        return error_response(
+            {"error": getattr(exc, "code", "checkpoint_error"), "reason": str(exc)}
+        )
     if isinstance(exc, ValueError):
         return error_response({"error": "invalid_request", "reason": str(exc)})
     raise exc
