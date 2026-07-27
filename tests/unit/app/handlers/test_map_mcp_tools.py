@@ -53,14 +53,16 @@ class TestMapProfileGating:
         assert not any(n.startswith("archivist_map_") for n in CORE_TOOL_NAMES)
         assert len(CORE_TOOL_NAMES) <= 12
 
-    def test_ops_includes_map_excludes_checkpoint(self, monkeypatch):
+    def test_ops_includes_map_and_checkpoint(self, monkeypatch):
+        """INIT-012/SPEC-003: map and checkpoint both on ops (core still excludes both)."""
         import archivist.core.config as config
         from archivist.app.handlers._registry import get_all_tools
 
         monkeypatch.setattr(config, "TOOL_PROFILE", "ops")
         names = {t.name for t in get_all_tools()}
         assert names >= _MAP_TOOLS
-        assert not any(n.startswith("archivist_checkpoint_") for n in names)
+        assert "archivist_checkpoint_branch" in names
+        assert "archivist_checkpoint_approve" in names
 
     def test_full_includes_map(self, monkeypatch):
         import archivist.core.config as config

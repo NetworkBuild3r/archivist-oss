@@ -52,8 +52,8 @@ class TestCoreProfileMembership:
 
 
 class TestOpsAndFullProfiles:
-    def test_ops_includes_share_excludes_checkpoint(self, monkeypatch):
-        """INIT-009/SPEC-002: share_* promoted to ops; checkpoint still full-only."""
+    def test_ops_includes_share_map_and_checkpoint(self, monkeypatch):
+        """INIT-012/SPEC-003: checkpoint promoted to ops with share/map (still off core)."""
         import archivist.core.config as config
         from archivist.app.handlers._registry import ALL_TOOLS, get_all_tools
 
@@ -65,9 +65,12 @@ class TestOpsAndFullProfiles:
         assert "archivist_share_attach_conflict" in names
         assert "archivist_map_list" in names
         assert "archivist_map_import" in names
-        assert not any(n.startswith("archivist_checkpoint_") for n in names)
-        # ops is a middle set — smaller than full, larger than core
-        assert len(names) < len(ALL_TOOLS)
+        assert "archivist_checkpoint_save" in names
+        assert "archivist_checkpoint_branch" in names
+        assert "archivist_checkpoint_interrupt" in names
+        assert "archivist_checkpoint_approve" in names
+        # No unfinished ops-hidden wedges → ops currently equals full
+        assert names == {t.name for t in ALL_TOOLS}
         assert len(names) > 12
 
     def test_full_restores_entire_registry(self, monkeypatch):
@@ -97,7 +100,7 @@ class TestDispatchFailClosed:
 
     @pytest.mark.asyncio
     async def test_share_available_under_ops(self, monkeypatch):
-        """INIT-009/SPEC-002: share_* dispatchable on ops (checkpoint still blocked)."""
+        """INIT-009/SPEC-002: share_* dispatchable on ops."""
         import archivist.core.config as config
         from archivist.app.handlers._registry import TOOL_REGISTRY, dispatch_tool
 
@@ -113,11 +116,24 @@ class TestDispatchFailClosed:
         assert "not available" not in data["error"]
 
     @pytest.mark.asyncio
-    async def test_checkpoint_blocked_under_ops(self, monkeypatch):
+    async def test_checkpoint_available_under_ops(self, monkeypatch):
+        """INIT-012/SPEC-003: checkpoint dispatchable on ops (not profile-gated)."""
         import archivist.core.config as config
         from archivist.app.handlers._registry import TOOL_REGISTRY, dispatch_tool
 
         monkeypatch.setattr(config, "TOOL_PROFILE", "ops")
+        assert "archivist_checkpoint_save" in TOOL_REGISTRY
+        result = await dispatch_tool("archivist_checkpoint_save", {})
+        data = json.loads(result[0].text)
+        assert "error" in data
+        assert "not available" not in data["error"]
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_blocked_under_core(self, monkeypatch):
+        import archivist.core.config as config
+        from archivist.app.handlers._registry import TOOL_REGISTRY, dispatch_tool
+
+        monkeypatch.setattr(config, "TOOL_PROFILE", "core")
         assert "archivist_checkpoint_save" in TOOL_REGISTRY
         result = await dispatch_tool("archivist_checkpoint_save", {})
         data = json.loads(result[0].text)

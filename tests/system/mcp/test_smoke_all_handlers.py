@@ -85,12 +85,15 @@ _ALL_EXPECTED_TOOLS = [
     "archivist_get_context",
     "archivist_handoff",
     "archivist_receive_handoff",
-    # tools_checkpoint (5) — INIT-001/SPEC-008
+    # tools_checkpoint (8) — INIT-001/SPEC-008 + INIT-012/SPEC-003–004
     "archivist_checkpoint_save",
     "archivist_checkpoint_list",
     "archivist_checkpoint_get",
     "archivist_checkpoint_resume",
     "archivist_checkpoint_replay",
+    "archivist_checkpoint_branch",
+    "archivist_checkpoint_interrupt",
+    "archivist_checkpoint_approve",
     # tools_coordination (5) — INIT-001/SPEC-010
     "archivist_share_propose",
     "archivist_share_accept",

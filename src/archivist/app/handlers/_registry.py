@@ -89,11 +89,10 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset(
     }
 )
 
-# Ops hides unfinished checkpoint wedge only. ``archivist_share_*`` is promoted
-# to ops under INIT-009/SPEC-002 (ADR-009 GR-PROD-002 — still off core).
-# ``archivist_map_*`` is promoted to ops under INIT-011/SPEC-003 (ADR-011) —
-# do **not** add ``archivist_map_`` here.
-_OPS_HIDDEN_PREFIXES: tuple[str, ...] = ("archivist_checkpoint_",)
+# Checkpoint tools are promoted to ops under INIT-012/SPEC-003 (ADR-012).
+# ``archivist_share_*`` / ``archivist_map_*`` remain on ops (not core).
+# Empty hide list: ops currently equals full until the next unfinished wedge.
+_OPS_HIDDEN_PREFIXES: tuple[str, ...] = ()
 
 
 def allowed_tool_names(profile: str | None = None) -> frozenset[str]:

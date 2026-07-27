@@ -5,7 +5,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-07-27
+
 ### Changed
+
+- **Diff #7 productize (INIT-012 / ADR-012)** — Checkpoint / time-travel is a first-class
+  **ops**/**full** MCP surface: existing `archivist_checkpoint_save|list|get|resume|replay`
+  promoted off full-only, plus **`archivist_checkpoint_branch`**, **`interrupt`**, and
+  **`approve`** (thin HITL via metadata; resume fails closed while interrupted; owner-agent
+  bind). Institutional tier DDL **deferred** (Phase 7 tracking remains open for multi-tier).
+  No new **core** tools (GR-PROD-002). Docs: REFERENCE / CURSOR_SKILL / ROADMAP (#7 → Done
+  scoped; Immediate Next → INIT-013); recipe
+  [`docs/demos/checkpoint-branch-hitl.md`](docs/demos/checkpoint-branch-hitl.md).
 
 - **Diff #4 productize (INIT-011 / ADR-011)** — Memory as a Product is a first-class
   **ops**/**full** MCP surface: `archivist_map_list|get|snapshot|fork|export|import`

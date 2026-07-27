@@ -1,10 +1,11 @@
-"""MCP tool handlers — Phase 7 agent-state checkpoint resume/replay.
+"""MCP tool handlers — Phase 7 agent-state checkpoint resume/replay/branch/HITL.
 
-Exposes ``archivist_checkpoint_*`` tools over the SPEC-007 store.
+Exposes ``archivist_checkpoint_*`` tools over the checkpoint store.
 Keeps existing handoff tools intact (GR-003). Resume injects into the
 caller's SessionStore only; replay is read-only chain reconstruction.
+Branch + thin HITL interrupt/approve per ADR-012 (INIT-012/SPEC-003).
 
-Provenance: INIT-001/SPEC-008.
+Provenance: INIT-001/SPEC-008; INIT-012/SPEC-003.
 """
 
 from __future__ import annotations
@@ -211,6 +212,116 @@ TOOLS: list[Tool] = [
             "required": ["agent_id", "checkpoint_id", "namespace"],
         },
     ),
+    Tool(
+        name="archivist_checkpoint_branch",
+        description=(
+            "Create a child checkpoint from a required parent in the same namespace "
+            "(explicit branch UX). Owner-agent bind applies — only the parent owner "
+            "may branch. Optional payload overrides the parent copy; default copies "
+            "parent payload/session. Agent-state only — not L0–L2 tiers."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "agent_id": {
+                    "type": "string",
+                    "description": "Owning agent (must match parent owner; required).",
+                },
+                "parent_checkpoint_id": {
+                    "type": "string",
+                    "description": "Parent checkpoint id in the same namespace (required).",
+                },
+                "namespace": {
+                    "type": "string",
+                    "description": "Namespace scope (required).",
+                },
+                "session_id": {
+                    "type": "string",
+                    "description": "Optional session override; defaults to parent session.",
+                },
+                "payload": {
+                    "type": "object",
+                    "description": (
+                        "Optional child payload; when omitted, copies parent payload. "
+                        f"JSON size limited to {_MAX_PAYLOAD_BYTES} bytes."
+                    ),
+                },
+                "metadata": {
+                    "type": "object",
+                    "description": "Optional child metadata (HITL keys managed by interrupt/approve).",
+                },
+                "caller_agent_id": {
+                    "type": "string",
+                    "description": "Delegating caller identity when distinct from agent_id.",
+                },
+            },
+            "required": ["agent_id", "parent_checkpoint_id", "namespace"],
+        },
+    ),
+    Tool(
+        name="archivist_checkpoint_interrupt",
+        description=(
+            "Mark a checkpoint as HITL-interrupted (metadata-only). "
+            "Resume fails closed until archivist_checkpoint_approve. "
+            "Requires namespace write + owner-agent bind."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "agent_id": {
+                    "type": "string",
+                    "description": "Owning agent (must match checkpoint owner; required).",
+                },
+                "checkpoint_id": {
+                    "type": "string",
+                    "description": "Checkpoint to interrupt (required).",
+                },
+                "namespace": {
+                    "type": "string",
+                    "description": "Namespace scope (required).",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Optional human-readable interrupt reason.",
+                },
+                "caller_agent_id": {
+                    "type": "string",
+                    "description": "Delegating caller identity when distinct from agent_id.",
+                },
+            },
+            "required": ["agent_id", "checkpoint_id", "namespace"],
+        },
+    ),
+    Tool(
+        name="archivist_checkpoint_approve",
+        description=(
+            "Clear HITL interrupt on a checkpoint (idempotent if already approved). "
+            "Required before resume when the checkpoint is interrupted. "
+            "Requires namespace write + owner-agent bind."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "agent_id": {
+                    "type": "string",
+                    "description": "Owning agent (must match checkpoint owner; required).",
+                },
+                "checkpoint_id": {
+                    "type": "string",
+                    "description": "Checkpoint to approve (required).",
+                },
+                "namespace": {
+                    "type": "string",
+                    "description": "Namespace scope (required).",
+                },
+                "caller_agent_id": {
+                    "type": "string",
+                    "description": "Delegating caller identity when distinct from agent_id.",
+                },
+            },
+            "required": ["agent_id", "checkpoint_id", "namespace"],
+        },
+    ),
 ]
 
 
@@ -286,6 +397,31 @@ def _require_namespace(namespace: str) -> list[TextContent] | None:
             }
         )
     return None
+
+
+def _map_checkpoint_error(exc: Exception) -> list[TextContent]:
+    """Map storage checkpoint errors to stable MCP error shapes (no payload echo)."""
+    from archivist.storage import checkpoints as ckpt
+
+    if isinstance(exc, ckpt.CheckpointAuthzError):
+        return error_response(
+            {
+                "error": exc.code,
+                "reason": str(exc),
+                "hint": "Use your own checkpoints, or archivist_handoff to transfer state.",
+            }
+        )
+    if isinstance(exc, ckpt.CheckpointNotFoundError):
+        return error_response({"error": exc.code, "reason": str(exc)})
+    if isinstance(exc, ckpt.CheckpointConflictError):
+        return error_response({"error": exc.code, "reason": str(exc)})
+    if isinstance(exc, ckpt.CheckpointError):
+        return error_response(
+            {"error": getattr(exc, "code", "checkpoint_error"), "reason": str(exc)}
+        )
+    if isinstance(exc, ValueError):
+        return error_response({"error": "invalid_request", "reason": str(exc)})
+    raise exc
 
 
 # ---------------------------------------------------------------------------
@@ -476,16 +612,11 @@ async def _handle_checkpoint_resume(arguments: dict) -> list[TextContent]:
             }
         )
 
-    # Namespace read access is not enough to replay another agent's state: bind
-    # resume to the checkpoint's owner (INIT-001/SPEC-012, SEC-008-01).
-    if record.agent_id and record.agent_id != agent_id:
-        return error_response(
-            {
-                "error": "access_denied",
-                "reason": "checkpoint belongs to another agent in this namespace",
-                "hint": "Resume your own checkpoints, or use archivist_handoff to transfer state.",
-            }
-        )
+    # Owner bind + HITL interrupt gate (SEC-008-01 / ADR-012).
+    try:
+        ckpt.ensure_resume_allowed(record, agent_id=agent_id)
+    except (ckpt.CheckpointAuthzError, ckpt.CheckpointConflictError) as exc:
+        return _map_checkpoint_error(exc)
 
     payload = record.payload if isinstance(record.payload, dict) else {}
     summary = ""
@@ -618,6 +749,147 @@ async def _handle_checkpoint_replay(arguments: dict) -> list[TextContent]:
     )
 
 
+async def _handle_checkpoint_branch(arguments: dict) -> list[TextContent]:
+    """Create a child checkpoint from a required parent (ADR-012)."""
+    from archivist.storage import checkpoints as ckpt
+
+    agent_id = (arguments.get("agent_id") or "").strip()
+    parent_id = (arguments.get("parent_checkpoint_id") or "").strip()
+    namespace = (arguments.get("namespace") or "").strip()
+    session_id = (arguments.get("session_id") or "").strip() or None
+    caller = resolve_caller(arguments)
+
+    if err := require_caller(caller):
+        return err
+    if not agent_id:
+        return error_response({"error": "agent_id is required"})
+    if not parent_id:
+        return error_response({"error": "parent_checkpoint_id is required"})
+    if err := _require_namespace(namespace):
+        return err
+    if denied := require_rbac(caller, "write", namespace):
+        return denied
+
+    payload = arguments.get("payload")
+    if payload is not None:
+        if err := _validate_payload(payload):
+            return err
+    metadata = arguments.get("metadata")
+    if err := _validate_metadata(metadata):
+        return err
+
+    try:
+        record = await ckpt.branch_checkpoint(
+            parent_checkpoint_id=parent_id,
+            namespace=namespace,
+            agent_id=agent_id,
+            session_id=session_id,
+            payload=payload,
+            metadata=metadata,
+        )
+    except (
+        ckpt.CheckpointAuthzError,
+        ckpt.CheckpointNotFoundError,
+        ckpt.CheckpointConflictError,
+        ckpt.CheckpointError,
+        ValueError,
+    ) as exc:
+        return _map_checkpoint_error(exc)
+    except Exception as exc:
+        logger.exception("archivist_checkpoint_branch failed")
+        return error_response({"error": str(exc)})
+
+    return success_response({"checkpoint": _record_to_dict(record)}, default=str)
+
+
+async def _handle_checkpoint_interrupt(arguments: dict) -> list[TextContent]:
+    """Mark checkpoint HITL-interrupted (metadata-only)."""
+    from archivist.storage import checkpoints as ckpt
+
+    agent_id = (arguments.get("agent_id") or "").strip()
+    checkpoint_id = (arguments.get("checkpoint_id") or "").strip()
+    namespace = (arguments.get("namespace") or "").strip()
+    reason = arguments.get("reason")
+    if reason is not None and not isinstance(reason, str):
+        return error_response({"error": "invalid_reason", "reason": "reason must be a string"})
+    caller = resolve_caller(arguments)
+
+    if err := require_caller(caller):
+        return err
+    if not agent_id:
+        return error_response({"error": "agent_id is required"})
+    if not checkpoint_id:
+        return error_response({"error": "checkpoint_id is required"})
+    if err := _require_namespace(namespace):
+        return err
+    if denied := require_rbac(caller, "write", namespace):
+        return denied
+
+    try:
+        record = await ckpt.interrupt_checkpoint(
+            checkpoint_id,
+            namespace=namespace,
+            agent_id=agent_id,
+            reason=reason,
+            actor=caller,
+        )
+    except (
+        ckpt.CheckpointAuthzError,
+        ckpt.CheckpointNotFoundError,
+        ckpt.CheckpointConflictError,
+        ckpt.CheckpointError,
+        ValueError,
+    ) as exc:
+        return _map_checkpoint_error(exc)
+    except Exception as exc:
+        logger.exception("archivist_checkpoint_interrupt failed")
+        return error_response({"error": str(exc)})
+
+    return success_response({"checkpoint": _record_to_dict(record)}, default=str)
+
+
+async def _handle_checkpoint_approve(arguments: dict) -> list[TextContent]:
+    """Clear HITL interrupt so resume may proceed."""
+    from archivist.storage import checkpoints as ckpt
+
+    agent_id = (arguments.get("agent_id") or "").strip()
+    checkpoint_id = (arguments.get("checkpoint_id") or "").strip()
+    namespace = (arguments.get("namespace") or "").strip()
+    caller = resolve_caller(arguments)
+
+    if err := require_caller(caller):
+        return err
+    if not agent_id:
+        return error_response({"error": "agent_id is required"})
+    if not checkpoint_id:
+        return error_response({"error": "checkpoint_id is required"})
+    if err := _require_namespace(namespace):
+        return err
+    if denied := require_rbac(caller, "write", namespace):
+        return denied
+
+    try:
+        record = await ckpt.approve_checkpoint(
+            checkpoint_id,
+            namespace=namespace,
+            agent_id=agent_id,
+            actor=caller,
+        )
+    except (
+        ckpt.CheckpointAuthzError,
+        ckpt.CheckpointNotFoundError,
+        ckpt.CheckpointConflictError,
+        ckpt.CheckpointError,
+        ValueError,
+    ) as exc:
+        return _map_checkpoint_error(exc)
+    except Exception as exc:
+        logger.exception("archivist_checkpoint_approve failed")
+        return error_response({"error": str(exc)})
+
+    return success_response({"checkpoint": _record_to_dict(record)}, default=str)
+
+
 # ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
@@ -628,4 +900,7 @@ HANDLERS: dict[str, object] = {
     "archivist_checkpoint_get": _handle_checkpoint_get,
     "archivist_checkpoint_resume": _handle_checkpoint_resume,
     "archivist_checkpoint_replay": _handle_checkpoint_replay,
+    "archivist_checkpoint_branch": _handle_checkpoint_branch,
+    "archivist_checkpoint_interrupt": _handle_checkpoint_interrupt,
+    "archivist_checkpoint_approve": _handle_checkpoint_approve,
 }

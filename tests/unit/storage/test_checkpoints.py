@@ -96,7 +96,8 @@ async def test_create_get_list_and_parent_link(async_pool):
     got = await ckpt.get_checkpoint(root.id, namespace="ns-alpha")
     assert got is not None
     assert got.payload == {"step": 0, "state": "boot"}
-    assert got.metadata == {"source": "unit"}
+    assert got.metadata.get("source") == "unit"
+    assert got.metadata.get(ckpt.HITL_STATUS_KEY) == ckpt.HITL_STATUS_NONE
     assert got.parent_checkpoint_id is None
 
     # Wrong namespace → no leak
@@ -168,3 +169,197 @@ async def test_payload_not_logged_at_info(async_pool, caplog):
         )
     joined = " ".join(r.getMessage() for r in caplog.records)
     assert "should-not-appear-in-info-logs" not in joined
+
+
+# ---------------------------------------------------------------------------
+# INIT-012/SPEC-002 — branch + HITL
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_branch_checkpoint_happy_path(async_pool):
+    """ac-1: branch creates child with required parent in same namespace."""
+    from archivist.storage import checkpoints as ckpt
+
+    parent = await ckpt.create_checkpoint(
+        agent_id="agent-a",
+        session_id="sess-1",
+        namespace="ns-alpha",
+        payload={"step": 0, "secret": "do-not-log"},
+    )
+    child = await ckpt.branch_checkpoint(
+        parent_checkpoint_id=parent.id,
+        namespace="ns-alpha",
+        agent_id="agent-a",
+    )
+    assert child.parent_checkpoint_id == parent.id
+    assert child.agent_id == "agent-a"
+    assert child.session_id == "sess-1"
+    assert child.payload == parent.payload
+    assert child.metadata.get(ckpt.HITL_STATUS_KEY) == ckpt.HITL_STATUS_NONE
+    assert child.id != parent.id
+
+
+@pytest.mark.asyncio
+async def test_branch_checkpoint_fail_closed(async_pool):
+    """ac-3: missing parent / wrong owner / cross-namespace → error."""
+    from archivist.storage import checkpoints as ckpt
+
+    parent = await ckpt.create_checkpoint(
+        agent_id="agent-a",
+        session_id="sess-1",
+        namespace="ns-alpha",
+        payload={"step": 0},
+    )
+
+    with pytest.raises(ckpt.CheckpointNotFoundError):
+        await ckpt.branch_checkpoint(
+            parent_checkpoint_id="missing-id",
+            namespace="ns-alpha",
+            agent_id="agent-a",
+        )
+
+    # Parent id exists but wrong namespace → not found (no leak)
+    with pytest.raises(ckpt.CheckpointNotFoundError):
+        await ckpt.branch_checkpoint(
+            parent_checkpoint_id=parent.id,
+            namespace="ns-other",
+            agent_id="agent-a",
+        )
+
+    with pytest.raises(ckpt.CheckpointAuthzError):
+        await ckpt.branch_checkpoint(
+            parent_checkpoint_id=parent.id,
+            namespace="ns-alpha",
+            agent_id="agent-b",
+        )
+
+
+@pytest.mark.asyncio
+async def test_hitl_interrupt_approve_resume_gate(async_pool):
+    """ac-2: interrupt blocks resume until approve; approve is idempotent."""
+    from archivist.storage import checkpoints as ckpt
+
+    row = await ckpt.create_checkpoint(
+        agent_id="agent-a",
+        session_id="sess-1",
+        namespace="ns-alpha",
+        payload={"step": 1},
+    )
+    interrupted = await ckpt.interrupt_checkpoint(
+        row.id,
+        namespace="ns-alpha",
+        agent_id="agent-a",
+        reason="need human",
+    )
+    assert ckpt.hitl_status(interrupted) == ckpt.HITL_STATUS_INTERRUPTED
+    assert interrupted.metadata.get(ckpt.HITL_REASON_KEY) == "need human"
+
+    with pytest.raises(ckpt.CheckpointConflictError, match="interrupted"):
+        ckpt.ensure_resume_allowed(interrupted, agent_id="agent-a")
+
+    approved = await ckpt.approve_checkpoint(
+        row.id,
+        namespace="ns-alpha",
+        agent_id="agent-a",
+    )
+    assert ckpt.hitl_status(approved) == ckpt.HITL_STATUS_APPROVED
+    ckpt.ensure_resume_allowed(approved, agent_id="agent-a")  # no raise
+
+    again = await ckpt.approve_checkpoint(
+        row.id,
+        namespace="ns-alpha",
+        agent_id="agent-a",
+    )
+    assert again.id == approved.id
+    assert ckpt.hitl_status(again) == ckpt.HITL_STATUS_APPROVED
+
+
+@pytest.mark.asyncio
+async def test_hitl_owner_bind_deny(async_pool):
+    """ac-3: interrupt/approve wrong owner fail closed."""
+    from archivist.storage import checkpoints as ckpt
+
+    row = await ckpt.create_checkpoint(
+        agent_id="agent-a",
+        session_id="sess-1",
+        namespace="ns-alpha",
+        payload={},
+    )
+    with pytest.raises(ckpt.CheckpointAuthzError):
+        await ckpt.interrupt_checkpoint(
+            row.id,
+            namespace="ns-alpha",
+            agent_id="intruder",
+        )
+    await ckpt.interrupt_checkpoint(
+        row.id,
+        namespace="ns-alpha",
+        agent_id="agent-a",
+    )
+    with pytest.raises(ckpt.CheckpointAuthzError):
+        await ckpt.approve_checkpoint(
+            row.id,
+            namespace="ns-alpha",
+            agent_id="intruder",
+        )
+
+
+@pytest.mark.asyncio
+async def test_client_cannot_forge_hitl_status_on_create_or_branch(async_pool):
+    """SEC-012-02: save/branch strip client HITL keys; only interrupt/approve set them."""
+    from archivist.storage import checkpoints as ckpt
+
+    forged = await ckpt.create_checkpoint(
+        agent_id="agent-a",
+        session_id="sess-1",
+        namespace="ns-alpha",
+        payload={"step": 0},
+        metadata={"hitl_status": "approved", "label": "keep-me"},
+    )
+    assert forged.metadata.get(ckpt.HITL_STATUS_KEY) == ckpt.HITL_STATUS_NONE
+    assert forged.metadata.get("label") == "keep-me"
+
+    child = await ckpt.branch_checkpoint(
+        parent_checkpoint_id=forged.id,
+        namespace="ns-alpha",
+        agent_id="agent-a",
+        metadata={"hitl_status": "approved", "hitl_reason": "forged"},
+    )
+    assert child.metadata.get(ckpt.HITL_STATUS_KEY) == ckpt.HITL_STATUS_NONE
+    assert ckpt.HITL_REASON_KEY not in child.metadata
+
+
+@pytest.mark.asyncio
+async def test_branch_hitl_payload_not_logged(async_pool, caplog):
+    """ac-4 / security: branch + HITL info logs omit payload bodies."""
+    import logging
+
+    from archivist.storage import checkpoints as ckpt
+
+    secret = "should-not-appear-in-info-logs-branch"
+    parent = await ckpt.create_checkpoint(
+        agent_id="agent-a",
+        session_id="sess-1",
+        namespace="ns-alpha",
+        payload={"token": secret},
+    )
+    with caplog.at_level(logging.INFO, logger="archivist.checkpoints"):
+        child = await ckpt.branch_checkpoint(
+            parent_checkpoint_id=parent.id,
+            namespace="ns-alpha",
+            agent_id="agent-a",
+        )
+        await ckpt.interrupt_checkpoint(
+            child.id,
+            namespace="ns-alpha",
+            agent_id="agent-a",
+            reason="pause",
+        )
+        await ckpt.approve_checkpoint(
+            child.id,
+            namespace="ns-alpha",
+            agent_id="agent-a",
+        )
+    joined = " ".join(r.getMessage() for r in caplog.records)
+    assert secret not in joined

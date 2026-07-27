@@ -6,8 +6,10 @@
 
 **Next milestones (engineering)** — Unique Differentiators completion program
 ([BRAIN-005](../sdd/brainstorms/BRAIN-005-complete-unique-differentiators/decision-document.md)):
-**Immediate next — INIT-012** Diff **#7** checkpoint productize → **INIT-013** Diff
-**#8** observability billboard. Diff **#4** Memory as a Product **Done**
+**Immediate next — INIT-013** Diff **#8** observability billboard. Diff **#7**
+Checkpoint / time-travel **Done (scoped)** ([INIT-012](../sdd/initiatives/INIT-012-checkpoint-time-travel/) /
+[ADR-012](adr/ADR-012-checkpoint-time-travel.md)) — ops promotion, branch, thin HITL;
+institutional tier DDL **deferred**. Diff **#4** Memory as a Product **Done**
 ([INIT-011](../sdd/initiatives/INIT-011-memory-as-product-mcp/) /
 [ADR-011](adr/ADR-011-memory-as-product-mcp.md)). Diff **#6** Self-Curation **Done**
 ([INIT-010](../sdd/initiatives/INIT-010-intelligent-self-curation/) /
@@ -15,7 +17,7 @@
 [ADR-009](adr/ADR-009-native-multi-agent-coordination.md)) **merged** (PR #53).
 Tip-only lessons remain ([ADR-007](adr/ADR-007-procedural-memory-wedge.md) /
 [ADR-008](adr/ADR-008-retire-skills-tip-lessons.md)).
-<!-- BRAIN-005 / INIT-011/SPEC-005 -->
+<!-- BRAIN-005 / INIT-012/SPEC-005 -->
 
 ---
 
@@ -43,7 +45,7 @@ We now shift from “great retrieval” to “great memory system for collaborat
 | 4 | **Memory as a Product** | Versioned, exportable, forkable, auditable memory graphs (Git for agent knowledge) | **Done (INIT-011 / [ADR-011](adr/ADR-011-memory-as-product-mcp.md))** — `archivist_map_*` on **ops**/**full** (snapshot/fork/export/**import**); service from INIT-001/SPEC-009 |
 | 5 | **Native Multi-Agent Coordination** | Built-in shared/institutional *use* of memory with selective sharing, conflict resolution, and negotiation | **Done (INIT-009 / ADR-009 / PR #53)** — `share_*` on ops; tip_ids + handoff; conflict→resolver |
 | 6 | **Intelligent Self-Curation** | Automatic summarization, relevance-based forgetting, contradiction detection | **Done (INIT-010 / [ADR-010](adr/ADR-010-intelligent-self-curation.md))** — curator product loop: reconsolidation + relevance forget + contradiction resolve (safe defaults / staged enablement) |
-| 7 | **Full Checkpointing + Time-Travel** | LangGraph-style resume, replay, branch, human-in-the-loop | **Partial** — checkpoint MCP on **full** (resume/replay); ops/branch/HITL = **INIT-012** (not “Not started”) |
+| 7 | **Full Checkpointing + Time-Travel** | LangGraph-style resume, replay, branch, human-in-the-loop | **Done (scoped, INIT-012 / [ADR-012](adr/ADR-012-checkpoint-time-travel.md))** — `archivist_checkpoint_*` on **ops**/**full** (save/list/get/resume/replay/**branch**/interrupt/**approve**); institutional tier DDL deferred |
 | 8 | **Observability Dashboard** | Memory lineage, audit trails, cost tracking, visualization | **Partial** — JSON lineage/savings/audit; UI billboard = **INIT-013** |
 
 These eight features combined will make Archivist the **most trustworthy and production-ready** memory layer.
@@ -70,20 +72,22 @@ These eight features combined will make Archivist the **most trustworthy and pro
 **Authoritative next work:** [BRAIN-005](../sdd/brainstorms/BRAIN-005-complete-unique-differentiators/decision-document.md)
 completion program — productize remaining Partial differentiators **one INIT at a time**.
 
-1. **Immediate next** — **INIT-012** Diff **#7** checkpoint productize
-   (ops promotion / branch UX / HITL; institutional tier DDL only if ADR-012
-   locks it). Then **INIT-013** Diff **#8** observability billboard.
-2. **Done** — Diff **#1–#6** including Diff **#4** (INIT-011 /
+1. **Immediate next** — **INIT-013** Diff **#8** observability billboard
+   (thin UI / auth per ADR-013).
+2. **Done** — Diff **#1–#7** including Diff **#7** (INIT-012 /
+   [ADR-012](adr/ADR-012-checkpoint-time-travel.md) — scoped: ops + branch + thin
+   HITL; institutional tier **out**), Diff **#4** (INIT-011 /
    [ADR-011](adr/ADR-011-memory-as-product-mcp.md)), Diff **#5** (INIT-009 /
    PR #53), Diff **#6** (INIT-010 / [ADR-010](adr/ADR-010-intelligent-self-curation.md)).
    Historical: INIT-008…004. Foundational: INIT-001 /
    [ADR-001](adr/ADR-001-platform-coherence-sequencing.md),
    INIT-003 / [ADR-003](adr/ADR-003-coach-core-reliability.md).
-3. **Still Partial until their INIT** — #7 checkpoint ops/HITL/branch,
-   #8 UI billboard. Phase 7 institutional **tier DDL** only if INIT-012 ADR includes it.
-   Skill OS remains cancelled (ADR-008).
+3. **Still Partial** — #8 UI billboard. Phase 7 tracking remains open for
+   **institutional / multi-tier DDL** (ADR-012 GR-TIER-001 deferred). Skill OS
+   remains cancelled (ADR-008).
 4. Optional: domain-specific long-document fixture locally (keep private data out of repo).
-   Short MaP round-trip recipe: [`demos/map-roundtrip.md`](demos/map-roundtrip.md).
+   Short recipes: [`demos/map-roundtrip.md`](demos/map-roundtrip.md),
+   [`demos/checkpoint-branch-hitl.md`](demos/checkpoint-branch-hitl.md).
 
 ---
 
@@ -149,7 +153,7 @@ reclaim the two extra routes.
 - [x] Phase 3 + 3.5 — Transactional outbox + atomic SQLite writes (see `docs/rearchitect_storage_phase3.md`)
 - [x] PostgreSQL first-class backend — v2.2.0 (see `CHANGELOG.md`)
 - [x] Answer Finder — v2.3.0: tiered memory, token packing, handoff protocol, savings observability
-- [ ] Phase 7 — Multi-tier memory + checkpointing
+- [ ] Phase 7 — Multi-tier memory + checkpointing *(Diff #7 checkpoint product Done scoped — ADR-012; institutional / multi-tier DDL still open)*
 - [ ] Phase 8 — Intelligent Lifecycle Management
 - [ ] Phase 9 — Observability & Control Plane
 - [x] Phase 10 — Multi-Agent Coordination Primitives plumbing (`archivist_share_*`; INIT-001/SPEC-010) + Diff #5 **product** (INIT-009 / ADR-009)
@@ -168,5 +172,5 @@ Expected console flow: `Encoding Batch …` → tqdm batch bar → nDCG / MAP / 
 
 _Add new rows when you change default embed models, BEIR limits, or the thin harness._
 
-**Last Updated**: INIT-011/SPEC-005 — Diff #4 Memory as a Product Done; Immediate Next → INIT-012 (2026-07-27)
+**Last Updated**: INIT-012/SPEC-005 — Diff #7 Checkpoint Done (scoped); Immediate Next → INIT-013 (2026-07-27)
 **Goal**: Become the most trustworthy, observable, and production-ready multi-agent memory system in 2026.

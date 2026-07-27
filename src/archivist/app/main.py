@@ -191,7 +191,7 @@ async def handle_health(_request):
         {
             "status": overall,
             "service": "archivist",
-            "version": "2.3.0",
+            "version": "2.4.0",
             "subsystems": statuses,
             "timestamp": datetime.now(UTC).isoformat(),
         },

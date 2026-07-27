@@ -1,20 +1,20 @@
 # Archivist MCP tool reference
 
-Quick reference for **52** MCP tools exposed by the Archivist server. For full parameter schemas, defaults, and examples, see [`CURSOR_SKILL.md`](CURSOR_SKILL.md).
+Quick reference for **55** MCP tools exposed by the Archivist server. For full parameter schemas, defaults, and examples, see [`CURSOR_SKILL.md`](CURSOR_SKILL.md).
 
 ## Tool profiles (`ARCHIVIST_TOOL_PROFILE`)
 
-<!-- INIT-003/SPEC-003 -->
+<!-- INIT-003/SPEC-003; INIT-012/SPEC-005 -->
 
 `list_tools` / `call_tool` honor **`ARCHIVIST_TOOL_PROFILE`** (default **`core`**):
 
 | Profile | Surface |
 |---------|---------|
 | `core` | Coach-path tools only: `archivist_store`, `archivist_search`, `archivist_get_context`, `archivist_index`, `archivist_delete` (forget path), plus small helpers (`archivist_health_dashboard`, `archivist_namespaces`, `archivist_get_reference_docs`). ≤12 tools. |
-| `ops` | Operator-oriented middle set — all tools except unfinished `archivist_checkpoint_*` wedge. Includes **`archivist_share_*`** (Diff #5 / [ADR-009](adr/ADR-009-native-multi-agent-coordination.md)) and **`archivist_map_*`** (Diff #4 / [ADR-011](adr/ADR-011-memory-as-product-mcp.md)). |
-| `full` | Entire registry (including checkpoints). |
+| `ops` | Operator-oriented set — currently equals **full** (no unfinished ops-hidden wedge). Includes **`archivist_share_*`** (Diff #5 / [ADR-009](adr/ADR-009-native-multi-agent-coordination.md)), **`archivist_map_*`** (Diff #4 / [ADR-011](adr/ADR-011-memory-as-product-mcp.md)), and **`archivist_checkpoint_*`** (Diff #7 / [ADR-012](adr/ADR-012-checkpoint-time-travel.md)). |
+| `full` | Entire registry. |
 
-Hidden tools remain in the codebase but are omitted from `list_tools` and **fail closed** on `call_tool` with a clear error. Set `ARCHIVIST_TOOL_PROFILE=full` (or `ops`) when you need the broader surface. See [ADR-003](adr/ADR-003-coach-core-reliability.md).
+Hidden tools remain in the codebase but are omitted from `list_tools` and **fail closed** on `call_tool` with a clear error. Set `ARCHIVIST_TOOL_PROFILE=ops` (or `full`) when you need the broader surface. See [ADR-003](adr/ADR-003-coach-core-reliability.md).
 
 The tables below describe the **full** registry; only the active profile is advertised to MCP clients.
 
@@ -103,15 +103,26 @@ Ack still means **durable graph + outbox** ([ADR-003](adr/ADR-003-coach-core-rel
 | `archivist_handoff` | Package a session's summary, goals, tips, hottest memories, and knowledge snapshot into a structured `HandoffPacket`. |
 | `archivist_receive_handoff` | Inject a `HandoffPacket` into the receiving agent's ephemeral `SessionStore`. |
 
-## Agent Checkpoints (5)
+## Agent Checkpoints (8)
+
+<!-- INIT-012/SPEC-005 -->
+
+Agent-state checkpoints (resume / replay / branch / thin HITL) — Unique Differentiator
+**#7** productized ([ADR-012](adr/ADR-012-checkpoint-time-travel.md)). Available on
+**ops** and **full** (not **core**). Distinct from L0–L2 memory tiers and from handoff /
+MaP scope versions. Do **not** put secrets in checkpoint payloads (audit logs never
+echo payload bodies).
 
 | Tool | Purpose |
 |------|---------|
 | `archivist_checkpoint_save` | Persist agent-state checkpoint (payload + optional parent) scoped to namespace. |
 | `archivist_checkpoint_list` | List session checkpoints in a namespace (oldest first). |
 | `archivist_checkpoint_get` | Fetch one checkpoint by id **and** namespace (no cross-tenant get by id alone). |
-| `archivist_checkpoint_resume` | Inject resume packet into the caller's `SessionStore` for that session only. |
+| `archivist_checkpoint_resume` | Inject resume packet into the caller's `SessionStore` for that session only. Fails closed while HITL-interrupted; owner-agent bind (SEC-008-01). |
 | `archivist_checkpoint_replay` | Read-only parent-chain reconstruction (metadata + payloads). |
+| `archivist_checkpoint_branch` | Create a child from a **required** parent in the same namespace (explicit branch UX). |
+| `archivist_checkpoint_interrupt` | Mark HITL waiting (`hitl_status=interrupted` in metadata). |
+| `archivist_checkpoint_approve` | Clear interrupt so resume may proceed (idempotent). |
 
 ## Coordination Beyond Handoff (5)
 
@@ -296,7 +307,7 @@ backward compatibility:
 - Use `archivist_share_propose` / `accept` / `reject` on **ops**/**full** for selective memory/`tip_ids` grants (Diff #5; does not replace handoff; not on **core**).
 - Use `archivist_share_attach_conflict` to record conflict outcomes (`supersede` / `merge` / `keep_both`); set `apply=true` to invoke the contradiction resolver (dry_run default; mutating apply needs write + `CONTRADICTION_RESOLVE_ENABLED`).
 - Use `archivist_map_*` on **ops**/**full** for Memory-as-Product snapshot/fork/export/import (Diff #4 / ADR-011; not on **core**; opaque `archive_id` only — never client absolute paths outside `BACKUP_DIR`).
-- Use `archivist_checkpoint_save` / `resume` / `replay` for Phase-7 agent-state time-travel (**full** profile; distinct from handoff and from L0–L2 tiers).
+- Use `archivist_checkpoint_save` / `resume` / `replay` / `branch` / `interrupt` / `approve` on **ops**/**full** for Diff #7 agent-state time-travel ([ADR-012](adr/ADR-012-checkpoint-time-travel.md); not on **core**; distinct from handoff and L0–L2 tiers; no secrets in payloads).
 - Check `archivist_savings_dashboard` to measure how much token waste the Answer Finder is eliminating (set `TOKEN_USD_PER_1K` for estimated USD fields).
 - Use `archivist_memory_lineage` to inspect provenance/version/audit/retrieval edges for a memory or entity (requires namespace read access).
 
