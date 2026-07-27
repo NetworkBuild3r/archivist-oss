@@ -310,6 +310,7 @@ backward compatibility:
 - Use `archivist_checkpoint_save` / `resume` / `replay` / `branch` / `interrupt` / `approve` on **ops**/**full** for Diff #7 agent-state time-travel ([ADR-012](adr/ADR-012-checkpoint-time-travel.md); not on **core**; distinct from handoff and L0–L2 tiers; no secrets in payloads).
 - Check `archivist_savings_dashboard` to measure how much token waste the Answer Finder is eliminating (set `TOKEN_USD_PER_1K` for estimated USD fields).
 - Use `archivist_memory_lineage` to inspect provenance/version/audit/retrieval edges for a memory or entity (requires namespace read access).
+- Open the **observability billboard** at **`/admin/ui/`** (Diff #8 / [ADR-013](adr/ADR-013-observability-billboard.md)) for lineage, audit, savings, and retrieval panels — same API-key auth as other `/admin/*` routes; set `ARCHIVIST_API_KEY` on any shared network.
 
 ## REST Endpoints (non-MCP)
 
@@ -317,9 +318,12 @@ backward compatibility:
 |----------|--------|---------|
 | `/health` | GET | Liveness probe (no auth required) |
 | `/metrics` | GET | Prometheus text exposition (see **Prometheus metrics** below) |
+| `/admin/ui/` | GET | Observability billboard (static HTML/JS — Diff #8 / ADR-013) |
 | `/admin/invalidate` | POST/GET | Delete expired memories (TTL-based) |
 | `/admin/retrieval-logs` | GET | Export retrieval pipeline execution traces |
 | `/admin/dashboard` | GET | Health dashboard JSON (add `?batch=true` for batch heuristic) |
+| `/admin/lineage` | GET | Memory/entity lineage JSON (`memory_id` or `entity_id`; `agent_id` for RBAC) |
+| `/admin/audit` | GET | Audit trail JSON (`memory_id` and/or `agent_id`, `limit`) |
 | `/mcp` | GET/POST/DELETE | MCP Streamable HTTP transport entrypoint (preferred) |
 | `/mcp/sse` | GET | Legacy MCP SSE transport entrypoint |
 | `/mcp/messages/` | POST | Legacy SSE message handler |

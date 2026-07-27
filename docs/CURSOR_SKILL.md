@@ -327,6 +327,10 @@ Lineage edges for a memory or entity from provenance, version history, audit act
 - `namespace` (string) -- Namespace for RBAC (required for entity lineage under strict RBAC)
 - `limit` (integer, default: 50) -- Max edges per source
 
+**Browser billboard (Diff #8):** Open `GET /admin/ui/` for the same lineage/audit/savings/retrieval
+views over HTTP ([ADR-013](adr/ADR-013-observability-billboard.md)). Use `X-API-Key` when
+`ARCHIVIST_API_KEY` is set. Recipe: [`demos/observability-billboard.md`](demos/observability-billboard.md).
+
 ---
 
 ## Cache Management (2 tools)

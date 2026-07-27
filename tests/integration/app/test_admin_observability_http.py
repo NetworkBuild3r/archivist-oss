@@ -1,4 +1,8 @@
-"""HTTP tests for Diff #8 admin lineage/audit + UI mount (INIT-013/SPEC-002)."""
+"""HTTP smoke for Diff #8 admin lineage/audit + UI mount.
+
+INIT-013/SPEC-002 — route wiring + RBAC/auth.
+INIT-013/SPEC-004 — billboard smoke / e2e (HTTP-level; no Playwright).
+"""
 
 from __future__ import annotations
 

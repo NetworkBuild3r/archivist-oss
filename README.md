@@ -874,6 +874,9 @@ These are available alongside the MCP interface for admin, monitoring, and integ
 | `/admin/invalidate` | GET/POST | Yes | Trigger TTL-based memory expiry |
 | `/admin/retrieval-logs` | GET | Yes | Export retrieval pipeline traces |
 | `/admin/dashboard` | GET | Yes | Health dashboard JSON (`?batch=true` for batch heuristic) |
+| `/admin/lineage` | GET | Yes | Memory/entity lineage JSON (Diff #8 / ADR-013) |
+| `/admin/audit` | GET | Yes | Audit trail JSON (Diff #8 / ADR-013) |
+| `/admin/ui/` | GET | Yes | Observability billboard UI (Diff #8 / ADR-013) |
 
 ---
 
@@ -884,7 +887,8 @@ Archivist is production-observable out of the box:
 - **Prometheus `/metrics`** — Same port as MCP (`MCP_PORT`). Counters, histograms (durations in ms; search result counts in `archivist_search_results`), and gauges including storage and dependency availability. Set `METRICS_ENABLED=false` to disable recording and return 404 on `/metrics`; use `METRICS_AUTH_EXEMPT=true` if Prometheus must scrape without `ARCHIVIST_API_KEY`. Full list: [docs/REFERENCE.md](docs/REFERENCE.md#prometheus-metrics).
 - **Retrieval traces** — Every `archivist_search` response includes `retrieval_trace` with per-stage counts and timings.
 - **Health dashboard** — `archivist_health_dashboard` MCP tool or `GET /admin/dashboard`: memory counts, stale %, conflict rate, cache hit rate.
-- **Audit trail** — Immutable log of all memory operations, queryable via `archivist_audit_trail`.
+- **Observability billboard** — `GET /admin/ui/` (Diff #8 / [ADR-013](docs/adr/ADR-013-observability-billboard.md)): lineage, audit, savings, and retrieval panels over HTTP JSON (`/admin/lineage`, `/admin/audit`, dashboard, retrieval-logs). Recipe: [`docs/demos/observability-billboard.md`](docs/demos/observability-billboard.md).
+- **Audit trail** — Immutable log of all memory operations, queryable via `archivist_audit_trail` or `GET /admin/audit`.
 - **Webhooks** — HTTP POST on `memory_store`, `memory_conflict`, `trajectory_logged`. Configure via `WEBHOOK_URL`.
 
 ---
@@ -977,7 +981,8 @@ Manual MCP and HTTP validation: [`QA_CHECKLIST.md`](QA_CHECKLIST.md). Full guide
 | **Diff #6 Intelligent Self-Curation** — curator reconsolidate / forget / resolve | **Done (INIT-010 / [ADR-010](docs/adr/ADR-010-intelligent-self-curation.md))** |
 | **Diff #4 Memory as a Product** — `archivist_map_*` on ops (+ import) | **Done (INIT-011 / [ADR-011](docs/adr/ADR-011-memory-as-product-mcp.md))** |
 | **Diff #7 Checkpoint / time-travel** — ops + branch + thin HITL | **Done scoped (INIT-012 / [ADR-012](docs/adr/ADR-012-checkpoint-time-travel.md))** |
-| Immediate next — Diff #8 observability billboard | **INIT-013** (BRAIN-005) |
+| **Diff #8 Observability billboard** — `/admin/ui/` + HTTP lineage/audit | **Done (INIT-013 / [ADR-013](docs/adr/ADR-013-observability-billboard.md))** |
+| Immediate next — maintenance / optional demos | BRAIN-005 program complete (#1–#8) |
 | Pydantic config validation + stronger env validation | Planned |
 
 Full phased plan: [`docs/ROADMAP.md`](docs/ROADMAP.md).

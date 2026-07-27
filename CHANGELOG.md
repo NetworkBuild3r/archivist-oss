@@ -5,6 +5,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Diff #8 productize (INIT-013 / ADR-013)** — Observability billboard is a first-class
+  served control plane: static **`/admin/ui/`** explorer over health/savings, lineage, audit,
+  and retrieval; new **`GET /admin/lineage`** and **`GET /admin/audit`** (RBAC parity with MCP);
+  reuses `/admin/dashboard` + `/admin/retrieval-logs`. Same `ArchivistAuthMiddleware` as other
+  `/admin/*` (set `ARCHIVIST_API_KEY` on shared networks). No new **core** MCP tools. Docs:
+  REFERENCE / ROADMAP (#8 → Done; Phase 9 checked; Immediate Next → maintenance); recipe
+  [`docs/demos/observability-billboard.md`](docs/demos/observability-billboard.md).
+
 ## [2.4.0] - 2026-07-27
 
 ### Changed
