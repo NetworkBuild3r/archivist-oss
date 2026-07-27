@@ -103,63 +103,6 @@ class TestHotnessScoring:
         assert _sigmoid(-100) < 0.01
 
 
-# ── Skill Relations ──────────────────────────────────────────────────────────
-
-
-class TestSkillRelations:
-    async def test_add_and_get_relation(self, async_pool):
-        from archivist.features.skills import (
-            add_skill_relation,
-            get_skill_relations,
-            register_skill,
-        )
-
-        r1 = await register_skill(name="kubectl", provider="k8s", registered_by="test")
-        r2 = await register_skill(name="helm", provider="k8s", registered_by="test")
-
-        rel_id = await add_skill_relation(
-            skill_a_id=r1["skill_id"],
-            skill_b_id=r2["skill_id"],
-            relation_type="compose_with",
-            confidence=0.9,
-            evidence="both manage k8s resources",
-            created_by="test",
-        )
-        assert rel_id > 0
-
-        rels = await get_skill_relations(r1["skill_id"])
-        assert len(rels) >= 1
-        assert rels[0]["relation_type"] == "compose_with"
-
-    async def test_invalid_relation_type(self, async_pool):
-        from archivist.features.skills import add_skill_relation
-
-        with pytest.raises(ValueError, match="Invalid relation_type"):
-            await add_skill_relation("a", "b", "invalid_type", created_by="test")
-
-    async def test_get_substitutes(self, async_pool):
-        from archivist.features.skills import (
-            add_skill_relation,
-            get_skill_substitutes,
-            register_skill,
-        )
-
-        r1 = await register_skill(name="docker", provider="oci", registered_by="test")
-        r2 = await register_skill(name="podman", provider="oci", registered_by="test")
-
-        await add_skill_relation(
-            skill_a_id=r1["skill_id"],
-            skill_b_id=r2["skill_id"],
-            relation_type="similar_to",
-            confidence=0.95,
-            created_by="test",
-        )
-
-        subs = await get_skill_substitutes(r1["skill_id"])
-        assert len(subs) >= 1
-        assert subs[0]["name"] == "podman"
-
-
 # ── Trajectory (tip consolidation schema) ────────────────────────────────────
 
 

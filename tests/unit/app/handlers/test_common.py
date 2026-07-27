@@ -1,10 +1,10 @@
 """Direct unit tests for INIT-022/SPEC-009's shared `require_rbac` helper.
 
 `require_rbac` replaces ~12 hand-copied RBAC-gate wrap-and-return call sites
-across `tools_storage.py`, `tools_search.py`, `tools_admin.py`, and
-`tools_skills.py` (M9) -- it is now the single authorization chokepoint for
-every handler, so it gets direct coverage of both the allowed and denied
-paths here, independent of any one handler.
+across `tools_storage.py`, `tools_search.py`, and `tools_admin.py` (M9) --
+it is now the single authorization chokepoint for every handler, so it gets
+direct coverage of both the allowed and denied paths here, independent of
+any one handler.
 """
 
 from __future__ import annotations

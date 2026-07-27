@@ -1,6 +1,6 @@
 """Webhook dispatcher — fires HTTP POSTs on configurable Archivist events.
 
-Events: memory_store, memory_conflict, skill_event, trajectory_logged,
+Events: memory_store, memory_conflict, trajectory_logged,
         annotation_added, cache_invalidated.
 
 Configure via WEBHOOK_URL (single endpoint) or WEBHOOK_CONFIG_PATH (YAML

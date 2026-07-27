@@ -7,7 +7,7 @@ Archivist is a memory service for multi-agent fleets. It combines:
 | Layer | Technology | Role |
 |-------|------------|------|
 | **Vectors** | Qdrant | Semantic search over hierarchical chunks |
-| **Structured state** | SQLite (default) or PostgreSQL (`GRAPH_BACKEND=postgres`) | Knowledge graph, FTS, needle registry, audit, trajectories, skills, outbox |
+| **Structured state** | SQLite (default) or PostgreSQL (`GRAPH_BACKEND=postgres`) | Knowledge graph, FTS, needle registry, audit, trajectories, tips, outbox |
 | **Durability boundary** | Transactional outbox + `MemoryTransaction` | Atomic commit of graph/FTS artefacts with queued Qdrant work (Phase 3 + 3.5) |
 | **Source of truth (optional)** | File system | Markdown under `MEMORY_ROOT` for ingestion |
 
@@ -155,7 +155,7 @@ Additional fields (`source_memory_id`, `is_reverse_hyde`, `thought_type`, actor 
 - **Outbox** — `outbox` (`id`, `event_type`, `payload`, `status`, `retry_count`, …)
 - **Agent checkpoints (Phase 7)** — `agent_checkpoints` (`id`, `agent_id`, `session_id`, `namespace`, `parent_checkpoint_id`, in-row JSON `payload`, optional `blob_ref`, `metadata`, `created_at`). This is **agent-state / time-travel storage**, not `memory_chunks.tier_label` (L0–L2). Repository helpers: `storage/checkpoints.py`. MCP: `archivist_checkpoint_save|list|get|resume|replay` (`app/handlers/tools_checkpoint.py`, INIT-001/SPEC-008). **Rollback:** `DROP TABLE IF EXISTS agent_checkpoints;` and unregister/disable checkpoint MCP tools.
 - **Memory-as-Product (INIT-001/SPEC-009)** — `memory_scope_versions` tracks namespace/agent-scoped **snapshot / fork / export** lineage (`parent_version_id`, `archive_id`, counts). Service APIs in `storage/memory_product.py` (`create_scope_snapshot`, `fork_from_snapshot`, `export_scope`); per-memory history remains in `memory_versions` via `storage/versioning.py`. Archives live under `BACKUP_DIR` and **must** resolve through `backup_manager._snapshot_dir` / `SnapshotPathError` (PR #39). Forks mutate vectors via `MemoryTransaction` + outbox. Distinct from Phase-7 checkpoints. **Rollback:** `DROP TABLE IF EXISTS memory_scope_versions;` and remove/disable Memory-as-Product callers.
-- **Operations** — `audit_log`, `memory_versions`, `curator_queue`, `retrieval_logs`, `trajectories`, `skills`, …
+- **Operations** — `audit_log`, `memory_versions`, `curator_queue`, `retrieval_logs`, `trajectories`, `tips`, … (legacy `skills*` tables may linger dormant after ADR-008; not a live product surface)
 
 Full table inventory: see the Archivist storage-schema skill (`.cursor/skills/archivist-storage-schema/SKILL.md`) when working on schema changes. Postgres DDL: [`storage/schema_postgres.sql`](../src/archivist/storage/schema_postgres.sql).
 
@@ -254,7 +254,7 @@ The following sections record behaviour and operational guidance by release (con
 
 ### v0.7.0
 
-- **Skill registry** — SQLite tables for skills, versions, lessons, events; skill MCP tools.
+- **Skill registry** — Introduced in v0.7 (SQLite skill tables + MCP tools); **retired** in INIT-008 / [ADR-008](adr/ADR-008-retire-skills-tip-lessons.md). Procedural lessons use trajectory **tips** only.
 
 ### v0.8.0
 
@@ -266,7 +266,7 @@ The following sections record behaviour and operational guidance by release (con
 ### v0.9.0
 
 - **Prometheus metrics** — `GET /metrics`.
-- **Webhooks** — HTTP POST on `memory_store`, `memory_conflict`, `skill_event`.
+- **Webhooks** — HTTP POST on `memory_store`, `memory_conflict`, `trajectory_logged`.
 - **Health dashboard** — Aggregated stats and batch heuristic.
 
 ### v1.0.0

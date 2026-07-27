@@ -1,5 +1,5 @@
 """Health dashboard and batch-size heuristic — aggregates operational metrics
-across memory, skills, retrieval, and conflicts for a single-pane view.
+across memory, retrieval, and conflicts for a single-pane view.
 
 The batch heuristic: when memory health degrades (high conflict rate, stale
 memories, low retrieval quality), recommend smaller batches / more frequent
@@ -67,7 +67,6 @@ async def build_dashboard(window_days: int = 7) -> dict:
     async with pool.read() as conn:
         audit_stats = await _audit_stats(conn, window_days)
         retrieval = await _retrieval_stats(conn, window_days)
-        skill_overview = await _skill_overview(conn, window_days)
         token_savings = await _token_savings_stats(conn, window_days)
         tier_dist = await _tier_distribution_stats(conn, window_days)
 
@@ -85,7 +84,6 @@ async def build_dashboard(window_days: int = 7) -> dict:
         "stale_estimate": stale,
         "conflicts": audit_stats,
         "retrieval": retrieval,
-        "skills": skill_overview,
         "cache": {
             "enabled": cache.get("enabled"),
             "total_entries": cache.get("total_entries"),
@@ -130,11 +128,6 @@ async def batch_heuristic(window_days: int = 7) -> dict:
         score -= 0.5
         signals.append(f"Low cache hit rate ({cache_hit:.0%})")
 
-    skill_health = dashboard["skills"].get("degraded_count", 0)
-    if skill_health > 2:
-        score -= 1
-        signals.append(f"{skill_health} degraded/broken skills")
-
     score = max(1, min(10, round(score)))
 
     if score <= 2:
@@ -154,7 +147,6 @@ async def batch_heuristic(window_days: int = 7) -> dict:
             "conflict_rate": conflict_rate,
             "stale_pct": stale_pct,
             "cache_hit_rate": cache_hit,
-            "degraded_skills": skill_health,
         },
     }
 
@@ -263,52 +255,6 @@ async def _retrieval_stats(conn, window_days: int) -> dict:
     except Exception as e:
         logger.warning("dashboard._retrieval_stats failed: %s", e, exc_info=True)
         return {"total": 0, "cache_hits": 0, "cache_hit_rate": None, "avg_duration_ms": None}
-
-
-async def _skill_overview(conn, window_days: int) -> dict:
-    try:
-        from archivist.core.config import GRAPH_BACKEND
-
-        if (GRAPH_BACKEND or "sqlite").lower() == "postgres":
-            cutoff = f"created_at >= NOW() - INTERVAL '{window_days} days'"
-            params: list = []
-        else:
-            cutoff = "created_at >= datetime('now', ?)"
-            params = [f"-{window_days} days"]
-
-        status_rows = await conn.fetchall(
-            "SELECT status, COUNT(*) as cnt FROM skills GROUP BY status"
-        )
-        status_counts = {row["status"]: row["cnt"] for row in status_rows}
-
-        total_skills = sum(status_counts.values())
-        degraded = status_counts.get("broken", 0) + status_counts.get("deprecated", 0)
-
-        event_rows = await conn.fetchall(
-            f"SELECT outcome, COUNT(*) as cnt FROM skill_events WHERE {cutoff} GROUP BY outcome",
-            params,
-        )
-        event_counts = {row["outcome"]: row["cnt"] for row in event_rows}
-        total_events = sum(event_counts.values())
-        success_rate = (
-            round(event_counts.get("success", 0) / total_events, 3) if total_events > 0 else None
-        )
-
-        return {
-            "total_skills": total_skills,
-            "status_breakdown": status_counts,
-            "degraded_count": degraded,
-            "events_in_window": total_events,
-            "skill_success_rate": success_rate,
-        }
-    except Exception as e:
-        logger.warning("dashboard._skill_overview failed: %s", e, exc_info=True)
-        return {
-            "total_skills": 0,
-            "degraded_count": 0,
-            "events_in_window": 0,
-            "skill_success_rate": None,
-        }
 
 
 async def _token_savings_stats(conn, window_days: int) -> dict:

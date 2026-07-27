@@ -95,22 +95,11 @@ Ack still means **durable graph + outbox** ([ADR-003](adr/ADR-003-coach-core-rel
 | `archivist_tips` | Retrieve strategy/recovery/optimization tips from past trajectories |
 | `archivist_session_end` | Summarize a session into durable memory |
 
-## Skill Registry (6)
-
-| Tool | Purpose |
-|------|---------|
-| `archivist_register_skill` | Register or update a skill (MCP tool) with provider, version, endpoint |
-| `archivist_skill_event` | Log invocation outcome (success/partial/failure) for health scoring |
-| `archivist_skill_lesson` | Record failure modes, workarounds, best practices |
-| `archivist_skill_health` | Get health grade, success rate, recent failures, substitutes |
-| `archivist_skill_relate` | Create relations between skills (similar_to, depend_on, compose_with, replaced_by) |
-| `archivist_skill_dependencies` | Get skill dependency/relation graph |
-
 ## Context Assembly & Handoff (3)
 
 | Tool | Purpose |
 |------|---------|
-| `archivist_get_context` | High-level token-budgeted context assembly — tiers, graph facts, procedural tips in one call. Supports `mode=normal\|bootstrap` (INIT-004/SPEC-004). Replaces multi-step search patterns. Tips: `include_tips` (default true) returns `tips[]` as strings from SQLite `tip_text`, ranked by task/query when provided (INIT-007 / [ADR-007](adr/ADR-007-procedural-memory-wedge.md)). |
+| `archivist_get_context` | High-level token-budgeted context assembly — tiers, graph facts, and **procedural tips** (the tip-only lesson API) in one call. Supports `mode=normal\|bootstrap` (INIT-004/SPEC-004). Tips: `include_tips` (default true) returns `tips[]` as strings from SQLite `tip_text`, ranked by task/query when provided ([ADR-007](adr/ADR-007-procedural-memory-wedge.md); skill registry retired — [ADR-008](adr/ADR-008-retire-skills-tip-lessons.md)). |
 | `archivist_handoff` | Package a session's summary, goals, tips, hottest memories, and knowledge snapshot into a structured `HandoffPacket`. |
 | `archivist_receive_handoff` | Inject a `HandoffPacket` into the receiving agent's ephemeral `SessionStore`. |
 
@@ -145,7 +134,7 @@ Selective share + consensus v1 (explicit accept/reject + audit). Extends — doe
 | `archivist_audit_trail` | View immutable audit log entries |
 | `archivist_resolve_uri` | Resolve `archivist://` URIs to their underlying resource |
 | `archivist_retrieval_logs` | Export/analyze retrieval pipeline execution traces |
-| `archivist_health_dashboard` | Single-pane health: memory counts, stale %, conflict rate, skills, cache |
+| `archivist_health_dashboard` | Single-pane health: memory counts, stale %, conflict rate, cache |
 | `archivist_batch_heuristic` | Recommended batch size (1-10) from health signals |
 | `archivist_savings_dashboard` | Token savings stats: avg/min/max savings %, total tokens saved, per-policy breakdown, estimated USD (`null` if `TOKEN_USD_PER_1K` unset), hotness heatmap (top-N memories). |
 | `archivist_memory_lineage` | Lineage edges for a memory/entity (provenance, versions, audit, retrieval mentions). RBAC on namespace reads; no secrets/full text. |

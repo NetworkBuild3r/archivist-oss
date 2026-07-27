@@ -5,6 +5,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Removed
+
+- **Skill registry retired (INIT-008 / ADR-008)** — removed six ops/full MCP tools
+  (`archivist_register_skill`, `archivist_skill_event`, `archivist_skill_lesson`,
+  `archivist_skill_health`, `archivist_skill_relate`, `archivist_skill_dependencies`)
+  plus `features/skills.py` / `handlers/tools_skills.py`. Procedural lessons use the
+  trajectory → tips → `get_context` path only ([ADR-007](docs/adr/ADR-007-procedural-memory-wedge.md)).
+  Existing `skills*` DB tables may remain dormant (no DROP in INIT-008). Breaking for
+  any ops/full client that called the skill tools (never on default **core** profile).
+
 ### Added
 
 - **Selective share + consensus MCP tools (INIT-001/SPEC-010)** — five new tools

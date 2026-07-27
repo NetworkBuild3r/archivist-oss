@@ -4,17 +4,20 @@
 
 **Goal** — Be the most **trustworthy and production-ready** open multi-agent memory layer in 2026: observable, RBAC-aware, safe under fleet load, and the best answer finder in the industry.
 
-**Next milestones (engineering)** — No frozen next INIT yet. INIT-007 /
-[ADR-007](adr/ADR-007-procedural-memory-wedge.md) (procedural memory wedge;
-PR #49 merged), INIT-006 / [ADR-006](adr/ADR-006-agentic-memory-eval-gym.md)
-(agentic eval gym; PR #48), INIT-005 / [ADR-005](adr/ADR-005-coach-path-performance.md),
-and INIT-004 / [ADR-004](adr/ADR-004-llm-native-coach-memory-surfaces.md) are
-**complete / historical**. Choose INIT-008 via a new planning pass (Mode A /
-BRAIN-003 leftovers: hierarchical reconsolidation, skill-registry↔tips bridge,
-multi-agent coherence depth) — do **not** default to a skill OS, Phase 7–10
-breadth, a full MemoryArena port, or a production agent runtime. (INIT-001 /
-[ADR-001](adr/ADR-001-platform-coherence-sequencing.md) and INIT-003 /
-[ADR-003](adr/ADR-003-coach-core-reliability.md) remain foundational context.)
+**Next milestones (engineering)** — Immediate focus is **INIT-008** /
+[ADR-008](adr/ADR-008-retire-skills-tip-lessons.md): **retire the skill
+registry** (MCP tools, wiring, docs, tests) and freeze **tip-only lessons**
+(trajectory → tips → `get_context` / handoff). Next mechanism bet after
+retirement is Unique Differentiator **#5** (Native Multi-Agent Coordination) as
+**INIT-009** — not a skill OS, not a skill↔tips bridge, not Phase 7–10 breadth.
+INIT-007 / [ADR-007](adr/ADR-007-procedural-memory-wedge.md) (PR #49), INIT-006 /
+[ADR-006](adr/ADR-006-agentic-memory-eval-gym.md) (PR #48), INIT-005 /
+[ADR-005](adr/ADR-005-coach-path-performance.md), and INIT-004 /
+[ADR-004](adr/ADR-004-llm-native-coach-memory-surfaces.md) are **complete /
+historical**. (INIT-001 / [ADR-001](adr/ADR-001-platform-coherence-sequencing.md)
+and INIT-003 / [ADR-003](adr/ADR-003-coach-core-reliability.md) remain
+foundational context.)
+<!-- INIT-008/SPEC-001 -->
 
 ---
 
@@ -64,26 +67,32 @@ These six features combined will make Archivist the **most trustworthy and produ
 
 ## Immediate Next Steps (Recommended)
 
-**Authoritative next work:** None frozen. Pick INIT-008 with a fresh Mode A
-brainstorm that re-scores BRAIN-003 / RSCH-001 leftovers against post–INIT-007
-reality. Do **not** treat a skill OS, skill-registry→core merge, Phase 7–10
-breadth, a full MemoryArena port, or a production agent runtime as the default
+<!-- INIT-008/SPEC-001 -->
+
+**Authoritative next work:** [ADR-008: Retire skill registry; tip-only
+lessons](adr/ADR-008-retire-skills-tip-lessons.md) (**INIT-008**) — remove the
+six skill-registry MCP tools and related wiring/docs/tests; keep procedural
+lessons on the ADR-007 tip path only. Do **not** bridge `skill_lessons` into
+tips, keep deprecated skill tools, or treat a skill OS / Phase 7–10 dump as the
 plan.
 
-1. **Choose INIT-008 (planning)** — Re-rank parked mechanism bets:
-   hierarchical reconsolidation, skill-registry ↔ tips bridge, multi-agent
-   coherence beyond `share_*` (and optional Domain MCP pause as a non-OSS
-   parallel). Freeze the winner in ADR-008 + Mode B only after that decision.
-2. **Complete / historical (not next)** — **INIT-007** (procedural memory wedge /
-   ADR-007, PR #49), **INIT-006** (agentic memory eval gym / ADR-006),
-   **INIT-005** (coach-path performance / ADR-005), **INIT-004** (LLM-native
-   coach memory surfaces / ADR-004). Foundational context: INIT-001 /
+1. **Retire skills / tip-only lessons (INIT-008)** — ADR-008 freeze, then delete
+   skill MCP surface + feature module, fix tests, rewrite product docs, security
+   review, architecture diagrams.
+2. **Next after INIT-008 (INIT-009)** — Unique Differentiator **#5 Native
+   Multi-Agent Coordination** (selective sharing / conflict / institutional
+   memory; share lessons via memory/`share_*` + handoff — not skills).
+3. **Complete / historical (not next)** — **INIT-007** (procedural tips wedge /
+   ADR-007, PR #49), **INIT-006** (agentic eval gym / ADR-006), **INIT-005**
+   (coach-path performance / ADR-005), **INIT-004** (LLM-native coach surfaces /
+   ADR-004). Foundational context: INIT-001 /
    [ADR-001](adr/ADR-001-platform-coherence-sequencing.md), INIT-003 /
    [ADR-003](adr/ADR-003-coach-core-reliability.md).
-3. **Parked for later (not next until chosen)** — Skill-registry ↔ tips bridge,
-   hierarchical reconsolidation, multi-agent coherence depth, Phase 7 checkpoint
-   UX, MaP MCP / recipe demos, `share_*` depth, Phase 9 observability billboard.
-4. Optional: add a **domain-specific long-document fixture** (your own docs +
+4. **Parked for later (not next)** — Hierarchical reconsolidation (Diff #6),
+   Memory-as-Product finish (Diff #4), Phase 7 checkpoint UX (Diff #7), MaP /
+   recipe demos, Phase 9 observability billboard (Diff #8). **Skill-registry ↔
+   tips bridge is cancelled** (ADR-008).
+5. Optional: add a **domain-specific long-document fixture** (your own docs +
    questions) locally to tune retrieval beyond the public toy corpus — keep
    private data out of the public repo.
 

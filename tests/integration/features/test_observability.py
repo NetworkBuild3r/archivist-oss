@@ -119,18 +119,6 @@ def _patch_dbs():
         result_count INTEGER, cache_hit INTEGER, duration_ms INTEGER,
         created_at TEXT DEFAULT (datetime('now'))
     );
-    CREATE TABLE IF NOT EXISTS skills (
-        id TEXT PRIMARY KEY, name TEXT, provider TEXT,
-        mcp_endpoint TEXT, current_version TEXT, status TEXT,
-        description TEXT, registered_by TEXT,
-        registered_at TEXT, updated_at TEXT, metadata TEXT
-    );
-    CREATE TABLE IF NOT EXISTS skill_events (
-        id TEXT, skill_id TEXT, agent_id TEXT, event_type TEXT,
-        outcome TEXT, skill_version TEXT, duration_ms INTEGER,
-        error_message TEXT, trajectory_id TEXT,
-        created_at TEXT DEFAULT (datetime('now')), metadata TEXT
-    );
     """)
     _test_conn.commit()
 

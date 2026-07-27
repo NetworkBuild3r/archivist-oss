@@ -152,7 +152,6 @@ def _translate_sql(sql: str) -> str:
                 "memory_points": ["memory_id", "qdrant_id", "point_type"],
                 "delete_failures": ["memory_id"],
                 "outbox": ["id"],
-                "skill_relations": ["skill_a", "skill_b", "relation_type"],
             }
             conflict_cols = _conflict_targets.get(table_name)
             pk_set = set(conflict_cols) if conflict_cols else {"id", "rowid"}

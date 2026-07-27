@@ -11,7 +11,6 @@ def test_uri_roundtrip():
         memory_uri,
         namespace_uri,
         parse_uri,
-        skill_uri,
     )
 
     m = memory_uri("agents-nova", "abc-123")
@@ -33,10 +32,8 @@ def test_uri_roundtrip():
     parsed_n = parse_uri(n)
     assert parsed_n.is_namespace
 
-    s = skill_uri("global", "web_search")
-    parsed_s = parse_uri(s)
-    assert parsed_s.is_skill
-    assert parsed_s.resource_id == "web_search"
+    # INIT-008/SPEC-002: skill resource type retired with skill registry
+    assert parse_uri("archivist://global/skill/web_search") is None
 
 
 def test_uri_parse_invalid():

@@ -12,6 +12,12 @@
 → [INIT-007](../../sdd/initiatives/INIT-007-procedural-memory-wedge/INIT-007-procedural-memory-wedge-initiative.md);
 follows ADR-003…006.
 
+> **Superseded for skills (2026-07-26):** [ADR-008](ADR-008-retire-skills-tip-lessons.md)
+> **retires** the skill registry. ADR-007 tip-path guardrails
+> (GR-PROC-001 / GR-SURF-001 / GR-RANK-001 / GR-SHAPE-001) remain in force;
+> **GR-SKILL-001** (“park registry / don’t merge into core”) is replaced by
+> retirement — do **not** bridge `skill_lessons` into tips.
+
 ## Decision
 
 Freeze Archivist’s **procedural memory product wedge** so INIT-007 specs do not
@@ -30,7 +36,7 @@ GR-LAYER-001).
 | ID | Rule |
 |---|---|
 | **GR-PROC-001** | **Tips / trajectory first.** Reuse `tips` + trajectory extraction hooks. Do **not** invent a parallel procedure store or Letta-style skill OS. |
-| **GR-SKILL-001** | **Skill-registry out of scope.** `tools_skills.py` / skill lessons stay ops/full and are **not** merged into core `get_context` in INIT-007. |
+| **GR-SKILL-001** | **Superseded by [ADR-008](ADR-008-retire-skills-tip-lessons.md).** Was: skill-registry out of INIT-007 scope. Now: registry **retired**; tip-only lessons; no skill↔tips bridge. |
 | **GR-SURF-001** | **Tips must surface.** `search_tips` row fields (`tip_text`) map correctly into `get_context` / handoff tip strings when `include_tips=true`. Silent empty tips are a defect. |
 | **GR-RANK-001** | **Task/query-conditioned recall.** Tip selection is not pure `ORDER BY created_at DESC`; prefer relevance (keyword / fingerprint / category). Usage counters may update on retrieve. Prefer CI-deterministic ranking over a new embed dependency. |
 | **GR-SHAPE-001** | **Compat shape.** Keep `tips: list[str]` on get_context responses unless a later ADR explicitly adds additive fields. |
@@ -118,7 +124,8 @@ INIT-007 as parked — stale after PR #48.
 
 Explicitly **out of scope** for work governed by this ADR:
 
-- Unifying / promoting skill-registry into core or get_context (GR-SKILL-001)
+- Unifying / promoting skill-registry into core or get_context (GR-SKILL-001;
+  **see ADR-008 — registry retired**)
 - Letta-style skill OS / production agent runtime (GR-LAYER-001)
 - Net-new core MCP tools or promoting `log_trajectory` into core (GR-PROD-002)
 - Full MemoryArena / web-nav gym port (GR-EVAL-001)

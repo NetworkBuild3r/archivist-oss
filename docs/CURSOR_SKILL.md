@@ -232,84 +232,6 @@ Summarize a session and optionally store it as durable memory.
 
 ---
 
-## Skill Registry (6 tools)
-
-### archivist_register_skill
-
-Register or update a skill (MCP tool) with provider, endpoint, and version.
-
-**Parameters:**
-- `name` (string, **required**) -- Skill/tool name
-- `agent_id` (string, **required**) -- Registering agent
-- `provider` (string) -- Provider name (e.g. `openai`, `internal`)
-- `mcp_endpoint` (string) -- MCP server endpoint URL
-- `version` (string, default: `0.0.0`) -- Version string
-- `description` (string) -- What the skill does
-- `changelog` (string) -- What changed in this version
-- `breaking_changes` (string) -- Known breaking changes
-
-### archivist_skill_event
-
-Log a skill invocation outcome for health scoring.
-
-**Parameters:**
-- `skill_name` (string, **required**) -- Skill name
-- `agent_id` (string, **required**) -- Agent that used the skill
-- `outcome` (enum: `success`, `partial`, `failure`, **required**)
-- `provider` (string) -- Provider to disambiguate
-- `skill_version` (string) -- Version used
-- `duration_ms` (integer) -- Execution time in milliseconds
-- `error_message` (string) -- Error details if failed
-- `trajectory_id` (string) -- Link to a trajectory
-
-### archivist_skill_lesson
-
-Record failure modes, workarounds, or best practices for a skill.
-
-**Parameters:**
-- `skill_name` (string, **required**) -- Skill name
-- `title` (string, **required**) -- Short title
-- `content` (string, **required**) -- Full lesson content
-- `agent_id` (string, **required**) -- Contributing agent
-- `provider` (string) -- Provider to disambiguate
-- `lesson_type` (enum: `failure_mode`, `workaround`, `best_practice`, `breaking_change`, `general`, default: `general`)
-- `skill_version` (string) -- Version this lesson applies to
-
-### archivist_skill_health
-
-Get health grade, success rate, recent failures, and substitutes for a skill.
-
-**Parameters:**
-- `skill_name` (string, **required**) -- Skill to check
-- `provider` (string) -- Provider to disambiguate
-- `window_days` (integer, default: 30) -- History window
-- `include_lessons` (boolean, default: true) -- Include recent lessons
-
-### archivist_skill_relate
-
-Create or update a relation between two skills.
-
-**Parameters:**
-- `skill_a` (string, **required**) -- First skill name
-- `skill_b` (string, **required**) -- Second skill name
-- `relation_type` (enum: `similar_to`, `depend_on`, `compose_with`, `replaced_by`, **required**)
-- `agent_id` (string, **required**) -- Agent creating the relation
-- `confidence` (number, default: 1.0) -- Confidence 0-1
-- `evidence` (string) -- Why this relation exists
-- `provider_a` (string) -- Provider for skill_a
-- `provider_b` (string) -- Provider for skill_b
-
-### archivist_skill_dependencies
-
-Return the dependency/relation graph for a skill.
-
-**Parameters:**
-- `skill_name` (string, **required**) -- Skill to get relations for
-- `provider` (string) -- Provider to disambiguate
-- `depth` (integer, default: 1) -- Graph traversal depth
-
----
-
 ## Admin & Context Management (8 tools)
 
 ### archivist_context_check
@@ -355,7 +277,7 @@ View immutable audit log for memory operations.
 
 ### archivist_resolve_uri
 
-Resolve an `archivist://` URI to its underlying resource. Supports memory, entity, namespace, and skill URIs.
+Resolve an `archivist://` URI to its underlying resource. Supports memory, entity, and namespace URIs.
 
 **Parameters:**
 - `uri` (string, **required**) -- An `archivist://` URI
@@ -374,14 +296,14 @@ Export retrieval pipeline execution traces for debugging and analytics.
 
 ### archivist_health_dashboard
 
-Comprehensive health dashboard: memory counts, stale %, conflict rate, retrieval stats, skill health, cache status.
+Comprehensive health dashboard: memory counts, stale %, conflict rate, retrieval stats, cache status.
 
 **Parameters:**
 - `window_days` (integer, default: 7) -- Analysis window
 
 ### archivist_batch_heuristic
 
-Recommend batch size (1-10) from health signals. Considers conflict rate, stale %, cache hit rate, degraded skills.
+Recommend batch size (1-10) from health signals. Considers conflict rate, stale %, cache hit rate.
 
 **Parameters:**
 - `window_days` (integer, default: 7) -- Analysis window
@@ -549,7 +471,7 @@ Fetch one grant by `grant_id` + `namespace`. Visible to proposer or recipient wi
 Return the full Archivist agent skill reference (this document) or a single named section.  Call this on first connection or whenever you are unsure how to use a tool.
 
 **Parameters:**
-- `section` (string, optional) -- Heading keyword to filter (e.g. `"search"`, `"storage"`, `"trajectory"`, `"skills"`, `"admin"`, `"tips"`). Omit to return the full reference.
+- `section` (string, optional) -- Heading keyword to filter (e.g. `"search"`, `"storage"`, `"trajectory"`, `"admin"`, `"tips"`). Omit to return the full reference.
 
 ---
 
@@ -565,8 +487,7 @@ Return the full Archivist agent skill reference (this document) or a single name
 8. **Use `archivist_context_check`** before reasoning to decide if compaction is needed
 9. **Use `archivist_compress` with `format: structured`** for Goal/Progress/Decisions/Next Steps summaries
 10. **Log trajectories** with `archivist_log_trajectory` so future searches benefit from outcome-aware retrieval
-11. **Check skill health** with `archivist_skill_health` before invoking unreliable external tools
-12. **Hand off sessions** with `archivist_handoff` + `archivist_receive_handoff` to transfer context between agents
-13. **Selectively share memories** with `archivist_share_propose` / `accept` / `reject` (consensus v1 = explicit decision + audit; does not replace handoff)
-14. **Resume agent state** with `archivist_checkpoint_save` + `archivist_checkpoint_resume` (namespace-scoped; use `replay` for chain inspection)
-15. **Monitor token savings** with `archivist_savings_dashboard` to confirm the Answer Finder is reducing noise
+11. **Hand off sessions** with `archivist_handoff` + `archivist_receive_handoff` to transfer context between agents
+12. **Selectively share memories** with `archivist_share_propose` / `accept` / `reject` (consensus v1 = explicit decision + audit; does not replace handoff)
+13. **Resume agent state** with `archivist_checkpoint_save` + `archivist_checkpoint_resume` (namespace-scoped; use `replay` for chain inspection)
+14. **Monitor token savings** with `archivist_savings_dashboard` to confirm the Answer Finder is reducing noise

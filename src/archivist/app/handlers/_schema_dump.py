@@ -21,7 +21,6 @@ _HANDLER_MODULES = [
     "handlers.tools_search",
     "handlers.tools_storage",
     "handlers.tools_trajectory",
-    "handlers.tools_skills",
     "handlers.tools_admin",
     "handlers.tools_cache",
     "handlers.tools_docs",
