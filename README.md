@@ -7,7 +7,7 @@
 Hybrid retrieval · token-budgeted context · knowledge graph · RBAC · active curation — one MCP endpoint.</p>
 
 <p align="center">
-  <a href="#quick-start"><strong>Quick Start</strong></a> · <a href="#top-tier-answer-finder"><strong>Answer Finder</strong></a> · <a href="#features-at-a-glance"><strong>Features</strong></a> · <a href="#architecture-deep-dive"><strong>Architecture</strong></a> · <a href="#benchmarks"><strong>Benchmarks</strong></a> · <a href="#quality-assurance--testing"><strong>QA</strong></a> · <a href="#mcp-tools-41"><strong>41 MCP Tools</strong></a> · <a href="#configuration-reference"><strong>Config</strong></a> · <a href="docs/ROADMAP.md"><strong>Roadmap</strong></a> · <a href="#development"><strong>Development</strong></a>
+  <a href="#quick-start"><strong>Quick Start</strong></a> · <a href="#top-tier-answer-finder"><strong>Answer Finder</strong></a> · <a href="#features-at-a-glance"><strong>Features</strong></a> · <a href="#architecture-deep-dive"><strong>Architecture</strong></a> · <a href="#benchmarks"><strong>Benchmarks</strong></a> · <a href="#quality-assurance--testing"><strong>QA</strong></a> ·   <a href="#mcp-tools-55"><strong>55 MCP Tools</strong></a> · <a href="#configuration-reference"><strong>Config</strong></a> · <a href="docs/ROADMAP.md"><strong>Roadmap</strong></a> · <a href="#development"><strong>Development</strong></a>
 </p>
 
 <p align="center">
@@ -15,7 +15,7 @@ Hybrid retrieval · token-budgeted context · knowledge graph · RBAC · active 
   <a href="https://github.com/NetworkBuild3r/archivist-oss"><img src="https://img.shields.io/github/stars/NetworkBuild3r/archivist-oss?style=social" alt="GitHub stars" /></a>
   <img src="https://img.shields.io/badge/python-3.12%20%7C%203.13-blue?logo=python&logoColor=white" alt="Python 3.12+" />
   <img src="https://img.shields.io/badge/docker-compose-ready-2496ED?logo=docker&logoColor=white" alt="Docker Compose" />
-  <img src="https://img.shields.io/badge/version-v2.4.0-brightgreen" alt="Version" />
+  <img src="https://img.shields.io/badge/version-v2.5.0-brightgreen" alt="Version" />
   <img src="https://img.shields.io/badge/protocol-MCP-purple" alt="MCP" />
   <img src="https://img.shields.io/badge/models-OpenAI--compatible-orange" alt="Models" />
 </p>
@@ -76,7 +76,8 @@ context = await archivist_get_context(
 | **Selective share + consensus** | `archivist_share_propose` / `accept` / `reject` on **ops**/**full** (not **core**); optional `tip_ids`; conflict `apply` → resolver (Diff #5 / ADR-009; extends handoff). |
 | **Memory as a Product** | `archivist_map_*` snapshot / fork / export / import on **ops**/**full** (not **core**) — Diff #4 / ADR-011. |
 | **Checkpoint / time-travel** | `archivist_checkpoint_*` save/resume/replay/**branch**/HITL on **ops**/**full** (not **core**) — Diff #7 / ADR-012. |
-| **Token savings observability** | Every retrieval logs `tokens_returned` / `tokens_naive` / `savings_pct`; view trends via `archivist_savings_dashboard`. |
+| **Observability billboard** | Served `/admin/ui/` explorer + `GET /admin/lineage` / `/admin/audit` — Diff #8 / ADR-013 (v2.5). |
+| **Token savings observability** | Every retrieval logs `tokens_returned` / `tokens_naive` / `savings_pct`; view trends via `archivist_savings_dashboard` or the billboard. |
 
 ### Measured token savings
 
@@ -181,11 +182,34 @@ INIT-009 architecture diagrams under `sdd/initiatives/INIT-009-…/design/`.
 | **Dual database backends** | SQLite (default, zero-config) or PostgreSQL (`GRAPH_BACKEND=postgres`) — hot paths, backups, and tests work on both. See [docs/DOCKER.md](docs/DOCKER.md#postgresql-backend-production-grade). |
 | **Transactional outbox** | Optional `OUTBOX_ENABLED=true`: SQLite/Postgres FTS, needle registry, `memory_points`, graph rows, and outbox events commit atomically; Qdrant work is drained by a background processor with retries. Default `false` keeps legacy inline Qdrant writes. |
 | **Hybrid retrieval** | Vector + BM25 fusion, graph augmentation, hotness-weighted FTS, tier-aware packing, reranking — see [How It Works](#how-it-works). |
-| **MCP tool surface** | 55 tools for search, storage, trajectories, admin, cache, context, handoff, checkpoints (ops), selective share, MaP, and docs — stable signatures. |
+| **MCP tool surface** | 55 tools for search, storage, trajectories, admin, cache, context, handoff, checkpoints (ops), selective share, MaP, and docs — stable signatures. Profiled via `ARCHIVIST_TOOL_PROFILE` (`core` / `ops` / `full`). |
 | **RBAC** | Namespace-level ACLs via optional `namespaces.yaml`. |
-| **Active curation** | Background curator, queue, compaction, hotness — configurable. |
+| **Active curation** | Background curator, queue, compaction, hotness — Diff #6 product loop with safe defaults ([ADR-010](docs/adr/ADR-010-intelligent-self-curation.md)). |
+| **Observability control plane** | Prometheus `/metrics`, MCP admin dashboards, and served **`/admin/ui/`** billboard (Diff #8 / [ADR-013](docs/adr/ADR-013-observability-billboard.md)). |
 
 ---
+
+## What's new in v2.5
+
+**Observability billboard (Diff #8)** — closes Unique Differentiator #8 and Phase 9:
+
+- **Served UI** — `GET /admin/ui/` static explorer (health/savings KPIs, lineage, audit, retrieval) — no React/Vite toolchain ([ADR-013](docs/adr/ADR-013-observability-billboard.md)).
+- **HTTP lineage / audit** — `GET /admin/lineage` and `GET /admin/audit` for browser clients (MCP admin tools unchanged).
+- **Same API-key gate** as other `/admin/*` routes — set `ARCHIVIST_API_KEY` on shared networks.
+- **ROADMAP** — Diff #1–#8 Done; Phased Roadmap phases 7–10 aligned; Immediate Next → maintenance.
+
+Recipe: [`docs/demos/observability-billboard.md`](docs/demos/observability-billboard.md).
+
+## What's new in v2.4
+
+**Unique Differentiators productize (BRAIN-005)** — Diff #4–#7 first-class ops surfaces:
+
+- **Diff #7** — Checkpoint ops + branch + thin HITL ([ADR-012](docs/adr/ADR-012-checkpoint-time-travel.md)).
+- **Diff #4** — Memory as a Product `archivist_map_*` + import ([ADR-011](docs/adr/ADR-011-memory-as-product-mcp.md)).
+- **Diff #6** — Intelligent self-curation product loop ([ADR-010](docs/adr/ADR-010-intelligent-self-curation.md)).
+- **Diff #5** — Selective share on ops + tip_ids ([ADR-009](docs/adr/ADR-009-native-multi-agent-coordination.md)).
+
+See [`CHANGELOG.md`](CHANGELOG.md) **v2.4.0**.
 
 ## What's new in v2.3
 
@@ -290,7 +314,7 @@ Each stage is observable via `retrieval_trace` in every response.
 | Active curation | Background entity extraction, contradiction resolution, stale compression | No | No |
 | Context management | Token budgets, tiered summaries, structured compaction | No | No |
 | Trajectory learning | Outcome-aware retrieval scoring from past successes/failures; tip-only procedural lessons | No | No |
-| Observability | Prometheus metrics, retrieval traces, health dashboard | Varies | No |
+| Observability | Prometheus, retrieval traces, `/admin/dashboard`, **`/admin/ui/`** billboard | Varies | No |
 | Protocol | MCP (language-agnostic) | Client library | Framework-specific |
 | Deployment | `docker compose up` | DIY | DIY |
 
@@ -461,7 +485,7 @@ This starts:
 
 ```bash
 curl http://localhost:3100/health
-# {"status": "ok", "service": "archivist", "version": "2.2.0"}
+# {"status": "ok", "service": "archivist", "version": "2.5.0"}
 ```
 
 ### 4. Connect your agents
@@ -473,7 +497,7 @@ http://localhost:3100/mcp
 
 Legacy SSE clients can continue using `http://localhost:3100/mcp/sse`.
 
-That's it. Your agents can now `archivist_store`, `archivist_search`, `archivist_recall`, and use all 47 tools.
+That's it. Your agents can now `archivist_store`, `archivist_search`, `archivist_recall`, and use the profiled MCP surface (default **core**; **ops**/**full** for share/map/checkpoint/admin).
 
 ### 5. Optional: add RBAC
 
@@ -547,7 +571,7 @@ Raw MD trees **do not scale**: they blow the context window, repeat facts, and d
 
 ---
 
-## MCP Tools (40)
+## MCP Tools (55)
 
 ### Search & Retrieval (9)
 
@@ -1034,9 +1058,13 @@ Archivist is integration and execution on top of public work from the agent-memo
 | [`docs/DOCKER.md`](docs/DOCKER.md) | Docker Compose stack, PostgreSQL backend, host vLLM + cloud LLM, volume overrides |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Storage transaction model, module map, diagrams, historical release notes |
 | [`docs/rearchitect_storage_phase3.md`](docs/rearchitect_storage_phase3.md) | Phase 3 + 3.5 outbox design reference |
-| [`docs/CURSOR_SKILL.md`](docs/CURSOR_SKILL.md) | Full parameter schemas and examples for all 47 MCP tools |
+| [`docs/CURSOR_SKILL.md`](docs/CURSOR_SKILL.md) | Full parameter schemas and examples for all 55 MCP tools |
 | [`docs/REFERENCE.md`](docs/REFERENCE.md) | Condensed tool reference table |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | Phased roadmap and differentiation goals |
+| [`docs/adr/ADR-013-observability-billboard.md`](docs/adr/ADR-013-observability-billboard.md) | Diff #8 — `/admin/ui/` billboard + HTTP lineage/audit |
+| [`docs/adr/ADR-012-checkpoint-time-travel.md`](docs/adr/ADR-012-checkpoint-time-travel.md) | Diff #7 — checkpoint ops + branch + thin HITL |
+| [`docs/adr/ADR-011-memory-as-product-mcp.md`](docs/adr/ADR-011-memory-as-product-mcp.md) | Diff #4 — Memory as a Product MCP |
+| [`docs/adr/ADR-010-intelligent-self-curation.md`](docs/adr/ADR-010-intelligent-self-curation.md) | Diff #6 — self-curation product loop |
 | [`docs/adr/ADR-009-native-multi-agent-coordination.md`](docs/adr/ADR-009-native-multi-agent-coordination.md) | Diff #5 productize — share on ops, tip/share paths, guardrails |
 | [`docs/INSPIRATION.md`](docs/INSPIRATION.md) | Credits, research lineage, ReMe comparison |
 | [`docs/REMOTES.md`](docs/REMOTES.md) | Multi-remote Git workflow for internal + public repos |

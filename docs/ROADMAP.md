@@ -1,6 +1,6 @@
 # Archivist multi-agent memory — roadmap (April 2026)
 
-**Status** — Retrieval foundation is solid (v2 pipeline complete). Semantic chunking (Phase 5) is done. **Phase 3 + 3.5 (transactional outbox + `MemoryTransaction` + conn-passing shims)** is **complete**: see [`docs/rearchitect_storage_phase3.md`](rearchitect_storage_phase3.md) and [`CHANGELOG.md`](../CHANGELOG.md) **v2.1.0**. **PostgreSQL first-class backend** is **complete** (v2.2.0): all hot paths, schema init, FTS, backups, and Docker wiring work on both SQLite and Postgres — see [`CHANGELOG.md`](../CHANGELOG.md) **v2.2.0** and [`docs/DOCKER.md`](DOCKER.md). **Answer Finder (v2.3.0)** is **complete**: hierarchical tiered memory, token-budgeted context packing, auto-compression, ephemeral `SessionStore`, high-level `get_relevant_context()` API, multi-agent handoff protocol, and token savings observability — see [`CHANGELOG.md`](../CHANGELOG.md) **v2.3.0**.
+**Status** — Retrieval foundation is solid (v2 pipeline complete). Semantic chunking (Phase 5) is done. **Phase 3 + 3.5 (transactional outbox + `MemoryTransaction` + conn-passing shims)** is **complete**: see [`docs/rearchitect_storage_phase3.md`](rearchitect_storage_phase3.md) and [`CHANGELOG.md`](../CHANGELOG.md) **v2.1.0**. **PostgreSQL first-class backend** is **complete** (v2.2.0): all hot paths, schema init, FTS, backups, and Docker wiring work on both SQLite and Postgres — see [`CHANGELOG.md`](../CHANGELOG.md) **v2.2.0** and [`docs/DOCKER.md`](DOCKER.md). **Answer Finder (v2.3.0)** is **complete**: hierarchical tiered memory, token-budgeted context packing, auto-compression, ephemeral `SessionStore`, high-level `get_relevant_context()` API, multi-agent handoff protocol, and token savings observability — see [`CHANGELOG.md`](../CHANGELOG.md) **v2.3.0**. **Unique Differentiators #1–#8** are **Done** (BRAIN-005; latest Diff #8 billboard in **v2.5.0** / [ADR-013](adr/ADR-013-observability-billboard.md)).
 
 **Goal** — Be the most **trustworthy and production-ready** open multi-agent memory layer in 2026: observable, RBAC-aware, safe under fleet load, and the best answer finder in the industry.
 
@@ -58,12 +58,12 @@ These eight features combined will make Archivist the **most trustworthy and pro
 
 | Phase | Name | Focus | Effort | Target Completion | Success Metric |
 |-------|------|-------|--------|-------------------|----------------|
-| **5** | Semantic Chunking | Production-grade markdown-aware chunking (headings, code blocks, lists) | 1–2 days | Done | Zero regression on short docs + measurable gains on long docs |
-| **6** | Provenance & Actor-Aware Memory | Every memory entry carries `actor_id`, `actor_type`, `confidence`, `source_trace` — reranker is sole ranking authority | 1–2 weeks | Done | Actor-aware retrieval + provenance queries work |
-| **7** | Multi-Tier Memory + Checkpointing | Explicit tiers (working/episodic/semantic/procedural/institutional) + LangGraph-style checkpointing | 2–3 weeks | — | Full tier support + time-travel/resume |
-| **8** | Intelligent Lifecycle Management | Auto-summarization, relevance-based forgetting, contradiction resolution, reflection loops | 3–4 weeks | — | Self-curation works without manual tuning |
-| **9** | Observability & Control Plane | Memory explorer dashboard, audit logs, cost tracking, lineage visualization | 2–3 weeks | Done (INIT-013) | Full visibility into memory state |
-| **10** | Multi-Agent Coordination Primitives | Selective share + accept/reject consensus (`archivist_share_*`; INIT-001/SPEC-010) | 2–3 weeks | Plumbing done | Diff #5 product maturity = INIT-009 (not a second invent) |
+| **5** | Semantic Chunking | Production-grade markdown-aware chunking (headings, code blocks, lists) | 1–2 days | **Done** | Zero regression on short docs + measurable gains on long docs |
+| **6** | Provenance & Actor-Aware Memory | Every memory entry carries `actor_id`, `actor_type`, `confidence`, `source_trace` — reranker is sole ranking authority | 1–2 weeks | **Done** | Actor-aware retrieval + provenance queries work |
+| **7** | Multi-Tier Memory + Checkpointing | Explicit tiers (working/episodic/semantic/procedural/institutional) + LangGraph-style checkpointing | 2–3 weeks | **Done (scoped)** — Diff #7 / [ADR-012](adr/ADR-012-checkpoint-time-travel.md); institutional / multi-tier DDL still open | Checkpoint ops + branch + thin HITL; tier DDL deferred |
+| **8** | Intelligent Lifecycle Management | Auto-summarization, relevance-based forgetting, contradiction resolution, reflection loops | 3–4 weeks | **Done** — Diff #6 / [ADR-010](adr/ADR-010-intelligent-self-curation.md) | Self-curation product loop with safe defaults |
+| **9** | Observability & Control Plane | Memory explorer dashboard, audit logs, cost tracking, lineage visualization | 2–3 weeks | **Done** — Diff #8 / [ADR-013](adr/ADR-013-observability-billboard.md) (INIT-013) | Served `/admin/ui/` + HTTP lineage/audit |
+| **10** | Multi-Agent Coordination Primitives | Selective share + accept/reject consensus (`archivist_share_*`) | 2–3 weeks | **Done** — Diff #5 / [ADR-009](adr/ADR-009-native-multi-agent-coordination.md) (INIT-009) | Share on ops + tip_ids + conflict→resolver |
 
 ---
 
@@ -155,8 +155,8 @@ reclaim the two extra routes.
 - [x] Phase 3 + 3.5 — Transactional outbox + atomic SQLite writes (see `docs/rearchitect_storage_phase3.md`)
 - [x] PostgreSQL first-class backend — v2.2.0 (see `CHANGELOG.md`)
 - [x] Answer Finder — v2.3.0: tiered memory, token packing, handoff protocol, savings observability
-- [ ] Phase 7 — Multi-tier memory + checkpointing *(Diff #7 checkpoint product Done scoped — ADR-012; institutional / multi-tier DDL still open)*
-- [ ] Phase 8 — Intelligent Lifecycle Management *(Diff #6 product Done — ADR-010; tracking may remain for further lifecycle maturity)*
+- [x] Phase 7 — Multi-tier memory + checkpointing *(Diff #7 checkpoint product Done scoped — ADR-012; institutional / multi-tier DDL still open)*
+- [x] Phase 8 — Intelligent Lifecycle Management *(Diff #6 product Done — ADR-010)*
 - [x] Phase 9 — Observability & Control Plane *(INIT-013 / ADR-013 — `/admin/ui/` + HTTP lineage/audit)*
 - [x] Phase 10 — Multi-Agent Coordination Primitives plumbing (`archivist_share_*`; INIT-001/SPEC-010) + Diff #5 **product** (INIT-009 / ADR-009)
 
@@ -174,5 +174,5 @@ Expected console flow: `Encoding Batch …` → tqdm batch bar → nDCG / MAP / 
 
 _Add new rows when you change default embed models, BEIR limits, or the thin harness._
 
-**Last Updated**: INIT-013/SPEC-005 — Diff #8 Observability billboard Done; Phase 9 checked; Immediate Next → maintenance (2026-07-27)
+**Last Updated**: INIT-013 — Diff #8 Done; Phased Roadmap 7–10 aligned; v2.5.0 (2026-07-27)
 **Goal**: Become the most trustworthy, observable, and production-ready multi-agent memory system in 2026.

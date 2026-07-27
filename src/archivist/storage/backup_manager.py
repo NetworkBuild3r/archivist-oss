@@ -50,7 +50,7 @@ from archivist.storage.sqlite_pool import _get_graph_write_lock
 logger = logging.getLogger("archivist.backup")
 
 MANIFEST_VERSION = 1
-ARCHIVIST_VERSION = "2.4.0"
+ARCHIVIST_VERSION = "2.5.0"
 
 
 class SnapshotPathError(ValueError):

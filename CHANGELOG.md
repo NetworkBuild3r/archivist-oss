@@ -5,6 +5,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.5.0] - 2026-07-27
+
 ### Changed
 
 - **Diff #8 productize (INIT-013 / ADR-013)** — Observability billboard is a first-class
@@ -14,6 +16,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   `/admin/*` (set `ARCHIVIST_API_KEY` on shared networks). No new **core** MCP tools. Docs:
   REFERENCE / ROADMAP (#8 → Done; Phase 9 checked; Immediate Next → maintenance); recipe
   [`docs/demos/observability-billboard.md`](docs/demos/observability-billboard.md).
+  Package version synced to **2.5.0**.
 
 ## [2.4.0] - 2026-07-27
 
