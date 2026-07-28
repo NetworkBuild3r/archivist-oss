@@ -1,17 +1,17 @@
-mcp[http]>=1.9.0,<2.0.0
+mcp>=1.28.1,<2.0.0
 qdrant-client>=1.13.0,<2.0.0
 httpx>=0.28.1
 watchfiles>=1.0.0
 pyyaml>=6.0.3
 tqdm>=4.66.0
-uvicorn>=0.46.0
-starlette>=0.38.0
+uvicorn>=0.51.0
+starlette>=1.3.1
 
 # v1.12: async SQLite pool (replaces blocking threading.Lock pattern)
 aiosqlite>=0.20.0
 
 # Pydantic Settings v2 (config system — replaces raw os.getenv pattern)
-pydantic-settings>=2.7.0
+pydantic-settings>=2.14.2
 
 # Dev / test dependencies — see requirements-test.txt (used by CI)
 # pytest-benchmark>=5.1.0
