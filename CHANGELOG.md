@@ -18,6 +18,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   [`docs/demos/observability-billboard.md`](docs/demos/observability-billboard.md).
   Package version synced to **2.5.0**.
 
+- **Docs: benchmark showcase publish (INIT-014/SPEC-004)** — Refresh
+  [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) + README measured-savings to **v2.5.0 /
+  2026-07-27** Option B actuals (token efficiency 0.0% empty-store; pipeline
+  `clean_reranker` R@5/NDCG@5 0.5975/0.8693; LongMemEval thin n=50 accuracy 0.04;
+  BEIR skipped). JSON artifacts remain gitignored under `.benchmarks/`.
+
 ## [2.4.0] - 2026-07-27
 
 ### Changed

@@ -81,11 +81,17 @@ context = await archivist_get_context(
 
 ### Measured token savings
 
-| Policy | Avg savings vs naive full-L2 | Best use |
+Canonical tables: [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) (latest showcase **v2.5.0 — 2026-07-27**).
+
+**Latest live pack (INIT-014 / 2026-07-27)** — actuals from `.benchmarks/token_efficiency_20260727.json`:
+
+| Policy | Avg savings vs naive full-L2 | Notes |
 |---|---|---|
-| `adaptive` | ~40–65% | Default — best precision/token trade-off |
-| `l0_first` | ~70–85% | Maximum compression when tokens are extremely scarce |
-| `l2_first` | ~0–20% | Full fidelity — previous behavior, greedy truncation only |
+| `adaptive` | **0.0%** | Empty `benchmark_agent` store → no sources to pack |
+| `l0_first` | 0.0% | Same empty-store condition |
+| `l2_first` | 0.0% | Same empty-store condition |
+
+This run does **not** claim the historical ≥60% adaptive target. Re-measure on a populated corpus. Pipeline R@5 / NDCG@5 for the same pack: **0.5975 / 0.8693** (`clean_reranker`, small). LongMemEval thin (`LIMIT_LM=50`, `BENCHMARK_FAST`): overall accuracy **0.04**, recall@5 **0.0**. BEIR skipped. Diff #8 `/admin/ui/` is observability only — not a retrieval-quality claim. Models: `gemma4-uncensored` + curator `qwen2.5-1.5b-instruct` + `BAAI/bge-m3`.
 
 Run the included benchmark to measure savings on your own memory corpus:
 
