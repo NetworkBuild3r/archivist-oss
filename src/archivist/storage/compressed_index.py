@@ -31,6 +31,13 @@ _WAKE_UP_PRIMARY_TOOLS = (
     " archivist_timeline, archivist_namespaces"
 )
 
+# Tail of the wake-up identity query. Grouping instead of SELECT DISTINCT keeps the
+# one-row-per-(name, type, retention) result while letting ORDER BY use the aggregated
+# mention count: Postgres rejects ORDER BY expressions that are not in a DISTINCT select list.
+_IDENTITY_GROUP_ORDER = (
+    " GROUP BY e.name, e.entity_type, e.retention_class ORDER BY mc DESC LIMIT 10"
+)
+
 # Shared SELECT list for entity map rows (cheap Graph path).
 _ENTITY_SELECT = "e.id, e.name, e.entity_type, e.mention_count, e.retention_class, e.last_seen"
 
@@ -257,7 +264,7 @@ async def build_wake_up_context(namespace: str, agent_id: str = "") -> dict:
         if agent_ids:
             placeholders = ",".join("?" for _ in agent_ids)
             identity_sql = (
-                f"SELECT DISTINCT e.name, e.entity_type, e.retention_class "
+                f"SELECT e.name, e.entity_type, e.retention_class, MAX(e.mention_count) AS mc "
                 f"FROM entities e "
                 f"JOIN facts f ON f.entity_id = e.id "
                 f"WHERE {visible} "
@@ -268,11 +275,11 @@ async def build_wake_up_context(namespace: str, agent_id: str = "") -> dict:
             if namespace:
                 identity_sql += " AND e.namespace = ?"
                 params.append(namespace)
-            identity_sql += " ORDER BY e.mention_count DESC LIMIT 10"
+            identity_sql += _IDENTITY_GROUP_ORDER
             identity_rows = await conn.fetchall(identity_sql, params)
         else:
             identity_sql = (
-                f"SELECT DISTINCT e.name, e.entity_type, e.retention_class "
+                f"SELECT e.name, e.entity_type, e.retention_class, MAX(e.mention_count) AS mc "
                 f"FROM entities e "
                 f"JOIN facts f ON f.entity_id = e.id "
                 f"WHERE {visible} "
@@ -282,7 +289,7 @@ async def build_wake_up_context(namespace: str, agent_id: str = "") -> dict:
             if namespace:
                 identity_sql += " AND e.namespace = ?"
                 params.append(namespace)
-            identity_sql += " ORDER BY e.mention_count DESC LIMIT 10"
+            identity_sql += _IDENTITY_GROUP_ORDER
             identity_rows = await conn.fetchall(identity_sql, params)
         identity_entities = [dict(r) for r in identity_rows]
 
