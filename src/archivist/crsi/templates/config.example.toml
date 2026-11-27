@@ -1,0 +1,71 @@
+# CRSI + SIM Configuration Template
+# Safe-by-default: uses deterministic fake provider with paid APIs disabled.
+#
+# HARD SECURITY RULE:
+# Never put raw API keys or tokens in this file. Reference environment variable
+# names ONLY via `api_key_env` (or inject via Vault / k8s secrets at runtime).
+
+project_name = "crsi-project"
+domain = "toy_base"
+memory_mode = "full"  # "full" (default), "problem_only" (ablation only), or "none"
+
+[budget]
+rounds = 3
+candidates = 2
+parallelism = 2
+rollouts = 1
+task_timeout_s = 60.0
+agent_timeout_s = 120.0
+total_wall_timeout_s = 1800.0
+max_llm_calls = 200
+max_spend_usd = 0.0        # Must be > 0.0 when allow_paid_apis = true
+allow_paid_apis = false    # Explicit opt-in required before any paid remote call
+regression_tolerance = 0.0 # Reject candidates scoring below baseline - tolerance
+
+[models.policy]
+provider = "fake"          # "fake" | "openai_compat" | "anthropic" | "gemini"
+model = "fake-policy-v1"
+# Examples for real providers (env-var name ONLY, never inline keys):
+#   OpenAI:    provider = "openai_compat", model = "gpt-4.1-mini", base_url = "https://api.openai.com/v1", api_key_env = "OPENAI_API_KEY"
+#   xAI:       provider = "openai_compat", model = "grok-3-mini", base_url = "https://api.x.ai/v1", api_key_env = "XAI_API_KEY"
+#   Ollama:    provider = "openai_compat", model = "qwen2.5-coder", base_url = "http://127.0.0.1:11434/v1"
+#   Anthropic: provider = "anthropic", model = "claude-sonnet-4-20250514", api_key_env = "ANTHROPIC_API_KEY"
+#   Gemini:    provider = "gemini", model = "gemini-2.5-pro", api_key_env = "GEMINI_API_KEY"
+max_tokens = 2048
+temperature = 0.0
+input_usd_per_1m = 0.0
+output_usd_per_1m = 0.0
+
+[models.proposer]
+provider = "fake"
+model = "fake-proposer-v1"
+max_tokens = 4096
+temperature = 0.0
+input_usd_per_1m = 0.0
+output_usd_per_1m = 0.0
+
+[models.selector]
+provider = "fake"
+model = "fake-selector-v1"
+max_tokens = 2048
+temperature = 0.0
+input_usd_per_1m = 0.0
+output_usd_per_1m = 0.0
+
+[harness]
+# Only files matching `editable` (and outside frozen deny-lists) may be changed by CRSI.
+editable = ["harness/**"]
+frozen = ["frozen_scorer_stub.py"]
+
+[commands]
+# Optional frozen external scorer/check commands (must NOT point to editable paths).
+# Example: run_task = ["python3", "/path/to/frozen/scorer.py", "{task_file}", "{task_id}", "{checkout}", "{out}", "{rollout}"]
+run_task = []
+check = []
+
+[paths]
+sim_path = ".crsi/sim.json"
+state_dir = ".crsi/runs"
+# private_dir = "/path/outside/repo/private"
+base_branch = "main"
+branch_prefix = "crsi/"
