@@ -555,7 +555,7 @@ async def create_scope_snapshot(
     except Exception:
         # Transactional boundary: no orphan lineage row; clean archive.
         try:
-            delete_snapshot(archive_id)
+            await asyncio.to_thread(delete_snapshot, archive_id)
         except Exception:
             logger.warning(
                 "snapshot rollback: could not delete archive_id=%s under %s",

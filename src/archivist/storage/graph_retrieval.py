@@ -592,9 +592,11 @@ async def detect_contradictions(entity_id: int) -> list[dict]:
                         {
                             "fact_a": a["fact_text"],
                             "fact_a_agent": a.get("agent_id", ""),
+                            "fact_a_namespace": a.get("namespace", ""),
                             "fact_a_date": a.get("created_at", ""),
                             "fact_b": b["fact_text"],
                             "fact_b_agent": b.get("agent_id", ""),
+                            "fact_b_namespace": b.get("namespace", ""),
                             "fact_b_date": b.get("created_at", ""),
                             "trigger": f"{pos}/{neg}",
                         }

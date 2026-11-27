@@ -48,6 +48,33 @@ async def merge_memories(
     if not points:
         return {"error": "No points found for the given memory IDs"}
 
+    from archivist.core.rbac import can_read_agent_memory, check_access, is_permissive_mode
+
+    if not is_permissive_mode():
+        for p in points:
+            pl = p.payload or {}
+            pt_ns = (pl.get("namespace") or "").strip()
+            if pt_ns:
+                pol = check_access(agent_id, "write", pt_ns)
+                if not pol.allowed:
+                    return {
+                        "error": "access_denied",
+                        "message": pol.reason
+                        or f"Agent '{agent_id}' lacks write access to namespace '{pt_ns}'",
+                        "memory_id": str(p.id),
+                        "namespace": pt_ns,
+                    }
+            else:
+                pt_agent = (pl.get("agent_id") or "").strip()
+                if not pt_agent or not can_read_agent_memory(agent_id, pt_agent):
+                    return {
+                        "error": "access_denied",
+                        "message": (
+                            f"Agent '{agent_id}' is not authorized to merge unscoped memory '{p.id}'"
+                        ),
+                        "memory_id": str(p.id),
+                    }
+
     payloads = [(p.id, p.payload) for p in points]
     payloads.sort(key=lambda x: x[1].get("date", ""))
 

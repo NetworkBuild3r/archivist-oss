@@ -8,6 +8,7 @@ from mcp.types import TextContent, Tool
 from archivist.core.archivist_uri import memory_uri
 from archivist.core.rbac import (
     can_read_agent_memory,
+    check_access,
     filter_agents_for_read,
     get_namespace_for_agent,
     is_permissive_mode,
@@ -781,13 +782,25 @@ async def _handle_contradictions(arguments: dict) -> list[TextContent]:
 
     contradictions = await detect_contradictions(eid)
     if not is_permissive_mode():
+
+        def _fact_readable(aid: str, ns: str) -> bool:
+            has_ns = bool(ns and ns != "global")
+            has_aid = bool(aid)
+            if not has_ns and not has_aid:
+                return False
+            if has_ns and not check_access(caller, "read", ns).allowed:
+                return False
+            return not has_aid or can_read_agent_memory(caller, aid)
+
         filtered_c = []
         for c in contradictions:
-            fa = c.get("fact_a") if isinstance(c, dict) else None
-            fb = c.get("fact_b") if isinstance(c, dict) else None
-            aid_a = (fa.get("agent_id", "") if isinstance(fa, dict) else c.get("agent_a", "")) or ""
-            aid_b = (fb.get("agent_id", "") if isinstance(fb, dict) else c.get("agent_b", "")) or ""
-            if can_read_agent_memory(caller, aid_a) and can_read_agent_memory(caller, aid_b):
+            if not isinstance(c, dict):
+                continue
+            aid_a = (c.get("fact_a_agent") or "").strip()
+            aid_b = (c.get("fact_b_agent") or "").strip()
+            ns_a = (c.get("fact_a_namespace") or "").strip()
+            ns_b = (c.get("fact_b_namespace") or "").strip()
+            if _fact_readable(aid_a, ns_a) and _fact_readable(aid_b, ns_b):
                 filtered_c.append(c)
         contradictions = filtered_c
 
@@ -838,9 +851,7 @@ async def _handle_entity_brief(arguments: dict) -> list[TextContent]:
 
     if alias:
         if not is_permissive_mode():
-            write_ns = (
-                ent_ns if (ent_ns and ent_ns != "global") else get_namespace_for_agent(caller)
-            )
+            write_ns = ent_ns or get_namespace_for_agent(caller)
             denied = require_rbac(caller, "write", write_ns)
             if denied:
                 return denied

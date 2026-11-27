@@ -24,7 +24,12 @@ from archivist.core.config import (
     TEAM_MAP,
 )
 from archivist.core.provenance import SourceTrace, default_confidence
-from archivist.core.rbac import get_namespace_config, get_namespace_for_agent
+from archivist.core.rbac import (
+    can_read_agent_memory,
+    get_namespace_config,
+    get_namespace_for_agent,
+    is_permissive_mode,
+)
 from archivist.features.embeddings import embed_batch, embed_text
 from archivist.retrieval.topic_detector import detect_topics
 from archivist.storage.collection_router import (
@@ -1549,6 +1554,28 @@ async def _handle_store_inner(
     return success_response(response)
 
 
+def _check_point_write_rbac(
+    agent_id: str, point_id: Any, payload: dict[str, Any]
+) -> list[TextContent] | None:
+    """Enforce per-point write RBAC under strict mode (AUDIT-MAJ-3, Minor #1)."""
+    if is_permissive_mode():
+        return None
+    pt_ns = (payload.get("namespace") or "").strip()
+    if pt_ns:
+        return require_rbac(agent_id, "write", pt_ns)
+    pt_agent = (payload.get("agent_id") or "").strip()
+    if not pt_agent or not can_read_agent_memory(agent_id, pt_agent):
+        return error_response(
+            {
+                "error": "access_denied",
+                "message": (
+                    f"Agent '{agent_id}' is not authorized to modify unscoped memory '{point_id}'"
+                ),
+            }
+        )
+    return None
+
+
 async def _handle_merge(arguments: dict) -> list[TextContent]:
     agent_id = arguments["agent_id"]
     memory_ids = arguments["memory_ids"]
@@ -1562,6 +1589,8 @@ async def _handle_merge(arguments: dict) -> list[TextContent]:
     from archivist.lifecycle.merge import merge_memories
 
     result = await merge_memories(memory_ids, strategy, agent_id, namespace)
+    if isinstance(result, dict) and result.get("error") == "access_denied":
+        return error_response(result)
     return success_response(result, default=str)
 
 
@@ -1608,6 +1637,8 @@ async def _handle_compress(arguments: dict) -> list[TextContent]:
                 )
                 if points:
                     pl = points[0].payload or {}
+                    if denied_pt := _check_point_write_rbac(agent_id, points[0].id, pl):
+                        return denied_pt
                     texts.append((str(points[0].id), pl.get("text", "")))
                     aid = pl.get("agent_id") or ""
                     if aid:
@@ -1713,6 +1744,9 @@ async def _handle_pin(arguments: dict) -> list[TextContent]:
                 client.retrieve, collection_name=_pin_coll, ids=[memory_id], with_payload=True
             )
             if points:
+                pl = points[0].payload or {}
+                if denied_pt := _check_point_write_rbac(agent_id, points[0].id, pl):
+                    return denied_pt
                 await asyncio.to_thread(
                     client.set_payload,
                     collection_name=_pin_coll,
@@ -1805,6 +1839,17 @@ async def _handle_unpin(arguments: dict) -> list[TextContent]:
         _unpin_coll = collection_for(namespace)
         client = qdrant_client()
         try:
+            if not is_permissive_mode():
+                unpin_points = await asyncio.to_thread(
+                    client.retrieve,
+                    collection_name=_unpin_coll,
+                    ids=[memory_id],
+                    with_payload=True,
+                )
+                if unpin_points:
+                    pl = unpin_points[0].payload or {}
+                    if denied_pt := _check_point_write_rbac(agent_id, unpin_points[0].id, pl):
+                        return denied_pt
             await asyncio.to_thread(
                 client.set_payload,
                 collection_name=_unpin_coll,

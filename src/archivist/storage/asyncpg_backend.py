@@ -67,45 +67,67 @@ def _rewrite_scalar_min_max(sql: str) -> str:
     """Rewrite 2+-argument scalar ``MIN(a, b)`` / ``MAX(a, b)`` to ``LEAST`` / ``GREATEST``.
 
     Single-argument aggregate calls (``MIN(col)`` / ``MAX(col)``) are left
-    untouched. A call is scalar only when its argument list contains a comma at
-    parenthesis depth 1 (not inside nested function calls or SQL string literals).
+    untouched, and any ``MIN(`` / ``MAX(`` tokens inside SQL single-quoted
+    string literals are skipped completely. A call is scalar only when its
+    argument list contains a comma at parenthesis depth 1 (not inside nested
+    function calls or SQL string literals).
     """
     out: list[str] = []
+    n = len(sql)
     pos = 0
-    while True:
-        m = _MIN_MAX_CALL_RE.search(sql, pos)
-        if m is None:
-            out.append(sql[pos:])
-            break
-        depth = 0
-        in_str = False
-        has_top_level_comma = False
-        i = m.end() - 1
-        while i < len(sql):
-            ch = sql[i]
-            if in_str:
-                if ch == "'":
-                    if i + 1 < len(sql) and sql[i + 1] == "'":
-                        i += 2
+    while pos < n:
+        ch = sql[pos]
+        if ch == "'":
+            # Consume entire SQL string literal (handling '' escapes) verbatim.
+            start = pos
+            pos += 1
+            while pos < n:
+                if sql[pos] == "'":
+                    if pos + 1 < n and sql[pos + 1] == "'":
+                        pos += 2
                         continue
-                    in_str = False
-            elif ch == "'":
-                in_str = True
-            elif ch == "(":
-                depth += 1
-            elif ch == ")":
-                depth -= 1
-                if depth == 0:
+                    pos += 1
                     break
-            elif ch == "," and depth == 1:
-                has_top_level_comma = True
-            i += 1
-        out.append(sql[pos : m.start()])
-        if has_top_level_comma:
-            out.append("LEAST(" if m.group(1).upper() == "MIN" else "GREATEST(")
-        else:
-            out.append(m.group(0))
-        pos = m.end()
+                pos += 1
+            out.append(sql[start:pos])
+            continue
+
+        # Check for word-boundary MIN( / MAX( outside string literals.
+        if (ch in ("m", "M")) and (pos == 0 or not (sql[pos - 1].isalnum() or sql[pos - 1] == "_")):
+            m = _MIN_MAX_CALL_RE.match(sql, pos)
+            if m is not None:
+                depth = 0
+                in_str = False
+                has_top_level_comma = False
+                i = m.end() - 1
+                while i < n:
+                    c = sql[i]
+                    if in_str:
+                        if c == "'":
+                            if i + 1 < n and sql[i + 1] == "'":
+                                i += 2
+                                continue
+                            in_str = False
+                    elif c == "'":
+                        in_str = True
+                    elif c == "(":
+                        depth += 1
+                    elif c == ")":
+                        depth -= 1
+                        if depth == 0:
+                            break
+                    elif c == "," and depth == 1:
+                        has_top_level_comma = True
+                    i += 1
+                if has_top_level_comma:
+                    out.append("LEAST(" if m.group(1).upper() == "MIN" else "GREATEST(")
+                else:
+                    out.append(m.group(0))
+                pos = m.end()
+                continue
+
+        out.append(ch)
+        pos += 1
     return "".join(out)
 
 

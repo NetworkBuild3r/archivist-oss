@@ -10,10 +10,10 @@ import json
 import logging
 import time
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import archivist.core.metrics as m
-from archivist.storage.graph import schema_guard
+from archivist.storage.graph import _is_postgres, schema_guard
 
 logger = logging.getLogger("archivist.curator_queue")
 
@@ -65,33 +65,76 @@ async def enqueue(op_type: str, payload: dict) -> str:
     return op_id
 
 
-async def drain(limit: int = 50) -> list[dict]:
+async def _sweep_orphaned_processing(orphan_timeout_seconds: int = 300) -> int:
+    """Reset curator_queue rows stuck in 'processing' past *orphan_timeout_seconds*."""
+    from archivist.storage.sqlite_pool import pool
+
+    cutoff = (datetime.now(UTC) - timedelta(seconds=orphan_timeout_seconds)).isoformat()
+    async with pool.write() as conn:
+        stuck = await conn.fetchall(
+            "SELECT id FROM curator_queue "
+            "WHERE status = 'processing' AND COALESCE(applied_at, created_at) < ?",
+            (cutoff,),
+        )
+        if not stuck:
+            return 0
+        ids = [r[0] for r in stuck]
+        placeholders = ",".join("?" for _ in ids)
+        await conn.execute(
+            f"UPDATE curator_queue SET status = 'pending', applied_at = NULL "
+            f"WHERE id IN ({placeholders}) AND status = 'processing'",
+            ids,
+        )
+    logger.warning("curator_queue: recovered %d orphaned 'processing' ops", len(ids))
+    return len(ids)
+
+
+async def drain(limit: int = 50, orphan_timeout_seconds: int = 300) -> list[dict]:
     """Apply pending operations up to limit. Returns list of applied ops.
 
-    Atomically claims pending rows as ``status='processing'`` inside a write
-    transaction before executing them so overlapping drains cannot double-apply
-    the same operation (MIN-9).
+    Atomically claims pending rows as ``status='processing'`` before executing
+    them so overlapping drains cannot double-apply the same operation (MIN-9).
+    Uses ``FOR UPDATE SKIP LOCKED ... RETURNING`` on Postgres for multi-worker
+    safety and sweeps stale crashed ``'processing'`` rows before claiming.
     """
     from archivist.storage.sqlite_pool import pool
 
     _ensure_schema()
     start = time.time()
     applied = []
+    claim_ts = datetime.now(UTC).isoformat()
+
+    await _sweep_orphaned_processing(orphan_timeout_seconds=orphan_timeout_seconds)
 
     async with pool.write() as conn:
-        rows = await conn.fetchall(
-            "SELECT id, op_type, payload FROM curator_queue "
-            "WHERE status = 'pending' ORDER BY created_at ASC LIMIT ?",
-            (limit,),
-        )
-        if rows:
-            claim_ids = [r[0] for r in rows]
-            placeholders = ",".join("?" for _ in claim_ids)
-            await conn.execute(
-                f"UPDATE curator_queue SET status = 'processing' "
-                f"WHERE id IN ({placeholders}) AND status = 'pending'",
-                claim_ids,
+        if _is_postgres():
+            rows = await conn.fetchall(
+                "UPDATE curator_queue "
+                "SET status = 'processing', applied_at = ? "
+                "WHERE id IN ("
+                "    SELECT id FROM curator_queue "
+                "    WHERE status = 'pending' "
+                "    ORDER BY created_at ASC "
+                "    LIMIT ? "
+                "    FOR UPDATE SKIP LOCKED"
+                ") "
+                "RETURNING id, op_type, payload",
+                (claim_ts, limit),
             )
+        else:
+            rows = await conn.fetchall(
+                "SELECT id, op_type, payload FROM curator_queue "
+                "WHERE status = 'pending' ORDER BY created_at ASC LIMIT ?",
+                (limit,),
+            )
+            if rows:
+                claim_ids = [r[0] for r in rows]
+                placeholders = ",".join("?" for _ in claim_ids)
+                await conn.execute(
+                    f"UPDATE curator_queue SET status = 'processing', applied_at = ? "
+                    f"WHERE id IN ({placeholders}) AND status = 'pending'",
+                    [claim_ts, *claim_ids],
+                )
 
     now = datetime.now(UTC).isoformat()
 

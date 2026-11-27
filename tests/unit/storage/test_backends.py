@@ -164,6 +164,18 @@ class TestTranslateSqlDialects:
         assert "LEAST(1.0, COALESCE(x, 0.0) + 0.1)" in result
         assert "GREATEST(0.0, y - 0.1)" in result
 
+    def test_min_max_inside_string_literals_untouched(self):
+        sql = (
+            "SELECT 'MIN(a, b)', 'it''s MAX(1, 2)', MIN(x, y), MAX(z) "
+            "FROM t WHERE note = 'MAX(a, b)'"
+        )
+        result = self._t(sql)
+        assert "'MIN(a, b)'" in result
+        assert "'it''s MAX(1, 2)'" in result
+        assert "'MAX(a, b)'" in result
+        assert "LEAST(x, y)" in result
+        assert "MAX(z)" in result
+
     def test_conflict_targets_match_postgres_schema(self):
         mp_sql = (
             "INSERT OR REPLACE INTO memory_points "

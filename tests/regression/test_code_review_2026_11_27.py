@@ -35,7 +35,7 @@ import asyncio
 import inspect
 import json
 import sqlite3
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -990,3 +990,335 @@ async def test_sec5_strict_rbac_enforcement(async_pool, rbac_config, monkeypatch
             ).status_code
             == 403
         )
+
+
+# ---------------------------------------------------------------------------
+# Pre-merge audit fixes: AUDIT-MAJ-1..3 + Minor #1..#4
+# ---------------------------------------------------------------------------
+
+
+async def test_audit_maj1_contradictions_filters_global_entity_by_fact_rbac(
+    async_pool, rbac_config
+):
+    """AUDIT-MAJ-1: _handle_contradictions must filter facts on 'global' entities
+    using real fact_a_agent/fact_b_agent + fact_a_namespace/fact_b_namespace keys
+    and fail closed on unattributed facts."""
+    from archivist.app.handlers.tools_search import _handle_contradictions
+    from archivist.storage.graph import add_fact, upsert_entity
+    from archivist.storage.graph_retrieval import detect_contradictions
+
+    eid = await upsert_entity("SharedGateway", namespace="global")
+    await add_fact(
+        eid, "Production ingress TLS routing is enabled", "a.md", "argo", namespace="deployer"
+    )
+    await add_fact(
+        eid, "Canary staging mesh proxy is disabled", "b.md", "gitbob", namespace="pipeline"
+    )
+    # Unattributed contradicting pair (no agent_id, no non-global namespace)
+    await add_fact(eid, "Legacy batch daemon process is running", "c.md", "", namespace="global")
+    await add_fact(
+        eid, "Nightly scheduler worker pool is stopped", "d.md", "gitbob", namespace="pipeline"
+    )
+
+    raw = await detect_contradictions(eid)
+    assert raw, "detect_contradictions should detect contradicting facts"
+    assert all("fact_a_namespace" in c and "fact_b_namespace" in c for c in raw)
+
+    # gitbob cannot read deployer/argo OR unattributed facts -> 0 contradictions leaked
+    res_bob = await _handle_contradictions({"entity": "SharedGateway", "agent_id": "gitbob"})
+    data_bob = json.loads(res_bob[0].text)
+    assert data_bob["count"] == 0
+    assert data_bob["contradictions"] == []
+
+    # chief has read access to BOTH pipeline and deployer in rbac_config, so chief sees
+    # the argo/gitbob contradiction, while unattributed facts still fail closed.
+    res_chief = await _handle_contradictions({"entity": "SharedGateway", "agent_id": "chief"})
+    data_chief = json.loads(res_chief[0].text)
+    assert data_chief["count"] == 1
+    c0 = data_chief["contradictions"][0]
+    assert {c0["fact_a_agent"], c0["fact_b_agent"]} == {"argo", "gitbob"}
+
+
+async def test_audit_maj2_handoff_default_namespace_and_fact_namespace_scoping(
+    async_pool, rbac_config
+):
+    """AUDIT-MAJ-2: _handle_handoff without explicit namespace must pass effective_ns
+    to create_handoff_packet, and facts query must filter by f.namespace too."""
+    from archivist.app.handlers.tools_context import _handle_handoff
+    from archivist.storage.graph import add_fact, upsert_entity
+
+    # Global entity with a private deployer fact and a pipeline fact
+    eid = await upsert_entity("SharedCluster", namespace="global")
+    await add_fact(
+        eid,
+        "SharedCluster deployer secret token is XYZ-999",
+        "dep.md",
+        "argo",
+        namespace="deployer",
+        confidence=0.95,
+    )
+    await add_fact(
+        eid,
+        "SharedCluster pipeline builds run on runner-42",
+        "pipe.md",
+        "gitbob",
+        namespace="pipeline",
+        confidence=0.95,
+    )
+
+    async with async_pool.write() as conn:
+        await conn.execute(
+            "INSERT INTO memory_chunks (qdrant_id, text, file_path, chunk_index, agent_id, namespace, date, memory_type) "
+            "VALUES ('mem-dep-hot', 'deployer secret', 'd.md', 0, 'argo', 'deployer', '2026-04-01', 'general')"
+        )
+        await conn.execute(
+            "INSERT INTO memory_chunks (qdrant_id, text, file_path, chunk_index, agent_id, namespace, date, memory_type) "
+            "VALUES ('mem-pipe-hot', 'pipeline work', 'p.md', 0, 'gitbob', 'pipeline', '2026-04-01', 'general')"
+        )
+        await conn.execute(
+            "INSERT INTO memory_hotness (memory_id, score, retrieval_count, updated_at) "
+            "VALUES ('mem-dep-hot', 0.99, 100, '2026-04-01T00:00:00+00:00')"
+        )
+        await conn.execute(
+            "INSERT INTO memory_hotness (memory_id, score, retrieval_count, updated_at) "
+            "VALUES ('mem-pipe-hot', 0.70, 5, '2026-04-01T00:00:00+00:00')"
+        )
+
+    # Omit namespace -> must default to effective_ns='pipeline' under strict RBAC
+    res = await _handle_handoff(
+        {
+            "agent_id": "gitbob",
+            "session_id": "s-handoff",
+            "receiving_agent_id": "gitbob",
+        }
+    )
+    pkt = json.loads(res[0].text)
+    assert "mem-pipe-hot" in pkt["key_memory_ids"]
+    assert "mem-dep-hot" not in pkt["key_memory_ids"]
+    facts = pkt["knowledge_snapshot"]["facts"]
+    assert any("runner-42" in f for f in facts)
+    assert not any("XYZ-999" in f for f in facts)
+
+
+async def test_audit_maj3_compress_and_merge_deny_cross_tenant_points(async_pool, rbac_config):
+    """AUDIT-MAJ-3: _handle_compress (sharded) and _handle_merge/merge_memories (unsharded)
+    must verify write RBAC on every retrieved Qdrant point before summarizing/merging/deleting."""
+    from archivist.app.handlers import tools_storage
+    from archivist.lifecycle import merge as merge_mod
+
+    # 1. Cross-tenant _handle_compress with namespace sharding enabled
+    dep_pt = MagicMock(
+        id="dep-secret-1",
+        payload={
+            "text": "DEPLOYER PRIVATE KEY MATERIAL",
+            "namespace": "deployer",
+            "agent_id": "argo",
+        },
+    )
+    unscoped_pt = MagicMock(
+        id="unscoped-1",
+        payload={"text": "ARGO UNSCOPED SECRET", "namespace": "", "agent_id": "argo"},
+    )
+    mock_q_compress = MagicMock()
+
+    def _retrieve_sharded(*, collection_name, ids, with_payload=True):
+        if collection_name == "coll_deployer" and ids == ["dep-secret-1"]:
+            return [dep_pt]
+        if collection_name == "coll_pipeline" and ids == ["unscoped-1"]:
+            return [unscoped_pt]
+        return []
+
+    mock_q_compress.retrieve.side_effect = _retrieve_sharded
+    mock_compact = AsyncMock(return_value="leaked summary")
+    mock_enqueue = AsyncMock()
+
+    with (
+        patch.object(tools_storage, "qdrant_client", return_value=mock_q_compress),
+        patch.object(tools_storage, "collection_for", return_value="coll_pipeline"),
+        patch.object(
+            tools_storage,
+            "collections_for_query",
+            return_value=["coll_pipeline", "coll_deployer"],
+        ),
+        patch("archivist.write.compaction.compact_flat", new=mock_compact),
+        patch.object(tools_storage.curator_queue, "enqueue", new=mock_enqueue),
+    ):
+        res_dep = await tools_storage._handle_compress(
+            {
+                "agent_id": "gitbob",
+                "namespace": "pipeline",
+                "memory_ids": ["dep-secret-1"],
+            }
+        )
+        assert json.loads(res_dep[0].text)["error"] == "access_denied"
+        mock_compact.assert_not_awaited()
+        mock_enqueue.assert_not_awaited()
+
+        res_unscoped = await tools_storage._handle_compress(
+            {
+                "agent_id": "gitbob",
+                "namespace": "pipeline",
+                "memory_ids": ["unscoped-1"],
+            }
+        )
+        assert json.loads(res_unscoped[0].text)["error"] == "access_denied"
+        mock_compact.assert_not_awaited()
+        mock_enqueue.assert_not_awaited()
+
+    # 2. Cross-tenant _handle_merge / merge_memories on unsharded shared collection
+    dep_m1 = MagicMock(
+        id="dep-m1",
+        payload={"text": "deployer secret 1", "namespace": "deployer", "agent_id": "argo"},
+    )
+    dep_m2 = MagicMock(
+        id="dep-m2",
+        payload={"text": "deployer secret 2", "namespace": "deployer", "agent_id": "argo"},
+    )
+    mock_q_merge = MagicMock()
+    mock_q_merge.retrieve.return_value = [dep_m1, dep_m2]
+    mock_delete = AsyncMock()
+
+    with (
+        patch.object(merge_mod, "qdrant_client", return_value=mock_q_merge),
+        patch.object(merge_mod, "collection_for", return_value="shared_collection"),
+        patch("archivist.lifecycle.memory_lifecycle.delete_memory_complete", new=mock_delete),
+    ):
+        res_merge = await tools_storage._handle_merge(
+            {
+                "agent_id": "gitbob",
+                "namespace": "pipeline",
+                "strategy": "concat",
+                "memory_ids": ["dep-m1", "dep-m2"],
+            }
+        )
+        assert json.loads(res_merge[0].text)["error"] == "access_denied"
+        mock_q_merge.upsert.assert_not_called()
+        mock_delete.assert_not_awaited()
+
+        # Unscoped point with no owner must also fail closed
+        mock_q_merge.retrieve.return_value = [
+            MagicMock(id="orphan-1", payload={"text": "orphan", "namespace": "", "agent_id": ""})
+        ]
+        res_orphan = await merge_mod.merge_memories(["orphan-1"], "concat", "gitbob", "pipeline")
+        assert res_orphan["error"] == "access_denied"
+
+
+async def test_audit_minor1_pin_and_unpin_deny_foreign_qdrant_point(async_pool, rbac_config):
+    """Audit Minor #1: _handle_pin and _handle_unpin must verify Qdrant point namespace
+    write RBAC before mutating payload on unsharded Qdrant."""
+    from archivist.app.handlers import tools_storage
+
+    foreign_pt = MagicMock(
+        id="dep-pin-1",
+        payload={"text": "deployer fact", "namespace": "deployer", "agent_id": "argo"},
+    )
+    mock_q = MagicMock()
+    mock_q.retrieve.return_value = [foreign_pt]
+
+    with (
+        patch.object(tools_storage, "qdrant_client", return_value=mock_q),
+        patch.object(tools_storage, "collection_for", return_value="shared_collection"),
+    ):
+        res_pin = await tools_storage._handle_pin(
+            {"agent_id": "gitbob", "namespace": "pipeline", "memory_id": "dep-pin-1"}
+        )
+        assert json.loads(res_pin[0].text)["error"] == "access_denied"
+        mock_q.set_payload.assert_not_called()
+
+        res_unpin = await tools_storage._handle_unpin(
+            {"agent_id": "gitbob", "namespace": "pipeline", "memory_id": "dep-pin-1"}
+        )
+        assert json.loads(res_unpin[0].text)["error"] == "access_denied"
+        mock_q.set_payload.assert_not_called()
+
+
+async def test_audit_minor2_entity_brief_add_alias_denies_global_entity_without_write(
+    async_pool, rbac_config
+):
+    """Audit Minor #2: add_alias on a 'global' entity must require write on 'global'."""
+    from archivist.app.handlers.tools_search import _handle_entity_brief
+    from archivist.storage.graph import upsert_entity
+
+    await upsert_entity("GlobalRouter", namespace="global")
+    res = await _handle_entity_brief(
+        {
+            "entity": "GlobalRouter",
+            "agent_id": "gitbob",
+            "add_alias": "hijacked-alias",
+        }
+    )
+    assert json.loads(res[0].text)["error"] == "access_denied"
+
+    async with async_pool.read() as conn:
+        row = await conn.fetchone("SELECT aliases FROM entities WHERE name = 'GlobalRouter'")
+    assert "hijacked-alias" not in (row["aliases"] or "")
+
+
+async def test_audit_minor3_curator_queue_sweeps_orphans_and_postgres_claim(
+    async_pool, monkeypatch
+):
+    """Audit Minor #3: curator_queue.drain sweeps crashed 'processing' orphans and uses
+    FOR UPDATE SKIP LOCKED ... RETURNING on Postgres."""
+    from archivist.lifecycle import curator_queue as cq
+
+    cq._ensure_schema()
+    stale_ts = (datetime.now(UTC) - timedelta(minutes=15)).isoformat()
+    async with async_pool.write() as conn:
+        await conn.execute(
+            "INSERT INTO curator_queue (id, op_type, payload, status, created_at, applied_at) "
+            "VALUES ('orphan-op-1', 'skip_store', '{}', 'processing', ?, ?)",
+            (stale_ts, stale_ts),
+        )
+
+    applied = await cq.drain(limit=10, orphan_timeout_seconds=300)
+    assert any(a["id"] == "orphan-op-1" and a["status"] == "applied" for a in applied)
+
+    # Verify Postgres claim path issues FOR UPDATE SKIP LOCKED ... RETURNING
+    captured_sql: list[str] = []
+
+    class _FakePGConn:
+        async def fetchall(self, sql, params=()):
+            captured_sql.append(sql)
+            return []
+
+        async def execute(self, sql, params=()):
+            captured_sql.append(sql)
+
+    class _FakePool:
+        from contextlib import asynccontextmanager
+
+        @asynccontextmanager
+        async def write(self):
+            yield _FakePGConn()
+
+    monkeypatch.setattr(cq, "_is_postgres", lambda: True)
+    with patch("archivist.storage.sqlite_pool.pool", _FakePool()):
+        await cq.drain(limit=5)
+
+    assert any("FOR UPDATE SKIP LOCKED" in s and "RETURNING" in s for s in captured_sql)
+
+
+async def test_audit_minor4_create_scope_snapshot_rollback_uses_to_thread(
+    async_pool, tmp_path, monkeypatch
+):
+    """Audit Minor #4: rollback delete_snapshot in create_scope_snapshot runs via asyncio.to_thread."""
+    from archivist.storage import memory_product as mp
+
+    monkeypatch.setattr("archivist.storage.backup_manager.BACKUP_DIR", str(tmp_path))
+    to_thread_calls: list[object] = []
+    real_to_thread = asyncio.to_thread
+
+    async def _spy_to_thread(fn, *args, **kwargs):
+        to_thread_calls.append(fn)
+        return await real_to_thread(fn, *args, **kwargs)
+
+    with (
+        patch.object(
+            mp, "_insert_scope_version", new=AsyncMock(side_effect=RuntimeError("db fail"))
+        ),
+        patch("archivist.storage.memory_product.asyncio.to_thread", side_effect=_spy_to_thread),
+    ):
+        with pytest.raises(RuntimeError, match="db fail"):
+            await mp.create_scope_snapshot(namespace="ns-rb", caller_agent_id="a1")
+
+    assert mp.delete_snapshot in to_thread_calls

@@ -308,6 +308,7 @@ async def _handle_handoff(arguments: dict) -> list[TextContent]:
     if not receiving:
         return error_response({"error": "receiving_agent_id is required"})
 
+    effective_ns = namespace
     if not is_permissive_mode():
         effective_ns = namespace or get_namespace_for_agent(agent_id)
         if denied := require_rbac(agent_id, "read", effective_ns):
@@ -319,7 +320,7 @@ async def _handle_handoff(arguments: dict) -> list[TextContent]:
             session_id=session_id,
             receiving_agent_id=receiving,
             max_tokens=int(arguments.get("max_tokens") or 4000),
-            namespace=namespace,
+            namespace=effective_ns,
         )
     except Exception as exc:
         logger.exception("archivist_handoff failed")

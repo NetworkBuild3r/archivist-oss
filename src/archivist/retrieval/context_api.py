@@ -611,8 +611,9 @@ async def create_handoff_packet(
                 "WHERE f.is_active = 1 AND COALESCE(f.is_suppressed, 0) = 0 "
                 "AND f.confidence >= 0.7 "
                 "AND (e.namespace = ? OR e.namespace = 'global') "
+                "AND (f.namespace = ? OR f.namespace = 'global' OR f.namespace = '') "
                 "ORDER BY f.created_at DESC LIMIT 20",
-                (namespace,),
+                (namespace, namespace),
             )
         else:
             fact_rows = await pool.fetchall(
