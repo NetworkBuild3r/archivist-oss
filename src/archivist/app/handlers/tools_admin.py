@@ -497,7 +497,11 @@ async def _handle_retrieval_logs(arguments: dict) -> list[TextContent]:
     if not is_permissive_mode():
         if err := require_caller(caller):
             return err
-        if target_agent and target_agent != caller and not can_read_agent_memory(caller, target_agent):
+        if (
+            target_agent
+            and target_agent != caller
+            and not can_read_agent_memory(caller, target_agent)
+        ):
             return error_response(
                 {
                     "error": "access_denied",

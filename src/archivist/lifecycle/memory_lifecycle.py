@@ -116,8 +116,7 @@ async def _resolve_child_ids(
         hyde_ids = [
             r["qdrant_id"]
             for r in mp_rows
-            if r["point_type"] not in ("primary", "micro_chunk")
-            and r["qdrant_id"] != memory_id
+            if r["point_type"] not in ("primary", "micro_chunk") and r["qdrant_id"] != memory_id
         ]
         logger.debug(
             "delete.child_lookup from memory_points: micro=%d derived=%d",

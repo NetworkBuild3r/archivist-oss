@@ -721,7 +721,9 @@ def _migrate_entity_unique_constraint():
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(name COLLATE NOCASE)"
                 )
-                conn.execute("CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(entity_type)")
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(entity_type)"
+                )
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_entities_namespace ON entities(namespace)"
                 )
@@ -734,7 +736,9 @@ def _migrate_entity_unique_constraint():
                 conn.execute("PRAGMA foreign_keys=ON")
             fk_issues = conn.execute("PRAGMA foreign_key_check").fetchall()
             if fk_issues:
-                _logger.warning("Entity migration foreign_key_check reported %d issues", len(fk_issues))
+                _logger.warning(
+                    "Entity migration foreign_key_check reported %d issues", len(fk_issues)
+                )
             _logger.info("Migrated entities: rebuilt UNIQUE constraint to include namespace")
         except Exception as e:
             _logger.warning(

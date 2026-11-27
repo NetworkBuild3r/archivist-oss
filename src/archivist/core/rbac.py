@@ -128,7 +128,7 @@ def load_config(path: str | None = None) -> RBACConfig:
 def get_config() -> RBACConfig:
     global _config
     if _config is None:
-        load_config()
+        return load_config()
     return _config
 
 

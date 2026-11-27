@@ -135,7 +135,7 @@ def _translate_sql(sql: str) -> str:
         'UPDATE r SET confidence=LEAST(confidence+0.01, 1.0) WHERE id=$1'
     """
     # Track which ORx substitution fired so we can append the right ON CONFLICT clause.
-    _mode = [None]  # "ignore" | "replace" | None
+    _mode: list[str | None] = [None]  # "ignore" | "replace" | None
 
     def _replace_insert(m: re.Match[str]) -> str:
         keyword = m.group(0).upper()

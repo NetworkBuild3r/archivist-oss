@@ -381,9 +381,7 @@ async def get_relevant_context(
                 if isinstance(gc, list):
                     for gitem in gc:
                         if isinstance(gitem, dict):
-                            _add_fact_text(
-                                str(gitem.get("text") or gitem.get("fact") or "")
-                            )
+                            _add_fact_text(str(gitem.get("text") or gitem.get("fact") or ""))
                         elif isinstance(gitem, str):
                             _add_fact_text(gitem)
         except Exception as e:
@@ -625,9 +623,7 @@ async def create_handoff_packet(
                 "AND f.confidence >= 0.7 "
                 "ORDER BY f.created_at DESC LIMIT 20",
             )
-        knowledge_snapshot["facts"] = [
-            f"[{r['entity_name']}] {r['fact_text']}" for r in fact_rows
-        ]
+        knowledge_snapshot["facts"] = [f"[{r['entity_name']}] {r['fact_text']}" for r in fact_rows]
     except Exception as e:
         logger.debug("handoff knowledge_snapshot failed: %s", e)
 

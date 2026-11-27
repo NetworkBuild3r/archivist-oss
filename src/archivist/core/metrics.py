@@ -238,7 +238,7 @@ def collect_storage_gauges_tick() -> None:
         for c in cols:
             try:
                 info = client.get_collection(c.name)
-                pts = float(info.points_count)
+                pts = float(info.points_count or 0)
             except Exception:
                 pts = 0.0
             gauge_set(QDRANT_VECTORS_TOTAL, pts, {"collection": c.name})

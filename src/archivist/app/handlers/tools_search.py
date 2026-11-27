@@ -571,9 +571,7 @@ async def _handle_timeline(arguments: dict) -> list[TextContent]:
         try:
             anchor = datetime.strptime(as_of, "%Y-%m-%d").replace(tzinfo=UTC)
         except ValueError:
-            return error_response(
-                {"error": "invalid_as_of", "message": "as_of must be YYYY-MM-DD"}
-            )
+            return error_response({"error": "invalid_as_of", "message": "as_of must be YYYY-MM-DD"})
         date_to = as_of
         date_from = (anchor - timedelta(days=days)).strftime("%Y-%m-%d") if days > 0 else ""
     else:
@@ -840,7 +838,9 @@ async def _handle_entity_brief(arguments: dict) -> list[TextContent]:
 
     if alias:
         if not is_permissive_mode():
-            write_ns = ent_ns if (ent_ns and ent_ns != "global") else get_namespace_for_agent(caller)
+            write_ns = (
+                ent_ns if (ent_ns and ent_ns != "global") else get_namespace_for_agent(caller)
+            )
             denied = require_rbac(caller, "write", write_ns)
             if denied:
                 return denied

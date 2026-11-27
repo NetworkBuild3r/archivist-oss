@@ -26,8 +26,10 @@ import sqlite3
 import subprocess
 import tarfile
 import time
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 import httpx
@@ -95,9 +97,7 @@ def _resolve_import_path(ndjson_path: str) -> Path:
     raw = Path(ndjson_path)
     candidate = (raw if raw.is_absolute() else (backup_root / raw)).resolve()
     if candidate == backup_root or backup_root not in candidate.parents:
-        raise SnapshotPathError(
-            f"Invalid import path {ndjson_path!r}: resolves outside BACKUP_DIR"
-        )
+        raise SnapshotPathError(f"Invalid import path {ndjson_path!r}: resolves outside BACKUP_DIR")
     return candidate
 
 
@@ -833,7 +833,7 @@ def _export_agent_graph(
     return count
 
 
-async def _run_fts_upserts(fts_pending: list[dict[str, object]]) -> None:
+async def _run_fts_upserts(fts_pending: list[dict[str, Any]]) -> None:
     """Upsert all queued FTS-chunk records in a single event loop run.
 
     Called once via ``asyncio.run(...)`` after ``import_agent()``'s main NDJSON
@@ -873,8 +873,8 @@ def import_agent(
     skipped = 0
     # Queued FTS-upsert kwargs, flushed via a single asyncio.run() call after the
     # main loop instead of once per NDJSON line (INIT-022/SPEC-002, fixes M15).
-    fts_pending: list[dict[str, object]] = []
-    batch_fts: dict[str, dict[str, object]] = {}
+    fts_pending: list[dict[str, Any]] = []
+    batch_fts: dict[str, dict[str, Any]] = {}
 
     with open(path, encoding="utf-8") as f:
         batch: list[tuple[str, PointStruct]] = []
@@ -969,7 +969,7 @@ def import_agent(
     return summary
 
 
-def _flush_import_batch(client, batch: list[tuple[str, object]]) -> tuple[list[str], int]:
+def _flush_import_batch(client: Any, batch: Sequence[tuple[str, Any]]) -> tuple[list[str], int]:
     """Upsert a batch of points grouped by collection.
 
     Returns ``(succeeded_point_ids, failed_count)`` so callers only count and
