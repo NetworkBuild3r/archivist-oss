@@ -615,7 +615,12 @@ def prune_snapshots(keep: int = 0) -> list[str]:
 # ── Per-agent export / import (NDJSON) ───────────────────────────────────────
 
 
-def export_agent(agent_id: str, output_dir: str = "") -> dict:
+def export_agent(
+    agent_id: str,
+    output_dir: str = "",
+    *,
+    loop: asyncio.AbstractEventLoop | None = None,
+) -> dict:
     """Export all memories for a single agent to NDJSON.
 
     Scrolls Qdrant for all points matching agent_id, writes one JSON line per
@@ -675,7 +680,7 @@ def export_agent(agent_id: str, output_dir: str = "") -> dict:
                     break
                 offset = next_offset
 
-    graph_rows = _export_agent_graph(agent_id, out_dir, safe_agent, ts)
+    graph_rows = _export_agent_graph(agent_id, out_dir, safe_agent, ts, loop=loop)
 
     size_bytes = out_path.stat().st_size
     summary = {
@@ -689,7 +694,14 @@ def export_agent(agent_id: str, output_dir: str = "") -> dict:
     return summary
 
 
-def _export_agent_graph(agent_id: str, out_dir: Path, safe_agent: str, ts: str) -> int:
+def _export_agent_graph(
+    agent_id: str,
+    out_dir: Path,
+    safe_agent: str,
+    ts: str,
+    *,
+    loop: asyncio.AbstractEventLoop | None = None,
+) -> int:
     """Export agent-related graph data (entities, facts) to NDJSON.
 
     Uses the async pool so the export works correctly for both SQLite and
@@ -722,14 +734,26 @@ def _export_agent_graph(agent_id: str, out_dir: Path, safe_agent: str, ts: str) 
         return rows_written
 
     try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            # Called from a sync context inside asyncio.to_thread()
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
 
+        if loop is not None:
+            if running_loop is loop:
+                raise RuntimeError(
+                    "_export_agent_graph called synchronously on the running event loop; "
+                    "offload export_agent via asyncio.to_thread(..., loop=loop)"
+                )
             future = asyncio.run_coroutine_threadsafe(_run(), loop)
             count = future.result(timeout=120)
+        elif running_loop is not None:
+            raise RuntimeError(
+                "_export_agent_graph called synchronously on a running event loop; "
+                "offload export_agent via asyncio.to_thread(..., loop=loop)"
+            )
         else:
-            count = loop.run_until_complete(_run())
+            count = asyncio.run(_run())
     except Exception as exc:
         logger.warning("_export_agent_graph pool query failed, falling back to sqlite3: %s", exc)
         # Fallback for SQLite-only deployments where the pool may not be initialized
@@ -768,7 +792,12 @@ async def _run_fts_upserts(fts_pending: list[dict[str, object]]) -> None:
         await upsert_fts_chunk(**kwargs)
 
 
-def import_agent(ndjson_path: str, dry_run: bool = False) -> dict:
+def import_agent(
+    ndjson_path: str,
+    dry_run: bool = False,
+    *,
+    loop: asyncio.AbstractEventLoop | None = None,
+) -> dict:
     """Import agent memories from an NDJSON export file.
 
     Upserts points back into Qdrant and rebuilds FTS entries.
@@ -851,7 +880,11 @@ def import_agent(ndjson_path: str, dry_run: bool = False) -> dict:
 
     fts_rebuilt = 0
     if fts_pending:
-        asyncio.run(_run_fts_upserts(fts_pending))
+        if loop is not None:
+            future = asyncio.run_coroutine_threadsafe(_run_fts_upserts(fts_pending), loop)
+            future.result(timeout=300)
+        else:
+            asyncio.run(_run_fts_upserts(fts_pending))
         fts_rebuilt = len(fts_pending)
 
     summary = {

@@ -662,7 +662,8 @@ async def _handle_backup(arguments: dict) -> list[TextContent]:
         agent_id = arguments.get("agent_id", "").strip()
         if not agent_id:
             return error_response({"error": "agent_id is required for export_agent"})
-        result = export_agent(agent_id)
+        loop = asyncio.get_running_loop()
+        result = await asyncio.to_thread(export_agent, agent_id, loop=loop)
         return success_response(result)
 
     if action == "import_agent":
@@ -670,7 +671,8 @@ async def _handle_backup(arguments: dict) -> list[TextContent]:
         if not file_path:
             return error_response({"error": "file path is required for import_agent"})
         try:
-            result = import_agent(file_path)
+            loop = asyncio.get_running_loop()
+            result = await asyncio.to_thread(import_agent, file_path, loop=loop)
             return success_response(result)
         except FileNotFoundError as e:
             return error_response({"error": str(e)})

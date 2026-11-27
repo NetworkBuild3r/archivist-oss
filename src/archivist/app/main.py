@@ -698,7 +698,8 @@ async def handle_agent_export(request):
     from archivist.storage.backup_manager import export_agent
 
     try:
-        result = export_agent(agent_id)
+        loop = asyncio.get_running_loop()
+        result = await asyncio.to_thread(export_agent, agent_id, loop=loop)
         return JSONResponse(result)
     except Exception as e:
         logger.error("Agent export failed: %s", e)
@@ -721,7 +722,8 @@ async def handle_agent_import(request):
     from archivist.storage.backup_manager import import_agent
 
     try:
-        result = import_agent(ndjson_path, dry_run=dry_run)
+        loop = asyncio.get_running_loop()
+        result = await asyncio.to_thread(import_agent, ndjson_path, dry_run=dry_run, loop=loop)
         return JSONResponse(result)
     except FileNotFoundError as e:
         return JSONResponse({"error": str(e)}, status_code=404)

@@ -1730,7 +1730,10 @@ async def _handle_pin(arguments: dict) -> list[TextContent]:
                 pinned.append({"type": "entity", "name": entity_name, "id": row["id"]})
             else:
                 eid = await upsert_entity(
-                    entity_name, retention_class="permanent", namespace=namespace or "global"
+                    entity_name,
+                    retention_class="permanent",
+                    namespace=namespace or "global",
+                    conn=conn,
                 )
                 pinned.append({"type": "entity", "name": entity_name, "id": eid, "created": True})
 
