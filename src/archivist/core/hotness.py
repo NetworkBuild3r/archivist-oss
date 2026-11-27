@@ -9,11 +9,27 @@ RLM pipeline blends hotness into scores after temporal decay.
 
 import logging
 import math
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from archivist.core.config import HOTNESS_HALFLIFE_DAYS, HOTNESS_WEIGHT
+from archivist.storage.graph import schema_guard
 
 logger = logging.getLogger("archivist.hotness")
+
+_HOTNESS_WATERMARK_KEY = "hotness_last_log_ts"
+
+# Module-level guard so SQLite DDL runs at most once per DB path instead of
+# opening a synchronous sqlite3 connection on every search (MAJ-12).
+_ensure_hotness_schema = schema_guard("""
+    CREATE TABLE IF NOT EXISTS memory_hotness (
+        memory_id TEXT PRIMARY KEY,
+        score REAL NOT NULL DEFAULT 0.0,
+        retrieval_count INTEGER NOT NULL DEFAULT 0,
+        last_accessed TEXT,
+        updated_at TEXT NOT NULL,
+        importance_signal REAL NOT NULL DEFAULT 0.5
+    );
+""")
 
 
 def _sigmoid(x: float) -> float:
@@ -38,21 +54,8 @@ async def get_hotness_scores(memory_ids: list[str]) -> dict[str, float]:
     if not memory_ids:
         return {}
 
-    # Ensure the SQLite schema exists (no-op on Postgres — table is in schema_postgres.sql)
     if not _is_postgres():
-        from archivist.storage.graph import schema_guard
-
-        _ensure = schema_guard("""
-            CREATE TABLE IF NOT EXISTS memory_hotness (
-                memory_id TEXT PRIMARY KEY,
-                score REAL NOT NULL DEFAULT 0.0,
-                retrieval_count INTEGER NOT NULL DEFAULT 0,
-                last_accessed TEXT,
-                updated_at TEXT NOT NULL,
-                importance_signal REAL NOT NULL DEFAULT 0.5
-            );
-        """)
-        _ensure()
+        _ensure_hotness_schema()
 
     placeholders = ",".join("?" for _ in memory_ids)
     async with pool.read() as conn:
@@ -89,27 +92,30 @@ async def apply_hotness_to_results(results: list[dict], weight: float | None = N
 
 
 def _retrieval_logs_query(is_postgres: bool) -> str:
-    """Return the retrieval_logs aggregation query for the active backend."""
+    """Return the parameterized retrieval_logs aggregation query for the active backend.
+
+    Expects a single ISO-8601 UTC cutoff timestamp parameter ``?``.
+    Uses ``cache_hit = 0`` uniformly (INTEGER column on both SQLite and Postgres)
+    and compares ``created_at`` (TEXT ISO-8601 UTC) against a bound string.
+    """
     if is_postgres:
-        # Postgres: use ->> JSON operator and NOW() - INTERVAL for date arithmetic
         return """
             SELECT
                 retrieval_trace::json->>'result_ids' AS result_ids,
                 created_at
             FROM retrieval_logs
-            WHERE cache_hit = FALSE
-              AND created_at > NOW() - INTERVAL '7 days'
+            WHERE cache_hit = 0
+              AND created_at > ?
             ORDER BY created_at DESC
             LIMIT 5000
         """
-    # SQLite: use json_extract() and datetime('now', ...)
     return """
         SELECT
             json_extract(retrieval_trace, '$.result_ids') as result_ids,
             created_at
         FROM retrieval_logs
         WHERE cache_hit = 0
-          AND created_at > datetime('now', '-7 days')
+          AND created_at > ?
         ORDER BY created_at DESC
         LIMIT 5000
     """
@@ -118,36 +124,25 @@ def _retrieval_logs_query(is_postgres: bool) -> str:
 async def batch_update_hotness() -> int:
     """Aggregate retrieval_logs into memory_hotness. Called from curator cycle.
 
-    v1.11: Fixes population bug -- creates rows for memories found in
-    retrieval_logs that lack a memory_hotness entry.  Also applies importance
-    feedback with cold-start guardrails (grace period, floor, relative frequency).
+    Uses a persisted watermark in ``curator_state`` (``hotness_last_log_ts``) so
+    repeated curator cycles only aggregate newly arrived retrieval_logs rows
+    rather than double-counting the 7-day window.
     """
     import json as _json
 
     from archivist.storage.graph import _is_postgres
     from archivist.storage.sqlite_pool import pool
 
-    # Ensure SQLite schema exists (no-op on Postgres)
     if not _is_postgres():
-        from archivist.storage.graph import schema_guard
-
-        _ensure = schema_guard("""
-            CREATE TABLE IF NOT EXISTS memory_hotness (
-                memory_id TEXT PRIMARY KEY,
-                score REAL NOT NULL DEFAULT 0.0,
-                retrieval_count INTEGER NOT NULL DEFAULT 0,
-                last_accessed TEXT,
-                updated_at TEXT NOT NULL,
-                importance_signal REAL NOT NULL DEFAULT 0.5
-            );
-        """)
-        _ensure()
+        _ensure_hotness_schema()
 
     now = datetime.now(UTC)
     now_iso = now.isoformat()
+    default_cutoff = (now - timedelta(days=7)).isoformat()
 
     memory_counts: dict[str, int] = {}
     memory_last_access: dict[str, str] = {}
+    watermark = default_cutoff
 
     async with pool.read() as conn:
         hotness_rows = await conn.fetchall(
@@ -158,12 +153,26 @@ async def batch_update_hotness() -> int:
             memory_last_access[r["memory_id"]] = r["last_accessed"] or now_iso
 
         try:
-            log_rows = await conn.fetchall(_retrieval_logs_query(_is_postgres()))
+            wm_row = await conn.fetchone(
+                "SELECT value FROM curator_state WHERE key = ?",
+                (_HOTNESS_WATERMARK_KEY,),
+            )
+            if wm_row and wm_row["value"]:
+                watermark = max(str(wm_row["value"]), default_cutoff)
         except Exception as e:
-            logger.debug("hotness.batch_update: retrieval_logs query failed: %s", e)
+            logger.debug("hotness.batch_update: watermark read skipped: %s", e)
+
+        try:
+            log_rows = await conn.fetchall(_retrieval_logs_query(_is_postgres()), (watermark,))
+        except Exception as e:
+            logger.warning("hotness.batch_update: retrieval_logs query failed: %s", e)
             log_rows = []
 
+    max_seen_ts = ""
     for row in log_rows:
+        row_ts = str(row["created_at"] or "")
+        if row_ts > max_seen_ts:
+            max_seen_ts = row_ts
         try:
             ids = _json.loads(row["result_ids"] or "[]")
         except Exception as e:
@@ -176,8 +185,8 @@ async def batch_update_hotness() -> int:
                 continue
             mid = str(mid)
             memory_counts[mid] = memory_counts.get(mid, 0) + 1
-            if mid not in memory_last_access or row["created_at"] > memory_last_access.get(mid, ""):
-                memory_last_access[mid] = row["created_at"]
+            if mid not in memory_last_access or row_ts > memory_last_access.get(mid, ""):
+                memory_last_access[mid] = row_ts
 
     updated = 0
     async with pool.write() as conn:
@@ -202,6 +211,16 @@ async def batch_update_hotness() -> int:
                 (mid, score, count, last_str, now_iso),
             )
             updated += 1
+
+        if max_seen_ts:
+            try:
+                await conn.execute(
+                    "INSERT INTO curator_state (key, value) VALUES (?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (_HOTNESS_WATERMARK_KEY, max_seen_ts),
+                )
+            except Exception as e:
+                logger.debug("hotness.batch_update: watermark write skipped: %s", e)
 
     logger.info("Hotness batch update: %d memories scored", updated)
     return updated

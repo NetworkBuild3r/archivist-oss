@@ -17,6 +17,7 @@ Provenance: INIT-001/SPEC-009; INIT-011/SPEC-002 (import + caps).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -33,6 +34,7 @@ logger = logging.getLogger("archivist.memory_product")
 
 MANIFEST_KIND = "memory_scope"
 MANIFEST_VERSION = 1
+_OUTBOX_UPSERT_BATCH_SIZE = 100
 
 # ADR-011 import blast-radius caps (INIT-011/SPEC-002).
 MAP_IMPORT_MAX_CHUNKS = 50_000
@@ -310,6 +312,23 @@ async def _load_scope_chunks(
     return [dict(r) for r in rows]
 
 
+async def _upsert_vectors_inline(collection: str, points: list[dict[str, Any]]) -> None:
+    """Inline Qdrant upsert fallback when OUTBOX_ENABLED=false."""
+    from qdrant_client.models import PointStruct
+
+    from archivist.storage.outbox import warn_legacy_inline_qdrant_once
+    from archivist.storage.qdrant import qdrant_client
+
+    warn_legacy_inline_qdrant_once()
+    client = qdrant_client()
+    for i in range(0, len(points), _OUTBOX_UPSERT_BATCH_SIZE):
+        batch = [
+            PointStruct(id=p["id"], vector=p["vector"], payload=p.get("payload") or {})
+            for p in points[i : i + _OUTBOX_UPSERT_BATCH_SIZE]
+        ]
+        await asyncio.to_thread(client.upsert, collection_name=collection, points=batch)
+
+
 def _write_archive(
     archive_id: str,
     *,
@@ -509,7 +528,9 @@ async def create_scope_snapshot(
     )
 
     try:
-        snap_dir = _write_archive(archive_id, chunks=chunks, vectors=vecs, manifest=manifest)
+        snap_dir = await asyncio.to_thread(
+            _write_archive, archive_id, chunks=chunks, vectors=vecs, manifest=manifest
+        )
     except SnapshotPathError:
         raise
     except Exception as exc:
@@ -581,7 +602,7 @@ async def fork_from_snapshot(
         raise MemoryProductConflictError("source version has no archive_id")
 
     try:
-        _manifest, chunks, vectors = _read_archive(source.archive_id)
+        _manifest, chunks, vectors = await asyncio.to_thread(_read_archive, source.archive_id)
     except SnapshotPathError:
         raise
     except MemoryProductNotFoundError:
@@ -657,12 +678,20 @@ async def fork_from_snapshot(
                         "payload": payload,
                     }
                     forked_vectors.append(point)
-                    # PointStruct-like dict; outbox serialises via model_dump/dict or as-is.
-                    txn.enqueue_qdrant_upsert(
-                        collection,
-                        [point],
-                        memory_id=new_id,
+                    await txn.execute(
+                        "INSERT OR IGNORE INTO memory_points "
+                        "(memory_id, qdrant_id, point_type, created_at) "
+                        "VALUES (?, ?, 'primary', ?)",
+                        (new_id, new_id, created_at),
                     )
+
+            for i in range(0, len(forked_vectors), _OUTBOX_UPSERT_BATCH_SIZE):
+                batch = forked_vectors[i : i + _OUTBOX_UPSERT_BATCH_SIZE]
+                txn.enqueue_qdrant_upsert(
+                    collection,
+                    batch,
+                    memory_id=batch[0]["id"],
+                )
 
             # Record lineage inside the same transaction so fork metadata is atomic
             # with chunk writes.
@@ -720,8 +749,19 @@ async def fork_from_snapshot(
         created_at=created_at,
         extra={"source_version_id": source_version_id, "source_archive_id": source.archive_id},
     )
+    from archivist.core.config import OUTBOX_ENABLED
+
+    if not OUTBOX_ENABLED and forked_vectors:
+        await _upsert_vectors_inline(collection, forked_vectors)
+
     try:
-        _write_archive(archive_id, chunks=forked_chunks, vectors=forked_vectors, manifest=manifest)
+        await asyncio.to_thread(
+            _write_archive,
+            archive_id,
+            chunks=forked_chunks,
+            vectors=forked_vectors,
+            manifest=manifest,
+        )
     except Exception as exc:
         # Fork data is already committed; archive is best-effort audit. Log and continue.
         logger.warning(
@@ -879,7 +919,7 @@ async def import_scope(
 
     # Path confinement first — SnapshotPathError must surface for escapes.
     try:
-        payload_bytes = _archive_payload_bytes(archive_id)
+        payload_bytes = await asyncio.to_thread(_archive_payload_bytes, archive_id)
     except SnapshotPathError:
         raise
     except MemoryProductNotFoundError:
@@ -891,7 +931,7 @@ async def import_scope(
         )
 
     try:
-        manifest, chunks, vectors = _read_archive(archive_id)
+        manifest, chunks, vectors = await asyncio.to_thread(_read_archive, archive_id)
     except SnapshotPathError:
         raise
     except MemoryProductNotFoundError:
@@ -990,11 +1030,20 @@ async def import_scope(
                         "payload": payload,
                     }
                     imported_vectors.append(point)
-                    txn.enqueue_qdrant_upsert(
-                        collection,
-                        [point],
-                        memory_id=new_id,
+                    await txn.execute(
+                        "INSERT OR IGNORE INTO memory_points "
+                        "(memory_id, qdrant_id, point_type, created_at) "
+                        "VALUES (?, ?, 'primary', ?)",
+                        (new_id, new_id, created_at),
                     )
+
+            for i in range(0, len(imported_vectors), _OUTBOX_UPSERT_BATCH_SIZE):
+                batch = imported_vectors[i : i + _OUTBOX_UPSERT_BATCH_SIZE]
+                txn.enqueue_qdrant_upsert(
+                    collection,
+                    batch,
+                    memory_id=batch[0]["id"],
+                )
 
             lineage = _strip_secrets(
                 {
@@ -1054,8 +1103,14 @@ async def import_scope(
         created_at=created_at,
         extra={"source_archive_id": archive_id},
     )
+    from archivist.core.config import OUTBOX_ENABLED
+
+    if not OUTBOX_ENABLED and imported_vectors:
+        await _upsert_vectors_inline(collection, imported_vectors)
+
     try:
-        _write_archive(
+        await asyncio.to_thread(
+            _write_archive,
             import_archive_id,
             chunks=imported_chunks,
             vectors=imported_vectors,

@@ -153,13 +153,21 @@ class SQLiteGraphBackend:
 
     def __init__(self) -> None:
         self._conn: aiosqlite.Connection | None = None
+        self._read_conn: aiosqlite.Connection | None = None
         self._write_lock: asyncio.Lock = asyncio.Lock()
 
     async def initialize(self, db_path: str, wal_autocheckpoint: int = 1000) -> None:
-        """Open the connection and configure PRAGMAs.
+        """Open dedicated write and read-only connections and configure PRAGMAs.
 
         Called once at app startup via :func:`initialize_pool`.  Idempotent —
         a second call while already initialized is a no-op.
+
+        For file-backed SQLite databases, a separate read-only connection
+        (``PRAGMA query_only=ON``) is opened so concurrent ``read()`` callers
+        get real WAL snapshot isolation and never observe uncommitted writes
+        from an active ``write()`` transaction. In-memory databases share the
+        single connection because a second ``connect(":memory:")`` creates an
+        empty separate database.
 
         Args:
             db_path: Path to the SQLite database file.
@@ -173,12 +181,27 @@ class SQLiteGraphBackend:
         await self._conn.execute("PRAGMA foreign_keys=ON")
         await self._conn.execute("PRAGMA synchronous=NORMAL")
         await self._conn.execute("PRAGMA cache_size=-8000")
+        await self._conn.execute("PRAGMA busy_timeout=5000")
         await self._conn.execute(f"PRAGMA wal_autocheckpoint={wal_autocheckpoint}")
         await self._conn.commit()
+
+        is_memory = db_path == ":memory:" or "mode=memory" in db_path
+        if not is_memory:
+            read_conn = await aiosqlite.connect(db_path)
+            read_conn.row_factory = aiosqlite.Row
+            await read_conn.execute("PRAGMA query_only=ON")
+            await read_conn.execute("PRAGMA cache_size=-8000")
+            await read_conn.execute("PRAGMA busy_timeout=5000")
+            self._read_conn = read_conn
+        else:
+            self._read_conn = self._conn
         logger.info("SQLite pool initialized: %s", db_path)
 
     async def close(self) -> None:
-        """Close the connection.  Called once at app shutdown."""
+        """Close the connections.  Called once at app shutdown."""
+        if self._read_conn is not None and self._read_conn is not self._conn:
+            await self._read_conn.close()
+        self._read_conn = None
         if self._conn is not None:
             await self._conn.close()
             self._conn = None
@@ -215,14 +238,14 @@ class SQLiteGraphBackend:
 
     @asynccontextmanager
     async def read(self) -> AsyncIterator[_WrappedSQLiteConn]:
-        """Yield the connection for read-only queries (no lock required under WAL).
+        """Yield the dedicated read-only connection (WAL snapshot isolation).
 
         Yields ``_WrappedSQLiteConn`` with ``fetchone`` / ``fetchall`` / ``fetchval``
         matching the Postgres wrapper API (INIT-002).
         """
         if self._conn is None:
             raise RuntimeError("SQLitePool is not initialized — call initialize_pool() first")
-        yield _WrappedSQLiteConn(self._conn)
+        yield _WrappedSQLiteConn(self._read_conn or self._conn)
 
     # ------------------------------------------------------------------
     # GraphBackend Protocol convenience methods

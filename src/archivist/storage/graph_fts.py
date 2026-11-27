@@ -66,6 +66,7 @@ async def upsert_fts_chunk(
             actor_type=actor_type,
             importance=importance,
             tier_label=tier_label,
+            conn=conn,
         )
         m.inc(m.FTS_UPSERT_TOTAL, {"backend": "postgres"})
         return
@@ -101,48 +102,58 @@ async def _upsert_fts_chunk_postgres(
     actor_type: str = "",
     importance: float = 0.5,
     tier_label: str = "l2",
+    conn: object | None = None,
 ) -> None:
     """Postgres upsert: insert/replace memory_chunks row.
 
     ``fts_vector`` and ``fts_vector_simple`` are GENERATED ALWAYS AS STORED
-    columns, so no shadow-row maintenance is required.
+    columns, so no shadow-row maintenance is required. When *conn* is supplied
+    (e.g. from ``MemoryTransaction``), the upsert joins that transaction and
+    re-raises on failure so the caller rolls back cleanly.
     """
     from archivist.storage.sqlite_pool import pool
 
+    sql = (
+        "INSERT INTO memory_chunks "
+        "(qdrant_id, text, file_path, chunk_index, agent_id, namespace, date, "
+        "memory_type, actor_id, actor_type, importance, tier_label) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT (qdrant_id) DO UPDATE SET "
+        "text=EXCLUDED.text, file_path=EXCLUDED.file_path, "
+        "chunk_index=EXCLUDED.chunk_index, agent_id=EXCLUDED.agent_id, "
+        "namespace=EXCLUDED.namespace, date=EXCLUDED.date, "
+        "memory_type=EXCLUDED.memory_type, actor_id=EXCLUDED.actor_id, "
+        "actor_type=EXCLUDED.actor_type, importance=EXCLUDED.importance, "
+        "tier_label=EXCLUDED.tier_label"
+    )
+    params = (
+        qdrant_id,
+        text,
+        file_path,
+        chunk_index,
+        agent_id,
+        namespace,
+        date,
+        memory_type,
+        actor_id,
+        actor_type,
+        importance,
+        tier_label,
+    )
+
     try:
-        async with pool.write() as conn:
-            await conn.execute(
-                "INSERT INTO memory_chunks "
-                "(qdrant_id, text, file_path, chunk_index, agent_id, namespace, date, "
-                "memory_type, actor_id, actor_type, importance, tier_label) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT (qdrant_id) DO UPDATE SET "
-                "text=EXCLUDED.text, file_path=EXCLUDED.file_path, "
-                "chunk_index=EXCLUDED.chunk_index, agent_id=EXCLUDED.agent_id, "
-                "namespace=EXCLUDED.namespace, date=EXCLUDED.date, "
-                "memory_type=EXCLUDED.memory_type, actor_id=EXCLUDED.actor_id, "
-                "actor_type=EXCLUDED.actor_type, importance=EXCLUDED.importance, "
-                "tier_label=EXCLUDED.tier_label",
-                (
-                    qdrant_id,
-                    text,
-                    file_path,
-                    chunk_index,
-                    agent_id,
-                    namespace,
-                    date,
-                    memory_type,
-                    actor_id,
-                    actor_type,
-                    importance,
-                    tier_label,
-                ),
-            )
+        if conn is not None:
+            await conn.execute(sql, params)  # type: ignore[attr-defined]
+        else:
+            async with pool.write() as c:
+                await c.execute(sql, params)
     except Exception as e:
         m.inc(m.FTS_UPSERT_ERRORS_TOTAL, {"backend": "postgres"})
         logging.getLogger("archivist.graph").warning(
             "Postgres FTS upsert failed for %s: %s", qdrant_id, e
         )
+        if conn is not None:
+            raise
 
 
 async def _upsert_fts_chunk_sqlite(
@@ -228,7 +239,10 @@ async def _upsert_fts_chunk_sqlite(
             async with pool.write() as c:
                 await _run(c)
     except Exception as e:
+        m.inc(m.FTS_UPSERT_ERRORS_TOTAL, {"backend": "sqlite"})
         logging.getLogger("archivist.graph").warning("FTS upsert failed for %s: %s", qdrant_id, e)
+        if conn is not None:
+            raise
 
 
 async def _delete_fts_rows_async(conn, rows):
