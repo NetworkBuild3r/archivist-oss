@@ -31,7 +31,7 @@ without becoming an agent runtime.
 |---|---|
 | **GR-EVAL-001** | **MemoryArena-*inspired* only.** Multi-session interdependent Memory→Action scenarios in CI. **No** full MemoryArena / web-nav gym port in INIT-006. |
 | **GR-EVAL-002** | **CI-shaped stubs.** Scenarios use SQLite, fake/stub embed, and test outbox drain helpers. No live external agent harness or live Qdrant required for the gate. |
-| **GR-LAYER-001** | **Archivist stays a memory layer.** Action selection lives in **tests** (harness oracle), not a production agent OS / Letta-shaped runtime. No net-new MCP tools for “run the agent.” |
+| **GR-LAYER-001** | **Archivist stays a memory layer.** Action selection lives in **tests** (harness oracle), not a production agent OS / Letta-shaped runtime. No net-new MCP tools for “run the agent.” *(See 2026-11-27 amendment for the decoupled `src/archivist/crsi/` carve-out.)* |
 | **GR-CE-001** (carry) | **Cite-or-refuse / empty-evidence-OK / map-only index** (ADR-004) must not regress. Index TOC is never sufficient evidence for action. |
 | **GR-DUR-001** (carry) | **Store ack = durable graph + outbox** (ADR-003). Do not reintroduce sync Qdrant on ack for eval convenience. |
 | **GR-COACH-001** | **`coach_core` remains required.** Existing `-m coach_core` suite must stay green. Agentic scenarios use a **separate** marker and must not replace or dilute coach_core. |
@@ -138,3 +138,26 @@ Explicitly **out of scope** for work governed by this ADR:
 
 See [`docs/ROADMAP.md`](../ROADMAP.md) for the product-facing pointer to this
 ADR, and BRAIN-003 / RSCH-001 for the eval-before-mechanism sequencing.
+
+## Amendment — 2026-11-27: `GR-LAYER-001` carve-out for `src/archivist/crsi/`
+
+**Status:** Accepted (amendment; PR #71 / `INIT-001-crsi-sim`)
+**Core rule unchanged:** Archivist’s production MCP server remains strictly a
+memory layer — no production agent OS / Letta-shaped runtime and no net-new MCP
+tools for “run the agent.”
+
+**Carve-out:** `src/archivist/crsi/` (offline CRSI agent-harness loop and
+Self-Improvement Memory, invoked exclusively via `python -m archivist.crsi`) is
+permitted inside this repository strictly as a decoupled, standalone offline
+research/eval harness subpackage under the following hard invariants:
+
+| Invariant | Requirement |
+|---|---|
+| **Zero core imports** | `src/archivist/crsi/` imports nothing from `archivist.{app,core,storage,retrieval,lifecycle,write,features,utils}` or `qdrant_client` (enforced by AST test in CI). |
+| **Zero MCP surface** | Exposes no MCP tools, handlers, or production server hooks; does not alter the default MCP profile. |
+| **Zero new runtime deps** | Adds no net-new production dependencies to `requirements.txt` or the production container image. |
+| **Single-directory extractable** | Self-contained under `src/archivist/crsi/` so it can be moved into a standalone repository with a single directory extraction and zero changes to Archivist core. |
+
+Any future proposal to couple `src/archivist/crsi/` to Archivist’s MCP server
+or production runtime requires a separate ADR and may not rely on this
+carve-out.

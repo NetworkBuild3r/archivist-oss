@@ -1,7 +1,7 @@
 # CRSI + SIM Design Note
 
 - **Reference:** Yu et al., *"Self-Improvement Memory Enables Continual Recursive Self-Improvement"* ([arXiv:2611.18856](https://arxiv.org/abs/2611.18856))
-- **Package:** `src/archivist/crsi/` (decoupled from core `archivist.*` per `ADR-006 / GR-LAYER-001`)
+- **Package:** `src/archivist/crsi/` (decoupled offline subpackage carved out under the 2026-11-27 [`ADR-006 / GR-LAYER-001`](adr/ADR-006-agentic-memory-eval-gym.md#amendment--2026-11-27-gr-layer-001-carve-out-for-srcarchivistcrsi) amendment)
 
 ---
 
