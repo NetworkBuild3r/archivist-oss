@@ -72,6 +72,14 @@ class HeldOutFingerprint:
         extra_forbidden_tokens: Sequence[str] = (),
     ) -> HeldOutFingerprint:
         """Build a firewall fingerprint from ``dataset.heldout_tasks()``."""
+        evolve_corpus_parts: list[str] = []
+        evolve_expected_tokens: set[str] = set()
+        for evo_task in dataset.evolve_tasks():
+            evolve_corpus_parts.append(evo_task.prompt)
+            for tok in _extract_answer_tokens(evo_task.expected):
+                evolve_expected_tokens.add(tok)
+        evolve_corpus = "\n".join(evolve_corpus_parts)
+
         heldout_ids: set[str] = set()
         prompts: set[str] = set()
         answer_tokens: set[str] = set()
@@ -81,7 +89,9 @@ class HeldOutFingerprint:
             if len(stripped_prompt) >= 8:
                 prompts.add(stripped_prompt)
             for tok in _extract_answer_tokens(task.expected):
-                answer_tokens.add(tok)
+                # Exclude shared domain literals that legitimately appear in evolve tasks.
+                if tok not in evolve_expected_tokens and tok not in evolve_corpus:
+                    answer_tokens.add(tok)
 
         paths: set[str] = set(_DEFAULT_HELDOUT_PATH_MARKERS)
         if private_dir is not None:
