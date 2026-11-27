@@ -32,6 +32,7 @@ from urllib.parse import urlparse
 
 import httpx
 
+from archivist import __version__ as ARCHIVIST_VERSION
 from archivist.core.config import (
     BACKUP_DIR,
     BACKUP_INCLUDE_FILES,
@@ -50,7 +51,6 @@ from archivist.storage.sqlite_pool import _get_graph_write_lock
 logger = logging.getLogger("archivist.backup")
 
 MANIFEST_VERSION = 1
-ARCHIVIST_VERSION = "2.5.0"
 
 
 class SnapshotPathError(ValueError):
@@ -850,7 +850,9 @@ def import_agent(
                 continue
 
             if not dry_run:
-                target_coll = ensure_collection(payload.get("namespace", ""))
+                target_coll = ensure_collection(payload.get("namespace", "")) or record.get(
+                    "collection", QDRANT_COLLECTION
+                )
                 point = PointStruct(id=point_id, vector=vector, payload=payload)
                 batch.append((target_coll, point))
 

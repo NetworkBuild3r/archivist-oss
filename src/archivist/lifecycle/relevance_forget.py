@@ -10,6 +10,7 @@ Safe defaults (ADR-010 / GR-SAFE-001): ``RELEVANCE_FORGET_ENABLED=false``,
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -150,7 +151,9 @@ async def _qdrant_retention_class(memory_id: str, namespace: str) -> str | None:
 
         client = qdrant_client()
         coll = collection_for(namespace)
-        points = client.retrieve(collection_name=coll, ids=[memory_id], with_payload=True)
+        points = await asyncio.to_thread(
+            client.retrieve, collection_name=coll, ids=[memory_id], with_payload=True
+        )
         if not points:
             return None
         payload = getattr(points[0], "payload", None) or {}

@@ -21,6 +21,7 @@ from starlette.staticfiles import StaticFiles
 from watchfiles import Change, awatch
 
 import archivist.core.health as health
+from archivist import __version__
 from archivist.app.admin_observability import handle_audit, handle_lineage
 from archivist.app.mcp_server import server
 from archivist.core.config import (
@@ -194,12 +195,18 @@ async def handle_health(_request):
         {
             "status": overall,
             "service": "archivist",
-            "version": "2.5.0",
+            "version": __version__,
             "subsystems": statuses,
             "timestamp": datetime.now(UTC).isoformat(),
         },
         status_code=200 if overall == "healthy" else 503,
     )
+
+
+def _append_invalidation_export(path: str, payload: dict) -> None:
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        f.flush()
 
 
 async def handle_invalidate(_request):
@@ -213,7 +220,8 @@ async def handle_invalidate(_request):
     client = qdrant_client()
 
     try:
-        expired = client.scroll(
+        expired = await asyncio.to_thread(
+            client.scroll,
             collection_name=QDRANT_COLLECTION,
             scroll_filter=Filter(
                 must=[FieldCondition(key="ttl_expires_at", range=Range(lte=now_ts, gt=0))]
@@ -260,9 +268,9 @@ async def handle_invalidate(_request):
                     "sample_namespaces": sample_ns,
                     "reason": "ttl_expired",
                 }
-                with open(ARCHIVIST_INVALIDATION_EXPORT_PATH, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(line, ensure_ascii=False) + "\n")
-                    f.flush()
+                await asyncio.to_thread(
+                    _append_invalidation_export, ARCHIVIST_INVALIDATION_EXPORT_PATH, line
+                )
             except OSError as ex:
                 logger.warning("invalidation export append failed: %s", ex)
 
@@ -310,7 +318,7 @@ async def _startup():
     import archivist.storage.sqlite_pool as _pool_module
     from archivist.storage.backend_factory import create_graph_backend
 
-    logger.info("Archivist v2.0.0 starting up...")
+    logger.info("Archivist v%s starting up...", __version__)
     logger.info(
         "MCP transport: streamable_http (POST /mcp)%s",
         " + legacy SSE (/mcp/sse, /mcp/messages/)"
@@ -630,8 +638,8 @@ async def handle_backup_create(request):
 
     label = request.query_params.get("label", "")
     try:
-        result = create_snapshot(label=label)
-        prune_snapshots()
+        result = await asyncio.to_thread(create_snapshot, label=label)
+        await asyncio.to_thread(prune_snapshots)
         return JSONResponse(result)
     except Exception as e:
         logger.error("Backup creation failed: %s", e)
@@ -642,7 +650,7 @@ async def handle_backup_list(_request):
     """GET /admin/backups — list available snapshots."""
     from archivist.storage.backup_manager import list_snapshots
 
-    snapshots = list_snapshots()
+    snapshots = await asyncio.to_thread(list_snapshots)
     return JSONResponse({"snapshots": snapshots, "count": len(snapshots)})
 
 
@@ -693,7 +701,7 @@ async def handle_backup_delete(request):
     from archivist.storage.backup_manager import SnapshotPathError, delete_snapshot
 
     try:
-        if delete_snapshot(snapshot_id):
+        if await asyncio.to_thread(delete_snapshot, snapshot_id):
             return JSONResponse({"deleted": snapshot_id})
     except SnapshotPathError as e:
         return JSONResponse({"error": str(e)}, status_code=400)

@@ -21,6 +21,7 @@ relevance without a separate parent-enrichment stage.
 
 import asyncio
 import logging
+import threading
 import time
 
 logger = logging.getLogger("archivist.reranker")
@@ -28,32 +29,45 @@ logger = logging.getLogger("archivist.reranker")
 _model: object | None = None
 _model_name: str = ""
 _load_failed = False
+_load_failed_at: float = 0.0
+_LOAD_RETRY_COOLDOWN_SECONDS = 60.0
+_model_lock = threading.Lock()
 
 
 def _get_model(model_name: str):
-    """Lazy-load the CrossEncoder model once.  Thread-safe via GIL."""
-    global _model, _model_name, _load_failed
-    if _load_failed:
-        return None
-    if _model is not None and _model_name == model_name:
-        return _model
-    try:
-        from sentence_transformers import CrossEncoder
+    """Lazy-load the CrossEncoder model once (thread-safe, retries after cooldown)."""
+    global _model, _model_name, _load_failed, _load_failed_at
+    with _model_lock:
+        if _model is not None and _model_name == model_name:
+            return _model
+        if _load_failed:
+            if (
+                _load_failed_at == 0.0
+                or (time.monotonic() - _load_failed_at) < _LOAD_RETRY_COOLDOWN_SECONDS
+            ):
+                return None
+            _load_failed = False
+        try:
+            from sentence_transformers import CrossEncoder
 
-        t0 = time.monotonic()
-        _model = CrossEncoder(model_name)
-        _model_name = model_name
-        dur = round((time.monotonic() - t0) * 1000)
-        logger.info("Loaded reranker model %s in %d ms", model_name, dur)
-        return _model
-    except Exception as e:
-        logger.warning(
-            "Failed to load reranker model '%s': %s — reranking disabled",
-            model_name,
-            e,
-        )
-        _load_failed = True
-        return None
+            t0 = time.monotonic()
+            _model = CrossEncoder(model_name)
+            _model_name = model_name
+            _load_failed = False
+            _load_failed_at = 0.0
+            dur = round((time.monotonic() - t0) * 1000)
+            logger.info("Loaded reranker model %s in %d ms", model_name, dur)
+            return _model
+        except Exception as e:
+            logger.warning(
+                "Failed to load reranker model '%s': %s — reranking paused for %.0fs",
+                model_name,
+                e,
+                _LOAD_RETRY_COOLDOWN_SECONDS,
+            )
+            _load_failed = True
+            _load_failed_at = time.monotonic()
+            return None
 
 
 def _build_pair(query: str, candidate: dict) -> str:
@@ -94,7 +108,7 @@ async def rerank_candidates(
     if not candidates:
         return candidates
 
-    model = _get_model(model_name)
+    model = await asyncio.to_thread(_get_model, model_name)
     if model is None:
         return sorted(candidates, key=lambda x: x.get("score", 0), reverse=True)[:top_k]
 
@@ -128,7 +142,7 @@ async def rerank_results(
     if not results:
         return results
 
-    model = _get_model(model_name)
+    model = await asyncio.to_thread(_get_model, model_name)
     if model is None:
         return sorted(results, key=lambda x: x.get("score", 0), reverse=True)[:limit]
 

@@ -400,7 +400,6 @@ class TestPrePruneHook(unittest.TestCase):
         cq._last_pre_prune_snapshot = 0.0
 
         call_count = 0
-        original_time = time.time()
 
         def mock_create_snapshot(label=""):
             nonlocal call_count

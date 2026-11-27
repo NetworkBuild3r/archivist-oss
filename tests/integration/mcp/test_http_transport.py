@@ -191,6 +191,7 @@ async def test_auth_middleware_accepts_actual_key(monkeypatch):
 
     request = Request(scope, receive)
     response = await middleware.dispatch(request, call_next)
+    assert response.status_code == 200
     assert accepted.get("called"), "call_next was not invoked — valid Bearer token was rejected"
 
 

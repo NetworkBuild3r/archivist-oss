@@ -23,6 +23,7 @@ import archivist.core.health as health
 import archivist.core.metrics as m
 from archivist.core.config import EMBED_API_KEY, EMBED_MODEL, EMBED_URL
 from archivist.core.observability import slow_embed_check
+from archivist.features.llm import _openai_base
 
 logger = logging.getLogger("archivist.embeddings")
 
@@ -126,7 +127,7 @@ async def embed_text(text: str, model: str = EMBED_MODEL) -> list[float]:
             if EMBED_API_KEY:
                 headers["Authorization"] = f"Bearer {EMBED_API_KEY}"
             resp = await client.post(
-                f"{EMBED_URL}/v1/embeddings",
+                f"{_openai_base(EMBED_URL)}/v1/embeddings",
                 headers=headers,
                 json=payload,
             )
@@ -194,7 +195,7 @@ async def embed_batch(texts: list[str], model: str = EMBED_MODEL) -> list[list[f
             headers["Authorization"] = f"Bearer {EMBED_API_KEY}"
 
         resp = await client.post(
-            f"{EMBED_URL}/v1/embeddings",
+            f"{_openai_base(EMBED_URL)}/v1/embeddings",
             headers=headers,
             json=payload,
             timeout=120,
