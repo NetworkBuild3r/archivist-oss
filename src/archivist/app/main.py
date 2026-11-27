@@ -527,14 +527,22 @@ async def handle_retrieval_export(request):
 
     params = request.query_params
     if params.get("stats") == "true":
+        try:
+            window_days = int(params.get("window_days", "7"))
+        except ValueError:
+            return JSONResponse({"error": "invalid window_days parameter"}, status_code=400)
         stats = await get_retrieval_stats(
             agent_id=params.get("agent_id", ""),
-            window_days=int(params.get("window_days", "7")),
+            window_days=window_days,
         )
         return JSONResponse(stats)
+    try:
+        limit = int(params.get("limit", "50"))
+    except ValueError:
+        return JSONResponse({"error": "invalid limit parameter"}, status_code=400)
     logs = await get_retrieval_logs(
         agent_id=params.get("agent_id", ""),
-        limit=int(params.get("limit", "50")),
+        limit=limit,
         since=params.get("since", ""),
     )
     return JSONResponse({"logs": logs, "count": len(logs)})
@@ -587,7 +595,10 @@ async def handle_dashboard(request):
     from archivist.app.dashboard import batch_heuristic, build_dashboard
 
     params = request.query_params
-    window = int(params.get("window_days", "7"))
+    try:
+        window = int(params.get("window_days", "7"))
+    except ValueError:
+        return JSONResponse({"error": "invalid window_days parameter"}, status_code=400)
     if params.get("batch") == "true":
         return JSONResponse(await batch_heuristic(window))
     return JSONResponse(await build_dashboard(window))

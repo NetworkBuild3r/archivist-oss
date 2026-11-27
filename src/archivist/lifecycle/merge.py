@@ -1,5 +1,6 @@
 """CRDT-style merge strategies for conflicting memories."""
 
+import asyncio
 import hashlib
 import logging
 import os
@@ -36,7 +37,8 @@ async def merge_memories(
     client = qdrant_client()
     ns = namespace or "default"
 
-    points = client.retrieve(
+    points = await asyncio.to_thread(
+        client.retrieve,
         collection_name=collection_for(ns),
         ids=memory_ids,
         with_payload=True,
@@ -65,10 +67,10 @@ async def merge_memories(
     merged_id = hashlib.md5(
         f"merge:{':'.join(memory_ids)}".encode(), usedforsecurity=False
     ).hexdigest()
-    checksum = compute_memory_checksum(merged_text, agent_id, namespace)
 
-    # Refine ns from actual point payload if namespace was not explicitly provided.
+    # Refine ns from actual point payload before checksum so checksum matches stored namespace.
     ns = namespace or payloads[0][1].get("namespace", "default") or "default"
+    checksum = compute_memory_checksum(merged_text, agent_id, ns)
     merged_payload = {
         "agent_id": agent_id,
         "text": merged_text,
@@ -80,7 +82,7 @@ async def merge_memories(
         "version": result["version"],
         "consistency_level": payloads[0][1].get("consistency_level", "eventual"),
         "checksum": checksum,
-        "parent_id": memory_ids[0],
+        "merged_from": list(memory_ids),
         "importance_score": max(p.get("importance_score", 0.5) for _, p in payloads),
         "chunk_index": 0,
     }
@@ -120,7 +122,8 @@ async def merge_memories(
         from archivist.storage.outbox import warn_legacy_inline_qdrant_once
 
         warn_legacy_inline_qdrant_once()
-        client.upsert(
+        await asyncio.to_thread(
+            client.upsert,
             collection_name=_coll,
             points=[_merged_point],
         )

@@ -100,19 +100,23 @@ async def resolve_memory_namespace(memory_id: str) -> str:
     try:
         import asyncio
 
-        from archivist.core.config import QDRANT_COLLECTION
+        from archivist.storage.collection_router import collections_for_query
         from archivist.storage.qdrant import qdrant_client
 
         client = qdrant_client()
-        points = await asyncio.to_thread(
-            client.retrieve,
-            collection_name=QDRANT_COLLECTION,
-            ids=[memory_id],
-            with_payload=True,
-        )
-        if points:
-            ns = (points[0].payload or {}).get("namespace") or ""
-            return str(ns)
+        for coll_name in collections_for_query(""):
+            try:
+                points = await asyncio.to_thread(
+                    client.retrieve,
+                    collection_name=coll_name,
+                    ids=[memory_id],
+                    with_payload=True,
+                )
+            except Exception:
+                continue
+            if points:
+                ns = (points[0].payload or {}).get("namespace") or ""
+                return str(ns)
     except Exception as e:
         logger.debug("lineage.resolve_memory_namespace qdrant miss: %s", e)
 
@@ -125,17 +129,24 @@ async def _provenance_edges(memory_id: str) -> list[dict[str, Any]]:
     try:
         import asyncio
 
-        from archivist.core.config import QDRANT_COLLECTION
         from archivist.core.provenance import SourceTrace
+        from archivist.storage.collection_router import collections_for_query
         from archivist.storage.qdrant import qdrant_client
 
         client = qdrant_client()
-        points = await asyncio.to_thread(
-            client.retrieve,
-            collection_name=QDRANT_COLLECTION,
-            ids=[memory_id],
-            with_payload=True,
-        )
+        points = []
+        for coll_name in collections_for_query(""):
+            try:
+                points = await asyncio.to_thread(
+                    client.retrieve,
+                    collection_name=coll_name,
+                    ids=[memory_id],
+                    with_payload=True,
+                )
+            except Exception:
+                continue
+            if points:
+                break
         if not points:
             return edges
         payload = points[0].payload or {}

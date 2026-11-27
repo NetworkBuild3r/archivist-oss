@@ -534,7 +534,10 @@ async def _handle_timeline(arguments: dict) -> list[TextContent]:
     query = arguments["query"]
     agent_id = arguments.get("agent_id", "")
     namespace = arguments.get("namespace", "")
-    days = int(arguments.get("days", 14))
+    try:
+        days = int(arguments.get("days", 14))
+    except (TypeError, ValueError):
+        return error_response({"error": "invalid_days", "message": "days must be an integer"})
     as_of = (arguments.get("as_of") or "").strip()
     caller = resolve_caller(arguments)
     if err := require_caller(caller):
@@ -565,7 +568,12 @@ async def _handle_timeline(arguments: dict) -> list[TextContent]:
             )
 
     if as_of:
-        anchor = datetime.strptime(as_of, "%Y-%m-%d").replace(tzinfo=UTC)
+        try:
+            anchor = datetime.strptime(as_of, "%Y-%m-%d").replace(tzinfo=UTC)
+        except ValueError:
+            return error_response(
+                {"error": "invalid_as_of", "message": "as_of must be YYYY-MM-DD"}
+            )
         date_to = as_of
         date_from = (anchor - timedelta(days=days)).strftime("%Y-%m-%d") if days > 0 else ""
     else:
@@ -648,38 +656,53 @@ async def _handle_insights(arguments: dict) -> list[TextContent]:
 
 async def _handle_deref(arguments: dict) -> list[TextContent]:
     """Dereference a single memory point by ID — returns full L2 text + metadata."""
-    from archivist.core.config import QDRANT_COLLECTION
+    from archivist.storage.collection_router import collections_for_query
     from archivist.storage.qdrant import qdrant_client
 
     memory_id = arguments["memory_id"]
-    agent_id = arguments.get("agent_id", "")
+    namespace_hint = (arguments.get("namespace") or "").strip()
+    caller = resolve_caller(arguments)
+    if not is_permissive_mode():
+        if err := require_caller(caller):
+            return err
 
     client = qdrant_client()
-    try:
-        # Offloaded off the event loop — qdrant-client's HTTP/gRPC calls are
-        # synchronous and would otherwise block the whole MCP server for the
-        # duration of the round trip (INIT-022/SPEC-009, H4-search).
-        points = await asyncio.to_thread(
-            client.retrieve,
-            collection_name=QDRANT_COLLECTION,
-            ids=[memory_id],
-            with_payload=True,
-        )
-    except Exception as e:
-        return error_response({"error": str(e)})
+    points = []
+    last_err: Exception | None = None
+    colls = collections_for_query(namespace_hint)
+    for coll_name in colls:
+        try:
+            # Offloaded off the event loop — qdrant-client's HTTP/gRPC calls are
+            # synchronous and would otherwise block the whole MCP server for the
+            # duration of the round trip (INIT-022/SPEC-009, H4-search).
+            found = await asyncio.to_thread(
+                client.retrieve,
+                collection_name=coll_name,
+                ids=[memory_id],
+                with_payload=True,
+            )
+            if found:
+                points = found
+                break
+        except Exception as e:
+            last_err = e
 
     if not points:
+        if last_err is not None:
+            return error_response({"error": str(last_err)})
         return error_response({"error": "not_found", "memory_id": memory_id})
 
     p = points[0]
     payload = p.payload or {}
 
-    if agent_id and not is_permissive_mode():
+    if not is_permissive_mode():
         ns = payload.get("namespace", "")
         if ns:
-            denied = require_rbac(agent_id, "read", ns)
+            denied = require_rbac(caller, "read", ns)
             if denied:
                 return denied
+        elif payload.get("agent_id") and not can_read_agent_memory(caller, payload["agent_id"]):
+            return error_response({"error": "access_denied", "memory_id": memory_id})
 
     return success_response(
         {

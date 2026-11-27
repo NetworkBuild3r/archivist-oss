@@ -40,12 +40,11 @@ def _cache_key(
 def _remove_from_ns_index(agent_id: str, key: str, value: dict) -> None:
     """Remove a single (agent_id, key) pair from the namespace index. Caller holds _lock."""
     ns = value.get("_cache_namespace", "")
-    if ns:
-        bucket = _ns_index.get(ns)
-        if bucket is not None:
-            bucket.discard((agent_id, key))
-            if not bucket:
-                del _ns_index[ns]
+    bucket = _ns_index.get(ns)
+    if bucket is not None:
+        bucket.discard((agent_id, key))
+        if not bucket:
+            del _ns_index[ns]
 
 
 def get(
@@ -120,9 +119,10 @@ def put(
         cache[key] = (now, result)
         cache.move_to_end(key)
 
-        result_ns = result.get("_cache_namespace", "")
-        if result_ns:
-            _ns_index.setdefault(result_ns, set()).add((agent_id, key))
+        result_ns = namespace if namespace else result.get("_cache_namespace", "")
+        if "_cache_namespace" not in result:
+            result["_cache_namespace"] = result_ns
+        _ns_index.setdefault(result_ns, set()).add((agent_id, key))
 
         while len(cache) > HOT_CACHE_MAX_PER_AGENT:
             evicted_key, (_, evicted_val) = cache.popitem(last=False)
@@ -133,19 +133,21 @@ def put(
 
 
 def invalidate_namespace(namespace: str) -> int:
-    """Evict all cache entries whose namespace matches. O(1) index lookup."""
+    """Evict all cache entries whose namespace matches (plus fleet-wide ``""`` entries)."""
     if not HOT_CACHE_ENABLED:
         return 0
 
     evicted = 0
+    buckets_to_evict = [namespace] if namespace == "" else [namespace, ""]
     with _lock:
-        entries = _ns_index.pop(namespace, None)
-        if entries:
-            for agent_id, key in entries:
-                cache = _agent_caches.get(agent_id)
-                if cache is not None and key in cache:
-                    del cache[key]
-                    evicted += 1
+        for ns_key in buckets_to_evict:
+            entries = _ns_index.pop(ns_key, None)
+            if entries:
+                for agent_id, key in entries:
+                    cache = _agent_caches.get(agent_id)
+                    if cache is not None and key in cache:
+                        del cache[key]
+                        evicted += 1
     if evicted:
         logger.debug("Cache invalidation: evicted %d entries for namespace %s", evicted, namespace)
     try:

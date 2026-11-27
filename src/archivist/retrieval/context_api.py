@@ -295,6 +295,8 @@ async def get_relevant_context(
         max_tokens=resolved_budget,
         refine=False,
         tier=tier_policy if tier_policy in ("l0", "l1", "l2") else "l2",
+        pack_policy=tier_policy,
+        include_hotness=include_hotness,
         subject=subject or "",
         purpose=purpose or "",
         sensitivity=sensitivity or "",
@@ -350,17 +352,40 @@ async def get_relevant_context(
     graph_facts: list[str] = []
     if include_graph:
         try:
+            seen_facts: set[str] = set()
+
+            def _add_fact_text(txt: str) -> None:
+                cleaned = (txt or "").strip()
+                if cleaned and cleaned not in seen_facts:
+                    seen_facts.add(cleaned)
+                    graph_facts.append(cleaned)
+
             rt = retrieval_result.get("retrieval_trace", {})
             raw_facts = rt.get("graph_context", [])
             for item in raw_facts:
                 if isinstance(item, dict):
-                    fact_text = item.get("text") or item.get("fact") or ""
+                    _add_fact_text(item.get("text") or item.get("fact") or "")
                 elif isinstance(item, str):
-                    fact_text = item
+                    _add_fact_text(item)
                 else:
-                    fact_text = str(item)
-                if fact_text:
-                    graph_facts.append(fact_text.strip())
+                    _add_fact_text(str(item))
+
+            # Entity facts injected by rlm_retriever live on sources
+            # (file_type == "entity_fact") and per-hit graph_context lists.
+            for src in raw_sources:
+                if not isinstance(src, dict):
+                    continue
+                if src.get("file_type") == "entity_fact":
+                    _add_fact_text(str(src.get("text") or ""))
+                gc = src.get("graph_context")
+                if isinstance(gc, list):
+                    for gitem in gc:
+                        if isinstance(gitem, dict):
+                            _add_fact_text(
+                                str(gitem.get("text") or gitem.get("fact") or "")
+                            )
+                        elif isinstance(gitem, str):
+                            _add_fact_text(gitem)
         except Exception as e:
             logger.debug("graph_facts extraction failed: %s", e)
 
@@ -541,12 +566,26 @@ async def create_handoff_packet(
     except Exception as e:
         logger.debug("handoff tips failed: %s", e)
 
-    # --- 4. Top hotness memory IDs ---
+    # --- 4. Top hotness memory IDs (namespace-scoped when namespace is set) ---
     key_memory_ids: list[str] = []
     try:
-        rows = await pool.fetchall(
-            "SELECT memory_id FROM memory_hotness ORDER BY score DESC LIMIT 20",
-        )
+        if namespace:
+            rows = await pool.fetchall(
+                "SELECT mh.memory_id FROM memory_hotness mh "
+                "JOIN memory_chunks mc ON mc.qdrant_id = mh.memory_id "
+                "WHERE mc.namespace = ? AND mc.is_excluded = 0 "
+                "AND COALESCE(mc.is_suppressed, 0) = 0 "
+                "ORDER BY mh.score DESC LIMIT 20",
+                (namespace,),
+            )
+        else:
+            rows = await pool.fetchall(
+                "SELECT mh.memory_id FROM memory_hotness mh "
+                "LEFT JOIN memory_chunks mc ON mc.qdrant_id = mh.memory_id "
+                "WHERE (mc.qdrant_id IS NULL "
+                "       OR (mc.is_excluded = 0 AND COALESCE(mc.is_suppressed, 0) = 0)) "
+                "ORDER BY mh.score DESC LIMIT 20",
+            )
         candidates = [r["memory_id"] for r in rows]
         scores = await get_hotness_scores(candidates)
         key_memory_ids = sorted(candidates, key=lambda mid: scores.get(mid, 0.0), reverse=True)[:10]
@@ -566,12 +605,28 @@ async def create_handoff_packet(
             {"name": r["name"], "type": r["entity_type"], "mentions": r["mention_count"]}
             for r in entity_rows
         ]
-        fact_rows = await pool.fetchall(
-            "SELECT subject, predicate, object FROM facts "
-            "WHERE confidence >= 0.7 ORDER BY created_at DESC LIMIT 20",
-        )
+        if namespace:
+            fact_rows = await pool.fetchall(
+                "SELECT e.name AS entity_name, f.fact_text "
+                "FROM facts f "
+                "JOIN entities e ON e.id = f.entity_id "
+                "WHERE f.is_active = 1 AND COALESCE(f.is_suppressed, 0) = 0 "
+                "AND f.confidence >= 0.7 "
+                "AND (e.namespace = ? OR e.namespace = 'global') "
+                "ORDER BY f.created_at DESC LIMIT 20",
+                (namespace,),
+            )
+        else:
+            fact_rows = await pool.fetchall(
+                "SELECT e.name AS entity_name, f.fact_text "
+                "FROM facts f "
+                "JOIN entities e ON e.id = f.entity_id "
+                "WHERE f.is_active = 1 AND COALESCE(f.is_suppressed, 0) = 0 "
+                "AND f.confidence >= 0.7 "
+                "ORDER BY f.created_at DESC LIMIT 20",
+            )
         knowledge_snapshot["facts"] = [
-            f"{r['subject']} {r['predicate']} {r['object']}" for r in fact_rows
+            f"[{r['entity_name']}] {r['fact_text']}" for r in fact_rows
         ]
     except Exception as e:
         logger.debug("handoff knowledge_snapshot failed: %s", e)

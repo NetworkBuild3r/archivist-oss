@@ -816,10 +816,12 @@ def import_agent(
     client = get_client()
 
     imported = 0
+    failed = 0
     skipped = 0
     # Queued FTS-upsert kwargs, flushed via a single asyncio.run() call after the
     # main loop instead of once per NDJSON line (INIT-022/SPEC-002, fixes M15).
     fts_pending: list[dict[str, object]] = []
+    batch_fts: dict[str, dict[str, object]] = {}
 
     with open(path, encoding="utf-8") as f:
         batch: list[tuple[str, PointStruct]] = []
@@ -842,7 +844,6 @@ def import_agent(
             point_id = record.get("id", "")
             vector = record.get("vector", [])
             payload = record.get("payload", {})
-            coll = record.get("collection", QDRANT_COLLECTION)
 
             if not point_id or not vector:
                 skipped += 1
@@ -853,30 +854,38 @@ def import_agent(
                 point = PointStruct(id=point_id, vector=vector, payload=payload)
                 batch.append((target_coll, point))
 
-                if len(batch) >= 100:
-                    _flush_import_batch(client, batch)
-                    imported += len(batch)
-                    batch.clear()
-
                 if BM25_ENABLED and payload.get("text"):
-                    fts_pending.append(
-                        {
-                            "qdrant_id": point_id,
-                            "text": payload["text"],
-                            "file_path": payload.get("file_path", ""),
-                            "chunk_index": payload.get("chunk_index", 0),
-                            "agent_id": payload.get("agent_id", ""),
-                            "namespace": payload.get("namespace", ""),
-                            "date": payload.get("date", ""),
-                            "memory_type": payload.get("memory_type", "general"),
-                        }
-                    )
+                    batch_fts[str(point_id)] = {
+                        "qdrant_id": point_id,
+                        "text": payload["text"],
+                        "file_path": payload.get("file_path", ""),
+                        "chunk_index": payload.get("chunk_index", 0),
+                        "agent_id": payload.get("agent_id", ""),
+                        "namespace": payload.get("namespace", ""),
+                        "date": payload.get("date", ""),
+                        "memory_type": payload.get("memory_type", "general"),
+                    }
+
+                if len(batch) >= 100:
+                    ok_ids, batch_failed = _flush_import_batch(client, batch)
+                    imported += len(ok_ids)
+                    failed += batch_failed
+                    for pid in ok_ids:
+                        if pid in batch_fts:
+                            fts_pending.append(batch_fts[pid])
+                    batch.clear()
+                    batch_fts.clear()
             else:
                 imported += 1
 
         if batch and not dry_run:
-            _flush_import_batch(client, batch)
-            imported += len(batch)
+            ok_ids, batch_failed = _flush_import_batch(client, batch)
+            imported += len(ok_ids)
+            failed += batch_failed
+            for pid in ok_ids:
+                if pid in batch_fts:
+                    fts_pending.append(batch_fts[pid])
+            batch_fts.clear()
 
     fts_rebuilt = 0
     if fts_pending:
@@ -890,27 +899,38 @@ def import_agent(
     summary = {
         "file": str(path),
         "imported": imported,
+        "failed": failed,
         "skipped": skipped,
         "fts_rebuilt": fts_rebuilt,
         "dry_run": dry_run,
     }
     logger.info(
-        "Agent import: %d points imported, %d skipped, %d FTS rebuilt",
+        "Agent import: %d points imported, %d failed, %d skipped, %d FTS rebuilt",
         imported,
+        failed,
         skipped,
         fts_rebuilt,
     )
     return summary
 
 
-def _flush_import_batch(client, batch: list[tuple[str, object]]) -> None:
-    """Upsert a batch of points grouped by collection."""
+def _flush_import_batch(client, batch: list[tuple[str, object]]) -> tuple[list[str], int]:
+    """Upsert a batch of points grouped by collection.
+
+    Returns ``(succeeded_point_ids, failed_count)`` so callers only count and
+    FTS-index points whose Qdrant upsert actually succeeded (MIN-8).
+    """
     by_coll: dict[str, list] = {}
     for coll, point in batch:
         by_coll.setdefault(coll, []).append(point)
 
+    succeeded: list[str] = []
+    failed = 0
     for coll, points in by_coll.items():
         try:
             client.upsert(collection_name=coll, points=points)
+            succeeded.extend(str(getattr(p, "id", "")) for p in points)
         except Exception as e:
+            failed += len(points)
             logger.error("Batch upsert to '%s' failed (%d points): %s", coll, len(points), e)
+    return succeeded, failed

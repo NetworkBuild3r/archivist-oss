@@ -5,6 +5,7 @@ then drained by a periodic applicator that runs during idle periods. This avoids
 GRAPH_WRITE_LOCK contention on the hot path.
 """
 
+import asyncio
 import json
 import logging
 import time
@@ -15,6 +16,9 @@ import archivist.core.metrics as m
 from archivist.storage.graph import schema_guard
 
 logger = logging.getLogger("archivist.curator_queue")
+
+# Strong references for fire-and-forget gauge updates so tasks are never GC'd (MIN-7).
+_pending_tasks: set[asyncio.Task] = set()
 
 VALID_OP_TYPES = {
     "merge_memory",
@@ -62,18 +66,32 @@ async def enqueue(op_type: str, payload: dict) -> str:
 
 
 async def drain(limit: int = 50) -> list[dict]:
-    """Apply pending operations up to limit. Returns list of applied ops."""
+    """Apply pending operations up to limit. Returns list of applied ops.
+
+    Atomically claims pending rows as ``status='processing'`` inside a write
+    transaction before executing them so overlapping drains cannot double-apply
+    the same operation (MIN-9).
+    """
     from archivist.storage.sqlite_pool import pool
 
     _ensure_schema()
     start = time.time()
     applied = []
 
-    async with pool.read() as conn:
+    async with pool.write() as conn:
         rows = await conn.fetchall(
-            "SELECT id, op_type, payload FROM curator_queue WHERE status = 'pending' ORDER BY created_at ASC LIMIT ?",
+            "SELECT id, op_type, payload FROM curator_queue "
+            "WHERE status = 'pending' ORDER BY created_at ASC LIMIT ?",
             (limit,),
         )
+        if rows:
+            claim_ids = [r[0] for r in rows]
+            placeholders = ",".join("?" for _ in claim_ids)
+            await conn.execute(
+                f"UPDATE curator_queue SET status = 'processing' "
+                f"WHERE id IN ({placeholders}) AND status = 'pending'",
+                claim_ids,
+            )
 
     now = datetime.now(UTC).isoformat()
 
@@ -228,7 +246,7 @@ async def _apply_delete(payload: dict):
     if not memory_ids:
         return
 
-    _maybe_pre_prune_snapshot()
+    await asyncio.to_thread(_maybe_pre_prune_snapshot)
 
     for mid in memory_ids:
         try:
@@ -250,12 +268,24 @@ async def _apply_consolidate_tips(payload: dict):
         if consolidated:
             tip_id = str(uuid.uuid4())
             now = datetime.now(UTC).isoformat()
+            trajectory_id = (consolidated.get("trajectory_id") or "").strip()
+            if not trajectory_id and original_ids:
+                placeholders = ",".join("?" for _ in original_ids)
+                row = await conn.fetchone(
+                    f"SELECT trajectory_id FROM tips WHERE id IN ({placeholders}) "
+                    "AND trajectory_id IS NOT NULL AND trajectory_id != '' LIMIT 1",
+                    original_ids,
+                )
+                if row:
+                    trajectory_id = str(row["trajectory_id"])
+            if not trajectory_id:
+                trajectory_id = "consolidated"
             await conn.execute(
                 "INSERT INTO tips (id, trajectory_id, agent_id, category, tip_text, context, negative_example, created_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     tip_id,
-                    consolidated.get("trajectory_id", "consolidated"),
+                    trajectory_id,
                     consolidated.get("agent_id", "curator"),
                     consolidated.get("category", "strategy"),
                     consolidated.get("tip", ""),
@@ -316,8 +346,6 @@ async def stats() -> dict:
 
 def _update_depth_gauge():
     """Update the Prometheus gauge for queue depth (best-effort, non-blocking)."""
-    import asyncio
-
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
@@ -330,4 +358,6 @@ def _update_depth_gauge():
         except Exception:
             pass
 
-    loop.create_task(_gauge())  # noqa: RUF006 — fire-and-forget depth gauge update
+    task = loop.create_task(_gauge())
+    _pending_tasks.add(task)
+    task.add_done_callback(_pending_tasks.discard)

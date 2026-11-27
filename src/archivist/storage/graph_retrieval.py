@@ -223,16 +223,24 @@ async def extract_entity_mentions(query: str, namespace: str = "") -> list[dict]
 _MAX_GRAPH_CONTEXT_ITEMS = 50
 
 
-async def graph_context_for_entities(entity_ids: list[int], depth: int = 1) -> list[dict]:
+async def graph_context_for_entities(
+    entity_ids: list[int],
+    depth: int = 1,
+    namespace: str = "",
+) -> list[dict]:
     """Gather facts and relationships for a set of entities up to `depth` hops.
 
     Uses bulk queries per hop to avoid N+1 DB round-trips.
     Capped at ``_MAX_GRAPH_CONTEXT_ITEMS`` total items to prevent
     graph-heavy queries from flooding the coarse result set.
+    When *namespace* is specified, facts and multi-hop neighbor traversal are
+    restricted to that namespace (plus ``global``) to prevent cross-tenant
+    leakage across graph edges.
     """
     visited: set[int] = set()
     frontier = list(entity_ids)
     context_items: list[dict] = []
+    allowed_ns = {namespace, "global"} if namespace else None
 
     for hop in range(depth):
         unvisited = [eid for eid in frontier if eid not in visited]
@@ -246,12 +254,16 @@ async def graph_context_for_entities(entity_ids: list[int], depth: int = 1) -> l
         next_frontier: list[int] = []
         for eid in unvisited:
             for f in all_facts.get(eid, []):
+                fact_ns = f.get("namespace") or ""
+                if allowed_ns is not None and fact_ns and fact_ns not in allowed_ns:
+                    continue
                 context_items.append(
                     {
                         "type": "fact",
                         "entity_id": eid,
                         "text": f["fact_text"],
                         "agent_id": f.get("agent_id", ""),
+                        "namespace": fact_ns,
                         "created_at": f.get("created_at", ""),
                         "source_file": f.get("source_file", ""),
                         "hop": hop,
@@ -261,6 +273,9 @@ async def graph_context_for_entities(entity_ids: list[int], depth: int = 1) -> l
                     return context_items
 
             for r in all_rels.get(eid, []):
+                rel_ns = r.get("namespace") or ""
+                if allowed_ns is not None and rel_ns and rel_ns not in allowed_ns:
+                    continue
                 context_items.append(
                     {
                         "type": "relationship",
@@ -269,6 +284,7 @@ async def graph_context_for_entities(entity_ids: list[int], depth: int = 1) -> l
                         "relation": r["relation_type"],
                         "evidence": r.get("evidence", ""),
                         "agent_id": r.get("agent_id", ""),
+                        "namespace": rel_ns,
                         "hop": hop,
                     }
                 )
@@ -513,7 +529,7 @@ async def build_entity_fact_results(
                     "file_type": "entity_fact",
                     "date": (f.get("created_at", "") or "")[:10],
                     "team": "",
-                    "namespace": "",
+                    "namespace": f.get("namespace") or entity.get("namespace") or "",
                     "chunk_index": 0,
                     "parent_id": None,
                     "is_parent": False,
@@ -525,6 +541,11 @@ async def build_entity_fact_results(
                     "valid_until": f.get("valid_until", ""),
                     "confidence": fact_confidence,
                     "actor_id": f.get("actor_id", ""),
+                    "subject": f.get("subject", "") or "",
+                    "purpose": f.get("purpose", "") or "",
+                    "sensitivity": f.get("sensitivity", "standard") or "standard",
+                    "statement_kind": f.get("statement_kind", "user") or "user",
+                    "is_suppressed": bool(f.get("is_suppressed", 0)),
                 }
             )
 
