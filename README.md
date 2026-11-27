@@ -1068,6 +1068,7 @@ Archivist is integration and execution on top of public work from the agent-memo
 | [`docs/adr/ADR-009-native-multi-agent-coordination.md`](docs/adr/ADR-009-native-multi-agent-coordination.md) | Diff #5 productize — share on ops, tip/share paths, guardrails |
 | [`docs/INSPIRATION.md`](docs/INSPIRATION.md) | Credits, research lineage, ReMe comparison |
 | [`docs/REMOTES.md`](docs/REMOTES.md) | Multi-remote Git workflow for internal + public repos |
+| [`docs/CRSI_README.md`](docs/CRSI_README.md) | CRSI harness loop & Self-Improvement Memory (SIM) operator guide ([design note](docs/CRSI_DESIGN_NOTE.md)) |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Development conventions and PR guidelines |
 
 ---
