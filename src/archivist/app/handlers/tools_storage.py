@@ -1553,7 +1553,11 @@ async def _handle_merge(arguments: dict) -> list[TextContent]:
     agent_id = arguments["agent_id"]
     memory_ids = arguments["memory_ids"]
     strategy = arguments["strategy"]
-    namespace = arguments.get("namespace", "")
+    namespace = arguments.get("namespace", "") or get_namespace_for_agent(agent_id)
+
+    denied = require_rbac(agent_id, "write", namespace)
+    if denied:
+        return denied
 
     from archivist.lifecycle.merge import merge_memories
 

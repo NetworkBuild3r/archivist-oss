@@ -752,7 +752,16 @@ async def _handle_index(arguments: dict) -> list[TextContent]:
 async def _handle_contradictions(arguments: dict) -> list[TextContent]:
     """Surface contradicting facts about an entity from different agents."""
     entity_name = arguments["entity"]
-    namespace = arguments.get("namespace", "")
+    namespace = (arguments.get("namespace") or "").strip()
+    caller = resolve_caller(arguments)
+
+    if not is_permissive_mode():
+        if err := require_caller(caller):
+            return err
+        if namespace:
+            denied = require_rbac(caller, "read", namespace)
+            if denied:
+                return denied
 
     entities = await search_entities(entity_name, limit=1, namespace=namespace)
     if not entities:
@@ -764,8 +773,25 @@ async def _handle_contradictions(arguments: dict) -> list[TextContent]:
             }
         )
 
-    eid = entities[0]["id"]
+    ent = entities[0]
+    eid = ent["id"]
+    ent_ns = (ent.get("namespace") or namespace or "").strip()
+    if not is_permissive_mode() and ent_ns and ent_ns != "global":
+        denied = require_rbac(caller, "read", ent_ns)
+        if denied:
+            return denied
+
     contradictions = await detect_contradictions(eid)
+    if not is_permissive_mode():
+        filtered_c = []
+        for c in contradictions:
+            fa = c.get("fact_a") if isinstance(c, dict) else None
+            fb = c.get("fact_b") if isinstance(c, dict) else None
+            aid_a = (fa.get("agent_id", "") if isinstance(fa, dict) else c.get("agent_a", "")) or ""
+            aid_b = (fb.get("agent_id", "") if isinstance(fb, dict) else c.get("agent_b", "")) or ""
+            if can_read_agent_memory(caller, aid_a) and can_read_agent_memory(caller, aid_b):
+                filtered_c.append(c)
+        contradictions = filtered_c
 
     return success_response(
         {
@@ -782,9 +808,17 @@ async def _handle_entity_brief(arguments: dict) -> list[TextContent]:
     entity_name = arguments["entity"]
     alias = (arguments.get("add_alias") or "").strip()
     as_of = (arguments.get("as_of") or "").strip()
-    namespace = arguments.get("namespace", "")
+    namespace = (arguments.get("namespace") or "").strip()
 
     caller = resolve_caller(arguments)
+
+    if not is_permissive_mode():
+        if err := require_caller(caller):
+            return err
+        if namespace:
+            denied = require_rbac(caller, "read", namespace)
+            if denied:
+                return denied
 
     entities = await search_entities(entity_name, limit=1, namespace=namespace)
     if not entities:
@@ -795,9 +829,21 @@ async def _handle_entity_brief(arguments: dict) -> list[TextContent]:
             }
         )
 
-    eid = entities[0]["id"]
+    ent = entities[0]
+    eid = ent["id"]
+    ent_ns = (ent.get("namespace") or namespace or "").strip()
+
+    if not is_permissive_mode() and ent_ns and ent_ns != "global":
+        denied = require_rbac(caller, "read", ent_ns)
+        if denied:
+            return denied
 
     if alias:
+        if not is_permissive_mode():
+            write_ns = ent_ns if (ent_ns and ent_ns != "global") else get_namespace_for_agent(caller)
+            denied = require_rbac(caller, "write", write_ns)
+            if denied:
+                return denied
         await add_entity_alias(eid, alias)
 
     brief = await get_entity_brief(eid, as_of=as_of)

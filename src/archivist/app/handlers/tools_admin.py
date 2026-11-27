@@ -374,11 +374,36 @@ async def _handle_namespaces(arguments: dict) -> list[TextContent]:
 
 
 async def _handle_audit_trail(arguments: dict) -> list[TextContent]:
+    from archivist.app.lineage import resolve_memory_namespace
     from archivist.core.audit import get_agent_activity, get_audit_trail
+    from archivist.core.rbac import can_read_agent_memory, check_access, is_permissive_mode
 
-    memory_id = arguments.get("memory_id", "")
-    target_agent = arguments.get("target_agent", "")
+    memory_id = (arguments.get("memory_id") or "").strip()
+    target_agent = (arguments.get("target_agent") or "").strip()
     limit = arguments.get("limit", 50)
+    caller = resolve_caller(arguments)
+
+    if not is_permissive_mode():
+        if err := require_caller(caller):
+            return err
+        if memory_id:
+            ns = await resolve_memory_namespace(memory_id)
+            if not ns:
+                return error_response(
+                    {
+                        "error": "access_denied",
+                        "reason": "Unable to resolve memory namespace for RBAC.",
+                    }
+                )
+            if denied := require_rbac(caller, "read", ns):
+                return denied
+        elif target_agent and not can_read_agent_memory(caller, target_agent):
+            return error_response(
+                {
+                    "error": "access_denied",
+                    "reason": f"Agent '{caller}' cannot read audit entries for '{target_agent}'.",
+                }
+            )
 
     if memory_id:
         entries = await get_audit_trail(memory_id, limit=limit)
@@ -386,6 +411,17 @@ async def _handle_audit_trail(arguments: dict) -> list[TextContent]:
         entries = await get_agent_activity(target_agent, limit=limit)
     else:
         entries = await get_agent_activity("", limit=limit)
+
+    if not is_permissive_mode():
+        entries = [
+            e
+            for e in entries
+            if (
+                check_access(caller, "read", e["namespace"]).allowed
+                if e.get("namespace")
+                else bool(e.get("agent_id") and can_read_agent_memory(caller, e["agent_id"]))
+            )
+        ]
 
     return success_response({"entries": entries}, default=str)
 
@@ -453,18 +489,47 @@ async def _handle_resolve_uri(arguments: dict) -> list[TextContent]:
 
 async def _handle_retrieval_logs(arguments: dict) -> list[TextContent]:
     """Export retrieval logs or aggregate stats."""
+    from archivist.core.rbac import can_read_agent_memory, check_access, is_permissive_mode
+
+    target_agent = (arguments.get("agent_id") or "").strip()
+    caller = resolve_caller(arguments)
+
+    if not is_permissive_mode():
+        if err := require_caller(caller):
+            return err
+        if target_agent and target_agent != caller and not can_read_agent_memory(caller, target_agent):
+            return error_response(
+                {
+                    "error": "access_denied",
+                    "reason": f"Agent '{caller}' cannot read retrieval logs for '{target_agent}'.",
+                }
+            )
+
     if arguments.get("stats_only"):
+        stats_agent = target_agent
+        if not is_permissive_mode() and not stats_agent:
+            stats_agent = caller
         stats = await get_retrieval_stats(
-            agent_id=arguments.get("agent_id", ""),
+            agent_id=stats_agent,
             window_days=arguments.get("window_days", 7),
         )
         return success_response(stats)
 
     logs = await get_retrieval_logs(
-        agent_id=arguments.get("agent_id", ""),
+        agent_id=target_agent,
         limit=arguments.get("limit", 20),
         since=arguments.get("since", ""),
     )
+    if not is_permissive_mode():
+        logs = [
+            row
+            for row in logs
+            if (
+                check_access(caller, "read", row["namespace"]).allowed
+                if row.get("namespace")
+                else bool(row.get("agent_id") and can_read_agent_memory(caller, row["agent_id"]))
+            )
+        ]
     return success_response({"logs": logs, "count": len(logs)})
 
 
@@ -607,7 +672,14 @@ async def _handle_batch_heuristic(arguments: dict) -> list[TextContent]:
 
 async def _handle_backup(arguments: dict) -> list[TextContent]:
     """Create, list, restore, or delete memory snapshots."""
+    from archivist.core.rbac import (
+        can_read_agent_memory,
+        check_access,
+        get_config,
+        is_permissive_mode,
+    )
     from archivist.storage.backup_manager import (
+        SnapshotPathError,
         create_snapshot,
         delete_snapshot,
         export_agent,
@@ -619,17 +691,54 @@ async def _handle_backup(arguments: dict) -> list[TextContent]:
 
     action = arguments.get("action", "")
 
+    if not is_permissive_mode():
+        caller = resolve_caller(arguments)
+        if err := require_caller(caller):
+            return err
+        if action == "export_agent":
+            target_agent = (arguments.get("agent_id") or "").strip()
+            if not target_agent:
+                return error_response({"error": "agent_id is required for export_agent"})
+            if not can_read_agent_memory(caller, target_agent):
+                return error_response(
+                    {
+                        "error": "access_denied",
+                        "reason": f"Agent '{caller}' cannot export memories for '{target_agent}'.",
+                    }
+                )
+        else:
+            perm = "read" if action == "list" else "write"
+            cfg = get_config()
+            if not cfg.namespaces:
+                return error_response(
+                    {
+                        "error": "access_denied",
+                        "reason": "No RBAC namespaces configured; backup admin action denied.",
+                    }
+                )
+            for ns_id in cfg.namespaces:
+                if not check_access(caller, perm, ns_id).allowed:
+                    return error_response(
+                        {
+                            "error": "access_denied",
+                            "reason": (
+                                f"Agent '{caller}' lacks fleet-wide {perm} permission "
+                                f"(denied on namespace '{ns_id}') for backup action '{action}'."
+                            ),
+                        }
+                    )
+
     if action == "create":
         label = arguments.get("label", "")
         # Offloaded off the event loop — create_snapshot() does multi-minute
         # synchronous I/O (httpx, sqlite3 online-backup, pg_dump) that would
         # otherwise freeze the whole MCP server (INIT-022/SPEC-002, fixes H5).
         result = await asyncio.to_thread(create_snapshot, label=label)
-        prune_snapshots()
+        await asyncio.to_thread(prune_snapshots)
         return success_response(result)
 
     if action == "list":
-        snapshots = list_snapshots()
+        snapshots = await asyncio.to_thread(list_snapshots)
         return success_response({"snapshots": snapshots, "count": len(snapshots)})
 
     if action == "restore":
@@ -654,8 +763,11 @@ async def _handle_backup(arguments: dict) -> list[TextContent]:
         snapshot_id = arguments.get("snapshot_id", "").strip()
         if not snapshot_id:
             return error_response({"error": "snapshot_id is required for delete"})
-        if delete_snapshot(snapshot_id):
-            return success_response({"deleted": snapshot_id})
+        try:
+            if await asyncio.to_thread(delete_snapshot, snapshot_id):
+                return success_response({"deleted": snapshot_id})
+        except SnapshotPathError as e:
+            return error_response({"error": str(e)})
         return error_response({"error": "snapshot not found"})
 
     if action == "export_agent":
@@ -674,7 +786,7 @@ async def _handle_backup(arguments: dict) -> list[TextContent]:
             loop = asyncio.get_running_loop()
             result = await asyncio.to_thread(import_agent, file_path, loop=loop)
             return success_response(result)
-        except FileNotFoundError as e:
+        except (FileNotFoundError, SnapshotPathError) as e:
             return error_response({"error": str(e)})
 
     return error_response({"error": f"Unknown action: {action}"})

@@ -82,6 +82,59 @@ def _snapshot_dir(snapshot_id: str) -> Path:
     return candidate
 
 
+def _resolve_import_path(ndjson_path: str) -> Path:
+    """Resolve an import NDJSON path and confine it inside BACKUP_DIR (SEC-2).
+
+    Accepts either a path relative to BACKUP_DIR or an absolute path located
+    within BACKUP_DIR. Rejects ``..`` traversal, paths outside BACKUP_DIR, and
+    symlinks escaping BACKUP_DIR with :class:`SnapshotPathError`.
+    """
+    if not ndjson_path or not ndjson_path.strip():
+        raise SnapshotPathError("Import path must not be empty")
+    backup_root = Path(BACKUP_DIR).resolve()
+    raw = Path(ndjson_path)
+    candidate = (raw if raw.is_absolute() else (backup_root / raw)).resolve()
+    if candidate == backup_root or backup_root not in candidate.parents:
+        raise SnapshotPathError(
+            f"Invalid import path {ndjson_path!r}: resolves outside BACKUP_DIR"
+        )
+    return candidate
+
+
+def _redact_dsn(dsn: str) -> str:
+    """Return a DSN with any embedded password redacted for safe logging (SEC-1)."""
+    if not dsn or "://" not in dsn:
+        return dsn
+    try:
+        parsed = urlparse(dsn)
+        if parsed.password is None:
+            return dsn
+        host = parsed.hostname or ""
+        port = f":{parsed.port}" if parsed.port else ""
+        user = f"{parsed.username}:***@" if parsed.username else "***@"
+        netloc = f"{user}{host}{port}"
+        return parsed._replace(netloc=netloc).geturl()
+    except Exception:
+        return "<redacted-dsn>"
+
+
+def _strip_dsn_password(dsn: str) -> str:
+    """Strip password from a Postgres DSN so credentials stay in PGPASSWORD env only."""
+    if not dsn or "://" not in dsn:
+        return dsn
+    try:
+        parsed = urlparse(dsn)
+        if parsed.password is None:
+            return dsn
+        host = parsed.hostname or ""
+        port = f":{parsed.port}" if parsed.port else ""
+        user = f"{parsed.username}@" if parsed.username else ""
+        netloc = f"{user}{host}{port}"
+        return parsed._replace(netloc=netloc).geturl()
+    except Exception:
+        return dsn
+
+
 def _ensure_backup_dir() -> None:
     os.makedirs(BACKUP_DIR, exist_ok=True)
 
@@ -294,12 +347,12 @@ def _backup_postgres(snap_dir: Path) -> None:
         "--no-password",
         f"--file={dest_path}",
     ]
-    # If DATABASE_URL contains the dbname we already set PGDATABASE above;
-    # pass it as the positional argument too for older pg_dump versions.
+    # Pass DSN without password on argv (PGPASSWORD is supplied via pg_env) so
+    # credentials never appear in process listings or logs (SEC-1).
     if DATABASE_URL:
-        cmd.append(DATABASE_URL)
+        cmd.append(_strip_dsn_password(DATABASE_URL))
 
-    logger.info("Running: %s", " ".join(str(c) for c in cmd))
+    logger.info("Running: %s", " ".join(_redact_dsn(str(c)) for c in cmd))
     result = subprocess.run(
         cmd,
         env=pg_env,
@@ -339,10 +392,10 @@ def _restore_postgres(backup_path: Path) -> None:
         "--no-password",
     ]
     if DATABASE_URL:
-        cmd += ["--dbname", DATABASE_URL]
+        cmd += ["--dbname", _strip_dsn_password(DATABASE_URL)]
     cmd.append(str(backup_path))
 
-    logger.info("Running: %s", " ".join(cmd))
+    logger.info("Running: %s", " ".join(_redact_dsn(str(c)) for c in cmd))
     result = subprocess.run(
         cmd,
         env=pg_env,
@@ -807,7 +860,7 @@ def import_agent(
     from archivist.core.config import BM25_ENABLED
     from archivist.storage.collection_router import ensure_collection
 
-    path = Path(ndjson_path)
+    path = _resolve_import_path(ndjson_path)
     if not path.is_file():
         raise FileNotFoundError(f"Import file not found: {ndjson_path}")
 

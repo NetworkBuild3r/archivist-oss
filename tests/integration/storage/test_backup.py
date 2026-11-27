@@ -378,17 +378,23 @@ class TestNDJSONExportImport(unittest.TestCase):
 
         from archivist.storage.backup_manager import import_agent
 
-        result = import_agent(ndjson_path, dry_run=True)
+        with patch("archivist.storage.backup_manager.BACKUP_DIR", self.tmpdir):
+            result = import_agent(ndjson_path, dry_run=True)
 
         assert result["imported"] == 2
         assert result["skipped"] == 1
         assert result["dry_run"] is True
 
     def test_import_missing_file(self):
-        from archivist.storage.backup_manager import import_agent
+        from archivist.storage.backup_manager import SnapshotPathError, import_agent
 
-        with self.assertRaises(FileNotFoundError):
-            import_agent("/nonexistent/path.ndjson")
+        missing_inside = os.path.join(self.tmpdir, "nonexistent.ndjson")
+        with patch("archivist.storage.backup_manager.BACKUP_DIR", self.tmpdir):
+            with self.assertRaises(FileNotFoundError):
+                import_agent(missing_inside)
+
+            with self.assertRaises(SnapshotPathError):
+                import_agent("/nonexistent/path.ndjson")
 
 
 class TestPrePruneHook(unittest.TestCase):

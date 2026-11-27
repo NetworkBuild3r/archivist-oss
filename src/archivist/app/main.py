@@ -1,6 +1,7 @@
 """Archivist main entrypoint — starts MCP server, file watcher, curator loop, and initial index."""
 
 import asyncio
+import hmac
 import json
 import logging
 import os
@@ -515,7 +516,9 @@ class ArchivistAuthMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
         auth = request.headers.get("authorization", "")
         xkey = request.headers.get("x-api-key", "")
-        ok = auth == f"Bearer {ARCHIVIST_API_KEY}" or xkey == ARCHIVIST_API_KEY
+        ok = hmac.compare_digest(auth, f"Bearer {ARCHIVIST_API_KEY}") or hmac.compare_digest(
+            xkey, ARCHIVIST_API_KEY
+        )
         if not ok and auth == self._OPENCLAW_PLACEHOLDER:
             logger.warning(
                 "auth.uninterpolated_placeholder: client sent literal "
@@ -738,12 +741,14 @@ async def handle_agent_import(request):
 
     dry_run = body.get("dry_run", False)
 
-    from archivist.storage.backup_manager import import_agent
+    from archivist.storage.backup_manager import SnapshotPathError, import_agent
 
     try:
         loop = asyncio.get_running_loop()
         result = await asyncio.to_thread(import_agent, ndjson_path, dry_run=dry_run, loop=loop)
         return JSONResponse(result)
+    except SnapshotPathError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
     except FileNotFoundError as e:
         return JSONResponse({"error": str(e)}, status_code=404)
     except Exception as e:
@@ -768,7 +773,7 @@ app = Starlette(
         Route("/health", handle_health),
         Route("/metrics", handle_metrics),
         Route("/debug/config", handle_debug_config),
-        Route("/admin/invalidate", handle_invalidate, methods=["POST", "GET"]),
+        Route("/admin/invalidate", handle_invalidate, methods=["POST"]),
         Route("/admin/retrieval-logs", handle_retrieval_export),
         Route("/admin/dashboard", handle_dashboard),
         Route("/admin/lineage", handle_lineage, methods=["GET"]),

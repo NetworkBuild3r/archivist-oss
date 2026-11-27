@@ -141,7 +141,12 @@ agent_namespaces:
     rbac._config = None
     rbac._permissive_fallback = False
     rbac.load_config(str(config_yaml))
-    return rbac
+    try:
+        yield rbac
+    finally:
+        rbac.NAMESPACES_CONFIG_PATH = ""
+        rbac._config = None
+        rbac._permissive_fallback = False
 
 
 @pytest.fixture

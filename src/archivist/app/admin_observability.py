@@ -12,7 +12,12 @@ from typing import Any
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from archivist.core.rbac import check_access, get_namespace_for_agent, is_permissive_mode
+from archivist.core.rbac import (
+    can_read_agent_memory,
+    check_access,
+    get_namespace_for_agent,
+    is_permissive_mode,
+)
 
 logger = logging.getLogger("archivist.admin")
 
@@ -142,21 +147,66 @@ async def handle_lineage(request: Request) -> JSONResponse:
         )
 
 
+def _entry_readable(caller: str, entry: dict[str, Any]) -> bool:
+    """True when *caller* has RBAC read permission for an audit/log row."""
+    ns = (entry.get("namespace") or "").strip()
+    if ns:
+        return check_access(caller, "read", ns).allowed
+    aid = (entry.get("agent_id") or "").strip()
+    if aid:
+        return can_read_agent_memory(caller, aid)
+    return False
+
+
 async def handle_audit(request: Request) -> JSONResponse:
     """GET /admin/audit — audit trail by memory_id or agent_id (INIT-013/SPEC-002)."""
+    from archivist.app.lineage import resolve_memory_namespace
     from archivist.core.audit import get_agent_activity, get_audit_trail
 
     params = request.query_params
+    caller = _caller_from_params(params)
     memory_id = (params.get("memory_id") or "").strip()
-    agent_id = (params.get("agent_id") or params.get("target_agent") or "").strip()
+    target_agent = (params.get("target_agent") or params.get("agent_id") or "").strip()
     limit = _parse_limit(params.get("limit"))
+
+    if not is_permissive_mode():
+        if not caller:
+            return JSONResponse(
+                {
+                    "error": "invalid_arguments",
+                    "reason": "agent_id (or caller_agent_id) is required under RBAC.",
+                },
+                status_code=400,
+            )
+        if memory_id:
+            ns = await resolve_memory_namespace(memory_id)
+            if not ns:
+                return JSONResponse(
+                    {
+                        "error": "access_denied",
+                        "reason": "Unable to resolve memory namespace for RBAC.",
+                    },
+                    status_code=403,
+                )
+            if denied := _rbac_denied_response(caller, "read", ns):
+                return denied
+        elif target_agent and not can_read_agent_memory(caller, target_agent):
+            return JSONResponse(
+                {
+                    "error": "access_denied",
+                    "reason": f"Agent '{caller}' cannot read audit entries for '{target_agent}'.",
+                },
+                status_code=403,
+            )
 
     try:
         if memory_id:
             entries = await get_audit_trail(memory_id, limit=limit)
         else:
             # Empty agent_id → recent activity (same as MCP audit_trail default).
-            entries = await get_agent_activity(agent_id, limit=limit)
+            entries = await get_agent_activity(target_agent, limit=limit)
+        if not is_permissive_mode():
+            entries = [e for e in entries if _entry_readable(caller, e)]
         return JSONResponse({"entries": entries, "count": len(entries)})
     except Exception:
         logger.exception("GET /admin/audit failed")
