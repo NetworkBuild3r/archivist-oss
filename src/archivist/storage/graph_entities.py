@@ -357,7 +357,7 @@ async def get_entity_facts(
     from archivist.storage.sqlite_pool import pool
 
     async with pool.read() as conn:
-        base = "SELECT * FROM facts WHERE entity_id=? AND is_active=1"
+        base = "SELECT * FROM facts WHERE entity_id=? AND is_active=1 AND COALESCE(is_suppressed, 0) = 0"
         params: list = [entity_id]
 
         if not include_superseded:
@@ -410,7 +410,7 @@ async def get_entity_facts_bulk(entity_ids: list[int], as_of: str = "") -> dict[
         placeholders = ",".join("?" for _ in entity_ids)
         base = (
             f"SELECT * FROM facts WHERE entity_id IN ({placeholders}) "
-            "AND is_active=1 AND superseded_by IS NULL"
+            "AND is_active=1 AND superseded_by IS NULL AND COALESCE(is_suppressed, 0) = 0"
         )
         params: list = list(entity_ids)
         if as_of:

@@ -668,7 +668,8 @@ async def consolidate_tips(budget: int = 20) -> dict:
         all_tips = [
             dict(r)
             for r in await conn.fetchall(
-                "SELECT id, agent_id, category, tip_text, context FROM tips WHERE archived=0"
+                "SELECT id, trajectory_id, agent_id, category, tip_text, context "
+                "FROM tips WHERE archived=0"
             )
         ]
 
@@ -716,6 +717,7 @@ async def consolidate_tips(budget: int = 20) -> dict:
             "consolidate_tips",
             {
                 "consolidated_tip": {
+                    "trajectory_id": cluster[0].get("trajectory_id", ""),
                     "agent_id": fleet_agent,
                     "category": merged.get("category", "strategy"),
                     "tip": merged.get("tip", ""),

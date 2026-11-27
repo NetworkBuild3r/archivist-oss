@@ -160,14 +160,18 @@ def init_schema():
         conn.executescript("""
         CREATE TABLE IF NOT EXISTS entities (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+            name TEXT NOT NULL COLLATE NOCASE,
             entity_type TEXT NOT NULL DEFAULT 'unknown',
             first_seen TEXT NOT NULL,
             last_seen TEXT NOT NULL,
             mention_count INTEGER NOT NULL DEFAULT 1,
             metadata TEXT DEFAULT '{}',
             retention_class TEXT NOT NULL DEFAULT 'standard',
-            aliases TEXT NOT NULL DEFAULT '[]'
+            aliases TEXT NOT NULL DEFAULT '[]',
+            namespace TEXT NOT NULL DEFAULT 'global',
+            actor_id TEXT NOT NULL DEFAULT '',
+            actor_type TEXT NOT NULL DEFAULT '',
+            UNIQUE(name, namespace)
         );
         CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(name COLLATE NOCASE);
         CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(entity_type);
@@ -659,48 +663,82 @@ def _migrate_entity_unique_constraint():
             idx_info = conn.execute(
                 "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='entities' AND sql IS NOT NULL"
             ).fetchall()
-            has_ns_unique = any("namespace" in (r[0] or "") for r in idx_info)
+            has_ns_unique = any(
+                "unique" in (r[0] or "").lower() and "namespace" in (r[0] or "").lower()
+                for r in idx_info
+            )
             create_sql = conn.execute(
                 "SELECT sql FROM sqlite_master WHERE type='table' AND name='entities'"
             ).fetchone()
-            if create_sql and "UNIQUE" in (create_sql[0] or ""):
-                after_unique = create_sql[0].split("UNIQUE", 1)[-1]
-                if "namespace" in after_unique:
+            if create_sql and create_sql[0]:
+                import re as _re
+
+                if _re.search(r"UNIQUE\s*\([^)]*namespace[^)]*\)", create_sql[0], _re.IGNORECASE):
                     return
             if has_ns_unique:
                 return
 
-            conn.execute("DROP TABLE IF EXISTS entities_new")
-            conn.execute("""
-                CREATE TABLE entities_new (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT NOT NULL COLLATE NOCASE,
-                    entity_type TEXT NOT NULL DEFAULT 'unknown',
-                    first_seen TEXT NOT NULL,
-                    last_seen TEXT NOT NULL,
-                    mention_count INTEGER NOT NULL DEFAULT 1,
-                    metadata TEXT DEFAULT '{}',
-                    retention_class TEXT NOT NULL DEFAULT 'standard',
-                    aliases TEXT NOT NULL DEFAULT '[]',
-                    namespace TEXT NOT NULL DEFAULT 'global',
-                    UNIQUE(name, namespace)
-                )
-            """)
-            conn.execute("""
-                INSERT INTO entities_new (id, name, entity_type, first_seen, last_seen,
-                    mention_count, metadata, retention_class, aliases, namespace)
-                SELECT id, name, entity_type, first_seen, last_seen,
-                    mention_count, metadata, retention_class, aliases, namespace
-                FROM entities
-            """)
-            conn.execute("DROP TABLE entities")
-            conn.execute("ALTER TABLE entities_new RENAME TO entities")
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(name COLLATE NOCASE)"
-            )
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(entity_type)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_entities_namespace ON entities(namespace)")
+            has_actor_id = "actor_id" in cols
+            has_actor_type = "actor_type" in cols
+            select_actor_id = "actor_id" if has_actor_id else "''"
+            select_actor_type = "actor_type" if has_actor_type else "''"
+
+            # PRAGMA foreign_keys must be toggled outside an active transaction.
             conn.commit()
+            conn.execute("PRAGMA foreign_keys=OFF")
+            try:
+                conn.execute("DROP TABLE IF EXISTS entities_new")
+                conn.execute("""
+                    CREATE TABLE entities_new (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        name TEXT NOT NULL COLLATE NOCASE,
+                        entity_type TEXT NOT NULL DEFAULT 'unknown',
+                        first_seen TEXT NOT NULL,
+                        last_seen TEXT NOT NULL,
+                        mention_count INTEGER NOT NULL DEFAULT 1,
+                        metadata TEXT DEFAULT '{}',
+                        retention_class TEXT NOT NULL DEFAULT 'standard',
+                        aliases TEXT NOT NULL DEFAULT '[]',
+                        namespace TEXT NOT NULL DEFAULT 'global',
+                        actor_id TEXT NOT NULL DEFAULT '',
+                        actor_type TEXT NOT NULL DEFAULT '',
+                        UNIQUE(name, namespace)
+                    )
+                """)
+                conn.execute(
+                    f"""
+                    INSERT INTO entities_new (id, name, entity_type, first_seen, last_seen,
+                        mention_count, metadata, retention_class, aliases, namespace,
+                        actor_id, actor_type)
+                    SELECT id, name, entity_type, first_seen, last_seen,
+                        mention_count, metadata, retention_class, aliases, namespace,
+                        {select_actor_id}, {select_actor_type}
+                    FROM entities
+                    """
+                )
+                conn.execute("DROP TABLE entities")
+                conn.execute("ALTER TABLE entities_new RENAME TO entities")
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(name COLLATE NOCASE)"
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(entity_type)"
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_entities_namespace ON entities(namespace)"
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_entities_retention ON entities(retention_class)"
+                )
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_entities_actor ON entities(actor_id)")
+                conn.commit()
+            finally:
+                conn.execute("PRAGMA foreign_keys=ON")
+            fk_issues = conn.execute("PRAGMA foreign_key_check").fetchall()
+            if fk_issues:
+                _logger.warning(
+                    "Entity migration foreign_key_check reported %d issues", len(fk_issues)
+                )
             _logger.info("Migrated entities: rebuilt UNIQUE constraint to include namespace")
         except Exception as e:
             _logger.warning(

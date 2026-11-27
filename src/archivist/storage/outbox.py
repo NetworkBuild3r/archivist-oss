@@ -235,10 +235,26 @@ class OutboxProcessor:
             event_id = row[0]
             retry_count = row[3] or 0
             try:
+                parsed_payload = json.loads(row[2])
+            except (json.JSONDecodeError, TypeError) as exc:
+                logger.error(
+                    "outbox.drain: corrupt JSON payload — dead-lettering immediately",
+                    extra={"event_id": event_id, "event_type": row[1], "error": str(exc)},
+                )
+                await self._mark_dead(
+                    event_id,
+                    payload={},
+                    error=f"invalid payload JSON: {exc}",
+                )
+                dead_count += 1
+                m.inc(m.OUTBOX_DEAD_LETTER_TOTAL)
+                continue
+
+            try:
                 await self._apply_event(
                     event_id=event_id,
                     event_type=EventType(row[1]),
-                    payload=json.loads(row[2]),
+                    payload=parsed_payload,
                 )
                 await self._mark_applied(event_id)
                 applied += 1
@@ -257,7 +273,7 @@ class OutboxProcessor:
                 if new_retry >= OUTBOX_MAX_RETRIES:
                     await self._mark_dead(
                         event_id,
-                        payload=json.loads(row[2]),
+                        payload=parsed_payload if isinstance(parsed_payload, dict) else {},
                         error=str(exc),
                     )
                     dead_count += 1

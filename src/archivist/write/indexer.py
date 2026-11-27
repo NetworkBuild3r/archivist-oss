@@ -264,8 +264,6 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
     if len(text.strip()) < 20:
         return 0
 
-    await delete_file_points(filepath)
-
     meta = _extract_metadata(filepath)
     from archivist.core.provenance import SourceTrace, default_confidence
 
@@ -424,6 +422,10 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
             points.append(PointStruct(id=pid, vector=vec, payload=payload))
 
     if points:
+        # Delete old points only AFTER chunking and embedding have succeeded so
+        # a transient embedding/LLM failure never leaves the file unindexed (MIN-8).
+        await delete_file_points(filepath)
+
         _coll = ensure_collection(meta.get("namespace", ""))
 
         _mp_records = []
@@ -646,7 +648,7 @@ async def index_file(filepath: str, hierarchical: bool = True) -> int:
 
 
 async def delete_file_points(filepath: str) -> None:
-    """Remove all points for a given file path from Qdrant and FTS5."""
+    """Remove all points for a given file path from Qdrant, FTS5, needle_registry, and memory_points."""
     rel = os.path.relpath(filepath, MEMORY_ROOT)
     client = qdrant_client()
     from archivist.core.config import OUTBOX_ENABLED
@@ -688,6 +690,33 @@ async def delete_file_points(filepath: str) -> None:
                     exc_info=True,
                     extra={"collection": _coll, "file_path": rel, "error": str(_e)},
                 )
+
+    # Clean up needle_registry and memory_points rows for this file's prior chunks
+    # before deleting memory_chunks so stale registry tokens never accumulate (MIN-8).
+    try:
+        from archivist.storage.sqlite_pool import pool as _del_pool
+
+        async with _del_pool.write() as conn:
+            cur = await conn.execute(
+                "SELECT qdrant_id FROM memory_chunks WHERE file_path = ?",
+                (rel,),
+            )
+            old_ids = [str(r["qdrant_id"]) for r in await cur.fetchall() if r["qdrant_id"]]
+            for i in range(0, len(old_ids), 500):
+                batch = old_ids[i : i + 500]
+                placeholders = ",".join("?" for _ in batch)
+                await conn.execute(
+                    f"DELETE FROM needle_registry WHERE memory_id IN ({placeholders})",
+                    batch,
+                )
+                await conn.execute(
+                    f"DELETE FROM memory_points WHERE memory_id IN ({placeholders}) "
+                    f"OR qdrant_id IN ({placeholders})",
+                    batch + batch,
+                )
+    except Exception as _e:
+        logger.debug("indexer.delete_file_points: auxiliary table cleanup skipped: %s", _e)
+
     if BM25_ENABLED:
         await delete_fts_chunks_by_file(rel)
 

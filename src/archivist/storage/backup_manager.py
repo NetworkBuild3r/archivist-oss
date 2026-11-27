@@ -26,12 +26,15 @@ import sqlite3
 import subprocess
 import tarfile
 import time
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 import httpx
 
+from archivist import __version__ as ARCHIVIST_VERSION
 from archivist.core.config import (
     BACKUP_DIR,
     BACKUP_INCLUDE_FILES,
@@ -50,7 +53,6 @@ from archivist.storage.sqlite_pool import _get_graph_write_lock
 logger = logging.getLogger("archivist.backup")
 
 MANIFEST_VERSION = 1
-ARCHIVIST_VERSION = "2.5.0"
 
 
 class SnapshotPathError(ValueError):
@@ -80,6 +82,57 @@ def _snapshot_dir(snapshot_id: str) -> Path:
     if candidate == backup_root or backup_root not in candidate.parents:
         raise SnapshotPathError(f"Invalid snapshot_id {snapshot_id!r}: resolves outside BACKUP_DIR")
     return candidate
+
+
+def _resolve_import_path(ndjson_path: str) -> Path:
+    """Resolve an import NDJSON path and confine it inside BACKUP_DIR (SEC-2).
+
+    Accepts either a path relative to BACKUP_DIR or an absolute path located
+    within BACKUP_DIR. Rejects ``..`` traversal, paths outside BACKUP_DIR, and
+    symlinks escaping BACKUP_DIR with :class:`SnapshotPathError`.
+    """
+    if not ndjson_path or not ndjson_path.strip():
+        raise SnapshotPathError("Import path must not be empty")
+    backup_root = Path(BACKUP_DIR).resolve()
+    raw = Path(ndjson_path)
+    candidate = (raw if raw.is_absolute() else (backup_root / raw)).resolve()
+    if candidate == backup_root or backup_root not in candidate.parents:
+        raise SnapshotPathError(f"Invalid import path {ndjson_path!r}: resolves outside BACKUP_DIR")
+    return candidate
+
+
+def _redact_dsn(dsn: str) -> str:
+    """Return a DSN with any embedded password redacted for safe logging (SEC-1)."""
+    if not dsn or "://" not in dsn:
+        return dsn
+    try:
+        parsed = urlparse(dsn)
+        if parsed.password is None:
+            return dsn
+        host = parsed.hostname or ""
+        port = f":{parsed.port}" if parsed.port else ""
+        user = f"{parsed.username}:***@" if parsed.username else "***@"
+        netloc = f"{user}{host}{port}"
+        return parsed._replace(netloc=netloc).geturl()
+    except Exception:
+        return "<redacted-dsn>"
+
+
+def _strip_dsn_password(dsn: str) -> str:
+    """Strip password from a Postgres DSN so credentials stay in PGPASSWORD env only."""
+    if not dsn or "://" not in dsn:
+        return dsn
+    try:
+        parsed = urlparse(dsn)
+        if parsed.password is None:
+            return dsn
+        host = parsed.hostname or ""
+        port = f":{parsed.port}" if parsed.port else ""
+        user = f"{parsed.username}@" if parsed.username else ""
+        netloc = f"{user}{host}{port}"
+        return parsed._replace(netloc=netloc).geturl()
+    except Exception:
+        return dsn
 
 
 def _ensure_backup_dir() -> None:
@@ -294,12 +347,12 @@ def _backup_postgres(snap_dir: Path) -> None:
         "--no-password",
         f"--file={dest_path}",
     ]
-    # If DATABASE_URL contains the dbname we already set PGDATABASE above;
-    # pass it as the positional argument too for older pg_dump versions.
+    # Pass DSN without password on argv (PGPASSWORD is supplied via pg_env) so
+    # credentials never appear in process listings or logs (SEC-1).
     if DATABASE_URL:
-        cmd.append(DATABASE_URL)
+        cmd.append(_strip_dsn_password(DATABASE_URL))
 
-    logger.info("Running: %s", " ".join(str(c) for c in cmd))
+    logger.info("Running: %s", " ".join(_redact_dsn(str(c)) for c in cmd))
     result = subprocess.run(
         cmd,
         env=pg_env,
@@ -339,10 +392,10 @@ def _restore_postgres(backup_path: Path) -> None:
         "--no-password",
     ]
     if DATABASE_URL:
-        cmd += ["--dbname", DATABASE_URL]
+        cmd += ["--dbname", _strip_dsn_password(DATABASE_URL)]
     cmd.append(str(backup_path))
 
-    logger.info("Running: %s", " ".join(cmd))
+    logger.info("Running: %s", " ".join(_redact_dsn(str(c)) for c in cmd))
     result = subprocess.run(
         cmd,
         env=pg_env,
@@ -615,7 +668,12 @@ def prune_snapshots(keep: int = 0) -> list[str]:
 # ── Per-agent export / import (NDJSON) ───────────────────────────────────────
 
 
-def export_agent(agent_id: str, output_dir: str = "") -> dict:
+def export_agent(
+    agent_id: str,
+    output_dir: str = "",
+    *,
+    loop: asyncio.AbstractEventLoop | None = None,
+) -> dict:
     """Export all memories for a single agent to NDJSON.
 
     Scrolls Qdrant for all points matching agent_id, writes one JSON line per
@@ -675,7 +733,7 @@ def export_agent(agent_id: str, output_dir: str = "") -> dict:
                     break
                 offset = next_offset
 
-    graph_rows = _export_agent_graph(agent_id, out_dir, safe_agent, ts)
+    graph_rows = _export_agent_graph(agent_id, out_dir, safe_agent, ts, loop=loop)
 
     size_bytes = out_path.stat().st_size
     summary = {
@@ -689,7 +747,14 @@ def export_agent(agent_id: str, output_dir: str = "") -> dict:
     return summary
 
 
-def _export_agent_graph(agent_id: str, out_dir: Path, safe_agent: str, ts: str) -> int:
+def _export_agent_graph(
+    agent_id: str,
+    out_dir: Path,
+    safe_agent: str,
+    ts: str,
+    *,
+    loop: asyncio.AbstractEventLoop | None = None,
+) -> int:
     """Export agent-related graph data (entities, facts) to NDJSON.
 
     Uses the async pool so the export works correctly for both SQLite and
@@ -722,14 +787,26 @@ def _export_agent_graph(agent_id: str, out_dir: Path, safe_agent: str, ts: str) 
         return rows_written
 
     try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            # Called from a sync context inside asyncio.to_thread()
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
 
+        if loop is not None:
+            if running_loop is loop:
+                raise RuntimeError(
+                    "_export_agent_graph called synchronously on the running event loop; "
+                    "offload export_agent via asyncio.to_thread(..., loop=loop)"
+                )
             future = asyncio.run_coroutine_threadsafe(_run(), loop)
             count = future.result(timeout=120)
+        elif running_loop is not None:
+            raise RuntimeError(
+                "_export_agent_graph called synchronously on a running event loop; "
+                "offload export_agent via asyncio.to_thread(..., loop=loop)"
+            )
         else:
-            count = loop.run_until_complete(_run())
+            count = asyncio.run(_run())
     except Exception as exc:
         logger.warning("_export_agent_graph pool query failed, falling back to sqlite3: %s", exc)
         # Fallback for SQLite-only deployments where the pool may not be initialized
@@ -756,7 +833,7 @@ def _export_agent_graph(agent_id: str, out_dir: Path, safe_agent: str, ts: str) 
     return count
 
 
-async def _run_fts_upserts(fts_pending: list[dict[str, object]]) -> None:
+async def _run_fts_upserts(fts_pending: list[dict[str, Any]]) -> None:
     """Upsert all queued FTS-chunk records in a single event loop run.
 
     Called once via ``asyncio.run(...)`` after ``import_agent()``'s main NDJSON
@@ -768,7 +845,12 @@ async def _run_fts_upserts(fts_pending: list[dict[str, object]]) -> None:
         await upsert_fts_chunk(**kwargs)
 
 
-def import_agent(ndjson_path: str, dry_run: bool = False) -> dict:
+def import_agent(
+    ndjson_path: str,
+    dry_run: bool = False,
+    *,
+    loop: asyncio.AbstractEventLoop | None = None,
+) -> dict:
     """Import agent memories from an NDJSON export file.
 
     Upserts points back into Qdrant and rebuilds FTS entries.
@@ -778,7 +860,7 @@ def import_agent(ndjson_path: str, dry_run: bool = False) -> dict:
     from archivist.core.config import BM25_ENABLED
     from archivist.storage.collection_router import ensure_collection
 
-    path = Path(ndjson_path)
+    path = _resolve_import_path(ndjson_path)
     if not path.is_file():
         raise FileNotFoundError(f"Import file not found: {ndjson_path}")
 
@@ -787,10 +869,12 @@ def import_agent(ndjson_path: str, dry_run: bool = False) -> dict:
     client = get_client()
 
     imported = 0
+    failed = 0
     skipped = 0
     # Queued FTS-upsert kwargs, flushed via a single asyncio.run() call after the
     # main loop instead of once per NDJSON line (INIT-022/SPEC-002, fixes M15).
-    fts_pending: list[dict[str, object]] = []
+    fts_pending: list[dict[str, Any]] = []
+    batch_fts: dict[str, dict[str, Any]] = {}
 
     with open(path, encoding="utf-8") as f:
         batch: list[tuple[str, PointStruct]] = []
@@ -813,71 +897,95 @@ def import_agent(ndjson_path: str, dry_run: bool = False) -> dict:
             point_id = record.get("id", "")
             vector = record.get("vector", [])
             payload = record.get("payload", {})
-            coll = record.get("collection", QDRANT_COLLECTION)
 
             if not point_id or not vector:
                 skipped += 1
                 continue
 
             if not dry_run:
-                target_coll = ensure_collection(payload.get("namespace", ""))
+                target_coll = ensure_collection(payload.get("namespace", "")) or record.get(
+                    "collection", QDRANT_COLLECTION
+                )
                 point = PointStruct(id=point_id, vector=vector, payload=payload)
                 batch.append((target_coll, point))
 
-                if len(batch) >= 100:
-                    _flush_import_batch(client, batch)
-                    imported += len(batch)
-                    batch.clear()
-
                 if BM25_ENABLED and payload.get("text"):
-                    fts_pending.append(
-                        {
-                            "qdrant_id": point_id,
-                            "text": payload["text"],
-                            "file_path": payload.get("file_path", ""),
-                            "chunk_index": payload.get("chunk_index", 0),
-                            "agent_id": payload.get("agent_id", ""),
-                            "namespace": payload.get("namespace", ""),
-                            "date": payload.get("date", ""),
-                            "memory_type": payload.get("memory_type", "general"),
-                        }
-                    )
+                    batch_fts[str(point_id)] = {
+                        "qdrant_id": point_id,
+                        "text": payload["text"],
+                        "file_path": payload.get("file_path", ""),
+                        "chunk_index": payload.get("chunk_index", 0),
+                        "agent_id": payload.get("agent_id", ""),
+                        "namespace": payload.get("namespace", ""),
+                        "date": payload.get("date", ""),
+                        "memory_type": payload.get("memory_type", "general"),
+                    }
+
+                if len(batch) >= 100:
+                    ok_ids, batch_failed = _flush_import_batch(client, batch)
+                    imported += len(ok_ids)
+                    failed += batch_failed
+                    for pid in ok_ids:
+                        if pid in batch_fts:
+                            fts_pending.append(batch_fts[pid])
+                    batch.clear()
+                    batch_fts.clear()
             else:
                 imported += 1
 
         if batch and not dry_run:
-            _flush_import_batch(client, batch)
-            imported += len(batch)
+            ok_ids, batch_failed = _flush_import_batch(client, batch)
+            imported += len(ok_ids)
+            failed += batch_failed
+            for pid in ok_ids:
+                if pid in batch_fts:
+                    fts_pending.append(batch_fts[pid])
+            batch_fts.clear()
 
     fts_rebuilt = 0
     if fts_pending:
-        asyncio.run(_run_fts_upserts(fts_pending))
+        if loop is not None:
+            future = asyncio.run_coroutine_threadsafe(_run_fts_upserts(fts_pending), loop)
+            future.result(timeout=300)
+        else:
+            asyncio.run(_run_fts_upserts(fts_pending))
         fts_rebuilt = len(fts_pending)
 
     summary = {
         "file": str(path),
         "imported": imported,
+        "failed": failed,
         "skipped": skipped,
         "fts_rebuilt": fts_rebuilt,
         "dry_run": dry_run,
     }
     logger.info(
-        "Agent import: %d points imported, %d skipped, %d FTS rebuilt",
+        "Agent import: %d points imported, %d failed, %d skipped, %d FTS rebuilt",
         imported,
+        failed,
         skipped,
         fts_rebuilt,
     )
     return summary
 
 
-def _flush_import_batch(client, batch: list[tuple[str, object]]) -> None:
-    """Upsert a batch of points grouped by collection."""
+def _flush_import_batch(client: Any, batch: Sequence[tuple[str, Any]]) -> tuple[list[str], int]:
+    """Upsert a batch of points grouped by collection.
+
+    Returns ``(succeeded_point_ids, failed_count)`` so callers only count and
+    FTS-index points whose Qdrant upsert actually succeeded (MIN-8).
+    """
     by_coll: dict[str, list] = {}
     for coll, point in batch:
         by_coll.setdefault(coll, []).append(point)
 
+    succeeded: list[str] = []
+    failed = 0
     for coll, points in by_coll.items():
         try:
             client.upsert(collection_name=coll, points=points)
+            succeeded.extend(str(getattr(p, "id", "")) for p in points)
         except Exception as e:
+            failed += len(points)
             logger.error("Batch upsert to '%s' failed (%d points): %s", coll, len(points), e)
+    return succeeded, failed

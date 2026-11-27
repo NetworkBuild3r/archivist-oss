@@ -9,15 +9,21 @@ Cost estimates (INIT-001/SPEC-011): token counters × configured TOKEN_USD_PER_1
 When the rate is unset, estimated_usd_* fields are null — not a billing system.
 """
 
+import asyncio
 import logging
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import archivist.core.health as health
 from archivist.core.config import QDRANT_COLLECTION, TOKEN_USD_PER_1K
 from archivist.storage.qdrant import qdrant_client
 
 logger = logging.getLogger("archivist.dashboard")
+
+
+def _cutoff_iso(window_days: int) -> str:
+    """Compute a dialect-neutral UTC ISO-8601 cutoff timestamp for SQL comparison."""
+    return (datetime.now(UTC) - timedelta(days=int(window_days))).isoformat()
 
 
 def estimate_token_usd(
@@ -62,7 +68,7 @@ async def build_dashboard(window_days: int = 7) -> dict:
 
     now_iso = datetime.now(UTC).isoformat()
 
-    qdrant_stats = _qdrant_stats()
+    qdrant_stats = await asyncio.to_thread(_qdrant_stats)
 
     async with pool.read() as conn:
         audit_stats = await _audit_stats(conn, window_days)
@@ -71,7 +77,7 @@ async def build_dashboard(window_days: int = 7) -> dict:
         tier_dist = await _tier_distribution_stats(conn, window_days)
 
     hotness_heatmap = await _hotness_heatmap()
-    stale = _stale_estimate()
+    stale = await asyncio.to_thread(_stale_estimate)
 
     import archivist.retrieval.hot_cache as hot_cache
 
@@ -195,18 +201,11 @@ def _stale_estimate() -> dict:
 
 async def _audit_stats(conn, window_days: int) -> dict:
     try:
-        from archivist.core.config import GRAPH_BACKEND
-
-        if (GRAPH_BACKEND or "sqlite").lower() == "postgres":
-            cutoff = f"timestamp >= NOW() - INTERVAL '{window_days} days'"
-            params: list = []
-        else:
-            cutoff = "timestamp >= datetime('now', ?)"
-            params = [f"-{window_days} days"]
+        cutoff = _cutoff_iso(window_days)
 
         rows = await conn.fetchall(
-            f"SELECT action, COUNT(*) as cnt FROM audit_log WHERE {cutoff} GROUP BY action",
-            params,
+            "SELECT action, COUNT(*) as cnt FROM audit_log WHERE timestamp >= ? GROUP BY action",
+            [cutoff],
         )
         counts = {row["action"]: row["cnt"] for row in rows}
         total_writes = counts.get("create", 0) + counts.get("merge", 0) + counts.get("update", 0)
@@ -227,23 +226,16 @@ async def _audit_stats(conn, window_days: int) -> dict:
 
 async def _retrieval_stats(conn, window_days: int) -> dict:
     try:
-        from archivist.core.config import GRAPH_BACKEND
-
-        if (GRAPH_BACKEND or "sqlite").lower() == "postgres":
-            cutoff = f"created_at >= NOW() - INTERVAL '{window_days} days'"
-            params: list = []
-        else:
-            cutoff = "created_at >= datetime('now', ?)"
-            params = [f"-{window_days} days"]
+        cutoff = _cutoff_iso(window_days)
 
         row = await conn.fetchone(
-            f"""SELECT
+            """SELECT
                    COUNT(*) as total,
                    SUM(cache_hit) as cache_hits,
                    AVG(duration_ms) as avg_duration_ms
                FROM retrieval_logs
-               WHERE {cutoff}""",
-            params,
+               WHERE created_at >= ?""",
+            [cutoff],
         )
         result = dict(row) if row else {}
         total = result.get("total", 0) or 0
@@ -260,17 +252,10 @@ async def _retrieval_stats(conn, window_days: int) -> dict:
 async def _token_savings_stats(conn, window_days: int) -> dict:
     """Aggregate token savings statistics from retrieval logs."""
     try:
-        from archivist.core.config import GRAPH_BACKEND
-
-        if (GRAPH_BACKEND or "sqlite").lower() == "postgres":
-            cutoff = f"created_at >= NOW() - INTERVAL '{window_days} days'"
-            params: list = []
-        else:
-            cutoff = "created_at >= datetime('now', ?)"
-            params = [f"-{window_days} days"]
+        cutoff = _cutoff_iso(window_days)
 
         row = await conn.fetchone(
-            f"""SELECT
+            """SELECT
                     COUNT(*) as total_queries,
                     SUM(CASE WHEN tokens_naive IS NOT NULL THEN 1 ELSE 0 END) as queries_with_savings_data,
                     AVG(savings_pct) as avg_savings_pct,
@@ -281,26 +266,26 @@ async def _token_savings_stats(conn, window_days: int) -> dict:
                     SUM(tokens_returned) as total_tokens_returned,
                     SUM(tokens_naive) as total_tokens_naive
                 FROM retrieval_logs
-                WHERE {cutoff}
+                WHERE created_at >= ?
                   AND tokens_naive IS NOT NULL""",
-            params,
+            [cutoff],
         )
         stats = dict(row) if row else {}
 
         policy_rows = await conn.fetchall(
-            f"""SELECT
+            """SELECT
                     pack_policy,
                     COUNT(*) as cnt,
                     AVG(savings_pct) as avg_savings_pct,
                     SUM(CASE WHEN tokens_naive > 0
                              THEN tokens_naive - tokens_returned ELSE 0 END) as tokens_saved
                 FROM retrieval_logs
-                WHERE {cutoff}
+                WHERE created_at >= ?
                   AND pack_policy IS NOT NULL
                   AND pack_policy != ''
                 GROUP BY pack_policy
                 ORDER BY cnt DESC""",
-            params,
+            [cutoff],
         )
         stats["per_policy"] = [dict(r) for r in policy_rows]
 
@@ -330,28 +315,19 @@ async def _token_savings_stats(conn, window_days: int) -> dict:
 async def _tier_distribution_stats(conn, window_days: int) -> dict:
     """Aggregate tier-distribution breakdown from retrieval_trace context_status."""
     try:
-        from archivist.core.config import GRAPH_BACKEND
-
-        if (GRAPH_BACKEND or "sqlite").lower() == "postgres":
-            cutoff = f"created_at >= NOW() - INTERVAL '{window_days} days'"
-            json_l0 = "retrieval_trace::json->'context_status'->>'tier_distribution'"
-            params: list = []
-        else:
-            cutoff = "created_at >= datetime('now', ?)"
-            json_l0 = "json_extract(retrieval_trace, '$.context_status.tier_distribution')"
-            params = [f"-{window_days} days"]
+        cutoff = _cutoff_iso(window_days)
 
         pack_rows = await conn.fetchall(
-            f"""SELECT
+            """SELECT
                     pack_policy,
                     COUNT(*) as cnt,
                     AVG(result_count) as avg_results
                 FROM retrieval_logs
-                WHERE {cutoff}
+                WHERE created_at >= ?
                   AND pack_policy IS NOT NULL
                   AND pack_policy != ''
                 GROUP BY pack_policy""",
-            params,
+            [cutoff],
         )
         return {
             "by_pack_policy": [dict(r) for r in pack_rows],

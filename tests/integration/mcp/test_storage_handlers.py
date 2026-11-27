@@ -181,12 +181,10 @@ class TestReverseHydeFireAndForget:
 
     async def test_hyde_failure_logs_warning(self, async_pool, monkeypatch):
         logged_warnings = []
-        original_warning = None
 
         import logging
 
         test_logger = logging.getLogger("archivist.mcp")
-        original_warning = test_logger.warning
 
         def capture_warning(msg, *args, **kwargs):
             logged_warnings.append(msg % args if args else msg)

@@ -225,7 +225,7 @@ def test_semantic_hierarchical_uses_semantic_strategy():
         text, "test.md", parent_size=700, child_size=300, strategy="fixed"
     )
     parents_semantic = [c for c in result_semantic if c["is_parent"]]
-    parents_fixed = [c for c in result_fixed if c["is_parent"]]
+    assert any(c["is_parent"] for c in result_fixed)
     # Semantic should produce heading-aligned parents; fixed may split differently
     semantic_headings = sum(1 for p in parents_semantic if p["content"].startswith("## "))
     assert semantic_headings >= 2, (

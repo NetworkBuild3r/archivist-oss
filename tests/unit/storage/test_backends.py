@@ -148,6 +148,46 @@ class TestTranslateSqlDialects:
         result = self._t("WHERE x = ? collate nocase")
         assert "collate nocase" not in result.lower()
 
+    # --- CRIT-3: scalar MIN/MAX vs aggregate MIN/MAX & conflict targets ---
+
+    def test_aggregate_min_max_preserved(self):
+        sql = "SELECT MIN(created_at), MAX(updated_at) FROM outbox WHERE status = ?"
+        result = self._t(sql)
+        assert "MIN(created_at)" in result
+        assert "MAX(updated_at)" in result
+        assert "LEAST(" not in result
+        assert "GREATEST(" not in result
+
+    def test_scalar_two_arg_min_max_rewritten_with_nested_parens(self):
+        sql = "UPDATE t SET x = MIN(1.0, COALESCE(x, 0.0) + 0.1), y = MAX(0.0, y - 0.1)"
+        result = self._t(sql)
+        assert "LEAST(1.0, COALESCE(x, 0.0) + 0.1)" in result
+        assert "GREATEST(0.0, y - 0.1)" in result
+
+    def test_min_max_inside_string_literals_untouched(self):
+        sql = (
+            "SELECT 'MIN(a, b)', 'it''s MAX(1, 2)', MIN(x, y), MAX(z) "
+            "FROM t WHERE note = 'MAX(a, b)'"
+        )
+        result = self._t(sql)
+        assert "'MIN(a, b)'" in result
+        assert "'it''s MAX(1, 2)'" in result
+        assert "'MAX(a, b)'" in result
+        assert "LEAST(x, y)" in result
+        assert "MAX(z)" in result
+
+    def test_conflict_targets_match_postgres_schema(self):
+        mp_sql = (
+            "INSERT OR REPLACE INTO memory_points "
+            "(memory_id, qdrant_id, point_type, created_at) VALUES (?, ?, ?, ?)"
+        )
+        assert "ON CONFLICT (memory_id, qdrant_id) DO UPDATE SET" in self._t(mp_sql)
+        df_sql = (
+            "INSERT OR REPLACE INTO delete_failures "
+            "(id, memory_id, error_msg, created_at) VALUES (?, ?, ?, ?)"
+        )
+        assert "ON CONFLICT (id) DO UPDATE SET" in self._t(df_sql)
+
     def test_collate_nocase_in_create_table_not_stripped(self):
         """COLLATE NOCASE in DDL strings inside schema_guard is SQLite-only;
         the translator is not applied to DDL (only to runtime queries via conn methods),

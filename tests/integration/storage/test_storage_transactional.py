@@ -122,9 +122,7 @@ async def test_flush_failure_rolls_back_outbox_and_sql(qa_pool, memory_factory):
     mem = memory_factory()
     from archivist.storage.transaction import MemoryTransaction
 
-    # Force _flush_events to raise by patching executemany after the first call
-    original_init = MemoryTransaction.__init__
-
+    # Force _flush_events to raise
     class _FailingTxn(MemoryTransaction):
         async def _flush_events(self) -> None:
             raise OSError("simulated flush failure")

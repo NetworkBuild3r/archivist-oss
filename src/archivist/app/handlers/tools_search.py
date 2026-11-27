@@ -8,6 +8,7 @@ from mcp.types import TextContent, Tool
 from archivist.core.archivist_uri import memory_uri
 from archivist.core.rbac import (
     can_read_agent_memory,
+    check_access,
     filter_agents_for_read,
     get_namespace_for_agent,
     is_permissive_mode,
@@ -534,7 +535,10 @@ async def _handle_timeline(arguments: dict) -> list[TextContent]:
     query = arguments["query"]
     agent_id = arguments.get("agent_id", "")
     namespace = arguments.get("namespace", "")
-    days = int(arguments.get("days", 14))
+    try:
+        days = int(arguments.get("days", 14))
+    except (TypeError, ValueError):
+        return error_response({"error": "invalid_days", "message": "days must be an integer"})
     as_of = (arguments.get("as_of") or "").strip()
     caller = resolve_caller(arguments)
     if err := require_caller(caller):
@@ -565,7 +569,10 @@ async def _handle_timeline(arguments: dict) -> list[TextContent]:
             )
 
     if as_of:
-        anchor = datetime.strptime(as_of, "%Y-%m-%d").replace(tzinfo=UTC)
+        try:
+            anchor = datetime.strptime(as_of, "%Y-%m-%d").replace(tzinfo=UTC)
+        except ValueError:
+            return error_response({"error": "invalid_as_of", "message": "as_of must be YYYY-MM-DD"})
         date_to = as_of
         date_from = (anchor - timedelta(days=days)).strftime("%Y-%m-%d") if days > 0 else ""
     else:
@@ -648,38 +655,53 @@ async def _handle_insights(arguments: dict) -> list[TextContent]:
 
 async def _handle_deref(arguments: dict) -> list[TextContent]:
     """Dereference a single memory point by ID — returns full L2 text + metadata."""
-    from archivist.core.config import QDRANT_COLLECTION
+    from archivist.storage.collection_router import collections_for_query
     from archivist.storage.qdrant import qdrant_client
 
     memory_id = arguments["memory_id"]
-    agent_id = arguments.get("agent_id", "")
+    namespace_hint = (arguments.get("namespace") or "").strip()
+    caller = resolve_caller(arguments)
+    if not is_permissive_mode():
+        if err := require_caller(caller):
+            return err
 
     client = qdrant_client()
-    try:
-        # Offloaded off the event loop — qdrant-client's HTTP/gRPC calls are
-        # synchronous and would otherwise block the whole MCP server for the
-        # duration of the round trip (INIT-022/SPEC-009, H4-search).
-        points = await asyncio.to_thread(
-            client.retrieve,
-            collection_name=QDRANT_COLLECTION,
-            ids=[memory_id],
-            with_payload=True,
-        )
-    except Exception as e:
-        return error_response({"error": str(e)})
+    points = []
+    last_err: Exception | None = None
+    colls = collections_for_query(namespace_hint)
+    for coll_name in colls:
+        try:
+            # Offloaded off the event loop — qdrant-client's HTTP/gRPC calls are
+            # synchronous and would otherwise block the whole MCP server for the
+            # duration of the round trip (INIT-022/SPEC-009, H4-search).
+            found = await asyncio.to_thread(
+                client.retrieve,
+                collection_name=coll_name,
+                ids=[memory_id],
+                with_payload=True,
+            )
+            if found:
+                points = found
+                break
+        except Exception as e:
+            last_err = e
 
     if not points:
+        if last_err is not None:
+            return error_response({"error": str(last_err)})
         return error_response({"error": "not_found", "memory_id": memory_id})
 
     p = points[0]
     payload = p.payload or {}
 
-    if agent_id and not is_permissive_mode():
+    if not is_permissive_mode():
         ns = payload.get("namespace", "")
         if ns:
-            denied = require_rbac(agent_id, "read", ns)
+            denied = require_rbac(caller, "read", ns)
             if denied:
                 return denied
+        elif payload.get("agent_id") and not can_read_agent_memory(caller, payload["agent_id"]):
+            return error_response({"error": "access_denied", "memory_id": memory_id})
 
     return success_response(
         {
@@ -729,7 +751,16 @@ async def _handle_index(arguments: dict) -> list[TextContent]:
 async def _handle_contradictions(arguments: dict) -> list[TextContent]:
     """Surface contradicting facts about an entity from different agents."""
     entity_name = arguments["entity"]
-    namespace = arguments.get("namespace", "")
+    namespace = (arguments.get("namespace") or "").strip()
+    caller = resolve_caller(arguments)
+
+    if not is_permissive_mode():
+        if err := require_caller(caller):
+            return err
+        if namespace:
+            denied = require_rbac(caller, "read", namespace)
+            if denied:
+                return denied
 
     entities = await search_entities(entity_name, limit=1, namespace=namespace)
     if not entities:
@@ -741,8 +772,37 @@ async def _handle_contradictions(arguments: dict) -> list[TextContent]:
             }
         )
 
-    eid = entities[0]["id"]
+    ent = entities[0]
+    eid = ent["id"]
+    ent_ns = (ent.get("namespace") or namespace or "").strip()
+    if not is_permissive_mode() and ent_ns and ent_ns != "global":
+        denied = require_rbac(caller, "read", ent_ns)
+        if denied:
+            return denied
+
     contradictions = await detect_contradictions(eid)
+    if not is_permissive_mode():
+
+        def _fact_readable(aid: str, ns: str) -> bool:
+            has_ns = bool(ns and ns != "global")
+            has_aid = bool(aid)
+            if not has_ns and not has_aid:
+                return False
+            if has_ns and not check_access(caller, "read", ns).allowed:
+                return False
+            return not has_aid or can_read_agent_memory(caller, aid)
+
+        filtered_c = []
+        for c in contradictions:
+            if not isinstance(c, dict):
+                continue
+            aid_a = (c.get("fact_a_agent") or "").strip()
+            aid_b = (c.get("fact_b_agent") or "").strip()
+            ns_a = (c.get("fact_a_namespace") or "").strip()
+            ns_b = (c.get("fact_b_namespace") or "").strip()
+            if _fact_readable(aid_a, ns_a) and _fact_readable(aid_b, ns_b):
+                filtered_c.append(c)
+        contradictions = filtered_c
 
     return success_response(
         {
@@ -759,9 +819,17 @@ async def _handle_entity_brief(arguments: dict) -> list[TextContent]:
     entity_name = arguments["entity"]
     alias = (arguments.get("add_alias") or "").strip()
     as_of = (arguments.get("as_of") or "").strip()
-    namespace = arguments.get("namespace", "")
+    namespace = (arguments.get("namespace") or "").strip()
 
     caller = resolve_caller(arguments)
+
+    if not is_permissive_mode():
+        if err := require_caller(caller):
+            return err
+        if namespace:
+            denied = require_rbac(caller, "read", namespace)
+            if denied:
+                return denied
 
     entities = await search_entities(entity_name, limit=1, namespace=namespace)
     if not entities:
@@ -772,9 +840,21 @@ async def _handle_entity_brief(arguments: dict) -> list[TextContent]:
             }
         )
 
-    eid = entities[0]["id"]
+    ent = entities[0]
+    eid = ent["id"]
+    ent_ns = (ent.get("namespace") or namespace or "").strip()
+
+    if not is_permissive_mode() and ent_ns and ent_ns != "global":
+        denied = require_rbac(caller, "read", ent_ns)
+        if denied:
+            return denied
 
     if alias:
+        if not is_permissive_mode():
+            write_ns = ent_ns or get_namespace_for_agent(caller)
+            denied = require_rbac(caller, "write", write_ns)
+            if denied:
+                return denied
         await add_entity_alias(eid, alias)
 
     brief = await get_entity_brief(eid, as_of=as_of)

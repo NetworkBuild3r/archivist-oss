@@ -158,6 +158,7 @@ def _literal_search_sync(
         literal_must_not = [
             FieldCondition(key="archived", match=MatchValue(value=True)),
             FieldCondition(key="deleted", match=MatchValue(value=True)),
+            FieldCondition(key="is_suppressed", match=MatchValue(value=True)),
         ]
         try:
             scrolled, _ = client.scroll(
@@ -198,6 +199,14 @@ def _literal_search_sync(
                     "retention_class": p.get("retention_class", "standard"),
                     "topic": p.get("topic", ""),
                     "thought_type": p.get("thought_type", ""),
+                    "is_suppressed": bool(p.get("is_suppressed", False)),
+                    "is_superseded": bool(p.get("is_superseded", False)),
+                    "supersedes_id": p.get("supersedes_id", "") or "",
+                    "superseded_by": p.get("superseded_by", "") or "",
+                    "subject": p.get("subject", "") or "",
+                    "purpose": p.get("purpose", "") or "",
+                    "sensitivity": p.get("sensitivity", "standard") or "standard",
+                    "statement_kind": p.get("statement_kind", "user") or "user",
                     "literal_match": True,
                 }
             )
@@ -860,6 +869,7 @@ async def _run_reranker_pipeline(
     t_post: float,
     trace_static: dict,
     budget: LatencyBudget,
+    prerank_fn=None,
 ) -> BranchOutcome:
     """v2 CLEAN PATH: nominate -> ID-dedupe -> parent enrich -> rerank -> top-K.
 
@@ -905,6 +915,8 @@ async def _run_reranker_pipeline(
     # Graph entity facts: inject as additional candidates (not score modifiers)
     if GRAPH_RETRIEVAL_ENABLED and detected_entities:
         entity_facts = await build_entity_fact_results(detected_entities, min_score=0.0)
+        if prerank_fn is not None:
+            entity_facts = prerank_fn(entity_facts)
         for ef in entity_facts:
             efid = str(ef.get("id", ""))
             if efid and efid not in candidate_pool:
@@ -1035,6 +1047,13 @@ async def _run_legacy_pipeline(
     t_post: float,
     trace_static: dict,
     cached_query_vec: list[float] | None,
+    actor_type: str = "",
+    subject: str = "",
+    purpose: str = "",
+    sensitivity: str = "",
+    pack_policy: str | None = None,
+    include_hotness: bool = True,
+    prerank_fn=None,
 ) -> BranchOutcome:
     """LEGACY PATH (``RERANKER_ENABLED=False``): RRF/BM25 merge (already applied
     by the caller) -> temporal decay -> LTR/hotness/importance scoring ->
@@ -1067,7 +1086,8 @@ async def _run_legacy_pipeline(
         coarse = ltr_rank_results(coarse)
         ltr_used = True
     else:
-        coarse = await apply_hotness_to_results(coarse)
+        if include_hotness:
+            coarse = await apply_hotness_to_results(coarse)
         coarse = apply_importance_to_results(coarse)
 
     # Stage 2: Threshold filter (Phase 1, dynamic v1.10)
@@ -1094,8 +1114,14 @@ async def _run_legacy_pipeline(
             date_to=date_to,
             memory_type=effective_memory_type,
             limit=wider_limit,
+            actor_type=actor_type,
+            subject=subject,
+            purpose=purpose,
+            sensitivity=sensitivity,
             _query_vec=cached_query_vec,
         )
+        if prerank_fn is not None:
+            wider_coarse = prerank_fn(wider_coarse)
         if len(wider_coarse) > n_coarse:
             was_adaptive_widened = True
             wider_coarse = dedupe_vector_hits(wider_coarse)
@@ -1105,7 +1131,8 @@ async def _run_legacy_pipeline(
                     TEMPORAL_DECAY_HALFLIFE_DAYS,
                     temporal_intent=temporal_intent,
                 )
-            wider_coarse = await apply_hotness_to_results(wider_coarse)
+            if include_hotness:
+                wider_coarse = await apply_hotness_to_results(wider_coarse)
             wider_coarse = apply_importance_to_results(wider_coarse)
             wider_filtered = apply_retrieval_threshold(wider_coarse, effective_threshold)
             filtered, _ = _merge_into_results(filtered, wider_filtered)
@@ -1154,6 +1181,8 @@ async def _run_legacy_pipeline(
             min_score=effective_threshold + 0.05,
             as_of=date_from,
         )
+        if prerank_fn is not None:
+            entity_facts = prerank_fn(entity_facts)
         if entity_facts:
             filtered, n_entity_facts_injected = _merge_into_results(
                 filtered,
@@ -1240,6 +1269,12 @@ async def _run_legacy_pipeline(
         date_to=date_to,
         max_tokens=max_tokens,
         memory_type=memory_type,
+        actor_type=actor_type,
+        subject=subject,
+        purpose=purpose,
+        sensitivity=sensitivity,
+        pack_policy=pack_policy,
+        include_hotness=include_hotness,
     )
     retry_result = await _maybe_iterative_retry(
         query, reranked, is_retry=is_retry, budget=budget, retry_kwargs=retry_kwargs
@@ -1309,6 +1344,8 @@ async def recursive_retrieve(
     subject: str = "",
     purpose: str = "",
     sensitivity: str = "",
+    pack_policy: str | None = None,
+    include_hotness: bool = True,
 ) -> dict:
     """Full RLM pipeline: coarse → dedupe → graph augment → temporal decay → threshold → rerank → parent → refine → synthesize.
 
@@ -1369,9 +1406,11 @@ async def recursive_retrieve(
     # `_static_trace_fields()` / `_finalize_trace_extra()` for the explicit-parameter
     # replacement of `_trace_kw()`'s mutable-outer-scope-closure pattern.
 
+    effective_pack_policy = (pack_policy or CONTEXT_PACK_POLICY).strip() or CONTEXT_PACK_POLICY
     cache_extra = (
         f"{agent_id}|{','.join(agent_ids or [])}|{team}|{date_from}|{date_to}|"
-        f"{limit}|{refine}|{subject}|{purpose}|{sensitivity}"
+        f"{limit}|{refine}|{actor_type}|{max_tokens}|{threshold}|"
+        f"{effective_pack_policy}|{include_hotness}|{subject}|{purpose}|{sensitivity}"
     )
     cached = hot_cache.get(
         agent_id or "fleet",
@@ -1464,10 +1503,14 @@ async def recursive_retrieve(
                 for c in _reg_candidates:
                     payload = _reg_payload_map.get(c.id)
                     if payload:
-                        if payload.get("archived") or payload.get("deleted"):
+                        if (
+                            payload.get("archived")
+                            or payload.get("deleted")
+                            or payload.get("is_suppressed")
+                        ):
                             m.inc(m.NEEDLE_REGISTRY_STALE, {"namespace": namespace})
                             logger.debug(
-                                "registry.excluded: memory_id=%s is archived/deleted — dropping",
+                                "registry.excluded: memory_id=%s is archived/deleted/suppressed — dropping",
                                 c.id,
                             )
                             continue
@@ -1550,6 +1593,7 @@ async def recursive_retrieve(
         """Run async BM25/SQLite search concurrently with vector search."""
         if not BM25_ENABLED:
             return []
+        bm25_kw: dict = {"agent_ids": agent_ids} if agent_ids else {}
         return await search_bm25(
             query,
             namespace=namespace,
@@ -1557,6 +1601,7 @@ async def recursive_retrieve(
             memory_type=effective_memory_type,
             limit=vector_limit,
             actor_type=actor_type,
+            **bm25_kw,
         )
 
     # Launch ALL search paths concurrently: vector variants + BM25 + literal
@@ -1641,6 +1686,7 @@ async def recursive_retrieve(
             graph_items = await graph_context_for_entities(
                 [e["id"] for e in entities],
                 depth=MULTI_HOP_DEPTH,
+                namespace=namespace,
             )
             n_graph_items = len(graph_items)
             if graph_items and not RERANKER_ENABLED:
@@ -1772,6 +1818,7 @@ async def recursive_retrieve(
             t_post=_t_post,
             trace_static=trace_static,
             budget=_budget,
+            prerank_fn=_prerank,
         )
     else:
         outcome = await _run_legacy_pipeline(
@@ -1805,6 +1852,13 @@ async def recursive_retrieve(
             t_post=_t_post,
             trace_static=trace_static,
             cached_query_vec=_cached_query_vec,
+            actor_type=actor_type,
+            subject=subject,
+            purpose=purpose,
+            sensitivity=sensitivity,
+            pack_policy=pack_policy,
+            include_hotness=include_hotness,
+            prerank_fn=_prerank,
         )
 
     if outcome.early_response is not None:
@@ -1827,12 +1881,13 @@ async def recursive_retrieve(
     enriched = enriched[:limit]
 
     # If max_tokens specified, use tier-aware packing instead of greedy truncation.
+    _pre_pack = list(enriched)
     _packed_ctx = None
     if max_tokens and max_tokens > 0:
         _packed_ctx = pack_context(
             enriched,
             max_tokens=max_tokens,
-            tier_policy=CONTEXT_PACK_POLICY,
+            tier_policy=effective_pack_policy,
             l0_budget_share=CONTEXT_L0_BUDGET_SHARE,
             min_full_results=CONTEXT_MIN_FULL_RESULTS,
         )
@@ -1856,11 +1911,23 @@ async def recursive_retrieve(
             try:
                 from archivist.write.compaction import compact_flat
 
-                _overflow = enriched[_packed_ctx.dropped_count :]  # trailing dropped items
+                _overflow = list(getattr(_packed_ctx, "dropped_sources", None) or [])
                 if not _overflow:
-                    # Fallback: compress the last N packed items when drop list is empty
-                    _n_compress = max(1, len(enriched) // 3)
-                    _overflow = enriched[-_n_compress:]
+                    _kept_ids = {
+                        str(r.get("id", r.get("qdrant_id", "")))
+                        for r in enriched
+                        if r.get("id") or r.get("qdrant_id")
+                    }
+                    _overflow = [
+                        r
+                        for r in _pre_pack
+                        if (
+                            (r.get("id") or r.get("qdrant_id"))
+                            and str(r.get("id", r.get("qdrant_id", ""))) not in _kept_ids
+                        )
+                    ]
+                    if not _overflow and len(_pre_pack) > len(enriched):
+                        _overflow = _pre_pack[len(enriched) :]
 
                 _overflow_pairs = [
                     (
@@ -1935,7 +2002,7 @@ async def recursive_retrieve(
         "tier_distribution": _tier_distribution,
         "token_savings_pct": _token_savings_pct,
         "dropped_count": _dropped_count,
-        "pack_policy": CONTEXT_PACK_POLICY if _packed_ctx is not None else "none",
+        "pack_policy": effective_pack_policy if _packed_ctx is not None else "none",
         "auto_compressed": _compress_savings > 0,
         "compress_savings_approx": _compress_savings,
         "hint": "compress" if budget_tokens and budget_used_pct > 80 else "ok",
@@ -2124,7 +2191,7 @@ async def recursive_retrieve(
         tokens_returned=result_tokens_approx,
         tokens_naive=_naive_tokens,
         savings_pct=_token_savings_pct if _token_savings_pct else None,
-        pack_policy=CONTEXT_PACK_POLICY if _packed_ctx is not None else "",
+        pack_policy=effective_pack_policy if _packed_ctx is not None else "",
     )
     m.inc(m.SEARCH_TOTAL)
     m.inc(m.CACHE_MISS)

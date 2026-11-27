@@ -108,13 +108,38 @@ class TestPermissiveMode:
         pol = rbac.check_access("anyone", "write", "anything")
         assert pol.allowed is True
 
-    def test_permissive_when_config_missing(self, tmp_path, monkeypatch):
+    def test_fail_closed_when_configured_path_missing(self, tmp_path):
+        """SEC-4: explicitly configured NAMESPACES_CONFIG_PATH must fail closed when unreadable."""
         import archivist.core.rbac as rbac
 
         rbac._config = None
         rbac._permissive_fallback = False
         rbac.load_config(str(tmp_path / "missing.yaml"))
 
-        assert rbac.is_permissive_mode() is True
+        assert rbac.is_permissive_mode() is False
         pol = rbac.check_access("anyone", "write", "anything")
-        assert pol.allowed is True
+        assert pol.allowed is False
+
+    def test_fail_closed_when_yaml_non_mapping(self, tmp_path):
+        """SEC-4 & MIN-3: empty/scalar/list YAML must fail closed instead of crashing."""
+        import archivist.core.rbac as rbac
+
+        bad_yaml = tmp_path / "empty.yaml"
+        bad_yaml.write_text("# empty file\n")
+        rbac._config = None
+        rbac._permissive_fallback = False
+        rbac.load_config(str(bad_yaml))
+
+        assert rbac.is_permissive_mode() is False
+        assert rbac.check_access("anyone", "read", "any").allowed is False
+
+    def test_lazy_init_before_load_config(self, monkeypatch):
+        """MIN-3: is_permissive_mode/check_access/can_read_agent_memory trigger lazy load."""
+        import archivist.core.rbac as rbac
+
+        monkeypatch.setattr(rbac, "NAMESPACES_CONFIG_PATH", "")
+        rbac._config = None
+        rbac._permissive_fallback = False
+        assert rbac.is_permissive_mode() is True
+        assert rbac.check_access("anyone", "read", "any").allowed is True
+        assert rbac.can_read_agent_memory("a", "b") is True

@@ -122,7 +122,7 @@ def _fts5_safe_query(raw_query: str) -> str:
         return ""
     safe = []
     for t in tokens:
-        cleaned = _clean_token(t)
+        cleaned = _clean_token(t).replace('"', '""')
         if cleaned and len(cleaned) >= 1:
             safe.append(f'"{cleaned}"')
     return " OR ".join(safe) if safe else ""
@@ -135,7 +135,7 @@ def _fts5_and_query(raw_query: str) -> str:
         return ""
     content_tokens = []
     for t in tokens:
-        cleaned = _clean_token(t).lower()
+        cleaned = _clean_token(t).lower().replace('"', '""')
         if cleaned and len(cleaned) >= 2 and cleaned not in _STOPWORDS:
             content_tokens.append(f'"{cleaned}"')
     if len(content_tokens) < 2:
@@ -150,7 +150,7 @@ def _fts5_phrase_query(raw_query: str) -> str:
         return ""
     content_tokens = []
     for t in tokens:
-        cleaned = _clean_token(t).lower()
+        cleaned = _clean_token(t).lower().replace('"', '""')
         if cleaned and len(cleaned) >= 2 and cleaned not in _STOPWORDS:
             content_tokens.append(cleaned)
     if len(content_tokens) < 2:
@@ -171,8 +171,8 @@ def _pg_escape_token(t: str) -> str:
     special characters.
     """
     cleaned = _clean_token(t)
-    # Replace internal single-quotes that would break the literal.
-    cleaned = cleaned.replace("'", "")
+    # Remove internal single-quotes and backslashes that would break to_tsquery literals.
+    cleaned = cleaned.replace("\\", "").replace("'", "")
     return cleaned
 
 
@@ -261,6 +261,7 @@ async def search_bm25(
     memory_type: str = "",
     limit: int = 30,
     actor_type: str = "",
+    agent_ids: list[str] | None = None,
 ) -> list[dict]:
     """Run BM25 keyword search via FTS5 (SQLite) or tsvector (Postgres) in dual AND+OR mode.
 
@@ -278,6 +279,8 @@ async def search_bm25(
     _t0 = time.monotonic()
     rankings: list[list[dict]] = []
 
+    _agent_kw: dict = {"agent_ids": agent_ids} if agent_ids else {}
+
     or_hits: list[dict] = []
     or_q = _fts5_safe_query(query)
     if or_q:
@@ -290,12 +293,14 @@ async def search_bm25(
             memory_type=memory_type,
             limit=limit,
             actor_type=actor_type,
+            **_agent_kw,
         )
         if or_hits:
             rankings.append(or_hits)
 
-    # On small indices OR already covers most chunks; extra modes add noise.
-    _run_extra_modes = len(or_hits) >= 200
+    # On small indices OR already returns every match (< limit); when OR saturates
+    # the limit, run high-precision AND/phrase modes to surface exact multi-term matches.
+    _run_extra_modes = len(or_hits) >= limit
 
     if _run_extra_modes:
         and_q = _fts5_and_query(query)
@@ -310,6 +315,7 @@ async def search_bm25(
                     memory_type=memory_type,
                     limit=limit,
                     actor_type=actor_type,
+                    **_agent_kw,
                 )
                 if and_hits:
                     rankings.append(and_hits)
@@ -328,6 +334,7 @@ async def search_bm25(
                     memory_type=memory_type,
                     limit=limit,
                     actor_type=actor_type,
+                    **_agent_kw,
                 )
                 if phrase_hits:
                     rankings.append(phrase_hits)
@@ -346,6 +353,7 @@ async def search_bm25(
                         memory_type=memory_type,
                         limit=limit,
                         actor_type=actor_type,
+                        **_agent_kw,
                     )
                     if exact_hits:
                         rankings.append(exact_hits)
@@ -365,6 +373,7 @@ async def search_bm25(
                         memory_type=memory_type,
                         limit=limit,
                         actor_type=actor_type,
+                        **_agent_kw,
                     )
                     if exact_hits:
                         rankings.append(exact_hits)

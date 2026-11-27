@@ -34,6 +34,8 @@ _SEARCH_RESULT_BUCKETS = [0, 1, 2, 5, 10, 20, 50, 100, 200, 500, float("inf")]
 _histogram_buckets: dict[str, list[int]] = {}
 # Parallel to _histogram_buckets keys: which bucket boundaries apply (ms vs result counts).
 _histogram_layout: dict[str, list[float]] = {}
+_histogram_counts: dict[str, int] = {}
+_histogram_sums: dict[str, float] = {}
 
 
 def _boundaries_for(name: str) -> list[float]:
@@ -75,15 +77,17 @@ def observe(name: str, value: float, labels: dict | None = None):
             buckets = [0] * len(boundaries)
             _histogram_buckets[key] = buckets
             _histogram_layout[key] = boundaries
+            _histogram_counts[key] = 0
+            _histogram_sums[key] = 0.0
         else:
             boundaries = _histogram_layout[key]
-        # Prometheus-style: one increment per bucket where observation <= le.
+        # Store non-cumulative per-bucket counts; render() computes cumulative sums once.
         for i, boundary in enumerate(boundaries):
             if value <= boundary:
                 buckets[i] += 1
-    # Histogram _count / _sum companions (render emits full histogram + these).
-    inc(f"{name}_count", labels)
-    inc(f"{name}_sum", labels, value)
+                break
+        _histogram_counts[key] = _histogram_counts.get(key, 0) + 1
+        _histogram_sums[key] = _histogram_sums.get(key, 0.0) + value
 
 
 def gauge_set(name: str, value: float, labels: dict | None = None):
@@ -148,6 +152,10 @@ def render() -> str:
                     lines.append(f'{base}_bucket{{{inner},le="{le_label}"}} {cumulative}')
                 else:
                     lines.append(f'{base}_bucket{{le="{le_label}"}} {cumulative}')
+            count_val = _histogram_counts.get(key, cumulative)
+            sum_val = _histogram_sums.get(key, 0.0)
+            lines.append(f"{base}_count{label_part} {count_val}")
+            lines.append(f"{base}_sum{label_part} {sum_val}")
 
     lines.append("")
     return "\n".join(lines)
@@ -230,7 +238,7 @@ def collect_storage_gauges_tick() -> None:
         for c in cols:
             try:
                 info = client.get_collection(c.name)
-                pts = float(info.points_count)
+                pts = float(info.points_count or 0)
             except Exception:
                 pts = 0.0
             gauge_set(QDRANT_VECTORS_TOTAL, pts, {"collection": c.name})

@@ -24,7 +24,12 @@ from archivist.core.config import (
     TEAM_MAP,
 )
 from archivist.core.provenance import SourceTrace, default_confidence
-from archivist.core.rbac import get_namespace_config, get_namespace_for_agent
+from archivist.core.rbac import (
+    can_read_agent_memory,
+    get_namespace_config,
+    get_namespace_for_agent,
+    is_permissive_mode,
+)
 from archivist.features.embeddings import embed_batch, embed_text
 from archivist.retrieval.topic_detector import detect_topics
 from archivist.storage.collection_router import (
@@ -53,6 +58,9 @@ from archivist.write.indexer import compute_ttl
 from archivist.write.pre_extractor import extract_needle_entities, pre_extract
 
 from ._common import error_response, require_rbac, resolve_actor, success_response
+
+# Strong references to background enrichment tasks so they are never GC'd (MIN-7).
+_pending_tasks: set[asyncio.Task] = set()
 
 # NOTE (INIT-022/SPEC-008, ac-5): `SourceTrace`/`default_confidence`, `detect_topics`,
 # `DEFAULT_CONFIDENCE_BY_ACTOR_TYPE`, and `MemoryTransaction` are hoisted here because no
@@ -927,6 +935,7 @@ async def _handle_store_inner(
                         "archive_memory",
                         {
                             "memory_ids": [d.get("existing_id", "")],
+                            "namespace": namespace,
                             "reason": "superseded",
                         },
                     )
@@ -1309,12 +1318,13 @@ async def _handle_store_inner(
         from archivist.storage.outbox import warn_legacy_inline_qdrant_once
 
         warn_legacy_inline_qdrant_once()
-        client.upsert(
+        await asyncio.to_thread(
+            client.upsert,
             collection_name=_coll,
             points=[_primary_point],
         )
         if _micro_points:
-            client.upsert(collection_name=_coll, points=_micro_points)
+            await asyncio.to_thread(client.upsert, collection_name=_coll, points=_micro_points)
 
     # Reverse HyDE: fire-and-forget — generate hypothetical questions in background
     from archivist.core.config import REVERSE_HYDE_ENABLED
@@ -1322,6 +1332,7 @@ async def _handle_store_inner(
     if REVERSE_HYDE_ENABLED:
 
         def _rh_done(task: asyncio.Task):
+            _pending_tasks.discard(task)
             if task.cancelled():
                 return
             exc = task.exception()
@@ -1347,6 +1358,7 @@ async def _handle_store_inner(
             ),
             name=f"reverse_hyde_{pid}",
         )
+        _pending_tasks.add(_rh_task)
         _rh_task.add_done_callback(_rh_done)
 
     # Synthetic question generation (background, non-blocking)
@@ -1355,6 +1367,7 @@ async def _handle_store_inner(
     if _SQ_ENABLED:
 
         def _sq_done(task: asyncio.Task):
+            _pending_tasks.discard(task)
             if task.cancelled():
                 return
             exc = task.exception()
@@ -1380,6 +1393,7 @@ async def _handle_store_inner(
             ),
             name=f"synthetic_q_{pid}",
         )
+        _pending_tasks.add(_sq_task)
         _sq_task.add_done_callback(_sq_done)
 
     from archivist.core.audit import log_memory_event
@@ -1540,15 +1554,43 @@ async def _handle_store_inner(
     return success_response(response)
 
 
+def _check_point_write_rbac(
+    agent_id: str, point_id: Any, payload: dict[str, Any]
+) -> list[TextContent] | None:
+    """Enforce per-point write RBAC under strict mode (AUDIT-MAJ-3, Minor #1)."""
+    if is_permissive_mode():
+        return None
+    pt_ns = (payload.get("namespace") or "").strip()
+    if pt_ns:
+        return require_rbac(agent_id, "write", pt_ns)
+    pt_agent = (payload.get("agent_id") or "").strip()
+    if not pt_agent or not can_read_agent_memory(agent_id, pt_agent):
+        return error_response(
+            {
+                "error": "access_denied",
+                "message": (
+                    f"Agent '{agent_id}' is not authorized to modify unscoped memory '{point_id}'"
+                ),
+            }
+        )
+    return None
+
+
 async def _handle_merge(arguments: dict) -> list[TextContent]:
     agent_id = arguments["agent_id"]
     memory_ids = arguments["memory_ids"]
     strategy = arguments["strategy"]
-    namespace = arguments.get("namespace", "")
+    namespace = arguments.get("namespace", "") or get_namespace_for_agent(agent_id)
+
+    denied = require_rbac(agent_id, "write", namespace)
+    if denied:
+        return denied
 
     from archivist.lifecycle.merge import merge_memories
 
     result = await merge_memories(memory_ids, strategy, agent_id, namespace)
+    if isinstance(result, dict) and result.get("error") == "access_denied":
+        return error_response(result)
     return success_response(result, default=str)
 
 
@@ -1581,22 +1623,32 @@ async def _handle_compress(arguments: dict) -> list[TextContent]:
     client = qdrant_client()
     texts: list[tuple[str, str]] = []
     source_agent_ids: list[str] = []
-    _colls = collections_for_query("")
+    primary_coll = collection_for(namespace)
+    search_colls = [primary_coll] + [c for c in collections_for_query("") if c != primary_coll]
     for mid in memory_ids:
-        try:
-            points = client.retrieve(
-                collection_name=_colls[0],
-                ids=[mid],
-                with_payload=True,
-            )
-            if points:
-                pl = points[0].payload or {}
-                texts.append((str(points[0].id), pl.get("text", "")))
-                aid = pl.get("agent_id") or ""
-                if aid:
-                    source_agent_ids.append(str(aid))
-        except Exception as e:
-            logger.warning("Compress: failed to retrieve %s: %s", mid, e)
+        found = False
+        for coll_name in search_colls:
+            try:
+                points = await asyncio.to_thread(
+                    client.retrieve,
+                    collection_name=coll_name,
+                    ids=[mid],
+                    with_payload=True,
+                )
+                if points:
+                    pl = points[0].payload or {}
+                    if denied_pt := _check_point_write_rbac(agent_id, points[0].id, pl):
+                        return denied_pt
+                    texts.append((str(points[0].id), pl.get("text", "")))
+                    aid = pl.get("agent_id") or ""
+                    if aid:
+                        source_agent_ids.append(str(aid))
+                    found = True
+                    break
+            except Exception as e:
+                logger.warning("Compress: failed to retrieve %s from %s: %s", mid, coll_name, e)
+        if not found:
+            logger.debug("Compress: memory %s not found across collections %s", mid, search_colls)
 
     if not texts:
         return error_response({"error": "no memories found for given IDs"})
@@ -1645,6 +1697,7 @@ async def _handle_compress(arguments: dict) -> list[TextContent]:
         "archive_memory",
         {
             "memory_ids": memory_ids,
+            "namespace": namespace,
             "reason": "compressed",
             "compressed_into": stored_data.get("memory_id", ""),
         },
@@ -1687,9 +1740,15 @@ async def _handle_pin(arguments: dict) -> list[TextContent]:
         _pin_coll = collection_for(namespace)
         client = qdrant_client()
         try:
-            points = client.retrieve(collection_name=_pin_coll, ids=[memory_id], with_payload=True)
+            points = await asyncio.to_thread(
+                client.retrieve, collection_name=_pin_coll, ids=[memory_id], with_payload=True
+            )
             if points:
-                client.set_payload(
+                pl = points[0].payload or {}
+                if denied_pt := _check_point_write_rbac(agent_id, points[0].id, pl):
+                    return denied_pt
+                await asyncio.to_thread(
+                    client.set_payload,
                     collection_name=_pin_coll,
                     payload={"retention_class": "permanent", "importance_score": 1.0},
                     points=[memory_id],
@@ -1730,7 +1789,10 @@ async def _handle_pin(arguments: dict) -> list[TextContent]:
                 pinned.append({"type": "entity", "name": entity_name, "id": row["id"]})
             else:
                 eid = await upsert_entity(
-                    entity_name, retention_class="permanent", namespace=namespace or "global"
+                    entity_name,
+                    retention_class="permanent",
+                    namespace=namespace or "global",
+                    conn=conn,
                 )
                 pinned.append({"type": "entity", "name": entity_name, "id": eid, "created": True})
 
@@ -1777,7 +1839,19 @@ async def _handle_unpin(arguments: dict) -> list[TextContent]:
         _unpin_coll = collection_for(namespace)
         client = qdrant_client()
         try:
-            client.set_payload(
+            if not is_permissive_mode():
+                unpin_points = await asyncio.to_thread(
+                    client.retrieve,
+                    collection_name=_unpin_coll,
+                    ids=[memory_id],
+                    with_payload=True,
+                )
+                if unpin_points:
+                    pl = unpin_points[0].payload or {}
+                    if denied_pt := _check_point_write_rbac(agent_id, unpin_points[0].id, pl):
+                        return denied_pt
+            await asyncio.to_thread(
+                client.set_payload,
                 collection_name=_unpin_coll,
                 payload={"retention_class": "standard", "importance_score": 0.5},
                 points=[memory_id],
@@ -1799,7 +1873,8 @@ async def _handle_unpin(arguments: dict) -> list[TextContent]:
         async with pool.write() as conn:
             _collate = "" if _is_postgres() else " COLLATE NOCASE"
             cur = await conn.execute(
-                f"SELECT id FROM entities WHERE name = ?{_collate}", (entity_name,)
+                f"SELECT id FROM entities WHERE name = ?{_collate} AND namespace = ?",
+                (entity_name, namespace or "global"),
             )
             row = await cur.fetchone()
             if row:

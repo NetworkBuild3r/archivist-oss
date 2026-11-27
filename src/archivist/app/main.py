@@ -1,6 +1,7 @@
 """Archivist main entrypoint — starts MCP server, file watcher, curator loop, and initial index."""
 
 import asyncio
+import hmac
 import json
 import logging
 import os
@@ -21,6 +22,7 @@ from starlette.staticfiles import StaticFiles
 from watchfiles import Change, awatch
 
 import archivist.core.health as health
+from archivist import __version__
 from archivist.app.admin_observability import handle_audit, handle_lineage
 from archivist.app.mcp_server import server
 from archivist.core.config import (
@@ -194,12 +196,18 @@ async def handle_health(_request):
         {
             "status": overall,
             "service": "archivist",
-            "version": "2.5.0",
+            "version": __version__,
             "subsystems": statuses,
             "timestamp": datetime.now(UTC).isoformat(),
         },
         status_code=200 if overall == "healthy" else 503,
     )
+
+
+def _append_invalidation_export(path: str, payload: dict) -> None:
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        f.flush()
 
 
 async def handle_invalidate(_request):
@@ -213,7 +221,8 @@ async def handle_invalidate(_request):
     client = qdrant_client()
 
     try:
-        expired = client.scroll(
+        expired = await asyncio.to_thread(
+            client.scroll,
             collection_name=QDRANT_COLLECTION,
             scroll_filter=Filter(
                 must=[FieldCondition(key="ttl_expires_at", range=Range(lte=now_ts, gt=0))]
@@ -260,9 +269,9 @@ async def handle_invalidate(_request):
                     "sample_namespaces": sample_ns,
                     "reason": "ttl_expired",
                 }
-                with open(ARCHIVIST_INVALIDATION_EXPORT_PATH, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(line, ensure_ascii=False) + "\n")
-                    f.flush()
+                await asyncio.to_thread(
+                    _append_invalidation_export, ARCHIVIST_INVALIDATION_EXPORT_PATH, line
+                )
             except OSError as ex:
                 logger.warning("invalidation export append failed: %s", ex)
 
@@ -310,7 +319,7 @@ async def _startup():
     import archivist.storage.sqlite_pool as _pool_module
     from archivist.storage.backend_factory import create_graph_backend
 
-    logger.info("Archivist v2.0.0 starting up...")
+    logger.info("Archivist v%s starting up...", __version__)
     logger.info(
         "MCP transport: streamable_http (POST /mcp)%s",
         " + legacy SSE (/mcp/sse, /mcp/messages/)"
@@ -507,7 +516,9 @@ class ArchivistAuthMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
         auth = request.headers.get("authorization", "")
         xkey = request.headers.get("x-api-key", "")
-        ok = auth == f"Bearer {ARCHIVIST_API_KEY}" or xkey == ARCHIVIST_API_KEY
+        ok = hmac.compare_digest(auth, f"Bearer {ARCHIVIST_API_KEY}") or hmac.compare_digest(
+            xkey, ARCHIVIST_API_KEY
+        )
         if not ok and auth == self._OPENCLAW_PLACEHOLDER:
             logger.warning(
                 "auth.uninterpolated_placeholder: client sent literal "
@@ -527,14 +538,22 @@ async def handle_retrieval_export(request):
 
     params = request.query_params
     if params.get("stats") == "true":
+        try:
+            window_days = int(params.get("window_days", "7"))
+        except ValueError:
+            return JSONResponse({"error": "invalid window_days parameter"}, status_code=400)
         stats = await get_retrieval_stats(
             agent_id=params.get("agent_id", ""),
-            window_days=int(params.get("window_days", "7")),
+            window_days=window_days,
         )
         return JSONResponse(stats)
+    try:
+        limit = int(params.get("limit", "50"))
+    except ValueError:
+        return JSONResponse({"error": "invalid limit parameter"}, status_code=400)
     logs = await get_retrieval_logs(
         agent_id=params.get("agent_id", ""),
-        limit=int(params.get("limit", "50")),
+        limit=limit,
         since=params.get("since", ""),
     )
     return JSONResponse({"logs": logs, "count": len(logs)})
@@ -587,7 +606,10 @@ async def handle_dashboard(request):
     from archivist.app.dashboard import batch_heuristic, build_dashboard
 
     params = request.query_params
-    window = int(params.get("window_days", "7"))
+    try:
+        window = int(params.get("window_days", "7"))
+    except ValueError:
+        return JSONResponse({"error": "invalid window_days parameter"}, status_code=400)
     if params.get("batch") == "true":
         return JSONResponse(await batch_heuristic(window))
     return JSONResponse(await build_dashboard(window))
@@ -619,8 +641,8 @@ async def handle_backup_create(request):
 
     label = request.query_params.get("label", "")
     try:
-        result = create_snapshot(label=label)
-        prune_snapshots()
+        result = await asyncio.to_thread(create_snapshot, label=label)
+        await asyncio.to_thread(prune_snapshots)
         return JSONResponse(result)
     except Exception as e:
         logger.error("Backup creation failed: %s", e)
@@ -631,7 +653,7 @@ async def handle_backup_list(_request):
     """GET /admin/backups — list available snapshots."""
     from archivist.storage.backup_manager import list_snapshots
 
-    snapshots = list_snapshots()
+    snapshots = await asyncio.to_thread(list_snapshots)
     return JSONResponse({"snapshots": snapshots, "count": len(snapshots)})
 
 
@@ -682,7 +704,7 @@ async def handle_backup_delete(request):
     from archivist.storage.backup_manager import SnapshotPathError, delete_snapshot
 
     try:
-        if delete_snapshot(snapshot_id):
+        if await asyncio.to_thread(delete_snapshot, snapshot_id):
             return JSONResponse({"deleted": snapshot_id})
     except SnapshotPathError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
@@ -698,7 +720,8 @@ async def handle_agent_export(request):
     from archivist.storage.backup_manager import export_agent
 
     try:
-        result = export_agent(agent_id)
+        loop = asyncio.get_running_loop()
+        result = await asyncio.to_thread(export_agent, agent_id, loop=loop)
         return JSONResponse(result)
     except Exception as e:
         logger.error("Agent export failed: %s", e)
@@ -718,11 +741,14 @@ async def handle_agent_import(request):
 
     dry_run = body.get("dry_run", False)
 
-    from archivist.storage.backup_manager import import_agent
+    from archivist.storage.backup_manager import SnapshotPathError, import_agent
 
     try:
-        result = import_agent(ndjson_path, dry_run=dry_run)
+        loop = asyncio.get_running_loop()
+        result = await asyncio.to_thread(import_agent, ndjson_path, dry_run=dry_run, loop=loop)
         return JSONResponse(result)
+    except SnapshotPathError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
     except FileNotFoundError as e:
         return JSONResponse({"error": str(e)}, status_code=404)
     except Exception as e:
@@ -747,7 +773,7 @@ app = Starlette(
         Route("/health", handle_health),
         Route("/metrics", handle_metrics),
         Route("/debug/config", handle_debug_config),
-        Route("/admin/invalidate", handle_invalidate, methods=["POST", "GET"]),
+        Route("/admin/invalidate", handle_invalidate, methods=["POST"]),
         Route("/admin/retrieval-logs", handle_retrieval_export),
         Route("/admin/dashboard", handle_dashboard),
         Route("/admin/lineage", handle_lineage, methods=["GET"]),

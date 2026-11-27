@@ -66,6 +66,7 @@ async def upsert_fts_chunk(
             actor_type=actor_type,
             importance=importance,
             tier_label=tier_label,
+            conn=conn,
         )
         m.inc(m.FTS_UPSERT_TOTAL, {"backend": "postgres"})
         return
@@ -101,48 +102,58 @@ async def _upsert_fts_chunk_postgres(
     actor_type: str = "",
     importance: float = 0.5,
     tier_label: str = "l2",
+    conn: object | None = None,
 ) -> None:
     """Postgres upsert: insert/replace memory_chunks row.
 
     ``fts_vector`` and ``fts_vector_simple`` are GENERATED ALWAYS AS STORED
-    columns, so no shadow-row maintenance is required.
+    columns, so no shadow-row maintenance is required. When *conn* is supplied
+    (e.g. from ``MemoryTransaction``), the upsert joins that transaction and
+    re-raises on failure so the caller rolls back cleanly.
     """
     from archivist.storage.sqlite_pool import pool
 
+    sql = (
+        "INSERT INTO memory_chunks "
+        "(qdrant_id, text, file_path, chunk_index, agent_id, namespace, date, "
+        "memory_type, actor_id, actor_type, importance, tier_label) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT (qdrant_id) DO UPDATE SET "
+        "text=EXCLUDED.text, file_path=EXCLUDED.file_path, "
+        "chunk_index=EXCLUDED.chunk_index, agent_id=EXCLUDED.agent_id, "
+        "namespace=EXCLUDED.namespace, date=EXCLUDED.date, "
+        "memory_type=EXCLUDED.memory_type, actor_id=EXCLUDED.actor_id, "
+        "actor_type=EXCLUDED.actor_type, importance=EXCLUDED.importance, "
+        "tier_label=EXCLUDED.tier_label"
+    )
+    params = (
+        qdrant_id,
+        text,
+        file_path,
+        chunk_index,
+        agent_id,
+        namespace,
+        date,
+        memory_type,
+        actor_id,
+        actor_type,
+        importance,
+        tier_label,
+    )
+
     try:
-        async with pool.write() as conn:
-            await conn.execute(
-                "INSERT INTO memory_chunks "
-                "(qdrant_id, text, file_path, chunk_index, agent_id, namespace, date, "
-                "memory_type, actor_id, actor_type, importance, tier_label) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT (qdrant_id) DO UPDATE SET "
-                "text=EXCLUDED.text, file_path=EXCLUDED.file_path, "
-                "chunk_index=EXCLUDED.chunk_index, agent_id=EXCLUDED.agent_id, "
-                "namespace=EXCLUDED.namespace, date=EXCLUDED.date, "
-                "memory_type=EXCLUDED.memory_type, actor_id=EXCLUDED.actor_id, "
-                "actor_type=EXCLUDED.actor_type, importance=EXCLUDED.importance, "
-                "tier_label=EXCLUDED.tier_label",
-                (
-                    qdrant_id,
-                    text,
-                    file_path,
-                    chunk_index,
-                    agent_id,
-                    namespace,
-                    date,
-                    memory_type,
-                    actor_id,
-                    actor_type,
-                    importance,
-                    tier_label,
-                ),
-            )
+        if conn is not None:
+            await conn.execute(sql, params)  # type: ignore[attr-defined]
+        else:
+            async with pool.write() as c:
+                await c.execute(sql, params)
     except Exception as e:
         m.inc(m.FTS_UPSERT_ERRORS_TOTAL, {"backend": "postgres"})
         logging.getLogger("archivist.graph").warning(
             "Postgres FTS upsert failed for %s: %s", qdrant_id, e
         )
+        if conn is not None:
+            raise
 
 
 async def _upsert_fts_chunk_sqlite(
@@ -228,7 +239,10 @@ async def _upsert_fts_chunk_sqlite(
             async with pool.write() as c:
                 await _run(c)
     except Exception as e:
+        m.inc(m.FTS_UPSERT_ERRORS_TOTAL, {"backend": "sqlite"})
         logging.getLogger("archivist.graph").warning("FTS upsert failed for %s: %s", qdrant_id, e)
+        if conn is not None:
+            raise
 
 
 async def _delete_fts_rows_async(conn, rows):
@@ -304,6 +318,7 @@ async def search_fts(
     actor_type: str = "",
     raw_query: str = "",
     fts_mode: str = "or",
+    agent_ids: list[str] | None = None,
 ) -> list[dict]:
     """BM25 keyword search via FTS5 (SQLite) or tsvector (Postgres).
 
@@ -324,6 +339,8 @@ async def search_fts(
         fts_mode: Query mode for Postgres tsquery building.  One of ``"or"``
             (default, high recall), ``"and"`` (high precision), or ``"phrase"``
             (sequential token match).  Ignored for SQLite.
+        agent_ids: Optional list of allowed agent IDs (takes precedence over
+            ``agent_id`` when non-empty).
 
     Returns:
         List of result dicts with ``qdrant_id``, ``bm25_score``, and payload fields.
@@ -336,6 +353,7 @@ async def search_fts(
             fts_mode=fts_mode,
             namespace=namespace,
             agent_id=agent_id,
+            agent_ids=agent_ids,
             memory_type=memory_type,
             limit=limit,
             actor_type=actor_type,
@@ -344,6 +362,7 @@ async def search_fts(
         query=query,
         namespace=namespace,
         agent_id=agent_id,
+        agent_ids=agent_ids,
         memory_type=memory_type,
         limit=limit,
         actor_type=actor_type,
@@ -351,7 +370,11 @@ async def search_fts(
 
 
 def _build_fts_where(
-    namespace: str, agent_id: str, memory_type: str, actor_type: str
+    namespace: str,
+    agent_id: str,
+    memory_type: str,
+    actor_type: str,
+    agent_ids: list[str] | None = None,
 ) -> tuple[list[str], list]:
     """Build the shared namespace/agent/type/actor filter clauses common to all FTS variants.
 
@@ -364,7 +387,12 @@ def _build_fts_where(
     if namespace:
         where_clauses.append("mc.namespace = ?")
         params.append(namespace)
-    if agent_id:
+    valid_agent_ids = [a for a in (agent_ids or []) if a]
+    if valid_agent_ids:
+        placeholders = ",".join("?" for _ in valid_agent_ids)
+        where_clauses.append(f"mc.agent_id IN ({placeholders})")
+        params.extend(valid_agent_ids)
+    elif agent_id:
         where_clauses.append("mc.agent_id = ?")
         params.append(agent_id)
     if memory_type:
@@ -420,9 +448,12 @@ async def _search_fts_sqlite_family(
     limit: int,
     actor_type: str,
     error_context: str,
+    agent_ids: list[str] | None = None,
 ) -> list[dict]:
     """Shared SQLite FTS5 BM25 search body for both the stemmed and exact-match tables."""
-    where_clauses, filter_params = _build_fts_where(namespace, agent_id, memory_type, actor_type)
+    where_clauses, filter_params = _build_fts_where(
+        namespace, agent_id, memory_type, actor_type, agent_ids=agent_ids
+    )
     where_sql = " AND " + " AND ".join(where_clauses)
 
     sql = (
@@ -452,6 +483,7 @@ async def _search_fts_sqlite(
     memory_type: str = "",
     limit: int = 30,
     actor_type: str = "",
+    agent_ids: list[str] | None = None,
 ) -> list[dict]:
     """SQLite FTS5 BM25 search implementation (stemmed / ``memory_fts``)."""
     return await _search_fts_sqlite_family(
@@ -459,6 +491,7 @@ async def _search_fts_sqlite(
         match_query=query,
         namespace=namespace,
         agent_id=agent_id,
+        agent_ids=agent_ids,
         memory_type=memory_type,
         limit=limit,
         actor_type=actor_type,
@@ -477,12 +510,15 @@ async def _search_fts_postgres_family(
     limit: int,
     actor_type: str,
     error_context: str,
+    agent_ids: list[str] | None = None,
 ) -> list[dict]:
     """Shared Postgres tsvector FTS search body for both the stemmed and exact-match configs."""
     if not tsquery_expr:
         return []
 
-    where_clauses, filter_params = _build_fts_where(namespace, agent_id, memory_type, actor_type)
+    where_clauses, filter_params = _build_fts_where(
+        namespace, agent_id, memory_type, actor_type, agent_ids=agent_ids
+    )
     where_sql = " AND " + " AND ".join(where_clauses)
 
     # ts_rank_cd returns values in [0,1]; multiply by 32 to normalize
@@ -516,6 +552,7 @@ async def _search_fts_postgres(
     memory_type: str = "",
     limit: int = 30,
     actor_type: str = "",
+    agent_ids: list[str] | None = None,
 ) -> list[dict]:
     """Postgres tsvector FTS search implementation (stemmed / ``fts_vector``)."""
     from archivist.storage.fts_search import _pg_tsquery_and, _pg_tsquery_or, _pg_tsquery_phrase
@@ -533,6 +570,7 @@ async def _search_fts_postgres(
         ts_config="english",
         namespace=namespace,
         agent_id=agent_id,
+        agent_ids=agent_ids,
         memory_type=memory_type,
         limit=limit,
         actor_type=actor_type,
@@ -548,6 +586,7 @@ async def search_fts_exact(
     limit: int = 30,
     actor_type: str = "",
     raw_query: str = "",
+    agent_ids: list[str] | None = None,
 ) -> list[dict]:
     """Non-stemmed keyword search for exact token matching (IPs, UUIDs, ticket IDs).
 
@@ -563,6 +602,8 @@ async def search_fts_exact(
         actor_type: Filter by actor type (empty = all types).
         raw_query: Original unformatted user query.  Used by the Postgres backend
             to build the ``tsquery`` expression.  Falls back to ``query`` when empty.
+        agent_ids: Optional list of allowed agent IDs (takes precedence over
+            ``agent_id`` when non-empty).
 
     Returns:
         List of result dicts with ``qdrant_id``, ``bm25_score``, and payload fields.
@@ -574,6 +615,7 @@ async def search_fts_exact(
             raw_query=raw_query or query,
             namespace=namespace,
             agent_id=agent_id,
+            agent_ids=agent_ids,
             memory_type=memory_type,
             limit=limit,
             actor_type=actor_type,
@@ -582,6 +624,7 @@ async def search_fts_exact(
         query=query,
         namespace=namespace,
         agent_id=agent_id,
+        agent_ids=agent_ids,
         memory_type=memory_type,
         limit=limit,
         actor_type=actor_type,
@@ -595,6 +638,7 @@ async def _search_fts_exact_sqlite(
     memory_type: str = "",
     limit: int = 30,
     actor_type: str = "",
+    agent_ids: list[str] | None = None,
 ) -> list[dict]:
     """SQLite FTS5 exact (non-stemmed) BM25 search via ``memory_fts_exact``."""
     return await _search_fts_sqlite_family(
@@ -602,6 +646,7 @@ async def _search_fts_exact_sqlite(
         match_query=query,
         namespace=namespace,
         agent_id=agent_id,
+        agent_ids=agent_ids,
         memory_type=memory_type,
         limit=limit,
         actor_type=actor_type,
@@ -616,6 +661,7 @@ async def _search_fts_exact_postgres(
     memory_type: str = "",
     limit: int = 30,
     actor_type: str = "",
+    agent_ids: list[str] | None = None,
 ) -> list[dict]:
     """Postgres exact (non-stemmed) FTS search via ``fts_vector_simple``.
 
@@ -632,6 +678,7 @@ async def _search_fts_exact_postgres(
         ts_config="simple",
         namespace=namespace,
         agent_id=agent_id,
+        agent_ids=agent_ids,
         memory_type=memory_type,
         limit=limit,
         actor_type=actor_type,

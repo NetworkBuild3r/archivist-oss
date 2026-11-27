@@ -77,7 +77,6 @@ ignore = [
     "SIM118", # in-dict-keys — minor
     "UP042",  # str-enum — requires Python 3.11+ min; deferred
     "UP047",  # non-pep695-generic — requires Python 3.12 syntax; deferred
-    "F841",   # local variable assigned but never used — review manually
     "E741",   # ambiguous variable name — isolated; review manually
     "C401",   # unnecessary generator → set() — minor
     "RUF012", # mutable class vars — dataclass fields

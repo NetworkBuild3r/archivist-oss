@@ -286,7 +286,6 @@ async def test_exception_after_first_insert_rolls_back_second(qa_pool, memory_fa
     from archivist.storage.transaction import MemoryTransaction
 
     mem1 = memory_factory()
-    mem2 = memory_factory()
 
     with pytest.raises(RuntimeError, match="injected fault"):
         async with MemoryTransaction(enabled=True) as txn:

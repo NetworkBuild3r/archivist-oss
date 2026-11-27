@@ -293,11 +293,13 @@ async def _handle_get_context(arguments: dict) -> list[TextContent]:
 
 async def _handle_handoff(arguments: dict) -> list[TextContent]:
     """Create a HandoffPacket for agent-to-agent task transfer."""
+    from archivist.core.rbac import get_namespace_for_agent, is_permissive_mode
     from archivist.retrieval.context_api import HandoffPacket, create_handoff_packet
 
     agent_id = (arguments.get("agent_id") or "").strip()
     session_id = (arguments.get("session_id") or "").strip()
     receiving = (arguments.get("receiving_agent_id") or "").strip()
+    namespace = (arguments.get("namespace") or "").strip()
 
     if err := require_caller(agent_id):
         return err
@@ -306,13 +308,19 @@ async def _handle_handoff(arguments: dict) -> list[TextContent]:
     if not receiving:
         return error_response({"error": "receiving_agent_id is required"})
 
+    effective_ns = namespace
+    if not is_permissive_mode():
+        effective_ns = namespace or get_namespace_for_agent(agent_id)
+        if denied := require_rbac(agent_id, "read", effective_ns):
+            return denied
+
     try:
         packet: HandoffPacket = await create_handoff_packet(
             agent_id=agent_id,
             session_id=session_id,
             receiving_agent_id=receiving,
             max_tokens=int(arguments.get("max_tokens") or 4000),
-            namespace=(arguments.get("namespace") or ""),
+            namespace=effective_ns,
         )
     except Exception as exc:
         logger.exception("archivist_handoff failed")

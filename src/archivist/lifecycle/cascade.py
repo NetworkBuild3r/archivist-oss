@@ -321,7 +321,8 @@ async def sweep_orphans() -> dict[str, int | str]:
         async with pool.read() as conn:
             cursor = await conn.execute(
                 "SELECT DISTINCT qdrant_id FROM memory_chunks "
-                "WHERE qdrant_id > ? ORDER BY qdrant_id LIMIT ?",
+                "WHERE qdrant_id > ? AND qdrant_id NOT LIKE 'reconsolidate:%' "
+                "ORDER BY qdrant_id LIMIT ?",
                 (last_id, _SWEEP_PAGE_SIZE),
             )
             rows = await cursor.fetchall()

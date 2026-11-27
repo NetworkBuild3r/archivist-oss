@@ -53,6 +53,14 @@ class ResultCandidate:
     actor_type: str = ""
     confidence: float = 1.0
     source_trace: dict = field(default_factory=dict)
+    is_suppressed: bool = False
+    is_superseded: bool = False
+    supersedes_id: str = ""
+    superseded_by: str = ""
+    subject: str = ""
+    purpose: str = ""
+    sensitivity: str = "standard"
+    statement_kind: str = "user"
 
     def to_dict(self) -> dict:
         """Convert to the pipeline dict format expected by all stages."""
@@ -82,6 +90,14 @@ class ResultCandidate:
             "actor_type": self.actor_type,
             "confidence": self.confidence,
             "source_trace": self.source_trace,
+            "is_suppressed": self.is_suppressed,
+            "is_superseded": self.is_superseded,
+            "supersedes_id": self.supersedes_id,
+            "superseded_by": self.superseded_by,
+            "subject": self.subject,
+            "purpose": self.purpose,
+            "sensitivity": self.sensitivity,
+            "statement_kind": self.statement_kind,
         }
         return d
 
@@ -120,6 +136,14 @@ class ResultCandidate:
             actor_type=payload.get("actor_type", ""),
             confidence=payload.get("confidence", 1.0),
             source_trace=payload.get("source_trace") or {},
+            is_suppressed=bool(payload.get("is_suppressed", False)),
+            is_superseded=bool(payload.get("is_superseded", False)),
+            supersedes_id=payload.get("supersedes_id", "") or "",
+            superseded_by=payload.get("superseded_by", "") or "",
+            subject=payload.get("subject", "") or "",
+            purpose=payload.get("purpose", "") or "",
+            sensitivity=payload.get("sensitivity", "standard") or "standard",
+            statement_kind=payload.get("statement_kind", "user") or "user",
         )
 
     @classmethod
@@ -158,6 +182,12 @@ class ResultCandidate:
             source=RetrievalSource.BM25,
             actor_id=hit.get("actor_id", ""),
             actor_type=hit.get("actor_type", ""),
+            is_suppressed=bool(hit.get("is_suppressed", False)),
+            supersedes_id=hit.get("supersedes_id", "") or "",
+            subject=hit.get("subject", "") or "",
+            purpose=hit.get("purpose", "") or "",
+            sensitivity=hit.get("sensitivity", "standard") or "standard",
+            statement_kind=hit.get("statement_kind", "user") or "user",
         )
 
     def update_from_payload(self, payload: dict) -> None:
@@ -183,3 +213,11 @@ class ResultCandidate:
         self.actor_type = payload.get("actor_type", self.actor_type)
         self.confidence = payload.get("confidence", self.confidence)
         self.source_trace = payload.get("source_trace") or self.source_trace
+        self.is_suppressed = bool(payload.get("is_suppressed", self.is_suppressed))
+        self.is_superseded = bool(payload.get("is_superseded", self.is_superseded))
+        self.supersedes_id = payload.get("supersedes_id", self.supersedes_id) or ""
+        self.superseded_by = payload.get("superseded_by", self.superseded_by) or ""
+        self.subject = payload.get("subject", self.subject) or ""
+        self.purpose = payload.get("purpose", self.purpose) or ""
+        self.sensitivity = payload.get("sensitivity", self.sensitivity) or "standard"
+        self.statement_kind = payload.get("statement_kind", self.statement_kind) or "user"

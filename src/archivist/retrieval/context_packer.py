@@ -59,6 +59,9 @@ class PackedContext:
     naive_tokens: int = 0
     """Total tokens if every result were returned at L2 (baseline for savings calculation)."""
 
+    dropped_sources: list[dict] = field(default_factory=list)
+    """Original result dicts that were dropped due to budget exhaustion."""
+
 
 def pack_context(
     results: list[dict],
@@ -134,6 +137,7 @@ def _pack_greedy(
     """Single-pass greedy packing: include results at *prefer_tier* until budget exhausted."""
     budget = 0
     packed: list[dict] = []
+    dropped_sources: list[dict] = []
     tier_dist: dict[str, int] = {}
     dropped = 0
     naive_total = _naive_l2_tokens(results)
@@ -144,6 +148,7 @@ def _pack_greedy(
         toks = count_tokens(text)
         if budget + toks > max_tokens and i >= min_full:
             dropped += 1
+            dropped_sources.append(r)
             continue
         out = dict(r)
         out["tier_text"] = text
@@ -162,6 +167,7 @@ def _pack_greedy(
         tier_distribution=tier_dist,
         token_savings_pct=savings,
         naive_tokens=naive_total,
+        dropped_sources=dropped_sources,
     )
 
 
@@ -225,11 +231,13 @@ def _pack_adaptive(
 
     # Assemble output — drop slots that have no text (budget entirely exhausted)
     packed: list[dict] = []
+    dropped_sources: list[dict] = []
     dropped = 0
     tier_dist: dict[str, int] = {}
     for slot in slots:
         if not slot["text"]:
             dropped += 1
+            dropped_sources.append(slot["result"])
             continue
         out = dict(slot["result"])
         out["tier_text"] = slot["text"]
@@ -248,4 +256,5 @@ def _pack_adaptive(
         tier_distribution=tier_dist,
         token_savings_pct=savings,
         naive_tokens=naive_total,
+        dropped_sources=dropped_sources,
     )

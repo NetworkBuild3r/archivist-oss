@@ -70,8 +70,6 @@ async def test_get_graph_write_lock_rebinds_when_loop_changes():
     """
     from archivist.storage import sqlite_pool as _sp
 
-    current_loop = asyncio.get_running_loop()
-
     # Build a dummy "stale" lock whose _loop points to a different (closed) loop.
     stale_loop = asyncio.new_event_loop()
     stale_loop.close()

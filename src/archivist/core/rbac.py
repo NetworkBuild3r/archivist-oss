@@ -47,11 +47,18 @@ _config: RBACConfig | None = None
 _permissive_fallback = False
 
 
-def load_config(path: str = NAMESPACES_CONFIG_PATH) -> RBACConfig:
-    """Load namespace + RBAC config from YAML. Falls back to permissive mode on error."""
+def load_config(path: str | None = None) -> RBACConfig:
+    """Load namespace + RBAC config from YAML.
+
+    When *path* is empty/unset, runs in permissive mode (documented single-user /
+    local-dev default). When *path* is explicitly configured but unreadable,
+    malformed, or non-mapping YAML, fails closed (denies all access) so a
+    typo or broken config mount never silently disables RBAC (SEC-4, MIN-3).
+    """
     global _config, _permissive_fallback
 
-    if not (path or "").strip():
+    effective_path = NAMESPACES_CONFIG_PATH if path is None else path
+    if not (effective_path or "").strip():
         logger.info(
             "RBAC: NAMESPACES_CONFIG_PATH not set — permissive mode (no namespace ACL file)",
         )
@@ -60,15 +67,25 @@ def load_config(path: str = NAMESPACES_CONFIG_PATH) -> RBACConfig:
         return _config
 
     try:
-        with open(path) as f:
+        with open(effective_path) as f:
             raw = yaml.safe_load(f)
     except Exception as e:
-        logger.warning(
-            "Failed to load namespace config from %s: %s — FALLING BACK TO PERMISSIVE MODE",
-            path,
+        logger.error(
+            "SECURITY: Failed to load namespace config from %s: %s — FAILING CLOSED (denying all access)",
+            effective_path,
             e,
         )
-        _permissive_fallback = True
+        _permissive_fallback = False
+        _config = RBACConfig()
+        return _config
+
+    if not isinstance(raw, dict):
+        logger.error(
+            "SECURITY: Namespace config %s must be a YAML mapping (got %s) — FAILING CLOSED",
+            effective_path,
+            type(raw).__name__,
+        )
+        _permissive_fallback = False
         _config = RBACConfig()
         return _config
 
@@ -111,7 +128,7 @@ def load_config(path: str = NAMESPACES_CONFIG_PATH) -> RBACConfig:
 def get_config() -> RBACConfig:
     global _config
     if _config is None:
-        load_config()
+        return load_config()
     return _config
 
 
@@ -179,10 +196,10 @@ def check_access(agent_id: str, action: str, namespace: str) -> AccessPolicy:
     should make to self-correct), and ``similar_namespaces`` (fuzzy matches to
     the requested namespace) on every denial.
     """
+    cfg = get_config()
     if _permissive_fallback:
         return AccessPolicy(allowed=True, reason="permissive fallback — config not loaded")
 
-    cfg = get_config()
     ns = cfg.namespaces.get(namespace)
     if ns is None:
         all_ns = list(cfg.namespaces.keys())
@@ -259,12 +276,14 @@ def filter_agents_for_read(
 
 
 def is_permissive_mode() -> bool:
-    """True when namespaces.yaml failed to load and all access is allowed."""
+    """True when NAMESPACES_CONFIG_PATH is unset and all access is allowed."""
+    get_config()
     return _permissive_fallback
 
 
 def can_read_agent_memory(caller_agent_id: str, target_agent_id: str) -> bool:
     """True if caller may read memories/facts attributed to target_agent_id."""
+    get_config()
     if _permissive_fallback:
         return True
     if not target_agent_id:

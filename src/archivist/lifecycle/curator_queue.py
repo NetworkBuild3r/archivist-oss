@@ -5,16 +5,20 @@ then drained by a periodic applicator that runs during idle periods. This avoids
 GRAPH_WRITE_LOCK contention on the hot path.
 """
 
+import asyncio
 import json
 import logging
 import time
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import archivist.core.metrics as m
-from archivist.storage.graph import schema_guard
+from archivist.storage.graph import _is_postgres, schema_guard
 
 logger = logging.getLogger("archivist.curator_queue")
+
+# Strong references for fire-and-forget gauge updates so tasks are never GC'd (MIN-7).
+_pending_tasks: set[asyncio.Task] = set()
 
 VALID_OP_TYPES = {
     "merge_memory",
@@ -61,19 +65,76 @@ async def enqueue(op_type: str, payload: dict) -> str:
     return op_id
 
 
-async def drain(limit: int = 50) -> list[dict]:
-    """Apply pending operations up to limit. Returns list of applied ops."""
+async def _sweep_orphaned_processing(orphan_timeout_seconds: int = 300) -> int:
+    """Reset curator_queue rows stuck in 'processing' past *orphan_timeout_seconds*."""
+    from archivist.storage.sqlite_pool import pool
+
+    cutoff = (datetime.now(UTC) - timedelta(seconds=orphan_timeout_seconds)).isoformat()
+    async with pool.write() as conn:
+        stuck = await conn.fetchall(
+            "SELECT id FROM curator_queue "
+            "WHERE status = 'processing' AND COALESCE(applied_at, created_at) < ?",
+            (cutoff,),
+        )
+        if not stuck:
+            return 0
+        ids = [r[0] for r in stuck]
+        placeholders = ",".join("?" for _ in ids)
+        await conn.execute(
+            f"UPDATE curator_queue SET status = 'pending', applied_at = NULL "
+            f"WHERE id IN ({placeholders}) AND status = 'processing'",
+            ids,
+        )
+    logger.warning("curator_queue: recovered %d orphaned 'processing' ops", len(ids))
+    return len(ids)
+
+
+async def drain(limit: int = 50, orphan_timeout_seconds: int = 300) -> list[dict]:
+    """Apply pending operations up to limit. Returns list of applied ops.
+
+    Atomically claims pending rows as ``status='processing'`` before executing
+    them so overlapping drains cannot double-apply the same operation (MIN-9).
+    Uses ``FOR UPDATE SKIP LOCKED ... RETURNING`` on Postgres for multi-worker
+    safety and sweeps stale crashed ``'processing'`` rows before claiming.
+    """
     from archivist.storage.sqlite_pool import pool
 
     _ensure_schema()
     start = time.time()
     applied = []
+    claim_ts = datetime.now(UTC).isoformat()
 
-    async with pool.read() as conn:
-        rows = await conn.fetchall(
-            "SELECT id, op_type, payload FROM curator_queue WHERE status = 'pending' ORDER BY created_at ASC LIMIT ?",
-            (limit,),
-        )
+    await _sweep_orphaned_processing(orphan_timeout_seconds=orphan_timeout_seconds)
+
+    async with pool.write() as conn:
+        if _is_postgres():
+            rows = await conn.fetchall(
+                "UPDATE curator_queue "
+                "SET status = 'processing', applied_at = ? "
+                "WHERE id IN ("
+                "    SELECT id FROM curator_queue "
+                "    WHERE status = 'pending' "
+                "    ORDER BY created_at ASC "
+                "    LIMIT ? "
+                "    FOR UPDATE SKIP LOCKED"
+                ") "
+                "RETURNING id, op_type, payload",
+                (claim_ts, limit),
+            )
+        else:
+            rows = await conn.fetchall(
+                "SELECT id, op_type, payload FROM curator_queue "
+                "WHERE status = 'pending' ORDER BY created_at ASC LIMIT ?",
+                (limit,),
+            )
+            if rows:
+                claim_ids = [r[0] for r in rows]
+                placeholders = ",".join("?" for _ in claim_ids)
+                await conn.execute(
+                    f"UPDATE curator_queue SET status = 'processing', applied_at = ? "
+                    f"WHERE id IN ({placeholders}) AND status = 'pending'",
+                    [claim_ts, *claim_ids],
+                )
 
     now = datetime.now(UTC).isoformat()
 
@@ -228,7 +289,7 @@ async def _apply_delete(payload: dict):
     if not memory_ids:
         return
 
-    _maybe_pre_prune_snapshot()
+    await asyncio.to_thread(_maybe_pre_prune_snapshot)
 
     for mid in memory_ids:
         try:
@@ -250,12 +311,24 @@ async def _apply_consolidate_tips(payload: dict):
         if consolidated:
             tip_id = str(uuid.uuid4())
             now = datetime.now(UTC).isoformat()
+            trajectory_id = (consolidated.get("trajectory_id") or "").strip()
+            if not trajectory_id and original_ids:
+                placeholders = ",".join("?" for _ in original_ids)
+                row = await conn.fetchone(
+                    f"SELECT trajectory_id FROM tips WHERE id IN ({placeholders}) "
+                    "AND trajectory_id IS NOT NULL AND trajectory_id != '' LIMIT 1",
+                    original_ids,
+                )
+                if row:
+                    trajectory_id = str(row["trajectory_id"])
+            if not trajectory_id:
+                trajectory_id = "consolidated"
             await conn.execute(
                 "INSERT INTO tips (id, trajectory_id, agent_id, category, tip_text, context, negative_example, created_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     tip_id,
-                    consolidated.get("trajectory_id", "consolidated"),
+                    trajectory_id,
                     consolidated.get("agent_id", "curator"),
                     consolidated.get("category", "strategy"),
                     consolidated.get("tip", ""),
@@ -316,8 +389,6 @@ async def stats() -> dict:
 
 def _update_depth_gauge():
     """Update the Prometheus gauge for queue depth (best-effort, non-blocking)."""
-    import asyncio
-
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
@@ -330,4 +401,6 @@ def _update_depth_gauge():
         except Exception:
             pass
 
-    loop.create_task(_gauge())  # noqa: RUF006 — fire-and-forget depth gauge update
+    task = loop.create_task(_gauge())
+    _pending_tasks.add(task)
+    task.add_done_callback(_pending_tasks.discard)

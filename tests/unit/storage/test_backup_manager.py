@@ -243,6 +243,7 @@ class TestFTSUpsertBatching:
             return None
 
         with (
+            patch("archivist.storage.backup_manager.BACKUP_DIR", str(tmp_path)),
             patch("archivist.core.config.BM25_ENABLED", True),
             patch(
                 "archivist.storage.collection_router.ensure_collection", return_value="test_coll"
@@ -268,6 +269,7 @@ class TestFTSUpsertBatching:
         ndjson_path.write_text("")
 
         with (
+            patch("archivist.storage.backup_manager.BACKUP_DIR", str(tmp_path)),
             patch("archivist.core.config.BM25_ENABLED", True),
             patch("asyncio.run") as mock_run,
         ):

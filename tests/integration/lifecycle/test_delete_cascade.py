@@ -354,7 +354,7 @@ class TestDeleteMemoryComplete:
         """log_memory_event is called with action='delete' and full metadata."""
         from archivist.lifecycle.memory_lifecycle import delete_memory_complete
 
-        result = await delete_memory_complete("m-audit", "ns")
+        await delete_memory_complete("m-audit", "ns")
 
         mock_audit.assert_called_once()
         kwargs = mock_audit.call_args[1]
@@ -656,7 +656,7 @@ class TestOrphanSweeper:
         ):
             from archivist.lifecycle.cascade import sweep_orphans
 
-            result = await sweep_orphans()
+            await sweep_orphans()
 
         conn = get_db()
         count = conn.execute(
@@ -760,7 +760,7 @@ class TestMergeUsesLifecycle:
         ):
             from archivist.lifecycle.merge import merge_memories
 
-            result = await merge_memories(["id1", "id2"], "semantic", "agent", "ns")
+            await merge_memories(["id1", "id2"], "semantic", "agent", "ns")
 
         assert mock_del.call_count == 2
 
@@ -2223,6 +2223,7 @@ class TestSoftDeleteMemory:
             ),
             None,
         )
+        assert primary_call is not None
         assert any(
             kw.get("payload", {}).get("deleted") is True for c in calls for kw in [c.kwargs]
         ), "deleted=True must be set via set_payload"

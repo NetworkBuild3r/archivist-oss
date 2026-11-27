@@ -9,7 +9,7 @@ plus timing and the final retrieval_trace dict.
 import json
 import logging
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from archivist.core.config import TRAJECTORY_EXPORT_ENABLED
 from archivist.storage.graph import schema_guard
@@ -149,29 +149,18 @@ async def get_retrieval_logs(
 
 async def get_retrieval_stats(agent_id: str = "", window_days: int = 7) -> dict:
     """Aggregate retrieval statistics for monitoring."""
-    from archivist.storage.graph import _is_postgres
     from archivist.storage.sqlite_pool import pool
 
     _ensure_schema()
 
+    cutoff_iso = (datetime.now(UTC) - timedelta(days=int(window_days))).isoformat()
     agent_filter = ""
+    params_main: list = [cutoff_iso]
+    params_agents: list = [cutoff_iso]
     if agent_id:
         agent_filter = " AND agent_id = ?"
-
-    if _is_postgres():
-        date_expr = f"NOW() - INTERVAL '{window_days} days'"
-        params_main: list = []
-        params_agents: list = []
-        if agent_id:
-            params_main.append(agent_id)
-            params_agents.append(agent_id)
-    else:
-        date_expr = "datetime('now', ?)"
-        params_main = [f"-{window_days} days"]
-        params_agents = [f"-{window_days} days"]
-        if agent_id:
-            params_main.append(agent_id)
-            params_agents.append(agent_id)
+        params_main.append(agent_id)
+        params_agents.append(agent_id)
 
     async with pool.read() as conn:
         row = await conn.fetchone(
@@ -183,7 +172,7 @@ async def get_retrieval_stats(agent_id: str = "", window_days: int = 7) -> dict:
                     MIN(duration_ms) as min_duration_ms,
                     MAX(duration_ms) as max_duration_ms
                 FROM retrieval_logs
-                WHERE created_at >= {date_expr}{agent_filter}""",
+                WHERE created_at >= ?{agent_filter}""",
             params_main,
         )
         result = dict(row) if row else {}
@@ -195,7 +184,7 @@ async def get_retrieval_stats(agent_id: str = "", window_days: int = 7) -> dict:
         top_rows = await conn.fetchall(
             f"""SELECT agent_id, COUNT(*) as cnt
                 FROM retrieval_logs
-                WHERE created_at >= {date_expr}{agent_filter}
+                WHERE created_at >= ?{agent_filter}
                 GROUP BY agent_id ORDER BY cnt DESC LIMIT 10""",
             params_agents,
         )
@@ -214,25 +203,19 @@ async def get_token_savings_stats(agent_id: str = "", window_days: int = 7) -> d
     Returns averages, percentiles, per-policy breakdown, and daily token
     savings totals for the given window.
     """
-    from archivist.storage.graph import _is_postgres
     from archivist.storage.sqlite_pool import pool
 
     _ensure_schema()
 
+    cutoff_iso = (datetime.now(UTC) - timedelta(days=int(window_days))).isoformat()
     agent_filter = ""
     agent_params: list = []
     if agent_id:
         agent_filter = " AND agent_id = ?"
         agent_params = [agent_id]
 
-    if _is_postgres():
-        date_expr = f"NOW() - INTERVAL '{window_days} days'"
-        params_base: list = [] + agent_params
-        params_policy: list = [] + agent_params
-    else:
-        date_expr = "datetime('now', ?)"
-        params_base = [f"-{window_days} days"] + agent_params
-        params_policy = [f"-{window_days} days"] + agent_params
+    params_base: list = [cutoff_iso] + agent_params
+    params_policy: list = [cutoff_iso] + agent_params
 
     async with pool.read() as conn:
         row = await conn.fetchone(
@@ -249,7 +232,7 @@ async def get_token_savings_stats(agent_id: str = "", window_days: int = 7) -> d
                     AVG(tokens_naive) as avg_tokens_naive,
                     SUM(CASE WHEN savings_pct IS NOT NULL THEN 1 ELSE 0 END) as rows_with_savings
                 FROM retrieval_logs
-                WHERE created_at >= {date_expr}
+                WHERE created_at >= ?
                   AND tokens_naive IS NOT NULL{agent_filter}""",
             params_base,
         )
@@ -263,7 +246,7 @@ async def get_token_savings_stats(agent_id: str = "", window_days: int = 7) -> d
                     SUM(CASE WHEN tokens_naive > 0
                              THEN tokens_naive - tokens_returned ELSE 0 END) as tokens_saved
                 FROM retrieval_logs
-                WHERE created_at >= {date_expr}
+                WHERE created_at >= ?
                   AND pack_policy IS NOT NULL
                   AND pack_policy != ''{agent_filter}
                 GROUP BY pack_policy
