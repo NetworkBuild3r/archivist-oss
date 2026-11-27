@@ -24,6 +24,8 @@ markers = [
     "coach_core: coach-path CI evals (store/index/search/get_context, ack SLO, namespace isolation)",
     # Agentic memory eval gym (INIT-006/SPEC-002) — sibling to coach_core; Memory→Action
     "agentic_memory: multi-session Memory→Action CI evals (omit-store / poisoned-memory; ADR-006)",
+    # Continual Recursive Self-Improvement + Self-Improvement Memory (INIT-001/SPEC-001)
+    "crsi: CRSI harness loop & SIM tests (deterministic, no paid APIs)",
 ]
 addopts = ["--strict-markers", "--tb=short", "-q"]
 
