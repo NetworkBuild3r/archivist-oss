@@ -29,12 +29,15 @@ from archivist.crsi.config import CrsiConfig, MemoryMode, load_config
 from archivist.crsi.evaluator.runner import FrozenEvaluator
 from archivist.crsi.evaluator.splits import SplitViolationError, TaskDataset, load_private_dataset
 from archivist.crsi.evaluator.types import EvaluationReport
+from archivist.crsi.guards.heldout_firewall import HeldOutLeakError
 from archivist.crsi.guards.path_policy import PathPolicyGuard
 from archivist.crsi.guards.secrets import SecretLeakError
-from archivist.crsi.llm.base import RoutedLLMClient
+from archivist.crsi.llm.base import LLMError, RoutedLLMClient
+from archivist.crsi.llm.budget import PaidApiNotEnabledError
 from archivist.crsi.llm.fake import FakeScriptedAdapter
 from archivist.crsi.loop.engine import CrsiEngine, WorktreeEvaluatorFn
-from archivist.crsi.loop.state import RunState, load_run_state
+from archivist.crsi.loop.state import RunState, load_run_state, validate_run_id
+from archivist.crsi.loop.worktree import GitWorktreeError
 from archivist.crsi.sim.models import SimDocument
 from archivist.crsi.sim.render import format_sim_summary
 from archivist.crsi.sim.store import SimStore
@@ -299,6 +302,19 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         return 1
 
     assert cfg is not None and dataset is not None
+    for role_name in ("policy", "proposer", "selector"):
+        role_cfg = cfg.models.for_role(cast(Literal["policy", "proposer", "selector"], role_name))
+        if (
+            role_cfg.is_paid_provider()
+            and role_cfg.input_usd_per_1m == 0.0
+            and role_cfg.output_usd_per_1m == 0.0
+        ):
+            print(
+                f"WARNING: Paid role {role_name!r} ({role_cfg.provider}:{role_cfg.model}) has "
+                "input_usd_per_1m=0.0 and output_usd_per_1m=0.0; max_spend_usd will not accrue "
+                "until token rates are configured.",
+                file=sys.stderr,
+            )
     print(
         f"CRSI validation OK: project={cfg.project_name} domain={cfg.domain} "
         f"evolve={len(dataset.evolve_ids())} heldout={len(dataset.heldout_ids())} "
@@ -472,15 +488,21 @@ def _cmd_run(args: argparse.Namespace) -> int:
             return 2
 
     state_dir = repo_root / effective_cfg.paths.state_dir
-    if args.run_id:
-        run_id = args.run_id
-    elif not args.new:
-        latest = _find_latest_run_state(state_dir)
-        run_id = (
-            latest[0] if latest is not None else datetime.now(UTC).strftime("run-%Y%m%d-%H%M%S")
-        )
-    else:
-        run_id = datetime.now(UTC).strftime("run-%Y%m%d-%H%M%S")
+    try:
+        if args.run_id:
+            run_id = validate_run_id(args.run_id)
+        elif not args.new:
+            latest = _find_latest_run_state(state_dir)
+            run_id = (
+                validate_run_id(latest[0])
+                if latest is not None
+                else datetime.now(UTC).strftime("run-%Y%m%d-%H%M%S")
+            )
+        else:
+            run_id = datetime.now(UTC).strftime("run-%Y%m%d-%H%M%S")
+    except ValueError as exc:
+        print(f"Invalid --run-id: {exc}", file=sys.stderr)
+        return 2
 
     sim_store: SimStore | None = None
     force_rebaseline = False
@@ -489,7 +511,11 @@ def _cmd_run(args: argparse.Namespace) -> int:
         if not carry_path.is_file():
             print(f"--carry-from SIM file not found: {carry_path}", file=sys.stderr)
             return 1
-        source_sim = SimStore.load(carry_path)
+        try:
+            source_sim = SimStore.load(carry_path)
+        except (ValidationError, ValueError, json.JSONDecodeError, SecretLeakError) as exc:
+            print(f"Failed to load --carry-from SIM ({carry_path}): {exc}", file=sys.stderr)
+            return 1
         sim_store = source_sim.carry_over(
             into_arm=run_id,
             source_arm=carry_path.parent.name or "carried-source",
@@ -522,13 +548,25 @@ def _cmd_run(args: argparse.Namespace) -> int:
         private_dir=private_dir,
     )
 
-    result = asyncio.run(
-        engine.run(
-            run_id=run_id,
-            resume=not args.new,
-            force_rebaseline=force_rebaseline,
+    try:
+        result = asyncio.run(
+            engine.run(
+                run_id=run_id,
+                resume=not args.new,
+                force_rebaseline=force_rebaseline,
+            )
         )
-    )
+    except (
+        PaidApiNotEnabledError,
+        HeldOutLeakError,
+        SecretLeakError,
+        GitWorktreeError,
+        LLMError,
+        ValidationError,
+        ValueError,
+    ) as exc:
+        print(f"CRSI run failed: {exc}", file=sys.stderr)
+        return 2
     # Mirror latest SIM to configured repo sim_path only if it's inside .crsi/ (never touches main git commits).
     print(f"CRSI Run {result.run_id} [{result.status}]")
     print(
@@ -555,12 +593,21 @@ def _cmd_status(args: argparse.Namespace) -> int:
         if args.config
         else (repo_root / ".crsi" / "config.toml")
     )
-    cfg = load_config(config_path) if config_path.is_file() else CrsiConfig()
-    state_dir = repo_root / cfg.paths.state_dir
+    try:
+        cfg = load_config(config_path) if config_path.is_file() else CrsiConfig()
+    except (SecretLeakError, ValidationError, ValueError) as exc:
+        print(f"Failed to load config ({config_path}): {exc}", file=sys.stderr)
+        return 1
+    state_dir = (repo_root / cfg.paths.state_dir).resolve()
 
     if args.run_id:
-        state_path = state_dir / args.run_id / "run_state.json"
-        if not state_path.is_file():
+        try:
+            safe_run_id = validate_run_id(args.run_id)
+        except ValueError as exc:
+            print(f"Invalid --run-id: {exc}", file=sys.stderr)
+            return 1
+        state_path = (state_dir / safe_run_id / "run_state.json").resolve()
+        if not state_path.is_relative_to(state_dir) or not state_path.is_file():
             print(f"Run state not found for run_id={args.run_id!r}: {state_path}", file=sys.stderr)
             return 1
     else:
@@ -570,7 +617,11 @@ def _cmd_status(args: argparse.Namespace) -> int:
             return 1
         _, state_path = latest
 
-    state: RunState = load_run_state(state_path)
+    try:
+        state: RunState = load_run_state(state_path)
+    except (ValidationError, ValueError, json.JSONDecodeError) as exc:
+        print(f"Failed to read run_state.json ({state_path}): {exc}", file=sys.stderr)
+        return 1
     spend = state.spend_snapshot or {}
     payload: dict[str, Any] = {
         "run_id": state.run_id,
@@ -620,16 +671,29 @@ def _resolve_sim_path(args: argparse.Namespace) -> Path:
     )
     cfg = load_config(config_path) if config_path.is_file() else CrsiConfig()
     if getattr(args, "run_id", None):
-        return repo_root / cfg.paths.state_dir / args.run_id / "sim.json"
+        safe_run_id = validate_run_id(args.run_id)
+        state_dir = (repo_root / cfg.paths.state_dir).resolve()
+        target = (state_dir / safe_run_id / "sim.json").resolve()
+        if not target.is_relative_to(state_dir):
+            raise ValueError(f"SIM path escapes state_dir for run_id={args.run_id!r}")
+        return target
     return repo_root / cfg.paths.sim_path
 
 
 def _cmd_show_sim(args: argparse.Namespace) -> int:
-    sim_path = _resolve_sim_path(args)
+    try:
+        sim_path = _resolve_sim_path(args)
+    except (SecretLeakError, ValidationError, ValueError) as exc:
+        print(f"Failed to resolve SIM path: {exc}", file=sys.stderr)
+        return 1
     if not sim_path.is_file():
         print(f"SIM file not found: {sim_path}", file=sys.stderr)
         return 1
-    store = SimStore.load(sim_path)
+    try:
+        store = SimStore.load(sim_path)
+    except (ValidationError, ValueError, json.JSONDecodeError, SecretLeakError) as exc:
+        print(f"Failed to load SIM ({sim_path}): {exc}", file=sys.stderr)
+        return 1
     if args.json:
         print(json.dumps(store.doc.model_dump(mode="json"), indent=2, sort_keys=False))
         return 0
@@ -638,17 +702,21 @@ def _cmd_show_sim(args: argparse.Namespace) -> int:
 
 
 def _cmd_sim_merge(args: argparse.Namespace) -> int:
-    sim_path = _resolve_sim_path(args)
+    try:
+        sim_path = _resolve_sim_path(args)
+    except (SecretLeakError, ValidationError, ValueError) as exc:
+        print(f"Failed to resolve SIM path: {exc}", file=sys.stderr)
+        return 1
     if not sim_path.is_file():
         print(f"SIM file not found: {sim_path}", file=sys.stderr)
         return 1
-    store = SimStore.load(sim_path)
     try:
+        store = SimStore.load(sim_path)
         merged = store.merge_entries(args.src_id, args.dst_id)
-    except (KeyError, ValueError) as exc:
+        store.save(sim_path)
+    except (KeyError, ValueError, ValidationError, json.JSONDecodeError, SecretLeakError) as exc:
         print(f"SIM merge failed: {exc}", file=sys.stderr)
         return 1
-    store.save(sim_path)
     print(
         f"Merged {args.src_id} -> {merged.id} ({len(merged.attempts)} attempt(s) preserved); "
         f"aliases={store.doc.aliases}"

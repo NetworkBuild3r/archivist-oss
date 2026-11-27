@@ -176,3 +176,35 @@ def test_validate_configuration_detects_editable_scorer_and_frozen_overlap(tmp_p
     )
     assert any("pyproject.toml" in e for e in errors)
     assert any("harness/scorer.py" in e for e in errors)
+
+
+def test_maj1_dotfile_symlink_bypass_validate_config_and_frozen_glob_accuracy(tmp_path: Path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("SECRET", encoding="utf-8")
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".harness").symlink_to(outside)
+
+    guard = PathPolicyGuard(repo_root=repo, editable_patterns=("harness/**",))
+    # Leading dots must NOT be stripped into 'harness/secret.txt'.
+    dot_res = guard.check_path(".harness/secret.txt")
+    assert dot_res.allowed is False
+    double_dot_res = guard.check_path("..harness/secret.txt")
+    assert double_dot_res.allowed is False
+
+    # validate_configuration must catch leading '/' and '../' patterns.
+    bad_cfg_guard = PathPolicyGuard(
+        repo_root=repo,
+        editable_patterns=("/etc/passwd", "../outside/**"),
+    )
+    cfg_errors = bad_cfg_guard.validate_configuration()
+    assert any("/etc/passwd" in e for e in cfg_errors)
+    assert any("../outside/**" in e for e in cfg_errors)
+
+    # Non-dot 'crsi/**' must NOT falsely match frozen '.crsi/**'; '.crsi/**' still denied.
+    crsi_guard = PathPolicyGuard(repo_root=repo, editable_patterns=("crsi/**",))
+    assert crsi_guard.check_path("crsi/my_harness.py").allowed is True
+    assert crsi_guard.check_path(".crsi/sim.json").allowed is False
+    assert crsi_guard.check_path("./crsi/my_harness.py").allowed is True

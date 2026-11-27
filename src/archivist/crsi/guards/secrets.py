@@ -111,6 +111,12 @@ def sanitize_env(
     return cleaned
 
 
+_AUTO_HARVEST_MIN_LEN = 8
+_NON_SECRET_ENV_SENTINELS: frozenset[str] = frozenset(
+    {"true", "false", "none", "null", "enabled", "disabled", "localhost", "127.0.0.1"}
+)
+
+
 class SecretRedactor:
     """Scrubs known secret values and common credential patterns from text and objects."""
 
@@ -142,7 +148,12 @@ class SecretRedactor:
                 values.append(val)
         if include_common_secret_vars:
             for key, val in source.items():
-                if val and SECRET_ENV_NAME_RE.search(key):
+                if (
+                    val
+                    and SECRET_ENV_NAME_RE.search(key)
+                    and len(val) >= _AUTO_HARVEST_MIN_LEN
+                    and val.strip().lower() not in _NON_SECRET_ENV_SENTINELS
+                ):
                     values.append(val)
         return cls(secrets=values)
 

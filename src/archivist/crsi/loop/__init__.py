@@ -12,7 +12,13 @@ from archivist.crsi.loop.legal_filter import (
 from archivist.crsi.loop.manifest import CandidateProposal, ChangeManifest
 from archivist.crsi.loop.proposer import InvalidProposal, ProposalBatch, ProposerAgent
 from archivist.crsi.loop.selector import PickDecision, ScreenDecision, SelectorAgent
-from archivist.crsi.loop.state import RoundPhase, RunState, load_run_state, save_run_state
+from archivist.crsi.loop.state import (
+    RoundPhase,
+    RunState,
+    load_run_state,
+    save_run_state,
+    validate_run_id,
+)
 from archivist.crsi.loop.worktree import GitWorktreeError, GitWorktreeManager
 
 __all__ = [
@@ -39,4 +45,5 @@ __all__ = [
     "interlock_is_weakened_or_removed",
     "load_run_state",
     "save_run_state",
+    "validate_run_id",
 ]

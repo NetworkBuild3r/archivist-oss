@@ -191,6 +191,7 @@ class ProposerAgent:
 
         proposals: list[CandidateProposal] = []
         invalid: list[InvalidProposal] = []
+        seen_ids: set[str] = set()
         for idx, item in enumerate(raw_list[:k_candidates], start=1):
             fallback_id = f"r{round_num}-c{idx}"
             if not isinstance(item, dict):
@@ -201,7 +202,13 @@ class ProposerAgent:
                     )
                 )
                 continue
-            cand_id = str(item.get("candidate_id") or fallback_id)
+            base_id = str(item.get("candidate_id") or fallback_id).strip() or fallback_id
+            cand_id = base_id
+            suffix = 2
+            while cand_id in seen_ids:
+                cand_id = f"{base_id}-{suffix}"
+                suffix += 1
+            seen_ids.add(cand_id)
             normalized = dict(item)
             normalized["candidate_id"] = cand_id
             try:

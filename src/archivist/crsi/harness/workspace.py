@@ -59,7 +59,9 @@ class WorkspaceManager:
         if pure.is_absolute() or ".." in pure.parts:
             raise WorkspaceSecurityError(f"Path traversal is forbidden in workspace: {raw!r}")
 
-        norm_rel = pure.as_posix().lstrip("./")
+        norm_rel = pure.as_posix()
+        while norm_rel.startswith("./"):
+            norm_rel = norm_rel[2:]
         if not norm_rel or norm_rel == ".":
             raise WorkspaceSecurityError(f"Invalid relative workspace path: {raw!r}")
 

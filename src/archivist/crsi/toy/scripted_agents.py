@@ -130,6 +130,8 @@ def seed_toy_repo(
 def load_toy_harness_from_worktree(
     wt_path: Path,
     llm_client: LLMClient,
+    *,
+    command_timeout_s: float = 30.0,
 ) -> HarnessProtocol:
     """Dynamically load ``harness/interlock.py`` and ``prompts/system.md`` from ``wt_path``."""
     interlock_path = wt_path / "harness" / "interlock.py"
@@ -164,6 +166,7 @@ def load_toy_harness_from_worktree(
         llm_client=llm_client,
         interlock_factory=_interlock_factory,
         context=SessionContext(system_prompt=system_prompt),
+        command_timeout_s=command_timeout_s,
     )
 
 
@@ -175,10 +178,15 @@ def make_toy_worktree_evaluator(
 ) -> WorktreeEvaluatorFn:
     """Build a ``WorktreeEvaluatorFn`` running ``FrozenEvaluator`` + ``ToyScorer``."""
     scorer = ToyScorer()
+    effective_cmd_timeout = min(30.0, max(0.05, task_timeout_s))
 
     async def _evaluate(wt_path: Path, dataset: TaskDataset, rollouts: int) -> EvaluationReport:
         evaluator = FrozenEvaluator(
-            harness_factory=lambda: load_toy_harness_from_worktree(wt_path, llm_client),
+            harness_factory=lambda: load_toy_harness_from_worktree(
+                wt_path,
+                llm_client,
+                command_timeout_s=effective_cmd_timeout,
+            ),
             scorer=scorer,
             parallelism=parallelism,
             task_timeout_s=task_timeout_s,

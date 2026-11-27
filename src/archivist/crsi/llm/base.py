@@ -127,23 +127,28 @@ class RoutedLLMClient:
         return self._adapters[provider]
 
     async def complete(self, request: LLMRequest) -> LLMResponse:
-        """Route ``request`` by role, enforce budget gates, and invoke the adapter."""
+        """Route ``request`` by role, atomically reserve budget, and invoke the adapter."""
         role_cfg = self.config.models.for_role(request.role)
-        self.spend_tracker.check_before_call(role_cfg, request)
+        reservation = self.spend_tracker.reserve_before_call(role_cfg, request)
         adapter = self._adapters[role_cfg.provider]
 
         try:
             response = await adapter.complete(request, role_cfg)
         except LLMError:
+            self.spend_tracker.release_reservation(reservation)
             raise
-        except Exception as exc:
-            safe_msg = self.redactor.redact_text(str(exc))
-            raise LLMError(
-                f"LLM call failed for role={request.role!r} provider={role_cfg.provider!r}: "
-                f"{safe_msg}"
-            ) from None
+        except BaseException as exc:
+            self.spend_tracker.release_reservation(reservation)
+            if isinstance(exc, Exception):
+                safe_msg = self.redactor.redact_text(str(exc))
+                raise LLMError(
+                    f"LLM call failed for role={request.role!r} provider={role_cfg.provider!r}: "
+                    f"{safe_msg}"
+                ) from None
+            raise
 
-        self.spend_tracker.record_call(
+        self.spend_tracker.commit_reservation(
+            reservation,
             role=request.role,
             prompt_tokens=response.prompt_tokens,
             completion_tokens=response.completion_tokens,

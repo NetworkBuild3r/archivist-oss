@@ -78,10 +78,18 @@ class PathCheckResult:
     reason: str | None = None
 
 
+def _strip_curdir_prefix(posix_path: str) -> str:
+    """Strip only repeated leading ``'./'`` segments (preserving dotfiles and leading '/')."""
+    cleaned = posix_path
+    while cleaned.startswith("./"):
+        cleaned = cleaned[2:]
+    return cleaned
+
+
 @lru_cache(maxsize=512)
 def _compile_glob(pattern: str) -> re.Pattern[str]:
     """Compile a POSIX glob pattern supporting ``*``, ``?``, and ``**`` segments."""
-    norm = pattern.strip().replace("\\", "/").lstrip("./")
+    norm = _strip_curdir_prefix(pattern.strip().replace("\\", "/"))
     if not norm:
         return re.compile(r"^$")
 
@@ -115,8 +123,8 @@ def _compile_glob(pattern: str) -> re.Pattern[str]:
 
 def glob_matches(posix_path: str, pattern: str) -> bool:
     """Return True if ``posix_path`` matches the POSIX glob ``pattern``."""
-    cleaned_path = posix_path.strip().replace("\\", "/").lstrip("./")
-    cleaned_pat = pattern.strip().replace("\\", "/").lstrip("./")
+    cleaned_path = _strip_curdir_prefix(posix_path.strip().replace("\\", "/"))
+    cleaned_pat = _strip_curdir_prefix(pattern.strip().replace("\\", "/"))
     if not cleaned_path or not cleaned_pat:
         return False
     if _compile_glob(cleaned_pat).match(cleaned_path):
@@ -142,14 +150,17 @@ class PathPolicyGuard:
         private_dir: Path | None = None,
     ) -> None:
         self.repo_root = repo_root.resolve()
+        self._raw_editable_patterns: tuple[str, ...] = tuple(
+            p.strip().replace("\\", "/") for p in editable_patterns if p.strip()
+        )
         self.editable_patterns: tuple[str, ...] = tuple(
-            p.strip().replace("\\", "/").lstrip("./") for p in editable_patterns if p.strip()
+            _strip_curdir_prefix(p) for p in self._raw_editable_patterns
         )
         self.private_dir = private_dir.resolve() if private_dir is not None else None
 
         frozen: list[str] = list(SYSTEM_FROZEN_PATTERNS)
         for pat in extra_frozen_patterns:
-            cleaned = pat.strip().replace("\\", "/").lstrip("./")
+            cleaned = _strip_curdir_prefix(pat.strip().replace("\\", "/"))
             if cleaned:
                 frozen.append(cleaned)
         for dyn in dynamic_frozen_paths:
@@ -171,7 +182,8 @@ class PathPolicyGuard:
         pure = PurePosixPath(posix)
         if ".." in pure.parts:
             return None
-        return pure.as_posix().lstrip("./")
+        norm = _strip_curdir_prefix(pure.as_posix())
+        return None if not norm or norm == "." else norm
 
     def _normalize_and_check_containment(
         self, raw_path: str | Path
@@ -201,7 +213,7 @@ class PathPolicyGuard:
                 return None, f"path traversal ('..') is forbidden: {raw_str}"
             if pure.is_absolute():
                 return None, f"absolute path is forbidden: {raw_str}"
-            rel_posix = pure.as_posix().lstrip("./")
+            rel_posix = _strip_curdir_prefix(pure.as_posix())
             if not rel_posix or rel_posix == ".":
                 return None, f"invalid repository-relative path: {raw_str}"
 
@@ -322,12 +334,16 @@ class PathPolicyGuard:
            ``editable_patterns`` (prevents scorer self-modification).
         """
         errors: list[str] = []
-        if not self.editable_patterns:
+        if not self._raw_editable_patterns:
             errors.append("harness.editable must specify at least one editable path or glob.")
 
-        for pat in self.editable_patterns:
-            if pat.startswith("/") or ".." in PurePosixPath(pat).parts:
-                errors.append(f"Invalid editable pattern {pat!r}: must be repo-relative.")
+        for raw_pat in self._raw_editable_patterns:
+            if raw_pat.startswith("/") or ".." in PurePosixPath(raw_pat).parts:
+                errors.append(f"Invalid editable pattern {raw_pat!r}: must be repo-relative.")
+                continue
+            pat = _strip_curdir_prefix(raw_pat)
+            if not pat or pat == ".":
+                errors.append(f"Invalid editable pattern {raw_pat!r}: must not be repo root.")
                 continue
             if not _has_glob_meta(pat):
                 frozen_hit = self._matches_frozen(pat)

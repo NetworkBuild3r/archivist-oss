@@ -218,19 +218,41 @@ def test_sanitize_env_strips_secret_vars():
     assert cleaned == {"PATH": "/usr/bin", "HOME": "/tmp/sandbox", "SAFE_FLAG": "1"}
 
 
+def test_min6_secret_redactor_from_env_ignores_short_boolean_sentinels():
+    redactor = SecretRedactor.from_env(
+        [],
+        environ={
+            "MY_AUTH": "true",
+            "USE_TOKEN": "none",
+            "SHORT_KEY": "12345",
+            "REAL_API_KEY": "real-long-secret-value-9999",
+        },
+        include_common_secret_vars=True,
+    )
+    assert redactor.contains_secret("allow_paid_apis = true; value = none; count = 12345") is False
+    assert redactor.contains_secret("leaked real-long-secret-value-9999") is True
+
+
 def test_zero_imports_from_core_archivist_or_qdrant():
-    """Enforce ADR-006 / GR-LAYER-001 decoupling across src/archivist/crsi/."""
+    """Enforce ADR-006 / GR-LAYER-001 decoupling across src/archivist/crsi/ (incl. relative imports)."""
     crsi_root = Path(__file__).resolve().parents[3] / "src" / "archivist" / "crsi"
     assert crsi_root.is_dir()
     violations: list[str] = []
     for py_file in sorted(crsi_root.rglob("*.py")):
+        rel_parts = py_file.relative_to(crsi_root).parts
+        # Depth of package nesting inside archivist.crsi (e.g. crsi/cli.py -> 1, crsi/sim/store.py -> 2).
+        depth_inside_crsi = len(rel_parts)
         tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 for alias in node.names:
                     if alias.name.startswith(FORBIDDEN_IMPORT_PREFIXES):
                         violations.append(f"{py_file}: import {alias.name}")
-            elif isinstance(node, ast.ImportFrom) and node.module:
-                if node.module.startswith(FORBIDDEN_IMPORT_PREFIXES):
+            elif isinstance(node, ast.ImportFrom):
+                if node.level > depth_inside_crsi:
+                    violations.append(
+                        f"{py_file}: relative import escapes archivist.crsi (level={node.level})"
+                    )
+                elif node.module and node.module.startswith(FORBIDDEN_IMPORT_PREFIXES):
                     violations.append(f"{py_file}: from {node.module} import ...")
     assert violations == []

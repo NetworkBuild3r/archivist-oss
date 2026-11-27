@@ -198,6 +198,33 @@ def test_cli_refuses_paid_provider_without_opt_in_and_positive_budget(
     err = capsys.readouterr().err
     assert "Refusing to run paid provider" in err
 
+    # MIN-9: validate warns when a paid role has 0.0 token pricing rates.
+    rc_val = main(["validate", "--repo-root", str(repo)])
+    assert rc_val == 0
+    val_captured = capsys.readouterr()
+    assert "WARNING:" in val_captured.err
+    assert "input_usd_per_1m=0.0" in val_captured.err
+
+    # MIN-3 + MIN-9: traversal --run-id fails cleanly without traceback.
+    assert main(["status", "--repo-root", str(repo), "--run-id", "../../etc"]) == 1
+    assert "Invalid --run-id" in capsys.readouterr().err
+    assert (
+        main(
+            [
+                "run",
+                "--repo-root",
+                str(repo),
+                "--run-id",
+                "../escape",
+                "--allow-paid",
+                "--max-spend",
+                "1.0",
+            ]
+        )
+        == 2
+    )
+    assert "Invalid --run-id" in capsys.readouterr().err
+
 
 def test_cli_sim_merge_preserves_attempts_and_updates_aliases(
     tmp_path: Path,

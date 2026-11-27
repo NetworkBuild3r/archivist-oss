@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -13,6 +14,21 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from archivist.crsi.config import MemoryMode
 from archivist.crsi.evaluator.types import EvaluationReport
+from archivist.crsi.guards.secrets import SecretRedactor
+
+RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+def validate_run_id(run_id: str) -> str:
+    """Validate that ``run_id`` is a safe filesystem/branch identifier with no traversal."""
+    cleaned = run_id.strip()
+    if not cleaned or ".." in cleaned or not RUN_ID_RE.match(cleaned):
+        raise ValueError(
+            f"Invalid run_id {run_id!r}: must match ^[A-Za-z0-9][A-Za-z0-9._-]{{0,127}}$ "
+            "and contain no '/' or '..'."
+        )
+    return cleaned
+
 
 RoundPhase = Literal[
     "baseline",
@@ -58,6 +74,8 @@ class RunState(BaseModel):
     round_selected_id: str | None = None
     round_select_reason: str = ""
     round_rejected_by_tolerance: bool = False
+    round_tolerance_rejected_id: str | None = None
+    round_record_committed_sha: str | None = None
     accepted_count: int = Field(default=0, ge=0)
     rejected_count: int = Field(default=0, ge=0)
     spend_snapshot: dict[str, Any] = Field(default_factory=dict)
@@ -67,10 +85,20 @@ class RunState(BaseModel):
     status: RunStatus = "running"
 
 
-def save_run_state(path: Path, state: RunState) -> Path:
-    """Atomically write ``run_state.json`` via tempfile + fsync + os.replace."""
+def save_run_state(
+    path: Path,
+    state: RunState,
+    *,
+    redactor: SecretRedactor | None = None,
+) -> Path:
+    """Atomically write ``run_state.json`` via tempfile + fsync + os.replace.
+
+    Enforces secret hygiene so raw credentials can never be persisted to disk.
+    """
     state.updated_at = utc_now_iso()
     payload = json.dumps(state.model_dump(mode="json"), indent=2, sort_keys=True) + "\n"
+    checker = redactor if redactor is not None else SecretRedactor()
+    checker.assert_no_secrets(payload, context=str(path))
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=".run_state_", suffix=".tmp")
     tmp_path = Path(tmp_name)

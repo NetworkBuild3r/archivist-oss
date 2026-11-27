@@ -157,3 +157,56 @@ async def test_selector_screen_drops_duplicate_candidates_and_history_retains_dr
     assert "screen_dropped" in formatted
     assert "duplicate of c1" in formatted
     assert "status=accepted" in formatted
+
+
+def test_min6_min8_proposer_dedupes_candidate_ids_and_history_redacts_ids_and_files(
+    tmp_path: Path,
+):
+    from archivist.crsi.loop.proposer import ProposerAgent
+
+    raw = json.dumps(
+        {
+            "candidates": [
+                {
+                    "candidate_id": "dup-id",
+                    "manifest": {
+                        "new_problem_name": "p1",
+                        "what": "w1",
+                        "files": ["harness/a.py"],
+                        "rationale": "r1",
+                        "predicted": ["evo-1"],
+                    },
+                    "file_edits": {"harness/a.py": "1\n"},
+                },
+                {
+                    "candidate_id": "dup-id",
+                    "manifest": {
+                        "new_problem_name": "p2",
+                        "what": "w2",
+                        "files": ["harness/b.py"],
+                        "rationale": "r2",
+                        "predicted": ["evo-1"],
+                    },
+                    "file_edits": {"harness/b.py": "2\n"},
+                },
+            ]
+        }
+    )
+    batch = ProposerAgent.parse_response(raw, round_num=0, k_candidates=3)
+    assert [p.candidate_id for p in batch.proposals] == ["dup-id", "dup-id-2"]
+
+    hist = RunHistory.load_or_create(tmp_path / "hist_secret.jsonl")
+    secret = "sk-proj-1234567890abcdefghijklmnop"
+    rec = hist.append(
+        HistoryRecord(
+            round=0,
+            candidate_id=f"cand-{secret}",
+            status="rejected",
+            drop_reason="secret_leak",
+            detail="leaked",
+            files=[f"harness/{secret}.py"],
+        )
+    )
+    assert secret not in rec.candidate_id
+    assert all(secret not in f for f in rec.files)
+    assert secret not in (tmp_path / "hist_secret.jsonl").read_text(encoding="utf-8")

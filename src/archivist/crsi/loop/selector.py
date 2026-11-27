@@ -37,6 +37,7 @@ class PickDecision(BaseModel):
     selected_id: str | None = None
     reason: str = ""
     rejected_by_tolerance: bool = False
+    rejected_candidate_id: str | None = None
 
 
 def _strip_json_fences(raw: str) -> str:
@@ -241,6 +242,7 @@ class SelectorAgent:
                     f"tolerance={self.regression_tolerance:.4f})."
                 ),
                 rejected_by_tolerance=True,
+                rejected_candidate_id=raw_pick.selected_id,
             )
         return raw_pick
 

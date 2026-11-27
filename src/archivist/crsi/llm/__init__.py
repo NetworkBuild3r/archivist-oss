@@ -16,6 +16,7 @@ from archivist.crsi.llm.base import (
 )
 from archivist.crsi.llm.budget import (
     BudgetExhaustedError,
+    BudgetReservation,
     PaidApiNotEnabledError,
     SpendTracker,
     estimate_cost_usd,
@@ -31,6 +32,7 @@ from archivist.crsi.llm.openai_compat import (
 __all__ = [
     "AnthropicAdapter",
     "BudgetExhaustedError",
+    "BudgetReservation",
     "FakeScriptedAdapter",
     "GoogleGeminiAdapter",
     "LLMClient",

@@ -77,9 +77,11 @@ class RunHistory:
         """Scrub secrets, append ``record`` in memory, and persist to JSONL if configured."""
         cleaned = record.model_copy(
             update={
+                "candidate_id": self.redactor.redact_text(record.candidate_id),
                 "detail": self.redactor.redact_text(record.detail),
                 "what": self.redactor.redact_text(record.what),
                 "problem_ref": self.redactor.redact_text(record.problem_ref),
+                "files": [self.redactor.redact_text(f) for f in record.files],
             }
         )
         self.records.append(cleaned)

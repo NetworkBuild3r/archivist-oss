@@ -182,3 +182,71 @@ async def test_seed_harness_runs_write_verify_and_finish_end_to_end():
     assert len(result.interlock_events) == 1
     assert result.interlock_events[0].allowed is True
     assert result.interlock_events[0].case == "verified_pass"
+
+
+def test_maj1_workspace_preserves_dotfile_names(tmp_path: Path):
+    ws_root = tmp_path / "ws_dot"
+    with WorkspaceManager(root=ws_root, auto_cleanup=False) as ws:
+        ws.write_file(".env", "FOO=bar")
+        assert (ws_root / ".env").is_file()
+        assert not (ws_root / "env").exists()
+        assert ws.read_file(".env") == "FOO=bar"
+        assert ws.read_file("./.env") == "FOO=bar"
+
+
+def test_maj2_permission_gate_blocks_traversal_dotfiles_and_git_global_flag_bypasses():
+    gate = PermissionGate()
+
+    # File actions targeting traversal, absolute paths, .git/, or .crsi/ MUST be DESTRUCTIVE.
+    for bad_path in (
+        "../etc/passwd",
+        "/etc/passwd",
+        ".git/config",
+        "./.git/HEAD",
+        ".crsi/sim.json",
+        "./.crsi/config.toml",
+    ):
+        assert gate.classify_file_action("write_file", bad_path) == ActionRisk.DESTRUCTIVE, bad_path
+
+    # Git global flag bypasses (-C, -c, --git-dir, --config-env) and mutating subcommands blocked.
+    for bad_git in (
+        ["git", "-C", ".", "push", "origin", "main"],
+        ["git", "-c", "a=b", "reset", "--hard"],
+        ["git", "-c", "core.sshCommand=sh", "status"],
+        ["git", "--config-env=core.sshCommand=ENV", "status"],
+        ["git", "-C", "/etc", "status"],
+        ["git", "-C", "..", "status"],
+        ["git", "--git-dir=/tmp/.git", "status"],
+        ["git", "checkout", "main"],
+        ["git", "commit", "-m", "hi"],
+    ):
+        assert gate.classify_command(bad_git) == ActionRisk.DESTRUCTIVE, bad_git
+
+    # Read-only allowlisted git subcommands inside workspace remain SAFE.
+    assert gate.classify_command(["git", "status"]) == ActionRisk.SAFE
+    assert gate.classify_command(["git", "-C", ".", "diff"]) == ActionRisk.SAFE
+    assert gate.classify_command(["git", "log", "-n", "1"]) == ActionRisk.SAFE
+
+
+async def test_min1_seed_harness_run_command_does_not_block_event_loop():
+    import asyncio
+
+    fake = FakeScriptedAdapter(
+        responses={
+            "policy": [
+                json.dumps(
+                    {
+                        "action": "run_command",
+                        "argv": [sys.executable, "-c", "import time; time.sleep(2.0)"],
+                    }
+                ),
+            ]
+        }
+    )
+    client = RoutedLLMClient(CrsiConfig(), adapters={"fake": fake})
+    harness = SeedHarness(client, command_timeout_s=5.0)
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(
+            harness.run(TaskInput(task_id="slow-1", prompt="sleep")),
+            timeout=0.35,
+        )

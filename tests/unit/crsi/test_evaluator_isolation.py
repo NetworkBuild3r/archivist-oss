@@ -254,3 +254,82 @@ result = {"score": 1.0, "passed": True, "summary": f"scored {task['id']}"}
     assert report_fail.passed == 0
     assert report_fail.mean_score == 0.0
     assert all("nonzero_exit:2" in ts.errors for ts in report_fail.task_scores)
+
+
+@pytest.mark.parametrize(
+    "exc_cls",
+    ["BudgetExhaustedError", "PaidApiNotEnabledError", "HeldOutLeakError"],
+)
+async def test_maj4_evaluator_propagates_control_plane_and_security_errors(
+    tmp_path: Path,
+    exc_cls: str,
+):
+    from archivist.crsi.llm.budget import BudgetExhaustedError, PaidApiNotEnabledError
+
+    exc_map = {
+        "BudgetExhaustedError": BudgetExhaustedError("cap hit"),
+        "PaidApiNotEnabledError": PaidApiNotEnabledError("paid off"),
+        "HeldOutLeakError": HeldOutLeakError("leak"),
+    }
+    to_raise = exc_map[exc_cls]
+
+    class _RaisingHarness:
+        async def run(self, task: TaskInput) -> HarnessResult:
+            _ = task
+            raise to_raise
+
+    dataset, _ = _make_dataset(tmp_path)
+    evaluator = FrozenEvaluator(
+        harness_factory=_RaisingHarness,
+        scorer=_ExactMatchScorer(),
+        parallelism=1,
+    )
+    with pytest.raises(type(to_raise)):
+        await evaluator.evaluate_evolve(dataset)
+
+
+async def test_min2_min3_min6_firewall_combined_layout_dir_symlink_run_id_and_trace_redaction(
+    tmp_path: Path,
+):
+    dataset, private_dir = _make_dataset(tmp_path)
+    guard = HeldOutIsolationGuard.from_dataset(dataset, private_dir=private_dir)
+
+    # MIN-2: tasks.jsonl, split.json, private_dir text markers and dir symlinks in feedback_dir blocked.
+    for leak_text in (
+        "Read tasks.jsonl for answers.",
+        "Inspect split.json to see splits.",
+        f"Data lives under {private_dir.resolve()}",
+    ):
+        with pytest.raises(HeldOutLeakError):
+            guard.assert_no_leak(prompt_text=leak_text)
+
+    fb_dir = tmp_path / "fb_symlink_dir"
+    fb_dir.mkdir()
+    (fb_dir / "linked_private").symlink_to(private_dir)
+    with pytest.raises(HeldOutLeakError):
+        guard.assert_no_leak(prompt_text="clean prompt", feedback_dir=fb_dir)
+
+    # MIN-3: traversal run_id rejected on evaluate_heldout.
+    class _SecretTraceScorer:
+        def score(self, task: TaskSpec, result: HarnessResult) -> TaskScore:
+            return TaskScore(
+                task_id=task.id,
+                score=1.0,
+                passed=True,
+                summary="ok",
+                trace_excerpt=["leaked sk-proj-1234567890abcdefghijklmnop"],
+            )
+
+    received: list[TaskInput] = []
+    ev = FrozenEvaluator(
+        harness_factory=lambda: _SpyHarness({"evo-1": "4", "evo-2": "isrc"}, received),
+        scorer=_SecretTraceScorer(),
+    )
+    with pytest.raises(ValueError, match="run_id"):
+        await ev.evaluate_heldout(dataset, report_dir=private_dir / "reports", run_id="../escape")
+
+    # MIN-6: custom scorer trace_excerpt is redacted.
+    rep = await ev.evaluate_evolve(dataset)
+    for ts in rep.task_scores:
+        assert all("sk-proj-1234567890abcdefghijklmnop" not in line for line in ts.trace_excerpt)
+        assert all("[REDACTED]" in line for line in ts.trace_excerpt)

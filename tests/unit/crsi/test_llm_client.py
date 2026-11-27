@@ -320,3 +320,95 @@ async def test_spend_tracker_enforces_call_cap_spend_cap_and_snapshot_restore():
     assert client2.spend_tracker.calls_used == 2
     with pytest.raises(BudgetExhaustedError):
         await client2.complete(_make_request("selector"))
+
+
+async def test_maj3_concurrent_calls_cannot_overshoot_call_or_spend_budget():
+    import asyncio
+
+    adapter_entries = 0
+
+    class _SlowPaidAdapter:
+        async def complete(self, request: LLMRequest, role_config: ModelRoleConfig):
+            nonlocal adapter_entries
+            adapter_entries += 1
+            await asyncio.sleep(0.05)
+            from archivist.crsi.llm.base import LLMResponse
+
+            return LLMResponse(
+                content="ok",
+                prompt_tokens=100,
+                completion_tokens=100,
+                estimated_cost_usd=0.04,
+                model=role_config.model,
+                provider=role_config.provider,
+                latency_ms=50.0,
+            )
+
+    cfg = CrsiConfig(
+        models=ModelsConfig(
+            policy=ModelRoleConfig(
+                provider="openai_compat",
+                model="paid-test",
+                base_url="https://api.openai.com/v1",
+                api_key_env="OPENAI_API_KEY",
+                max_tokens=1000,
+                input_usd_per_1m=10.0,
+                output_usd_per_1m=40.0,
+            )
+        ),
+        budget=BudgetConfig(
+            allow_paid_apis=True,
+            max_spend_usd=0.05,
+            max_llm_calls=1,
+            parallelism=4,
+        ),
+    )
+    client = RoutedLLMClient(
+        cfg,
+        adapters={"openai_compat": _SlowPaidAdapter()},
+        environ={"OPENAI_API_KEY": "sk-proj-1234567890abcdefghijklmnop"},
+    )
+
+    results = await asyncio.gather(
+        *(client.complete(_make_request("policy")) for _ in range(4)),
+        return_exceptions=True,
+    )
+    successes = [r for r in results if not isinstance(r, BaseException)]
+    exhausted = [r for r in results if isinstance(r, BudgetExhaustedError)]
+
+    assert len(successes) == 1
+    assert len(exhausted) == 3
+    assert adapter_entries == 1
+    assert client.spend_tracker.calls_used == 1
+    assert client.spend_tracker.spent_usd <= 0.05
+
+
+async def test_maj3_failed_call_releases_budget_reservation():
+    def fail_once_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text="server error")
+
+    cfg = CrsiConfig(
+        models=ModelsConfig(
+            policy=ModelRoleConfig(
+                provider="openai_compat",
+                model="test-model",
+                base_url="https://api.openai.com/v1",
+                api_key_env="OPENAI_API_KEY",
+                max_tokens=100,
+                input_usd_per_1m=1.0,
+                output_usd_per_1m=1.0,
+            )
+        ),
+        budget=BudgetConfig(allow_paid_apis=True, max_spend_usd=0.05, max_llm_calls=1),
+    )
+    client = RoutedLLMClient(
+        cfg,
+        environ={"OPENAI_API_KEY": "sk-proj-1234567890abcdefghijklmnop"},
+        transport=httpx.MockTransport(fail_once_handler),
+    )
+    with pytest.raises(LLMError):
+        await client.complete(_make_request("policy"))
+
+    # Reservation was released on error, so calls_used remains 0 and slot is reusable.
+    assert client.spend_tracker.calls_used == 0
+    assert client.spend_tracker.spent_usd == 0.0

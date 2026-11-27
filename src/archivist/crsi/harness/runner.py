@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Callable
 from typing import Any
@@ -201,7 +202,9 @@ class SeedHarness:
                         raw_argv = payload.get("argv")
                         if not isinstance(raw_argv, list) or not raw_argv:
                             raise ValueError("run_command requires a non-empty 'argv' list.")
-                        cmd_res = tools.run_command([str(x) for x in raw_argv])
+                        cmd_res = await asyncio.to_thread(
+                            tools.run_command, [str(x) for x in raw_argv]
+                        )
                         combined_out = "\n".join(
                             part for part in (cmd_res.stdout, cmd_res.stderr) if part
                         )

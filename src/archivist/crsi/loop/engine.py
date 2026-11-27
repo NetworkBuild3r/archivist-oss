@@ -27,6 +27,7 @@ from archivist.crsi.loop.state import (
     RunStatus,
     load_run_state,
     save_run_state,
+    validate_run_id,
 )
 from archivist.crsi.loop.worktree import GitWorktreeManager
 from archivist.crsi.sim.models import AttemptRecord, ObservedOutcome
@@ -128,14 +129,39 @@ class CrsiEngine:
         )
 
     def _run_dir(self, run_id: str) -> Path:
-        return (self.repo_root / self.config.paths.state_dir / run_id).resolve()
+        safe_id = validate_run_id(run_id)
+        base = (self.repo_root / self.config.paths.state_dir).resolve()
+        target = (base / safe_id).resolve()
+        if not target.is_relative_to(base):
+            raise ValueError(f"Run directory escapes state_dir for run_id={run_id!r}")
+        return target
 
     def _checkpoint(
         self, state_path: Path, state: RunState, wall_start: float, prior_wall: float
     ) -> None:
         state.elapsed_wall_s = round(prior_wall + (time.perf_counter() - wall_start), 3)
         state.spend_snapshot = self.llm_client.spend_tracker.snapshot()
-        save_run_state(state_path, state)
+        save_run_state(state_path, state, redactor=self.redactor)
+
+    def _proposal_contains_secret(self, proposal: CandidateProposal) -> str | None:
+        fields: list[tuple[str, str]] = [
+            ("candidate_id", proposal.candidate_id),
+            ("manifest.what", proposal.manifest.what),
+            ("manifest.rationale", proposal.manifest.rationale),
+        ]
+        if proposal.manifest.new_problem_name:
+            fields.append(("manifest.new_problem_name", proposal.manifest.new_problem_name))
+        for path_str in proposal.manifest.files:
+            fields.append(("manifest.files", path_str))
+        for path_str in proposal.delete_files:
+            fields.append(("delete_files", path_str))
+        for path_str, content in proposal.file_edits.items():
+            fields.append(("file_edits.path", path_str))
+            fields.append(("file_edits.content", content))
+        for label, text in fields:
+            if self.redactor.contains_secret(text):
+                return label
+        return None
 
     async def run(
         self,
@@ -146,6 +172,7 @@ class CrsiEngine:
         stop_after_phase: tuple[int, RoundPhase] | None = None,
     ) -> CrsiRunResult:
         """Execute or resume a CRSI run on dedicated branch ``<branch_prefix><run_id>``."""
+        run_id = validate_run_id(run_id)
         run_dir = self._run_dir(run_id)
         run_dir.mkdir(parents=True, exist_ok=True)
         state_path = run_dir / "run_state.json"
@@ -183,10 +210,11 @@ class CrsiEngine:
                 policy_model=self.config.models.policy.model,
             )
             self.sim_store.save(run_sim_path)
-            save_run_state(state_path, state)
+            save_run_state(state_path, state, redactor=self.redactor)
 
         prior_wall = state.elapsed_wall_s
         wall_start = time.perf_counter()
+        pending_rebaseline = force_rebaseline
 
         try:
             while state.current_round < self.config.budget.rounds:
@@ -202,7 +230,7 @@ class CrsiEngine:
                 if state.phase == "baseline":
                     need_eval = (
                         state.baseline_report is None
-                        or force_rebaseline
+                        or pending_rebaseline
                         or (round_idx == 0 and state.baseline_score is None)
                     )
                     if need_eval:
@@ -221,6 +249,7 @@ class CrsiEngine:
                         if state.baseline_score is None:
                             state.baseline_score = base_rep.mean_score
                         state.current_score = base_rep.mean_score
+                        pending_rebaseline = False
 
                     state.phase = "propose"
                     self._checkpoint(state_path, state, wall_start, prior_wall)
@@ -263,7 +292,30 @@ class CrsiEngine:
                         )
                         state.rejected_count += 1
 
-                    state.round_proposals = [p.model_dump(mode="json") for p in batch.proposals]
+                    # Scan proposals for secrets BEFORE checkpointing into run_state.json.
+                    clean_proposals: list[CandidateProposal] = []
+                    for prop in batch.proposals:
+                        leaked_field = self._proposal_contains_secret(prop)
+                        if leaked_field is not None:
+                            history.append(
+                                HistoryRecord(
+                                    round=round_idx,
+                                    candidate_id=prop.candidate_id,
+                                    status="rejected",
+                                    drop_reason="secret_leak",
+                                    detail=f"Secret material detected in candidate {leaked_field}.",
+                                    problem_ref=prop.manifest.problem_ref_label(),
+                                    what=prop.manifest.what,
+                                    files=prop.manifest.files,
+                                    predicted=prop.manifest.predicted,
+                                    baseline_score=state.baseline_report.mean_score,
+                                )
+                            )
+                            state.rejected_count += 1
+                            continue
+                        clean_proposals.append(prop)
+
+                    state.round_proposals = [p.model_dump(mode="json") for p in clean_proposals]
                     state.round_legal_ids = []
                     state.round_diffs = {}
                     state.round_candidate_shas = {}
@@ -272,6 +324,8 @@ class CrsiEngine:
                     state.round_selected_id = None
                     state.round_select_reason = ""
                     state.round_rejected_by_tolerance = False
+                    state.round_tolerance_rejected_id = None
+                    state.round_record_committed_sha = None
                     state.phase = "filter"
                     self._checkpoint(state_path, state, wall_start, prior_wall)
                     if stop_after_phase == (round_idx, "propose"):
@@ -463,12 +517,14 @@ class CrsiEngine:
                             history=history,
                         )
                         state.round_selected_id = pick_dec.selected_id
-                        state.round_select_reason = pick_dec.reason
+                        state.round_select_reason = self.redactor.redact_text(pick_dec.reason)
                         state.round_rejected_by_tolerance = pick_dec.rejected_by_tolerance
+                        state.round_tolerance_rejected_id = pick_dec.rejected_candidate_id
                     else:
                         state.round_selected_id = None
                         state.round_select_reason = "No surviving candidates to select."
                         state.round_rejected_by_tolerance = False
+                        state.round_tolerance_rejected_id = None
 
                     state.phase = "record"
                     self._checkpoint(state_path, state, wall_start, prior_wall)
@@ -478,17 +534,23 @@ class CrsiEngine:
                 # ── Phase 7: SIM Update, Commit on crsi/<run_id>, Record D_t ───────
                 if state.phase == "record":
                     selected_id = state.round_selected_id
+                    round_baseline_score = state.baseline_report.mean_score
+                    already_recorded_cids = {
+                        (r.round, r.candidate_id) for r in history.records if r.round == round_idx
+                    }
 
-                    # Record non-selected evaluated candidates in D_t.
+                    # Record non-selected evaluated candidates in D_t (idempotent on resume).
                     for cid in state.round_screened_ids:
-                        if cid == selected_id:
+                        if cid == selected_id or (round_idx, cid) in already_recorded_cids:
                             continue
                         prop = proposals_by_id[cid]
                         rej_rep = state.round_eval_reports.get(cid)
+                        is_tol_rejected = state.round_rejected_by_tolerance and (
+                            state.round_tolerance_rejected_id is None
+                            or cid == state.round_tolerance_rejected_id
+                        )
                         drop_reason: DropReason = (
-                            "below_tolerance"
-                            if state.round_rejected_by_tolerance
-                            else "not_selected"
+                            "below_tolerance" if is_tol_rejected else "not_selected"
                         )
                         history.append(
                             HistoryRecord(
@@ -502,7 +564,7 @@ class CrsiEngine:
                                 files=prop.manifest.files,
                                 predicted=prop.manifest.predicted,
                                 score=rej_rep.mean_score if rej_rep else None,
-                                baseline_score=state.baseline_report.mean_score,
+                                baseline_score=round_baseline_score,
                                 commit_sha=state.round_candidate_shas.get(cid),
                             )
                         )
@@ -513,71 +575,82 @@ class CrsiEngine:
                         win_rep = state.round_eval_reports[selected_id]
                         win_sha = state.round_candidate_shas[selected_id]
 
-                        observed = ObservedOutcome.from_task_results(
-                            predicted=win_prop.manifest.predicted,
-                            before_passed=state.baseline_report.by_task_passed,
-                            after_passed=win_rep.by_task_passed,
-                            after_scores=win_rep.by_task_score,
-                        )
-                        attempt = AttemptRecord(
-                            round=round_idx + 1,
-                            sample=selected_id,
-                            accepted=True,
-                            backfilled=False,
-                            what=win_prop.manifest.what,
-                            files=win_prop.manifest.files,
-                            rationale=win_prop.manifest.rationale,
-                            predicted=win_prop.manifest.predicted,
-                            observed=observed,
-                            model=self.config.models.policy.model,
-                            domain=self.config.domain,
-                        )
-                        self.sim_store.record_attempt(
-                            attempt=attempt,
-                            problem_id=win_prop.manifest.problem_id,
-                            new_problem_name=win_prop.manifest.new_problem_name,
-                        )
-                        self.sim_store.save(run_sim_path)
-
-                        # Commit updated .crsi/sim.json on top of the winning candidate SHA
-                        # and advance ONLY the dedicated crsi/<run_id> branch.
-                        commit_wt = wt_mgr.checkout_detached_worktree(
-                            f"r{round_idx}_commit", win_sha
-                        )
-                        try:
-                            self.sim_store.save(commit_wt / self.config.paths.sim_path)
-                            final_round_sha = wt_mgr.commit_worktree_changes(
-                                commit_wt,
-                                message=(
-                                    f"crsi({run_id}): accept {selected_id} "
-                                    f"(score={win_rep.mean_score:.4f})"
-                                ),
+                        if state.round_record_committed_sha is None:
+                            # Guard against duplicate SIM attempt if crashed after sim.save().
+                            attempt_already_logged = any(
+                                att.round == round_idx + 1 and att.sample == selected_id
+                                for prob in self.sim_store.doc.problems
+                                for att in prob.attempts
                             )
-                        finally:
-                            wt_mgr.remove_worktree(commit_wt)
+                            if not attempt_already_logged:
+                                observed = ObservedOutcome.from_task_results(
+                                    predicted=win_prop.manifest.predicted,
+                                    before_passed=state.baseline_report.by_task_passed,
+                                    after_passed=win_rep.by_task_passed,
+                                    after_scores=win_rep.by_task_score,
+                                )
+                                attempt = AttemptRecord(
+                                    round=round_idx + 1,
+                                    sample=selected_id,
+                                    accepted=True,
+                                    backfilled=False,
+                                    what=win_prop.manifest.what,
+                                    files=win_prop.manifest.files,
+                                    rationale=win_prop.manifest.rationale,
+                                    predicted=win_prop.manifest.predicted,
+                                    observed=observed,
+                                    model=self.config.models.policy.model,
+                                    domain=self.config.domain,
+                                )
+                                self.sim_store.record_attempt(
+                                    attempt=attempt,
+                                    problem_id=win_prop.manifest.problem_id,
+                                    new_problem_name=win_prop.manifest.new_problem_name,
+                                )
+                                self.sim_store.save(run_sim_path)
 
-                        wt_mgr.advance_run_branch(state.run_branch, final_round_sha)
-                        state.current_sha = final_round_sha
-                        state.baseline_report = win_rep
-                        state.current_score = win_rep.mean_score
-                        state.accepted_count += 1
-
-                        history.append(
-                            HistoryRecord(
-                                round=round_idx,
-                                candidate_id=selected_id,
-                                status="accepted",
-                                drop_reason=None,
-                                detail=state.round_select_reason,
-                                problem_ref=win_prop.manifest.problem_ref_label(),
-                                what=win_prop.manifest.what,
-                                files=win_prop.manifest.files,
-                                predicted=win_prop.manifest.predicted,
-                                score=win_rep.mean_score,
-                                baseline_score=state.baseline_score,
-                                commit_sha=final_round_sha,
+                            # Commit updated .crsi/sim.json on top of the winning candidate SHA
+                            # and advance ONLY the dedicated crsi/<run_id> branch.
+                            commit_wt = wt_mgr.checkout_detached_worktree(
+                                f"r{round_idx}_commit", win_sha
                             )
-                        )
+                            try:
+                                self.sim_store.save(commit_wt / self.config.paths.sim_path)
+                                final_round_sha = wt_mgr.commit_worktree_changes(
+                                    commit_wt,
+                                    message=(
+                                        f"crsi({run_id}): accept {selected_id} "
+                                        f"(score={win_rep.mean_score:.4f})"
+                                    ),
+                                )
+                            finally:
+                                wt_mgr.remove_worktree(commit_wt)
+
+                            wt_mgr.advance_run_branch(state.run_branch, final_round_sha)
+                            state.round_record_committed_sha = final_round_sha
+                            state.current_sha = final_round_sha
+                            state.baseline_report = win_rep
+                            state.current_score = win_rep.mean_score
+                            state.accepted_count += 1
+                            self._checkpoint(state_path, state, wall_start, prior_wall)
+
+                        if (round_idx, selected_id) not in already_recorded_cids:
+                            history.append(
+                                HistoryRecord(
+                                    round=round_idx,
+                                    candidate_id=selected_id,
+                                    status="accepted",
+                                    drop_reason=None,
+                                    detail=state.round_select_reason,
+                                    problem_ref=win_prop.manifest.problem_ref_label(),
+                                    what=win_prop.manifest.what,
+                                    files=win_prop.manifest.files,
+                                    predicted=win_prop.manifest.predicted,
+                                    score=win_rep.mean_score,
+                                    baseline_score=round_baseline_score,
+                                    commit_sha=state.round_record_committed_sha,
+                                )
+                            )
 
                     # Advance to next round cleanly.
                     state.current_round += 1
@@ -595,6 +668,8 @@ class CrsiEngine:
                     state.round_selected_id = None
                     state.round_select_reason = ""
                     state.round_rejected_by_tolerance = False
+                    state.round_tolerance_rejected_id = None
+                    state.round_record_committed_sha = None
                     self._checkpoint(state_path, state, wall_start, prior_wall)
                     if stop_after_phase == (round_idx, "record"):
                         break

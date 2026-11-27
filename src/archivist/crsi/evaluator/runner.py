@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -21,8 +22,17 @@ from archivist.crsi.evaluator.types import (
     TaskScore,
     TaskSpec,
 )
+from archivist.crsi.guards.heldout_firewall import HeldOutLeakError
 from archivist.crsi.guards.secrets import SecretRedactor, sanitize_env
 from archivist.crsi.harness.contract import HarnessProtocol, HarnessResult
+from archivist.crsi.llm.budget import BudgetExhaustedError, PaidApiNotEnabledError
+
+_SAFE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+def _sanitize_fs_token(raw: str, *, max_len: int = 40) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]", "_", raw).strip("._-")
+    return (cleaned or "task")[:max_len]
 
 
 def sanitize_trace(
@@ -137,6 +147,8 @@ class FrozenEvaluator:
                     summary=f"Task timed out after {self.task_timeout_s:.2f}s",
                     errors=[f"timeout:{task.id}:rollout={rollout}"],
                 )
+            except (BudgetExhaustedError, PaidApiNotEnabledError, HeldOutLeakError):
+                raise
             except Exception as exc:
                 safe_err = self.redactor.redact_text(str(exc))
                 return TaskScore(
@@ -155,7 +167,7 @@ class FrozenEvaluator:
                     "summary": self.redactor.redact_text(scored.summary),
                     "errors": [self.redactor.redact_text(e) for e in scored.errors],
                     "trace_excerpt": (
-                        scored.trace_excerpt
+                        [self.redactor.redact_text(line) for line in scored.trace_excerpt]
                         if scored.trace_excerpt
                         else sanitize_trace(result, redactor=self.redactor)
                     ),
@@ -168,7 +180,8 @@ class FrozenEvaluator:
         rollout: int,
         checkout_dir: Path,
     ) -> TaskScore:
-        with tempfile.TemporaryDirectory(prefix=f"crsi_eval_{task.id}_") as tmp_str:
+        safe_task_prefix = _sanitize_fs_token(task.id)
+        with tempfile.TemporaryDirectory(prefix=f"crsi_eval_{safe_task_prefix}_") as tmp_str:
             tmp_dir = Path(tmp_str)
             task_file = tmp_dir / "task.json"
             out_dir = tmp_dir / "out"
@@ -345,14 +358,22 @@ class FrozenEvaluator:
 
         Never returns evolve feedback and never mutates ``F_t``, ``D_t``, or SIM.
         """
+        if not _SAFE_RUN_ID_RE.match(run_id) or ".." in run_id:
+            raise ValueError(
+                f"Invalid run_id {run_id!r}: must match ^[A-Za-z0-9][A-Za-z0-9._-]{{0,127}}$ "
+                "and contain no path traversal."
+            )
         report = await self._evaluate_tasks(
             split="heldout",
             tasks=dataset.heldout_tasks(),
             rollouts=rollouts,
             checkout_dir=checkout_dir,
         )
-        report_dir.mkdir(parents=True, exist_ok=True)
-        out_path = report_dir / f"heldout_{run_id}.json"
+        resolved_dir = report_dir.resolve()
+        resolved_dir.mkdir(parents=True, exist_ok=True)
+        out_path = (resolved_dir / f"heldout_{run_id}.json").resolve()
+        if not out_path.is_relative_to(resolved_dir):
+            raise ValueError(f"Held-out report path escapes report_dir: {run_id!r}")
         payload = json.dumps(report.model_dump(mode="json"), indent=2, sort_keys=True) + "\n"
         fd, tmp_name = tempfile.mkstemp(dir=str(report_dir), prefix=".heldout_", suffix=".tmp")
         tmp_path = Path(tmp_name)

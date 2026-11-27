@@ -22,6 +22,8 @@ if TYPE_CHECKING:
 _DEFAULT_HELDOUT_PATH_MARKERS: tuple[str, ...] = (
     "tasks_heldout.jsonl",
     "heldout_reports",
+    "tasks.jsonl",
+    "split.json",
 )
 
 
@@ -96,8 +98,11 @@ class HeldOutFingerprint:
         paths: set[str] = set(_DEFAULT_HELDOUT_PATH_MARKERS)
         if private_dir is not None:
             resolved = private_dir.resolve()
+            paths.add(str(resolved))
             paths.add(str(resolved / "tasks_heldout.jsonl"))
             paths.add(str(resolved / "heldout_reports"))
+            paths.add(str(resolved / "tasks.jsonl"))
+            paths.add(str(resolved / "split.json"))
 
         extras = frozenset(tok.strip() for tok in extra_forbidden_tokens if tok.strip())
         return cls(
@@ -237,8 +242,8 @@ class HeldOutIsolationGuard:
         if feedback_dir is not None and feedback_dir.exists():
             findings.extend(self._scan_paths([feedback_dir]))
             for child in sorted(feedback_dir.rglob("*")):
+                findings.extend(self._scan_paths([child]))
                 if child.is_file():
-                    findings.extend(self._scan_paths([child]))
                     try:
                         text = child.read_text(encoding="utf-8", errors="ignore")
                     except OSError:

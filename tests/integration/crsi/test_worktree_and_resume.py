@@ -223,3 +223,125 @@ async def test_crsi_engine_isolates_branch_records_rejected_and_resumes_without_
         r.candidate_id == "c_illegal" and r.drop_reason == "illegal_path" for r in hist.records
     )
     assert any(r.candidate_id == "c_good" and r.status == "accepted" for r in hist.records)
+
+
+async def test_maj1_maj5_min3_min4_worktree_dot_secret_state_hygiene_and_single_rebaseline(
+    tmp_path: Path,
+):
+    from archivist.crsi.guards.secrets import SecretLeakError
+    from archivist.crsi.loop.state import RunState, save_run_state
+
+    repo = _init_temp_repo(tmp_path)
+
+    # MAJ-1: worktree target '.' raises GitWorktreeError (not IsADirectoryError).
+    wt_mgr = GitWorktreeManager(repo, worktree_root=tmp_path / "wt_dot")
+    wt = wt_mgr.checkout_detached_worktree("dot_check", wt_mgr.rev_parse("HEAD"))
+    try:
+        with pytest.raises(GitWorktreeError):
+            wt_mgr.apply_file_edits(wt, {".": "bad"})
+    finally:
+        wt_mgr.cleanup_all()
+
+    # MAJ-5: save_run_state refuses raw secrets directly.
+    leaked_secret = "sk-proj-999988887777666655554444"
+    bad_state = RunState(
+        run_id="r-secret",
+        run_branch="crsi/r-secret",
+        base_sha="a" * 40,
+        current_sha="a" * 40,
+        round_select_reason=f"oops {leaked_secret}",
+    )
+    with pytest.raises(SecretLeakError):
+        save_run_state(tmp_path / "bad_state.json", bad_state)
+
+    # MAJ-5 + MIN-3 + MIN-4: Proposer emitting secret never persists it to run_state.json or history.jsonl,
+    # invalid run_id is rejected, and force_rebaseline evaluates baseline only once across 2 rounds.
+    dataset = TaskDataset(
+        tasks={
+            "evo-1": TaskSpec(id="evo-1", prompt="Solve evo-1", expected="1"),
+            "held-1": TaskSpec(id="held-1", prompt="Secret heldout", expected="SECRET_VAL"),
+        },
+        split=SplitManifest(evolve=["evo-1"], heldout=["held-1"]),
+    )
+
+    eval_count = 0
+
+    async def counting_eval(wt_path: Path, ds: TaskDataset, rollouts: int) -> EvaluationReport:
+        nonlocal eval_count
+        _ = (wt_path, ds, rollouts)
+        eval_count += 1
+        return EvaluationReport(
+            split="evolve",
+            mean_score=0.5,
+            passed=0,
+            total=1,
+            task_scores=[TaskScore(task_id="evo-1", score=0.5, passed=False, summary="s")],
+            by_task_passed={"evo-1": False},
+            by_task_score={"evo-1": 0.5},
+        )
+
+    def secret_proposer(req: LLMRequest, _cfg: object) -> str:
+        round_n = int(req.metadata.get("round", 0))
+        if round_n == 0:
+            return json.dumps(
+                {
+                    "candidates": [
+                        {
+                            "candidate_id": "c_secret",
+                            "manifest": {
+                                "new_problem_name": "secret leak attempt",
+                                "what": f"embed {leaked_secret}",
+                                "files": ["harness/interlock.py"],
+                                "rationale": "testing secret drop",
+                                "predicted": ["evo-1"],
+                            },
+                            "file_edits": {"harness/interlock.py": f"KEY = '{leaked_secret}'\n"},
+                        }
+                    ]
+                }
+            )
+        return json.dumps({"candidates": []})
+
+    fake = FakeScriptedAdapter(
+        handlers={
+            "proposer": secret_proposer,
+            "selector": lambda req, _cfg: json.dumps({"selected": "NONE", "reason": "none"}),
+        }
+    )
+    cfg = CrsiConfig(
+        project_name="secret-hygiene-test",
+        domain="toy_base",
+        budget=BudgetConfig(rounds=2, candidates=1, parallelism=1),
+        harness=HarnessPathsConfig(editable=["harness/**"], frozen=["frozen_scorer.py"]),
+    )
+    client = RoutedLLMClient(cfg, adapters={"fake": fake})
+    engine = CrsiEngine(
+        repo_root=repo,
+        config=cfg,
+        dataset=dataset,
+        llm_client=client,
+        evaluator_fn=counting_eval,
+    )
+
+    # MIN-3: traversal run_id rejected.
+    with pytest.raises(ValueError, match="run_id"):
+        await engine.run(run_id="../escape", resume=False)
+
+    # Stop right after Phase 2 (propose) to prove raw secret never touches run_state.json!
+    partial = await engine.run(
+        run_id="secret-hygiene-01",
+        resume=False,
+        force_rebaseline=True,
+        stop_after_phase=(0, "propose"),
+    )
+    state_text = Path(partial.state_path).read_text(encoding="utf-8")
+    hist_text = Path(partial.history_path).read_text(encoding="utf-8")
+    assert leaked_secret not in state_text
+    assert leaked_secret not in hist_text
+    assert "secret_leak" in hist_text
+
+    # Resume through round 0 and round 1 with force_rebaseline=True on a clean run -> only 1 baseline eval!
+    final = await engine.run(run_id="secret-hygiene-01", resume=True, force_rebaseline=False)
+    assert final.status == "completed"
+    assert final.rounds_completed == 2
+    assert eval_count == 1  # Baseline ran once (round 0); round 1 reused baseline_report.

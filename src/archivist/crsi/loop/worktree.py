@@ -142,7 +142,11 @@ class GitWorktreeManager:
         pure = PurePosixPath(raw)
         if pure.is_absolute() or ".." in pure.parts:
             raise GitWorktreeError(f"Illegal path traversal in edit path: {rel_path!r}")
-        norm = pure.as_posix().lstrip("./")
+        norm = pure.as_posix()
+        while norm.startswith("./"):
+            norm = norm[2:]
+        if not norm or norm == ".":
+            raise GitWorktreeError(f"Invalid relative edit path (worktree root): {rel_path!r}")
         target = (resolved_wt / norm).resolve()
         if not target.is_relative_to(resolved_wt):
             raise GitWorktreeError(f"Edit path escapes worktree root: {rel_path!r}")
@@ -202,6 +206,8 @@ class GitWorktreeManager:
                 "user.name=CRSI Loop",
                 "-c",
                 "user.email=crsi@local.invalid",
+                "-c",
+                "commit.gpgsign=false",
                 "commit",
                 "-m",
                 message,
