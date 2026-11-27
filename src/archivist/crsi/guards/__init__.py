@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from archivist.crsi.guards.heldout_firewall import (
+    HeldOutFingerprint,
+    HeldOutIsolationGuard,
+    HeldOutLeakError,
+)
 from archivist.crsi.guards.path_policy import (
     SYSTEM_FROZEN_PATTERNS,
     PathCheckResult,
@@ -17,6 +22,9 @@ from archivist.crsi.guards.secrets import (
 
 __all__ = [
     "SYSTEM_FROZEN_PATTERNS",
+    "HeldOutFingerprint",
+    "HeldOutIsolationGuard",
+    "HeldOutLeakError",
     "PathCheckResult",
     "PathPolicyGuard",
     "PathPolicyViolation",
