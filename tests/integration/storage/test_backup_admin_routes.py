@@ -137,3 +137,98 @@ class TestRestoreRouteContainment:
         confirms the new containment check does not change unrelated behavior."""
         resp = client.post("/admin/restore", json={"snapshot_id": "nonexistent_snapshot"})
         assert resp.status_code == 404
+
+
+class TestAgentExportImportAndInvalidateRoutes:
+    """CRIT-2, SEC-2, SEC-3, MAJ-13: HTTP route tests for export/import/invalidate."""
+
+    def test_import_agent_rejects_path_outside_backup_dir(self, client, backup_dir):
+        resp = client.post(
+            "/admin/import-agent",
+            json={"file": "/etc/passwd", "dry_run": True},
+        )
+        assert resp.status_code == 400, resp.text
+
+    def test_import_agent_rejects_dotdot_traversal(self, client, backup_dir):
+        resp = client.post(
+            "/admin/import-agent",
+            json={"file": "../../outside.ndjson", "dry_run": True},
+        )
+        assert resp.status_code == 400, resp.text
+
+    def test_import_agent_succeeds_inside_backup_dir_with_bm25(
+        self, client, backup_dir, async_pool, monkeypatch
+    ):
+        from unittest.mock import MagicMock
+
+        ndjson = backup_dir / "agent_export.ndjson"
+        ndjson.write_text(
+            json.dumps(
+                {
+                    "id": "imp-route-1",
+                    "vector": [0.1, 0.2, 0.3],
+                    "payload": {
+                        "agent_id": "nova",
+                        "namespace": "ns-imp",
+                        "text": "imported via HTTP route with BM25 enabled",
+                    },
+                }
+            )
+            + "\n"
+        )
+        mock_qdrant = MagicMock()
+        monkeypatch.setattr("archivist.core.config.BM25_ENABLED", True)
+        with (
+            patch(
+                "archivist.storage.collection_router.ensure_collection",
+                return_value="test_coll",
+            ),
+            patch("archivist.storage.qdrant.qdrant_client", return_value=mock_qdrant),
+        ):
+            resp = client.post(
+                "/admin/import-agent",
+                json={"file": str(ndjson), "dry_run": False},
+            )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["imported"] == 1
+        assert data["fts_rebuilt"] == 1
+        assert data["failed"] == 0
+
+    def test_export_agent_succeeds_over_http_without_event_loop_crash(
+        self, client, backup_dir, async_pool
+    ):
+        from unittest.mock import MagicMock
+
+        mock_point = MagicMock()
+        mock_point.id = "exp-1"
+        mock_point.vector = [0.1, 0.2]
+        mock_point.payload = {"agent_id": "nova", "text": "exported memory"}
+        mock_qdrant = MagicMock()
+        mock_qdrant.scroll.return_value = ([mock_point], None)
+
+        with (
+            patch(
+                "archivist.storage.backup_manager.collections_for_query",
+                return_value=["test_coll"],
+            ),
+            patch("archivist.storage.qdrant.qdrant_client", return_value=mock_qdrant),
+        ):
+            resp = client.post("/admin/export-agent", params={"agent_id": "nova"})
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["agent_id"] == "nova"
+        assert data["points"] == 1
+
+    def test_invalidate_rejects_get_and_accepts_post(self, client):
+        get_resp = client.get("/admin/invalidate")
+        assert get_resp.status_code == 405
+
+        from unittest.mock import MagicMock
+
+        mock_qdrant = MagicMock()
+        mock_qdrant.scroll.return_value = ([], None)
+        with patch("archivist.app.main.qdrant_client", return_value=mock_qdrant):
+            post_resp = client.post("/admin/invalidate")
+        assert post_resp.status_code == 200
+        assert post_resp.json()["invalidated"] == 0

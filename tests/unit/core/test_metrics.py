@@ -74,32 +74,12 @@ class TestSubsystemHealthyGauge:
     """collect_storage_gauges_tick emits SUBSYSTEM_HEALTHY for registered subsystems."""
 
     def test_subsystem_healthy_gauge_emitted_when_healthy(self, monkeypatch):
+        from unittest.mock import MagicMock, patch
+
         import archivist.core.health as health
         from archivist.core import metrics as m
 
         health.register("test_subsystem_up", healthy=True)
-
-        emitted: dict[str, float] = {}
-
-        def fake_gauge_set(name, value, labels=None):
-            if name == m.SUBSYSTEM_HEALTHY and labels:
-                emitted[labels.get("subsystem", "")] = value
-
-        monkeypatch.setattr(m, "gauge_set", fake_gauge_set)
-
-        # Call only the subsystem health portion by invoking the helper directly
-        for _name, _entry in health.all_status().items():
-            m.gauge_set(
-                m.SUBSYSTEM_HEALTHY, 1.0 if _entry.get("healthy") else 0.0, {"subsystem": _name}
-            )
-
-        assert "test_subsystem_up" in emitted
-        assert emitted["test_subsystem_up"] == 1.0
-
-    def test_subsystem_healthy_gauge_zero_when_unhealthy(self, monkeypatch):
-        import archivist.core.health as health
-        from archivist.core import metrics as m
-
         health.register("test_subsystem_down", healthy=False)
 
         emitted: dict[str, float] = {}
@@ -109,14 +89,66 @@ class TestSubsystemHealthyGauge:
                 emitted[labels.get("subsystem", "")] = value
 
         monkeypatch.setattr(m, "gauge_set", fake_gauge_set)
+        monkeypatch.setattr("archivist.core.config.GRAPH_BACKEND", "postgres")
 
-        for _name, _entry in health.all_status().items():
-            m.gauge_set(
-                m.SUBSYSTEM_HEALTHY, 1.0 if _entry.get("healthy") else 0.0, {"subsystem": _name}
-            )
+        fake_client = MagicMock()
+        fake_client.get_collections.return_value = MagicMock(collections=[])
 
-        assert "test_subsystem_down" in emitted
-        assert emitted["test_subsystem_down"] == 0.0
+        with patch("archivist.storage.qdrant.qdrant_client", return_value=fake_client):
+            m.collect_storage_gauges_tick()
+
+        assert emitted.get("test_subsystem_up") == 1.0
+        assert emitted.get("test_subsystem_down") == 0.0
+
+
+class TestPrometheusHistogramFormat:
+    """MAJ-2: histogram buckets must not double-accumulate and _count/_sum stay under histogram TYPE."""
+
+    def test_single_observation_cumulative_buckets_and_count(self):
+        from archivist.core import metrics as m
+
+        m._counters.clear()
+        m._gauges.clear()
+        m._histogram_buckets.clear()
+        m._histogram_layout.clear()
+        m._histogram_counts.clear()
+        m._histogram_sums.clear()
+
+        m.observe("archivist_test_lat_ms", 12.0)
+        text = m.render()
+
+        assert "# TYPE archivist_test_lat_ms histogram" in text
+        assert "# TYPE archivist_test_lat_ms_count counter" not in text
+        assert "# TYPE archivist_test_lat_ms_sum counter" not in text
+        assert 'archivist_test_lat_ms_bucket{le="10"} 0' in text
+        assert 'archivist_test_lat_ms_bucket{le="25"} 1' in text
+        assert 'archivist_test_lat_ms_bucket{le="50"} 1' in text
+        assert 'archivist_test_lat_ms_bucket{le="+Inf"} 1' in text
+        assert "archivist_test_lat_ms_count 1" in text
+        assert "archivist_test_lat_ms_sum 12.0" in text
+
+    def test_labeled_histogram_multiple_observations(self):
+        from archivist.core import metrics as m
+
+        m._counters.clear()
+        m._gauges.clear()
+        m._histogram_buckets.clear()
+        m._histogram_layout.clear()
+        m._histogram_counts.clear()
+        m._histogram_sums.clear()
+
+        m.observe(m.SEARCH_RESULTS, 0.0, {"namespace": "alpha"})
+        m.observe(m.SEARCH_RESULTS, 12.0, {"namespace": "alpha"})
+        m.observe(m.SEARCH_RESULTS, 1000.0, {"namespace": "alpha"})
+        text = m.render()
+
+        assert "# TYPE archivist_search_results histogram" in text
+        assert 'archivist_search_results_bucket{namespace="alpha",le="0"} 1' in text
+        assert 'archivist_search_results_bucket{namespace="alpha",le="10"} 1' in text
+        assert 'archivist_search_results_bucket{namespace="alpha",le="20"} 2' in text
+        assert 'archivist_search_results_bucket{namespace="alpha",le="+Inf"} 3' in text
+        assert 'archivist_search_results_count{namespace="alpha"} 3' in text
+        assert 'archivist_search_results_sum{namespace="alpha"} 1012.0' in text
 
 
 class TestHealthRegisterLatency:

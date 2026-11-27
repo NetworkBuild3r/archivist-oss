@@ -15,7 +15,7 @@ def _isolate_env(monkeypatch, tmp_path):
     db_path = str(tmp_path / "graph.db")
     monkeypatch.setenv("MEMORY_ROOT", str(tmp_path / "memories"))
     monkeypatch.setenv("SQLITE_PATH", db_path)
-    monkeypatch.setenv("NAMESPACES_CONFIG_PATH", str(tmp_path / "ns.yaml"))
+    monkeypatch.setenv("NAMESPACES_CONFIG_PATH", "")
     monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
     monkeypatch.setenv("LLM_URL", "http://localhost:4000")
     monkeypatch.setenv("LLM_API_KEY", "test-key")
@@ -24,9 +24,14 @@ def _isolate_env(monkeypatch, tmp_path):
     os.makedirs(str(tmp_path / "memories"), exist_ok=True)
 
     import archivist.core.config as config
+    import archivist.core.rbac as rbac
     import archivist.storage.graph as graph
 
     monkeypatch.setattr(config, "SQLITE_PATH", db_path)
+    monkeypatch.setattr(config, "NAMESPACES_CONFIG_PATH", "")
+    monkeypatch.setattr(rbac, "NAMESPACES_CONFIG_PATH", "")
+    rbac._config = None
+    rbac._permissive_fallback = False
     monkeypatch.setattr(graph, "SQLITE_PATH", db_path)
     graph.init_schema()
 

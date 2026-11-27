@@ -84,10 +84,13 @@ def test_search_results_histogram():
     m.observe(m.SEARCH_RESULTS, 0.0, {"namespace": "ns1"})
     m.observe(m.SEARCH_RESULTS, 12.0, {"namespace": "ns1"})
     text = m.render()
-    assert "archivist_search_results_bucket" in text
-    assert "archivist_search_results_count" in text
-    assert 'namespace="ns1"' in text
-    assert "archivist_search_results_sum" in text
+    assert "# TYPE archivist_search_results histogram" in text
+    assert "# TYPE archivist_search_results_count counter" not in text
+    assert 'archivist_search_results_bucket{namespace="ns1",le="0"} 1' in text
+    assert 'archivist_search_results_bucket{namespace="ns1",le="20"} 2' in text
+    assert 'archivist_search_results_bucket{namespace="ns1",le="+Inf"} 2' in text
+    assert 'archivist_search_results_count{namespace="ns1"} 2' in text
+    assert 'archivist_search_results_sum{namespace="ns1"} 12.0' in text
 
 
 def test_metrics_auth_exempt_allows_unauthenticated_scrape(monkeypatch):

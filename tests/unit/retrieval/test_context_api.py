@@ -497,3 +497,108 @@ class TestReceiveHandoffPacket:
 
         assert "handoff_note_goal_hint" in result["injected_keys"]
         assert mock_ss.get("bob", "sess-1", "handoff_note_goal_hint") == "focus on auth"
+
+
+class TestContextApiMAJ8AndSec5:
+    """MAJ-8 + SEC-5 + MAJ-13: real-SQLite handoff facts join, namespace-scoped hotness,
+    entity_fact extraction, and pack_policy/include_hotness threading."""
+
+    @pytest.mark.asyncio
+    async def test_get_relevant_context_extracts_entity_facts_and_forwards_options(self):
+        mock_retrieve = AsyncMock(
+            return_value={
+                "sources": [
+                    {
+                        "id": "ef-1",
+                        "file_type": "entity_fact",
+                        "text": "Service X runs on port 8080",
+                        "score": 0.9,
+                        "file_path": "",
+                        "date": "2026-04-01",
+                        "agent_id": "alice",
+                    }
+                ],
+                "answer": "Service X uses 8080.",
+                "over_budget": False,
+                "retrieval_trace": {"context_status": {}},
+            }
+        )
+        with (
+            patch("archivist.retrieval.context_api.recursive_retrieve", new=mock_retrieve),
+            patch("archivist.retrieval.context_api.count_tokens", return_value=20),
+            patch("archivist.retrieval.context_api.search_tips", new=AsyncMock(return_value=[])),
+        ):
+            ctx = await get_relevant_context(
+                agent_id="alice",
+                task_description="what port does Service X use?",
+                tier_policy="l0_first",
+                include_hotness=False,
+            )
+
+        assert "Service X runs on port 8080" in ctx.graph_facts
+        call_kw = mock_retrieve.await_args.kwargs
+        assert call_kw["pack_policy"] == "l0_first"
+        assert call_kw["include_hotness"] is False
+
+    @pytest.mark.asyncio
+    async def test_create_handoff_packet_real_sqlite_joins_entities_and_scopes_hotness(
+        self, async_pool
+    ):
+        from archivist.storage.graph import add_fact, upsert_entity
+
+        eid_a = await upsert_entity("AlphaService", namespace="ns-alpha")
+        await add_fact(
+            eid_a,
+            "AlphaService deploys via ArgoCD",
+            "notes.md",
+            "alice",
+            namespace="ns-alpha",
+            confidence=0.95,
+        )
+        eid_b = await upsert_entity("BetaSecret", namespace="ns-beta")
+        await add_fact(
+            eid_b,
+            "BetaSecret belongs to another tenant",
+            "secret.md",
+            "bob",
+            namespace="ns-beta",
+            confidence=0.95,
+        )
+
+        async with async_pool.write() as conn:
+            await conn.execute(
+                "INSERT INTO memory_chunks (qdrant_id, text, file_path, chunk_index, agent_id, namespace, date, memory_type) "
+                "VALUES (?, ?, ?, 0, ?, ?, ?, 'general')",
+                ("mem-alpha-1", "alpha text", "a.md", "alice", "ns-alpha", "2026-04-01"),
+            )
+            await conn.execute(
+                "INSERT INTO memory_chunks (qdrant_id, text, file_path, chunk_index, agent_id, namespace, date, memory_type) "
+                "VALUES (?, ?, ?, 0, ?, ?, ?, 'general')",
+                ("mem-beta-1", "beta secret", "b.md", "bob", "ns-beta", "2026-04-01"),
+            )
+            await conn.execute(
+                "INSERT INTO memory_hotness (memory_id, score, retrieval_count, updated_at) "
+                "VALUES (?, ?, ?, ?)",
+                ("mem-alpha-1", 0.8, 5, "2026-04-01T00:00:00+00:00"),
+            )
+            await conn.execute(
+                "INSERT INTO memory_hotness (memory_id, score, retrieval_count, updated_at) "
+                "VALUES (?, ?, ?, ?)",
+                ("mem-beta-1", 0.99, 50, "2026-04-01T00:00:00+00:00"),
+            )
+
+        pkt = await create_handoff_packet(
+            agent_id="alice",
+            session_id="sess-real",
+            receiving_agent_id="charlie",
+            namespace="ns-alpha",
+        )
+
+        # Facts joined entities cleanly and excluded ns-beta
+        fact_lines = pkt.knowledge_snapshot["facts"]
+        assert any("AlphaService" in line and "ArgoCD" in line for line in fact_lines)
+        assert not any("BetaSecret" in line for line in fact_lines)
+
+        # Hotness key_memory_ids scoped strictly to ns-alpha (SEC-5)
+        assert "mem-alpha-1" in pkt.key_memory_ids
+        assert "mem-beta-1" not in pkt.key_memory_ids
