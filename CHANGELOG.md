@@ -5,6 +5,32 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Postgres: wake-up cache and hotness never updated.** The wake-up identity query used
+  `SELECT DISTINCT ... ORDER BY e.mention_count` (rejected by Postgres: ORDER BY expressions
+  must appear in the DISTINCT select list), so the curator's wake-up refresh failed for every
+  namespace/agent pair on every cycle and no wake-up payload was cached. It now groups by
+  `(name, entity_type, retention_class)` and orders by `MAX(mention_count)`, with the same
+  result set on SQLite. The hotness batch job compared the INTEGER `cache_hit` column to
+  `FALSE` and the TEXT `created_at` column to `NOW()`; both predicates are now valid, so
+  hotness scores update on Postgres.
+- **Postgres SQL translation: aggregate `MAX(col)` / `MIN(col)` were rewritten to
+  `GREATEST(col)` / `LEAST(col)`.** Only the two-argument scalar form is rewritten now.
+  Single-argument aggregates (for example `MAX(version)`, `MAX(last_seen)`) previously
+  returned an arbitrary row's value, or failed in grouped queries, on Postgres.
+- **Logging:** a failing wake-up refresh now logs one warning per curator cycle with the
+  failure count and the first error (previously one debug line per pair), and a failing
+  hotness retrieval_logs query logs at warning instead of debug.
+
+### Tests
+
+- CI's integration job now starts a Postgres service and sets `POSTGRES_TEST_DSN`, so the
+  `postgres` variants in `tests/integration/storage/` run instead of skipping. The dual-backend
+  hotness test now actually logs retrievals (it previously passed vacuously), and new
+  dual-backend tests cover wake-up context, the wake-up cache round trip, the curator refresh
+  loop, and namespace-inventory top entities.
+
 ## [2.5.0] - 2026-07-27
 
 ### Changed

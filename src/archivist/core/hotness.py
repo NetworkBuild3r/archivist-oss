@@ -91,14 +91,19 @@ async def apply_hotness_to_results(results: list[dict], weight: float | None = N
 def _retrieval_logs_query(is_postgres: bool) -> str:
     """Return the retrieval_logs aggregation query for the active backend."""
     if is_postgres:
-        # Postgres: use ->> JSON operator and NOW() - INTERVAL for date arithmetic
+        # Postgres: use ->> JSON operator for the trace.  Both cache_hit (INTEGER) and
+        # created_at (TEXT, ISO-8601 UTC) are stored exactly as on SQLite, so compare
+        # cache_hit to an integer and created_at to an ISO-formatted UTC cutoff string;
+        # comparing the TEXT column to NOW() raises "operator does not exist".
         return """
             SELECT
                 retrieval_trace::json->>'result_ids' AS result_ids,
                 created_at
             FROM retrieval_logs
-            WHERE cache_hit = FALSE
-              AND created_at > NOW() - INTERVAL '7 days'
+            WHERE cache_hit = 0
+              AND created_at > to_char(
+                  (NOW() AT TIME ZONE 'UTC') - INTERVAL '7 days', 'YYYY-MM-DD"T"HH24:MI:SS'
+              )
             ORDER BY created_at DESC
             LIMIT 5000
         """
@@ -160,7 +165,7 @@ async def batch_update_hotness() -> int:
         try:
             log_rows = await conn.fetchall(_retrieval_logs_query(_is_postgres()))
         except Exception as e:
-            logger.debug("hotness.batch_update: retrieval_logs query failed: %s", e)
+            logger.warning("hotness.batch_update: retrieval_logs query failed: %s", e)
             log_rows = []
 
     for row in log_rows:

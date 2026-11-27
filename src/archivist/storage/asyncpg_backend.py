@@ -58,18 +58,54 @@ _INSERT_OR_IGNORE_RE = re.compile(r"\bINSERT\s+OR\s+IGNORE\s+INTO\b", re.IGNOREC
 _INSERT_OR_REPLACE_RE = re.compile(r"\bINSERT\s+OR\s+REPLACE\s+INTO\b", re.IGNORECASE)
 _COLLATE_NOCASE_RE = re.compile(r"\s+COLLATE\s+NOCASE\b", re.IGNORECASE)
 # SQLite's two-argument MIN(a, b) / MAX(a, b) are scalar functions; Postgres uses LEAST/GREATEST.
-# This matches MIN( or MAX( only when immediately followed by a non-whitespace character (i.e.
-# it is the two-argument scalar form, not the SQL aggregate MIN(...) used over a column).
-_MIN2_RE = re.compile(r"\bMIN\s*\(", re.IGNORECASE)
-_MAX2_RE = re.compile(r"\bMAX\s*\(", re.IGNORECASE)
+# The single-argument aggregate form MIN(col) / MAX(col) is valid on both engines and must be
+# left alone, so the rewrite only fires when the call has a top-level comma.
+_MIN_MAX_CALL_RE = re.compile(r"\b(MIN|MAX)\s*\(", re.IGNORECASE)
 
 
-def _replace_min2(m: re.Match[str]) -> str:
-    return "LEAST("
+def _rewrite_scalar_min_max(sql: str) -> str:
+    """Rewrite two-argument ``MIN(a, b)`` / ``MAX(a, b)`` to ``LEAST`` / ``GREATEST``.
 
-
-def _replace_max2(m: re.Match[str]) -> str:
-    return "GREATEST("
+    Single-argument aggregate calls (``MAX(col)``) are returned unchanged. A call is
+    scalar only when its argument list has a comma at nesting depth 1 (directly inside
+    the call's own parentheses); commas inside nested parentheses or single-quoted
+    string literals do not count.
+    """
+    out: list[str] = []
+    pos = 0
+    while True:
+        m = _MIN_MAX_CALL_RE.search(sql, pos)
+        if m is None:
+            out.append(sql[pos:])
+            break
+        depth = 0
+        in_str = False
+        has_top_level_comma = False
+        i = m.end() - 1
+        while i < len(sql):
+            ch = sql[i]
+            if in_str:
+                if ch == "'":
+                    in_str = False
+            elif ch == "'":
+                in_str = True
+            elif ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            elif ch == "," and depth == 1:
+                has_top_level_comma = True
+            i += 1
+        out.append(sql[pos : m.start()])
+        if has_top_level_comma:
+            out.append("LEAST(" if m.group(1).upper() == "MIN" else "GREATEST(")
+        else:
+            out.append(m.group(0))
+        # Resume right after the opening paren so nested calls are still visited.
+        pos = m.end()
+    return "".join(out)
 
 
 def _translate_sql(sql: str) -> str:
@@ -118,10 +154,9 @@ def _translate_sql(sql: str) -> str:
     # Step 4: MIN(a, b) / MAX(a, b) → LEAST(a, b) / GREATEST(a, b)
     # SQLite exposes these as two-argument scalar comparison functions; PostgreSQL
     # does not have MIN/MAX as scalar functions — it uses LEAST/GREATEST instead.
-    # The SQL aggregate forms (SELECT MIN(col) FROM …) are unaffected because
-    # both databases accept the aggregate MIN(col) syntax natively.
-    sql2 = _MIN2_RE.sub(_replace_min2, sql2)
-    sql2 = _MAX2_RE.sub(_replace_max2, sql2)
+    # The SQL aggregate forms (SELECT MAX(col) FROM …) are left untouched because
+    # both databases accept the aggregate MIN(col) / MAX(col) syntax natively.
+    sql2 = _rewrite_scalar_min_max(sql2)
 
     # Step 5: ? → $N
     counter = 0

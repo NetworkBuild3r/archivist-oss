@@ -70,6 +70,41 @@ class TestTranslateSqlDialects:
 
         return _translate_sql(sql)
 
+    # --- MIN / MAX: scalar two-argument form vs aggregate ---
+
+    def test_scalar_min_becomes_least(self):
+        result = self._t("UPDATE r SET c=MIN(c+0.01, 1.0) WHERE id=?")
+        assert result == "UPDATE r SET c=LEAST(c+0.01, 1.0) WHERE id=$1"
+
+    def test_scalar_max_becomes_greatest(self):
+        assert self._t("SELECT MAX(a, b) FROM t") == "SELECT GREATEST(a, b) FROM t"
+
+    def test_aggregate_max_is_left_alone(self):
+        """MAX(col) is an aggregate on both engines; GREATEST(col) breaks GROUP BY queries."""
+        sql = (
+            "SELECT e.name, MAX(e.mention_count) AS mc FROM entities e "
+            "GROUP BY e.name ORDER BY mc DESC LIMIT ?"
+        )
+        assert self._t(sql) == sql.replace("LIMIT ?", "LIMIT $1")
+
+    def test_aggregate_min_is_left_alone(self):
+        assert self._t("SELECT MIN(created_at) AS ts FROM outbox") == (
+            "SELECT MIN(created_at) AS ts FROM outbox"
+        )
+
+    def test_aggregate_over_scalar_call_is_distinguished(self):
+        """Only the inner two-argument call is rewritten; the outer aggregate stays."""
+        result = self._t("SELECT MAX(MIN(a, b)) FROM t")
+        assert result == "SELECT MAX(LEAST(a, b)) FROM t"
+
+    def test_commas_in_nested_calls_and_strings_do_not_make_aggregate_scalar(self):
+        result = self._t("SELECT MAX(COALESCE(a, 0)), MAX(replace(b, ',', ';')) FROM t")
+        assert "GREATEST" not in result
+        assert result == "SELECT MAX(COALESCE(a, 0)), MAX(replace(b, ',', ';')) FROM t"
+
+    def test_aggregate_without_space_variants(self):
+        assert "GREATEST" not in self._t("SELECT MAX (version) AS v FROM t WHERE id = ?")
+
     # --- INSERT OR IGNORE ---
 
     def test_insert_or_ignore_basic(self):

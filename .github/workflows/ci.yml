@@ -183,6 +183,23 @@ jobs:
       (github.event_name == 'pull_request' &&
         (github.base_ref == 'main' || github.base_ref == 'master'))
 
+    # Throwaway Postgres so the postgres variants of the dual-backend tests run in CI.
+    # Without it they skip silently and Postgres-only SQL errors go unnoticed.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: archivist
+          POSTGRES_PASSWORD: archivist-ci
+          POSTGRES_DB: archivist_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U archivist -d archivist_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
     steps:
       - uses: actions/checkout@v4
 
@@ -210,6 +227,7 @@ jobs:
         env:
           SQLITE_PATH: "/tmp/archivist-test.db"
           QDRANT_URL: ""
+          POSTGRES_TEST_DSN: "postgresql://archivist:archivist-ci@localhost:5432/archivist_test"
 
       - name: Upload integration test results
         if: always()

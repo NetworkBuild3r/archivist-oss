@@ -474,6 +474,8 @@ async def _refresh_wake_up_caches() -> int:
         )
 
     refreshed = 0
+    failed = 0
+    first_failure = ""
     seen: set[str] = set()
     for row in rows:
         ns = row["namespace"]
@@ -486,7 +488,19 @@ async def _refresh_wake_up_caches() -> int:
             await cache_wake_up(ns, agent_id=aid)
             refreshed += 1
         except Exception as e:
-            logger.debug("Wake-up cache failed for %s/%s: %s", ns, aid, e)
+            failed += 1
+            if not first_failure:
+                first_failure = f"{ns}/{aid}: {type(e).__name__}: {e}"
+
+    # One warning per cycle (not one line per pair): a statement that fails for every
+    # pair used to be invisible at debug level, leaving the wake-up cache unwritten.
+    if failed:
+        logger.warning(
+            "Wake-up cache refresh failed for %d of %d namespace/agent pairs; first failure: %s",
+            failed,
+            failed + refreshed,
+            first_failure,
+        )
 
     if refreshed:
         logger.info("Refreshed wake-up context for %d namespace/agent pairs", refreshed)

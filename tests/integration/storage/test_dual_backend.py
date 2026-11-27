@@ -113,6 +113,12 @@ async def dual_pool(request, tmp_path, monkeypatch):
             await conn.execute("DELETE FROM needle_registry WHERE namespace = 'dual_test'")
             await conn.execute("DELETE FROM facts WHERE namespace = 'dual_test'")
             await conn.execute("DELETE FROM entities WHERE namespace = 'dual_test'")
+            await conn.execute("DELETE FROM retrieval_logs WHERE namespace = 'dual_test'")
+            await conn.execute("DELETE FROM memory_chunks WHERE namespace = 'dual_test'")
+            await conn.execute("DELETE FROM memory_hotness WHERE memory_id LIKE 'hot-mem-%'")
+            await conn.execute("DELETE FROM curator_state WHERE key LIKE 'wake_up:dual_test:%'")
+            await conn.execute("DELETE FROM curator_state WHERE key LIKE 'rc_key_%'")
+            await conn.execute("DELETE FROM audit_log WHERE namespace = 'dual_test'")
 
         monkeypatch.setattr(_sp, "pool", original_pool)
         await backend.close()
@@ -389,20 +395,24 @@ async def test_dual_retrieval_log_roundtrip(dual_pool):
 # ---------------------------------------------------------------------------
 
 
-async def test_dual_hotness_batch_update(dual_pool):
-    """batch_update_hotness() runs without error and get_hotness_scores() returns data."""
-    pool, backend_name = dual_pool
+async def test_dual_hotness_batch_update(dual_pool, monkeypatch):
+    """batch_update_hotness() scores memories from non-cache-hit retrieval logs.
 
-    # Insert a retrieval log so batch_update has something to aggregate
-    import os
+    The retrieval_logs aggregation filters ``cache_hit`` (an INTEGER column) and
+    ``created_at`` (ISO-8601 TEXT); a type mismatch in either predicate used to be
+    swallowed and left every score at zero.  Asserts real rows are scored.
+    """
+    _pool, backend_name = dual_pool
 
     from archivist.core.hotness import batch_update_hotness, get_hotness_scores
+    from archivist.retrieval.retrieval_log import log_retrieval
 
-    os.environ["TRAJECTORY_EXPORT_ENABLED"] = "1"
-    try:
-        from archivist.retrieval.retrieval_log import log_retrieval
+    # The flag is bound at import time, so patch the module attribute.
+    monkeypatch.setattr("archivist.retrieval.retrieval_log.TRAJECTORY_EXPORT_ENABLED", True)
 
-        mid = f"hot-mem-{backend_name}"
+    hot_id = f"hot-mem-{backend_name}"
+    cached_id = f"hot-mem-cached-{backend_name}"
+    for mid, cache_hit in ((hot_id, False), (cached_id, True)):
         await log_retrieval(
             agent_id="hotness-agent",
             query="hotness query",
@@ -411,18 +421,111 @@ async def test_dual_hotness_batch_update(dual_pool):
             memory_type="",
             retrieval_trace={"result_ids": [mid]},
             result_count=1,
-            cache_hit=False,
+            cache_hit=cache_hit,
             duration_ms=10,
         )
-    finally:
-        os.environ.pop("TRAJECTORY_EXPORT_ENABLED", None)
 
     updated = await batch_update_hotness()
-    assert isinstance(updated, int), f"[{backend_name}] batch_update_hotness returned non-int"
+    assert updated >= 1, f"[{backend_name}] no memories scored (retrieval_logs query failed?)"
 
-    scores = await get_hotness_scores([mid])
-    # Score may be 0 if the memory wasn't logged in time; just verify no crash
-    assert isinstance(scores, dict), f"[{backend_name}] get_hotness_scores returned non-dict"
+    scores = await get_hotness_scores([hot_id, cached_id])
+    assert scores.get(hot_id, 0.0) > 0.0, f"[{backend_name}] non-cache-hit memory not scored"
+    assert cached_id not in scores, f"[{backend_name}] cache-hit retrieval must not be scored"
+
+
+# ---------------------------------------------------------------------------
+# Wake-up context
+# ---------------------------------------------------------------------------
+
+
+async def _seed_wake_up_entities():
+    """Three entities in dual_test: two identity-class (hot, warm) and one standard."""
+    from archivist.storage.graph import add_fact, upsert_entity
+
+    hot = await upsert_entity(
+        "WakeHot", "agent", retention_class="permanent", namespace="dual_test"
+    )
+    for _ in range(2):  # bump mention_count above WakeWarm's
+        await upsert_entity("WakeHot", "agent", retention_class="permanent", namespace="dual_test")
+    warm = await upsert_entity("WakeWarm", "tool", retention_class="durable", namespace="dual_test")
+    std = await upsert_entity(
+        "WakeStandard", "tool", retention_class="standard", namespace="dual_test"
+    )
+    # Two facts for WakeHot: the join fans out, the result must still be one row per entity.
+    await add_fact(hot, "hot fact one", "w.md", "wake-agent", "permanent", namespace="dual_test")
+    await add_fact(hot, "hot fact two", "w.md", "wake-agent", "permanent", namespace="dual_test")
+    await add_fact(warm, "warm fact", "w.md", "wake-agent", "durable", namespace="dual_test")
+    await add_fact(std, "standard fact", "w.md", "wake-agent", "standard", namespace="dual_test")
+
+
+@pytest.mark.parametrize("agent_id", ["wake-agent", ""])
+async def test_dual_wake_up_context_identity_entities(dual_pool, agent_id):
+    """build_wake_up_context() ranks identity entities by mention count on both backends.
+
+    Covers both identity branches (agent-scoped and unscoped).  On Postgres the
+    previous ``SELECT DISTINCT ... ORDER BY e.mention_count`` raised and no wake-up
+    payload could be produced.
+    """
+    _pool, backend_name = dual_pool
+    await _seed_wake_up_entities()
+
+    from archivist.storage.compressed_index import build_wake_up_context
+
+    ctx = await build_wake_up_context("dual_test", agent_id=agent_id)
+    assert ctx["top_entities"] == ["WakeHot", "WakeWarm"], f"[{backend_name}] {ctx['top_entities']}"
+    assert ctx["last_activity"], f"[{backend_name}] last_activity empty (MAX(last_seen) lost?)"
+
+
+async def test_dual_wake_up_cache_round_trip(dual_pool):
+    """cache_wake_up() persists a payload that get_cached_wake_up() returns."""
+    _pool, backend_name = dual_pool
+    await _seed_wake_up_entities()
+
+    from archivist.storage.compressed_index import cache_wake_up, get_cached_wake_up
+
+    await cache_wake_up("dual_test", agent_id="wake-agent")
+    cached = await get_cached_wake_up("dual_test", agent_id="wake-agent")
+    assert cached is not None, f"[{backend_name}] wake-up cache not written"
+    assert cached["top_entities"] == ["WakeHot", "WakeWarm"]
+
+
+async def test_dual_wake_up_refresh_loop_writes_cache(dual_pool):
+    """The curator's _refresh_wake_up_caches() refreshes every pair without failures."""
+    _pool, backend_name = dual_pool
+    await _seed_wake_up_entities()
+
+    from archivist.lifecycle.curator import _refresh_wake_up_caches
+    from archivist.storage.compressed_index import get_cached_wake_up
+    from archivist.storage.graph import upsert_fts_chunk
+
+    await upsert_fts_chunk(
+        "wake-chunk-1", "wake text", "w.md", 0, "wake-agent", "dual_test", "2026-01-01", "general"
+    )
+    refreshed = await _refresh_wake_up_caches()
+    assert refreshed >= 1, f"[{backend_name}] no wake-up pair refreshed"
+    assert await get_cached_wake_up("dual_test", agent_id="wake-agent") is not None
+
+
+async def test_dual_namespace_inventory_top_entities_primary_query(dual_pool):
+    """The facts+chunks top-entities query runs on both backends (not just its fallback).
+
+    ``WakeStandard`` has mention_count 1, which the fallback query (mention_count >= 2)
+    would exclude, so seeing it proves the primary DISTINCT query itself executed.
+    """
+    pool, backend_name = dual_pool
+    await _seed_wake_up_entities()
+
+    from archivist.storage.graph import upsert_fts_chunk
+    from archivist.storage.namespace_inventory import _fetch_top_entities
+
+    await upsert_fts_chunk(
+        "wake-chunk-2", "wake text", "w.md", 0, "wake-agent", "dual_test", "2026-01-01", "general"
+    )
+    async with pool.read() as conn:
+        names = await _fetch_top_entities(conn, "dual_test")
+
+    assert names[0] == "WakeHot", f"[{backend_name}] {names}"
+    assert set(names) == {"WakeHot", "WakeWarm", "WakeStandard"}, f"[{backend_name}] {names}"
 
 
 # ---------------------------------------------------------------------------
