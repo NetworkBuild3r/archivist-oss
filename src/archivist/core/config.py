@@ -347,11 +347,11 @@ class ArchivistSettings(BaseSettings):
     archivist_api_key: str = ""
     # Optional dedicated admin key for /admin/* and /debug/config scope split (INIT-023/SPEC-003).
     archivist_admin_api_key: str = ""
-    # MCP tool surface profile (INIT-003/SPEC-003). Default ``core`` exposes the
-    # coach-path tools only; ``ops`` adds operator tools (still hides share /
-    # checkpoint wedges); ``full`` restores the entire registry.
+    # MCP tool surface profile (INIT-024/SPEC-008). Default ``coding`` exposes
+    # the pruned 5-tool v3 coding surface (<900 schema tokens); ``core``/``legacy``
+    # expose the legacy v2.5 coach-core surface; ``ops``/``full`` expose all tools.
     # Env: ARCHIVIST_TOOL_PROFILE
-    archivist_tool_profile: str = "core"
+    archivist_tool_profile: str = "coding"
 
     # ── Conflict detection ────────────────────────────────────────────────────
     conflict_check_on_store: bool = False
@@ -462,10 +462,12 @@ class ArchivistSettings(BaseSettings):
     @field_validator("archivist_tool_profile", mode="before")
     @classmethod
     def _normalize_tool_profile(cls, v: Any) -> str:
-        """Normalize ARCHIVIST_TOOL_PROFILE to core|ops|full (INIT-003/SPEC-003)."""
-        val = str(v).strip().lower() if v else "core"
-        if val not in ("core", "ops", "full"):
-            raise ValueError(f"ARCHIVIST_TOOL_PROFILE must be one of: core, ops, full; got {val!r}")
+        """Normalize ARCHIVIST_TOOL_PROFILE to coding|core|legacy|ops|full (INIT-024/SPEC-008)."""
+        val = str(v).strip().lower() if v else "coding"
+        if val not in ("coding", "core", "legacy", "ops", "full"):
+            raise ValueError(
+                f"ARCHIVIST_TOOL_PROFILE must be one of: coding, core, legacy, ops, full; got {val!r}"
+            )
         return val
 
     @field_validator("metrics_collect_interval_seconds", mode="before")

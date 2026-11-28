@@ -125,9 +125,11 @@ class TestDispatch:
         assert data["total_tokens"] > 0
         assert data["hint"] == "ok"
 
-    async def test_namespaces_returns_result(self, rbac_config):
+    async def test_namespaces_returns_result(self, rbac_config, monkeypatch):
+        import archivist.core.config as config
         from archivist.app.handlers._registry import dispatch_tool
 
+        monkeypatch.setattr(config, "TOOL_PROFILE", "core")
         result = await dispatch_tool("archivist_namespaces", {"agent_id": "chief"})
         data = json.loads(result[0].text)
         assert "accessible_namespaces" in data

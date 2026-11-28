@@ -258,12 +258,25 @@ def extract_l1_query_window(text: str, query: str, max_tokens: int = 300) -> str
         # No query terms matched — return leading sentences.
         return extract_l1_query_window(cleaned, "", max_tokens=max_tokens)
 
-    if count_tokens(segments[best_idx]) > max_tokens:
+    anchor_toks = count_tokens(segments[best_idx])
+    if anchor_toks > max_tokens:
         return _window_around_single_segment(segments[best_idx], q_unique, max_tokens)
 
-    # Expand a contiguous window around the highest-scoring anchor sentence.
+    # Expand a contiguous window around the highest-scoring anchor sentence
+    # in O(N) using cached per-segment token counts rather than re-tokenizing
+    # the growing joined prefix on every step.
+    seg_tok_cache: dict[int, int] = {best_idx: anchor_toks}
+
+    def _seg_tokens(idx: int) -> int:
+        cached = seg_tok_cache.get(idx)
+        if cached is None:
+            cached = count_tokens(segments[idx])
+            seg_tok_cache[idx] = cached
+        return cached
+
     left = best_idx
     right = best_idx
+    used_tokens = anchor_toks
     while True:
         expanded = False
         can_right = right + 1 < n_segs
@@ -277,11 +290,15 @@ def extract_l1_query_window(text: str, query: str, max_tokens: int = 300) -> str
         neighbors.sort(key=lambda item: item[0], reverse=True)
 
         for _, direction in neighbors:
-            cand_l = left - 1 if direction == "left" else left
-            cand_r = right + 1 if direction == "right" else right
-            candidate = " ".join(segments[cand_l : cand_r + 1])
-            if count_tokens(candidate) <= max_tokens:
-                left, right = cand_l, cand_r
+            next_idx = right + 1 if direction == "right" else left - 1
+            # +1 token headroom for the joining space between segments.
+            added = _seg_tokens(next_idx) + 1
+            if used_tokens + added <= max_tokens:
+                if direction == "right":
+                    right = next_idx
+                else:
+                    left = next_idx
+                used_tokens += added
                 expanded = True
                 break
         if not expanded:

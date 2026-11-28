@@ -2,10 +2,10 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt uvicorn starlette
+COPY pyproject.toml README.md LICENSE ./
+COPY src/ ./src/
 
-COPY src/ ./
+RUN pip install --no-cache-dir ".[postgres,qdrant]"
 
 ARG UID=1000
 ARG GID=1000

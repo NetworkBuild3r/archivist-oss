@@ -1,3 +1,87 @@
+[build-system]
+requires = ["hatchling>=1.25.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "archivist-mcp"
+dynamic = ["version"]
+description = "Single-file local and fleet memory server for AI coding agents via MCP"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.12"
+keywords = ["mcp", "memory", "agents", "sqlite-vec", "onnx", "retrieval"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+dependencies = [
+    "mcp>=1.28.1,<2.0.0",
+    "httpx>=0.28.1",
+    "pyyaml>=6.0.3",
+    "pydantic-settings>=2.14.2",
+    "aiosqlite>=0.20.0",
+    "starlette>=1.3.1",
+    "uvicorn>=0.51.0",
+    "watchfiles>=1.0.0",
+    "tqdm>=4.66.0",
+    "google-re2>=1.1",
+    "sqlite-vec>=0.1.6",
+    "numpy>=1.26.0",
+]
+
+[project.scripts]
+archivist = "archivist.cli.main:main"
+archivist-mcp = "archivist.cli.main:mcp_entrypoint"
+
+[project.optional-dependencies]
+local = [
+    "sqlite-vec>=0.1.6",
+    "onnxruntime>=1.19.0",
+    "tokenizers>=0.20.0",
+    "fastembed>=0.5.0",
+    "google-re2>=1.1",
+    "numpy>=1.26.0",
+]
+usearch = [
+    "usearch>=2.16.0",
+]
+postgres = [
+    "asyncpg>=0.30.0",
+    "pgvector>=0.3.6",
+]
+qdrant = [
+    "qdrant-client>=1.13.0,<2.0.0",
+]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "pytest-timeout>=2.4.0",
+    "pytest-cov>=6.0.0",
+    "mypy==1.19.1",
+    "ruff>=0.9.0",
+    "bandit>=1.8.0",
+    "tiktoken>=0.7.0",
+    "build>=1.2.0",
+]
+
+[tool.hatch.version]
+path = "src/archivist/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/archivist"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src/archivist",
+    "/README.md",
+    "/LICENSE",
+    "/pyproject.toml",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
