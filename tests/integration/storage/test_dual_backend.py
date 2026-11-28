@@ -114,24 +114,30 @@ async def dual_pool(request, tmp_path, monkeypatch):
         monkeypatch.setattr("archivist.core.config.GRAPH_BACKEND", "postgres")
         _reset_guards()
 
-        yield backend, "postgres"
+        try:
+            yield backend, "postgres"
+        finally:
+            async with backend.write() as conn:
+                await conn.execute("DELETE FROM relationships WHERE namespace = 'dual_test'")
+                await conn.execute("DELETE FROM needle_registry WHERE namespace = 'dual_test'")
+                await conn.execute("DELETE FROM memory_chunks WHERE namespace = 'dual_test'")
+                await conn.execute("DELETE FROM facts WHERE namespace = 'dual_test'")
+                await conn.execute("DELETE FROM entities WHERE namespace = 'dual_test'")
+                await conn.execute("DELETE FROM audit_log WHERE namespace = 'dual_test'")
+                await conn.execute("DELETE FROM retrieval_logs WHERE namespace = 'dual_test'")
+                await conn.execute("DELETE FROM memory_points WHERE memory_id LIKE 'dual-%'")
+                await conn.execute(
+                    "DELETE FROM memory_hotness "
+                    "WHERE memory_id LIKE 'dual-%' OR memory_id LIKE 'hot-mem-%'"
+                )
+                await conn.execute("DELETE FROM outbox WHERE payload LIKE '%dual-%'")
+                await conn.execute("DELETE FROM curator_queue WHERE payload LIKE '%\"dual_test\"%'")
+                await conn.execute(
+                    "DELETE FROM curator_state WHERE key LIKE 'dual_%' OR key LIKE 'rc_key_%'"
+                )
 
-        async with backend.write() as conn:
-            await conn.execute("DELETE FROM relationships WHERE namespace = 'dual_test'")
-            await conn.execute("DELETE FROM needle_registry WHERE namespace = 'dual_test'")
-            await conn.execute("DELETE FROM memory_chunks WHERE namespace = 'dual_test'")
-            await conn.execute("DELETE FROM facts WHERE namespace = 'dual_test'")
-            await conn.execute("DELETE FROM entities WHERE namespace = 'dual_test'")
-            await conn.execute("DELETE FROM audit_log WHERE namespace = 'dual_test'")
-            await conn.execute("DELETE FROM retrieval_logs WHERE namespace = 'dual_test'")
-            await conn.execute("DELETE FROM memory_points WHERE memory_id LIKE 'dual-%'")
-            await conn.execute("DELETE FROM memory_hotness WHERE memory_id LIKE 'dual-%'")
-            await conn.execute("DELETE FROM outbox WHERE payload LIKE '%dual-%'")
-            await conn.execute("DELETE FROM curator_queue WHERE payload LIKE '%\"dual_test\"%'")
-            await conn.execute("DELETE FROM curator_state WHERE key LIKE 'dual_%'")
-
-        monkeypatch.setattr(_sp, "pool", original_pool)
-        await backend.close()
+            monkeypatch.setattr(_sp, "pool", original_pool)
+            await backend.close()
 
 
 # ---------------------------------------------------------------------------

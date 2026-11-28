@@ -786,7 +786,7 @@ jobs:
           assert health.get("service") == "archivist", f"Unexpected /health service: {health}"
 
           inv = json.loads(os.environ["INV_BODY"])
-          assert "deleted" in inv or "count" in inv, f"Unexpected /admin/invalidate response: {inv}"
+          assert "invalidated" in inv, f"Unexpected /admin/invalidate response: {inv}"
 
           created = json.loads(os.environ["BACKUP_CREATE_BODY"])
           snap_id = created.get("snapshot_id") or created.get("id")
