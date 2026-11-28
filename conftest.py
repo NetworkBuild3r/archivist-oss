@@ -25,9 +25,8 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         "yes",
         "on",
     }
-    env_threshold = float(
-        os.getenv("ARCHIVIST_STALL_THRESHOLD_MS", str(DEFAULT_STALL_THRESHOLD_MS))
-    )
+    raw_threshold = os.getenv("ARCHIVIST_STALL_THRESHOLD_MS", "").strip()
+    env_threshold = float(raw_threshold) if raw_threshold else DEFAULT_STALL_THRESHOLD_MS
     parser.addoption(
         "--stall-watchdog",
         action="store_true",

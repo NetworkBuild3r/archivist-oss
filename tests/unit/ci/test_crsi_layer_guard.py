@@ -4,13 +4,15 @@ Enforces that ``src/archivist/crsi/`` remains strictly decoupled from the
 Archivist core runtime and vector client:
   1. Zero imports from ``archivist.*`` outside ``archivist.crsi`` (including
      bare ``import archivist``, relative escapes like ``from ..storage import ...``,
-     and dynamic ``importlib.import_module`` / ``__import__`` string literals).
+     and dynamic ``importlib.import_module`` / ``__import__`` / ``builtins.__import__``
+     forms with aliases, keyword arguments, or relative targets).
   2. Zero imports of ``qdrant_client`` or ``qdrant_client.*``.
 """
 
 from __future__ import annotations
 
 import ast
+import importlib.util
 from pathlib import Path
 
 import pytest
@@ -55,12 +57,71 @@ def _resolve_relative_import(package_parts: list[str], level: int, module: str |
     return ".".join(base)
 
 
+def _extract_string_arg(
+    call: ast.Call,
+    pos_idx: int,
+    kw_name: str,
+) -> str | None:
+    """Extract a constant string argument by positional index or keyword name."""
+    if len(call.args) > pos_idx:
+        arg = call.args[pos_idx]
+        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+            return arg.value
+    for kw in call.keywords:
+        if (
+            kw.arg == kw_name
+            and isinstance(kw.value, ast.Constant)
+            and isinstance(kw.value.value, str)
+        ):
+            return kw.value.value
+    return None
+
+
+def _resolve_dynamic_target(target: str, package: str | None, default_pkg: str) -> str:
+    """Resolve relative ``importlib.import_module('.x', package=...)`` targets."""
+    if not target.startswith("."):
+        return target
+    pkg = package or default_pkg
+    if not pkg:
+        return target
+    try:
+        return importlib.util.resolve_name(target, pkg)
+    except (ImportError, ValueError):
+        return target
+
+
 def find_crsi_layer_violations(source: str, module_rel_path: Path) -> list[str]:
     """Parse *source* and return human-readable GR-LAYER-001 violations."""
     tree = ast.parse(source, filename=str(module_rel_path))
     pkg_parts = _package_parts_for_module(module_rel_path)
+    default_pkg = ".".join(pkg_parts)
     violations: list[str] = []
 
+    importlib_mod_aliases: set[str] = {"importlib"}
+    import_module_aliases: set[str] = set()
+    builtins_mod_aliases: set[str] = {"builtins"}
+    dunder_import_aliases: set[str] = {"__import__"}
+
+    # Pass 1: collect local import aliases so aliased dynamic imports cannot bypass Pass 2.
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                local_name = alias.asname or alias.name
+                if alias.name == "importlib":
+                    importlib_mod_aliases.add(local_name)
+                elif alias.name == "builtins":
+                    builtins_mod_aliases.add(local_name)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0:
+            if node.module == "importlib":
+                for alias in node.names:
+                    if alias.name == "import_module":
+                        import_module_aliases.add(alias.asname or alias.name)
+            elif node.module == "builtins":
+                for alias in node.names:
+                    if alias.name == "__import__":
+                        dunder_import_aliases.add(alias.asname or alias.name)
+
+    # Pass 2: check static imports and all dynamic import forms.
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
@@ -92,19 +153,38 @@ def find_crsi_layer_violations(source: str, module_rel_path: Path) -> list[str]:
 
         elif isinstance(node, ast.Call):
             func = node.func
-            is_dynamic_import = (isinstance(func, ast.Name) and func.id == "__import__") or (
+            is_import_module_call = (
+                isinstance(func, ast.Name) and func.id in import_module_aliases
+            ) or (
                 isinstance(func, ast.Attribute)
                 and func.attr == "import_module"
                 and isinstance(func.value, ast.Name)
-                and func.value.id == "importlib"
+                and func.value.id in importlib_mod_aliases
             )
-            if is_dynamic_import and node.args:
-                arg0 = node.args[0]
-                if isinstance(arg0, ast.Constant) and isinstance(arg0.value, str):
-                    if _is_forbidden_target(arg0.value):
+            is_dunder_import_call = (
+                isinstance(func, ast.Name) and func.id in dunder_import_aliases
+            ) or (
+                isinstance(func, ast.Attribute)
+                and func.attr == "__import__"
+                and isinstance(func.value, ast.Name)
+                and func.value.id in builtins_mod_aliases
+            )
+
+            if is_import_module_call:
+                raw_target = _extract_string_arg(node, 0, "name")
+                if raw_target is not None:
+                    pkg_arg = _extract_string_arg(node, 1, "package")
+                    resolved = _resolve_dynamic_target(raw_target, pkg_arg, default_pkg)
+                    if _is_forbidden_target(resolved):
                         violations.append(
-                            f"{module_rel_path}:{node.lineno}: forbidden dynamic import '{arg0.value}'"
+                            f"{module_rel_path}:{node.lineno}: forbidden dynamic import '{resolved}'"
                         )
+            elif is_dunder_import_call:
+                raw_target = _extract_string_arg(node, 0, "name")
+                if raw_target is not None and _is_forbidden_target(raw_target):
+                    violations.append(
+                        f"{module_rel_path}:{node.lineno}: forbidden dynamic import '{raw_target}'"
+                    )
 
     return violations
 
@@ -173,19 +253,35 @@ from archivist import crsi
     assert find_crsi_layer_violations(good_sample, rel) == []
 
 
-def test_guard_catches_qdrant_client_and_dynamic_imports() -> None:
-    """Verify qdrant_client and importlib/__import__ core bypasses are caught."""
+def test_guard_catches_qdrant_client_and_all_dynamic_import_forms() -> None:
+    """Verify qdrant_client and all dynamic import forms (aliases, kwargs, relative, builtins)."""
     sample = """
+import builtins
+import builtins as bi
 import importlib
+import importlib as il
+from builtins import __import__ as dyn_imp
+from importlib import import_module
 import qdrant_client
 from qdrant_client.models import PointStruct
 
 def load():
     importlib.import_module("archivist.storage.graph")
     __import__("qdrant_client")
+    import_module("archivist.storage.graph")
+    il.import_module("archivist.storage.graph")
+    importlib.import_module(name="archivist.storage.graph")
+    importlib.import_module("..storage.graph", package="archivist.crsi")
+    importlib.import_module("...storage.graph", package="archivist.crsi.loop")
+    builtins.__import__("archivist.storage.graph")
+    bi.__import__(name="qdrant_client.models")
+    dyn_imp("archivist.core.config")
+    # Legitimate CRSI dynamic imports must remain allowed:
     importlib.import_module("archivist.crsi.sim")
+    importlib.import_module(".state", package="archivist.crsi.loop")
 """
-    rel = Path("archivist/crsi/cli.py")
+    rel = Path("archivist/crsi/loop/cli.py")
     violations = find_crsi_layer_violations(sample, rel)
-    assert len(violations) == 4
+    assert len(violations) == 12, f"Expected 12 violations, got {len(violations)}: {violations}"
     assert all("archivist.crsi.sim" not in v for v in violations)
+    assert all("archivist.crsi.loop.state" not in v for v in violations)

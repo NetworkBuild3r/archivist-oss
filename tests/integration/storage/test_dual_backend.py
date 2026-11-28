@@ -64,10 +64,15 @@ async def dual_pool(request, tmp_path, monkeypatch):
     original_pool = _sp.pool
 
     def _reset_guards():
-        for attr in dir(_graph):
-            obj = getattr(_graph, attr, None)
-            if hasattr(obj, "reset") and callable(obj.reset):
-                obj.reset()
+        from archivist.core import audit as _audit
+        from archivist.core import hotness as _hotness
+        from archivist.lifecycle import curator_queue as _cq
+
+        for mod in (_graph, _audit, _hotness, _cq):
+            for attr in dir(mod):
+                obj = getattr(mod, attr, None)
+                if hasattr(obj, "reset") and callable(obj.reset):
+                    obj.reset()
         if hasattr(_graph, "_ensure_needle_registry"):
             _graph._ensure_needle_registry.applied = True  # type: ignore[attr-defined]
 
@@ -81,6 +86,8 @@ async def dual_pool(request, tmp_path, monkeypatch):
             await build_schema(conn)
 
         monkeypatch.setattr(_sp, "pool", p)
+        monkeypatch.setattr("archivist.core.config.SQLITE_PATH", db_path)
+        monkeypatch.setattr("archivist.storage.graph.SQLITE_PATH", db_path)
         monkeypatch.setattr("archivist.core.config.GRAPH_BACKEND", "sqlite")
         _reset_guards()
 
@@ -115,6 +122,13 @@ async def dual_pool(request, tmp_path, monkeypatch):
             await conn.execute("DELETE FROM memory_chunks WHERE namespace = 'dual_test'")
             await conn.execute("DELETE FROM facts WHERE namespace = 'dual_test'")
             await conn.execute("DELETE FROM entities WHERE namespace = 'dual_test'")
+            await conn.execute("DELETE FROM audit_log WHERE namespace = 'dual_test'")
+            await conn.execute("DELETE FROM retrieval_logs WHERE namespace = 'dual_test'")
+            await conn.execute("DELETE FROM memory_points WHERE memory_id LIKE 'dual-%'")
+            await conn.execute("DELETE FROM memory_hotness WHERE memory_id LIKE 'dual-%'")
+            await conn.execute("DELETE FROM outbox WHERE payload LIKE '%dual-%'")
+            await conn.execute("DELETE FROM curator_queue WHERE payload LIKE '%\"dual_test\"%'")
+            await conn.execute("DELETE FROM curator_state WHERE key LIKE 'dual_%'")
 
         monkeypatch.setattr(_sp, "pool", original_pool)
         await backend.close()
@@ -572,3 +586,152 @@ async def test_dual_relationship_upsert_parity(dual_pool):
         )
     assert len(rows) >= 1, f"[{backend_name}] relationship row not found"
     assert rows[0]["relation_type"] == "depends_on"
+
+
+async def test_dual_curator_queue_atomic_claim_parity(dual_pool):
+    """Concurrent curator_queue.drain() calls claim each pending op at most once on both backends."""
+    import asyncio
+
+    from archivist.lifecycle import curator_queue
+
+    backend, backend_name = dual_pool
+    enqueued_ids: list[str] = []
+    for idx in range(6):
+        op_id = await curator_queue.enqueue(
+            "skip_store",
+            {"namespace": "dual_test", "backend": backend_name, "idx": idx},
+        )
+        enqueued_ids.append(op_id)
+
+    # Overlap two concurrent drains: SQLite serializes via pool.write();
+    # Postgres uses UPDATE ... FOR UPDATE SKIP LOCKED ... RETURNING.
+    drain_a, drain_b = await asyncio.gather(
+        curator_queue.drain(limit=10),
+        curator_queue.drain(limit=10),
+    )
+
+    claimed_ids = [item["id"] for item in (*drain_a, *drain_b) if item["id"] in enqueued_ids]
+    assert len(claimed_ids) == len(enqueued_ids), (
+        f"[{backend_name}] expected every op claimed exactly once: "
+        f"claimed={claimed_ids}, expected={enqueued_ids}"
+    )
+    assert set(claimed_ids) == set(enqueued_ids)
+    assert all(
+        item["status"] == "applied" for item in (*drain_a, *drain_b) if item["id"] in enqueued_ids
+    )
+
+    # Subsequent drain must find nothing left to claim.
+    drain_c = await curator_queue.drain(limit=10)
+    assert not any(item["id"] in enqueued_ids for item in drain_c)
+
+    placeholders = ",".join("?" for _ in enqueued_ids)
+    async with backend.read() as conn:
+        rows = await conn.fetchall(
+            f"SELECT id, status, applied_at FROM curator_queue WHERE id IN ({placeholders})",
+            enqueued_ids,
+        )
+    assert len(rows) == len(enqueued_ids)
+    for row in rows:
+        assert row["status"] == "applied", f"[{backend_name}] op {row['id']} not applied"
+        assert row["applied_at"], f"[{backend_name}] op {row['id']} missing applied_at"
+
+
+async def test_dual_delete_memory_cascade_parity(dual_pool, monkeypatch):
+    """delete_memory_complete cascades FTS, needles, facts, hotness, outbox & audit on both backends."""
+    from datetime import UTC, datetime
+
+    from archivist.lifecycle import memory_lifecycle as ml
+    from archivist.storage.graph import (
+        add_fact,
+        lookup_needle_tokens,
+        register_needle_tokens,
+        search_fts,
+        upsert_entity,
+        upsert_fts_chunk,
+    )
+
+    backend, backend_name = dual_pool
+    mem_id = f"dual-cascade-{backend_name}"
+    needle = f"DUAL-CASC-{backend_name.upper()}-9001"
+
+    await upsert_fts_chunk(
+        qdrant_id=mem_id,
+        text=f"Cascade parity test memory {needle} for dual backend deletion",
+        file_path=f"dual/{backend_name}/cascade.md",
+        chunk_index=0,
+        namespace="dual_test",
+    )
+    await register_needle_tokens(
+        mem_id,
+        f"Cascade parity test memory {needle} for dual backend deletion",
+        namespace="dual_test",
+    )
+    eid = await upsert_entity(f"CascadeEntity_{backend_name}", "service", namespace="dual_test")
+    fid = await add_fact(
+        eid,
+        "status",
+        f"linked to {mem_id}",
+        namespace="dual_test",
+        memory_id=mem_id,
+    )
+    now_iso = datetime.now(UTC).isoformat()
+    async with backend.write() as conn:
+        await conn.execute(
+            "INSERT INTO memory_hotness (memory_id, score, retrieval_count, updated_at) "
+            "VALUES (?, ?, ?, ?)",
+            (mem_id, 0.75, 3, now_iso),
+        )
+
+    class _StubQdrant:
+        def scroll(self, **kwargs):
+            return [], None
+
+        def count(self, **kwargs):
+            class _Cnt:
+                count = 0
+
+            return _Cnt()
+
+        def delete(self, **kwargs):
+            return None
+
+    monkeypatch.setattr(ml, "qdrant_client", lambda: _StubQdrant())
+    monkeypatch.setattr("archivist.core.config.OUTBOX_ENABLED", True)
+
+    result = await ml.delete_memory_complete(mem_id, namespace="dual_test")
+    assert result.failed_steps == [], f"[{backend_name}] unexpected failed_steps: {result}"
+    assert result.fts_entries >= 1, f"[{backend_name}] expected FTS entry deleted"
+    assert result.registry_tokens >= 1, f"[{backend_name}] expected needle token deleted"
+    assert result.entity_facts >= 1, f"[{backend_name}] expected entity fact deactivated"
+    assert result.memory_hotness >= 1, f"[{backend_name}] expected hotness row deleted"
+
+    # Verify post-cascade state across all affected tables.
+    fts_after = await search_fts("cascade parity dual backend", namespace="dual_test")
+    assert all(r["qdrant_id"] != mem_id for r in fts_after)
+    assert await lookup_needle_tokens(needle, namespace="dual_test") == []
+
+    async with backend.read() as conn:
+        fact_row = await conn.fetchone("SELECT is_active FROM facts WHERE id = ?", (fid,))
+        assert fact_row is not None and fact_row["is_active"] == 0
+
+        hot_row = await conn.fetchone(
+            "SELECT memory_id FROM memory_hotness WHERE memory_id = ?",
+            (mem_id,),
+        )
+        assert hot_row is None
+
+        outbox_rows = await conn.fetchall(
+            "SELECT event_type, status, payload FROM outbox WHERE payload LIKE ?",
+            (f"%{mem_id}%",),
+        )
+        assert any(r["event_type"] == "qdrant_delete" for r in outbox_rows), (
+            f"[{backend_name}] expected qdrant_delete outbox row"
+        )
+
+        audit_rows = await conn.fetchall(
+            "SELECT action FROM audit_log WHERE memory_id = ? AND namespace = 'dual_test'",
+            (mem_id,),
+        )
+        assert any(r["action"] == "delete" for r in audit_rows), (
+            f"[{backend_name}] expected delete audit_log entry"
+        )

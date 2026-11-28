@@ -7,6 +7,12 @@ Uses Python's built-in asyncio debug slow-callback instrumentation
 (``loop.set_debug(True)`` + ``loop.slow_callback_duration``) paired with a
 scoped handler on the ``asyncio`` logger so any single callback exceeding the
 threshold fails the test deterministically with actionable diagnostics.
+
+Prefer ``async with EventLoopStallWatchdog():`` in async code — its
+``__aexit__`` yields once (``await asyncio.sleep(0)``) before stopping so
+CPython flushes any slow-callback warning from the final turn. Sync
+``with EventLoopStallWatchdog():`` also detects zero-yield synchronous blocks
+directly (without requiring a trailing ``await``).
 """
 
 from __future__ import annotations
@@ -14,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from dataclasses import dataclass
 
 DEFAULT_STALL_THRESHOLD_MS: float = 50.0
@@ -74,12 +81,18 @@ class _SlowCallbackLogHandler(logging.Handler):
 class EventLoopStallWatchdog:
     """Scoped detector for blocking callbacks on the active asyncio event loop.
 
-    Usage::
+    Usage (preferred in async code)::
 
         async def test_handler():
-            with EventLoopStallWatchdog(threshold_ms=50.0) as watchdog:
+            async with EventLoopStallWatchdog(threshold_ms=50.0) as watchdog:
                 await my_async_handler()
             # Raises EventLoopStallError if any callback exceeded 50ms.
+
+    Sync ``with EventLoopStallWatchdog(threshold_ms=50.0):`` is also supported:
+    zero-yield synchronous blocks inside the ``with`` body are measured directly
+    on ``__exit__`` without needing a trailing ``await``. For blocks that mix
+    ``await`` calls with trailing synchronous work, use ``async with`` so
+    CPython's ``_run_once`` can flush the final callback timing before exit.
     """
 
     def __init__(
@@ -94,17 +107,29 @@ class EventLoopStallWatchdog:
         self._threshold_s = self.threshold_ms / 1000.0
         self._loop = loop
         self._active_loop: asyncio.AbstractEventLoop | None = None
+        self._started: bool = False
         self._prev_debug: bool = False
         self._prev_slow_duration: float = 0.1
         self._prev_logger_level: int = logging.NOTSET
         self._prev_logger_disabled: bool = False
         self._handler: _SlowCallbackLogHandler | None = None
+        self._recorded_stalls: list[StallRecord] = []
+        self._sync_enter_t0: float | None = None
+        self._loop_yielded_since_enter: bool = False
+        self._yield_probe: asyncio.Handle | None = None
 
     @property
     def stalls(self) -> list[StallRecord]:
-        return list(self._handler.stalls) if self._handler is not None else []
+        if self._handler is not None:
+            return list(self._handler.stalls)
+        return list(self._recorded_stalls)
+
+    def _mark_loop_yielded(self) -> None:
+        self._loop_yielded_since_enter = True
 
     def start(self) -> EventLoopStallWatchdog:
+        if self._started:
+            return self
         loop = self._loop or asyncio.get_running_loop()
         self._active_loop = loop
         self._prev_debug = loop.get_debug()
@@ -115,21 +140,35 @@ class EventLoopStallWatchdog:
         self._prev_logger_disabled = asyncio_logger.disabled
         if asyncio_logger.disabled:
             asyncio_logger.disabled = False
-        if asyncio_logger.level > logging.WARNING:
+        # Check effective level (not raw .level, which defaults to NOTSET=0) so a
+        # root logger configured at ERROR/CRITICAL cannot silently drop WARNINGs.
+        if asyncio_logger.getEffectiveLevel() > logging.WARNING:
             asyncio_logger.setLevel(logging.WARNING)
 
         self._handler = _SlowCallbackLogHandler(self._threshold_s)
+        self._recorded_stalls = []
         asyncio_logger.addHandler(self._handler)
 
         loop.set_debug(True)
         loop.slow_callback_duration = self._threshold_s
+        self._started = True
         return self
 
     def stop(self) -> list[StallRecord]:
-        recorded = self.stalls
+        if not self._started:
+            return list(self._recorded_stalls)
+
+        if self._yield_probe is not None:
+            self._yield_probe.cancel()
+            self._yield_probe = None
+
+        recorded = list(self._handler.stalls) if self._handler is not None else []
+        self._recorded_stalls = recorded
+
         asyncio_logger = logging.getLogger("asyncio")
         if self._handler is not None:
             asyncio_logger.removeHandler(self._handler)
+            self._handler = None
         asyncio_logger.setLevel(self._prev_logger_level)
         asyncio_logger.disabled = self._prev_logger_disabled
 
@@ -137,6 +176,10 @@ class EventLoopStallWatchdog:
             self._active_loop.slow_callback_duration = self._prev_slow_duration
             self._active_loop.set_debug(self._prev_debug)
             self._active_loop = None
+
+        self._started = False
+        self._sync_enter_t0 = None
+        self._loop_yielded_since_enter = False
         return recorded
 
     def assert_no_stalls(self) -> None:
@@ -144,9 +187,42 @@ class EventLoopStallWatchdog:
             raise EventLoopStallError(self.stalls, self.threshold_ms)
 
     def __enter__(self) -> EventLoopStallWatchdog:
-        return self.start()
+        self.start()
+        self._sync_enter_t0 = time.monotonic()
+        self._loop_yielded_since_enter = False
+        if self._active_loop is not None:
+            self._yield_probe = self._active_loop.call_soon(self._mark_loop_yielded)
+        return self
 
     def __exit__(self, exc_type, _exc, _tb) -> None:
+        if self._started and self._sync_enter_t0 is not None and not self._loop_yielded_since_enter:
+            elapsed_s = time.monotonic() - self._sync_enter_t0
+            if elapsed_s >= self._threshold_s and self._handler is not None:
+                self._handler.stalls.append(
+                    StallRecord(
+                        callback="<synchronous block inside EventLoopStallWatchdog>",
+                        duration_ms=elapsed_s * 1000.0,
+                        message=(
+                            f"Synchronous block held event loop for {elapsed_s:.3f} seconds "
+                            f"without yielding"
+                        ),
+                    )
+                )
         recorded = self.stop()
+        if exc_type is None and recorded:
+            raise EventLoopStallError(recorded, self.threshold_ms)
+
+    async def __aenter__(self) -> EventLoopStallWatchdog:
+        self.start()
+        # Yield once so subsequent body execution runs in a monitored handle turn.
+        await asyncio.sleep(0)
+        return self
+
+    async def __aexit__(self, exc_type, _exc, _tb) -> None:
+        try:
+            # Flush the callback step that just finished the body before stopping.
+            await asyncio.sleep(0)
+        finally:
+            recorded = self.stop()
         if exc_type is None and recorded:
             raise EventLoopStallError(recorded, self.threshold_ms)

@@ -55,6 +55,10 @@ def assert_prometheus_histogram_invariant(metrics_text: str) -> None:
             key = (m_cnt.group("name"), _strip_le_label(m_cnt.group("labels") or ""))
             counts[key] = float(m_cnt.group("val"))
 
+    assert len(inf_buckets) > 0, (
+        "Expected at least one Prometheus histogram with le='+Inf' bucket in /metrics "
+        "(histogram invariant must not pass vacuously)"
+    )
     for key, inf_val in inf_buckets.items():
         assert key in counts, f"Histogram {key} has +Inf bucket but no _count series"
         assert inf_val == pytest.approx(counts[key]), (
@@ -73,7 +77,8 @@ async def test_live_asgi_routes_and_metrics_invariant_without_loop_stalls(
 
     # Record a real histogram observation so /metrics emits histogram +Inf & _count series.
     metrics.observe(metrics.INVALIDATE_DURATION, 12.5)
-    health.register("qdrant", healthy=True)
+    for subsystem in ("qdrant", "sqlite", "postgres", "embeddings"):
+        health.register(subsystem, healthy=True)
 
     transport = httpx.ASGITransport(app=main.app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:

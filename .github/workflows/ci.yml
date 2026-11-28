@@ -64,10 +64,10 @@ jobs:
         run: uv tool install ruff
 
       - name: Ruff format check
-        run: ruff format --check src/ tests/
+        run: ruff format --check src/ tests/ benchmarks/
 
       - name: Ruff lint
-        run: ruff check src/ tests/
+        run: ruff check src/ tests/ benchmarks/
 
 # ─── Type check (ratchet — error count may only decrease) ────────────────────
   typecheck:
@@ -94,20 +94,29 @@ jobs:
         # Only real type errors count — import-not-found / import-untyped are
         # excluded because they vary by environment.
         # Ratchet history:
-        #   170 (baseline) → 120 (PR #72) → 64 (Wave 1 PR #73) → 53 (Wave 3A INIT-025).
+        #   170 (baseline) → 120 (PR #72) → 64 (Wave 1 PR #73) → 50 (Wave 3A INIT-025).
         # Ceiling tightened from 175 → 55 (INIT-025/SPEC-012).
         env:
           MYPY_MAX_ERRORS: "55"
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
         run: |
-          # mypy exits 1 when any errors exist — capture under `|| true` so
-          # `bash -e` does not abort before the ratchet count (INIT-002).
-          OUTPUT=$(python -m mypy src/archivist/ --config-file pyproject.toml 2>&1) || true
+          set -euo pipefail
+          # mypy exits 1 when type errors exist; capture exit code explicitly so
+          # a mypy invocation/config crash (exit != 0 with 0 error lines) fails loudly.
+          MYPY_RC=0
+          OUTPUT=$(python -m mypy src/archivist/ --config-file pyproject.toml 2>&1) || MYPY_RC=$?
           echo "$OUTPUT"
-          REAL_ERRORS=$(echo "$OUTPUT" | grep "^src/archivist/.*: error:" | grep -v "\[import-not-found\]\|\[import-untyped\]" || true)
+          ALL_ERROR_LINES=$(printf '%s\n' "$OUTPUT" | grep -c ": error:" || true)
+          if [ "$MYPY_RC" -ne 0 ] && [ "$ALL_ERROR_LINES" -eq 0 ]; then
+            echo "::error::mypy exited with status $MYPY_RC without emitting type-error diagnostics (invocation/config crash)."
+            exit "$MYPY_RC"
+          fi
+          REAL_ERRORS=$(printf '%s\n' "$OUTPUT" | grep "^src/archivist/.*: error:" | grep -v "\[import-not-found\]\|\[import-untyped\]" || true)
           if [ -z "$REAL_ERRORS" ]; then
             COUNT=0
           else
-            COUNT=$(echo "$REAL_ERRORS" | wc -l | tr -d ' ')
+            COUNT=$(printf '%s\n' "$REAL_ERRORS" | wc -l | tr -d ' ')
           fi
           echo ""
           echo "::notice::mypy type errors (real, excl. import stubs): $COUNT / ceiling: $MYPY_MAX_ERRORS"
@@ -117,18 +126,21 @@ jobs:
           fi
           echo "mypy ratchet OK: $COUNT ≤ $MYPY_MAX_ERRORS"
 
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            git fetch origin "${{ github.base_ref }}" --depth=1 || git fetch origin "${{ github.base_ref }}"
-            CHANGED_FILES=$(git diff --name-only --diff-filter=ACMR "origin/${{ github.base_ref }}...HEAD" -- 'src/archivist/*.py' 'src/archivist/**/*.py' || true)
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            # Full-history fetch (never --depth=1) so three-dot merge-base always resolves.
+            git fetch --no-tags origin "$BASE_REF"
+            git merge-base "origin/$BASE_REF" HEAD >/dev/null
+            CHANGED_FILES=$(git diff --name-only --diff-filter=ACMR "origin/${BASE_REF}...HEAD" -- 'src/archivist/*.py' 'src/archivist/**/*.py')
             PR_FAIL=0
-            for f in $CHANGED_FILES; do
-              FILE_ERRORS=$(echo "$REAL_ERRORS" | grep "^${f}:" || true)
+            while IFS= read -r f; do
+              [ -z "$f" ] && continue
+              FILE_ERRORS=$(printf '%s\n' "$REAL_ERRORS" | awk -v prefix="${f}:" 'index($0, prefix) == 1')
               if [ -n "$FILE_ERRORS" ]; then
                 echo "::error::mypy error(s) in PR-changed file ${f}:"
                 echo "$FILE_ERRORS"
                 PR_FAIL=1
               fi
-            done
+            done <<< "$CHANGED_FILES"
             if [ "$PR_FAIL" -ne 0 ]; then
               echo "::error::PR-changed files under src/archivist/ must have 0 mypy errors (INIT-025/SPEC-012)."
               exit 1
@@ -164,22 +176,23 @@ jobs:
         # regression: specific bug guards — also no external services
         # Combined coverage ≥ 65% and PR diff-cover ≥ 80% are enforced by `coverage-gate`.
         run: |
-          if [ "${{ matrix.python-version }}" = "3.12" ]; then
+          if [ "$PYTHON_VERSION" = "3.12" ]; then
             COVERAGE_FILE=.coverage.unit python -m coverage run --branch -m pytest \
               tests/unit/ tests/regression/ \
               -m "unit or regression" \
               --tb=short \
-              --junitxml=test-results-${{ matrix.python-version }}.xml \
+              --junitxml="test-results-${PYTHON_VERSION}.xml" \
               -q
           else
             python -m pytest \
               tests/unit/ tests/regression/ \
               -m "unit or regression" \
               --tb=short \
-              --junitxml=test-results-${{ matrix.python-version }}.xml \
+              --junitxml="test-results-${PYTHON_VERSION}.xml" \
               -q
           fi
         env:
+          PYTHON_VERSION: ${{ matrix.python-version }}
           SQLITE_PATH: ":memory:"
           QDRANT_URL: ""
 
@@ -370,20 +383,27 @@ jobs:
 
       - name: Combine coverage and enforce ≥ 65% floor
         run: |
+          set -euo pipefail
           coverage combine .coverage.unit .coverage.integration
-          coverage xml -o coverage.xml
-          coverage report --fail-under=65 --precision=1
+          # Emit XML with --fail-under=0 so the per-file report always prints before failing.
+          coverage xml -o coverage.xml --fail-under=0
+          coverage report --fail-under=65 --precision=1 --skip-empty
 
       - name: Enforce ≥ 80% diff-cover on PR-changed lines in src/archivist/
         if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
         run: |
-          git fetch origin "${{ github.base_ref }}" --depth=1 || git fetch origin "${{ github.base_ref }}"
-          CHANGED_SRC=$(git diff --name-only --diff-filter=ACMR "origin/${{ github.base_ref }}...HEAD" -- 'src/archivist/*.py' 'src/archivist/**/*.py' || true)
+          set -euo pipefail
+          # Full-history fetch (never --depth=1) so three-dot merge-base always resolves.
+          git fetch --no-tags origin "$BASE_REF"
+          git merge-base "origin/$BASE_REF" HEAD >/dev/null
+          CHANGED_SRC=$(git diff --name-only --diff-filter=ACMR "origin/${BASE_REF}...HEAD" -- 'src/archivist/*.py' 'src/archivist/**/*.py')
           if [ -z "$CHANGED_SRC" ]; then
             echo "::notice::No Python files changed under src/archivist/ — skipping diff-cover"
           else
             diff-cover coverage.xml \
-              --compare-branch="origin/${{ github.base_ref }}" \
+              --compare-branch="origin/${BASE_REF}" \
               --include="src/archivist/**" \
               --fail-under=80
           fi
@@ -449,23 +469,35 @@ jobs:
                   run([str(vpy), "-m", "pip", "install", "--upgrade", "pip"])
                   run([str(vpy), "-m", "pip", "install", str(wheels[0])])
                   # Execute outside repo root so imports MUST come from the installed wheel.
+                  wheel_env = dict(os.environ)
+                  wheel_env.pop("PYTHONPATH", None)
+                  wheel_env["ARCHIVIST_REPO_ROOT"] = str(repo_root.resolve())
                   run(
                       [
                           str(vpy),
                           "-c",
                           (
-                              "import pathlib, archivist; "
+                              "import os, pathlib, archivist; "
                               "p = pathlib.Path(archivist.__file__).resolve(); "
+                              "repo_root = pathlib.Path(os.environ['ARCHIVIST_REPO_ROOT']).resolve(); "
+                              "assert repo_root not in p.parents, f'Imported from repo checkout instead of wheel: {p}'; "
                               "print('Wheel archivist:', archivist.__version__, p); "
                               "from archivist.core import config; "
                               "assert config.ArchivistSettings() is not None"
                           ),
                       ],
+                      env=wheel_env,
                       cwd=str(tmp_path),
                   )
-                  cli_bin = scripts_dir / ("archivist.exe" if os.name == "nt" else "archivist")
-                  if cli_bin.exists():
-                      run([str(cli_bin), "--version"], cwd=str(tmp_path))
+                  declared_scripts = pyproject.get("project", {}).get("scripts", {})
+                  for script_name in declared_scripts:
+                      cli_bin = scripts_dir / (
+                          f"{script_name}.exe" if os.name == "nt" else script_name
+                      )
+                      assert cli_bin.exists(), (
+                          f"Declared [project.scripts] CLI '{script_name}' missing at {cli_bin}"
+                      )
+                      run([str(cli_bin), "--help"], env=wheel_env, cwd=str(tmp_path))
                   print("Full 3-OS wheel smoke OK", flush=True)
           else:
               print(
@@ -644,21 +676,12 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
-      packages: write
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
-
-      - name: Log in to ghcr.io (push steps only)
-        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build image (linux/amd64 only for CI speed)
         uses: docker/build-push-action@v6
@@ -673,8 +696,10 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Smoke test — package imports
+        env:
+          IMAGE_TAG: archivist:ci-${{ github.sha }}
         run: |
-          docker run --rm archivist:ci-${{ github.sha }} \
+          docker run --rm "$IMAGE_TAG" \
             python -c "
           import sys
           sys.path.insert(0, '/app')
@@ -686,7 +711,9 @@ jobs:
           print('core imports OK')
           "
 
-      - name: Smoke test — live /health, /metrics, and /mcp (blocking, no error masking)
+      - name: Smoke test — live /health, write->read round-trip, /metrics, and /mcp (blocking, no error masking)
+        env:
+          IMAGE_TAG: archivist:ci-${{ github.sha }}
         run: |
           set -euo pipefail
 
@@ -712,7 +739,8 @@ jobs:
             qdrant/qdrant:v1.13.4
 
           echo "Waiting for Qdrant..."
-          curl -sf --retry 30 --retry-delay 1 --retry-connrefused --retry-all-errors http://127.0.0.1:16333/collections >/dev/null
+          curl -sf --max-time 5 --retry 30 --retry-delay 1 --retry-connrefused --retry-all-errors \
+            http://127.0.0.1:16333/collections >/dev/null
 
           docker run -d --name archivist-smoke \
             --network "$NET_NAME" \
@@ -723,26 +751,52 @@ jobs:
             -e LLM_MODEL=test \
             -e EMBED_MODEL=test \
             -e METRICS_ENABLED=true \
-            archivist:ci-${{ github.sha }}
+            -e BACKUP_DIR=/data/archivist/backups \
+            "$IMAGE_TAG"
 
           echo "Waiting for Archivist /health..."
-          HEALTH_BODY=$(curl -sf --retry 30 --retry-delay 2 --retry-connrefused --retry-all-errors http://127.0.0.1:3100/health)
+          HEALTH_BODY=$(curl -sf --max-time 5 --retry 30 --retry-delay 2 --retry-connrefused --retry-all-errors \
+            http://127.0.0.1:3100/health)
           echo "Health response: $HEALTH_BODY"
 
-          METRICS_BODY=$(curl -sf http://127.0.0.1:3100/metrics)
-          MCP_BODY=$(curl -sf \
-            -X POST http://127.0.0.1:3100/mcp \
-            -H "Accept: application/json, text/event-stream" \
-            -H "Content-Type: application/json" \
-            -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"ci-docker-smoke","version":"1.0"}}}')
-          echo "MCP initialize response: $MCP_BODY"
+          # 1. Trigger a real Qdrant-backed histogram observation (archivist_invalidate_duration_ms).
+          INV_BODY=$(curl -sf --max-time 10 -X POST http://127.0.0.1:3100/admin/invalidate)
+          echo "Invalidate response: $INV_BODY"
 
-          HEALTH_BODY="$HEALTH_BODY" METRICS_BODY="$METRICS_BODY" MCP_BODY="$MCP_BODY" python3 - <<'PY'
-          import json, os, re
+          # 2. Exercise a live storage write -> read -> delete round-trip via admin backup endpoints.
+          BACKUP_CREATE_BODY=$(curl -sf --max-time 15 -X POST "http://127.0.0.1:3100/admin/backup?label=ci-smoke")
+          echo "Backup create response: $BACKUP_CREATE_BODY"
+          BACKUPS_LIST_BODY=$(curl -sf --max-time 10 http://127.0.0.1:3100/admin/backups)
+          echo "Backups list response: $BACKUPS_LIST_BODY"
+
+          # 3. Scrape /metrics AFTER real requests so histogram assertions are non-vacuous (> 0 histograms).
+          METRICS_BODY=$(curl -sf --max-time 10 http://127.0.0.1:3100/metrics)
+
+          # 4. Run full MCP Streamable HTTP session: initialize -> notifications/initialized -> tools/list.
+          HEALTH_BODY="$HEALTH_BODY" \
+          INV_BODY="$INV_BODY" \
+          BACKUP_CREATE_BODY="$BACKUP_CREATE_BODY" \
+          BACKUPS_LIST_BODY="$BACKUPS_LIST_BODY" \
+          METRICS_BODY="$METRICS_BODY" \
+          python3 - <<'PY'
+          import json, os, re, urllib.request
 
           health = json.loads(os.environ["HEALTH_BODY"])
           assert health.get("status") == "healthy", f"Unexpected /health status: {health}"
           assert health.get("service") == "archivist", f"Unexpected /health service: {health}"
+
+          inv = json.loads(os.environ["INV_BODY"])
+          assert "deleted" in inv or "count" in inv, f"Unexpected /admin/invalidate response: {inv}"
+
+          created = json.loads(os.environ["BACKUP_CREATE_BODY"])
+          snap_id = created.get("snapshot_id") or created.get("id")
+          assert snap_id, f"Missing snapshot_id in /admin/backup response: {created}"
+          listed = json.loads(os.environ["BACKUPS_LIST_BODY"])
+          snap_ids = [
+              (s.get("snapshot_id") or s.get("id")) if isinstance(s, dict) else s
+              for s in listed.get("snapshots", [])
+          ]
+          assert snap_id in snap_ids, f"Created snapshot {snap_id!r} missing from /admin/backups: {listed}"
 
           metrics_text = os.environ["METRICS_BODY"]
           assert "# TYPE" in metrics_text, "Missing Prometheus # TYPE metadata in /metrics"
@@ -768,21 +822,94 @@ jobs:
                   m = cnt_re.match(s)
                   if m:
                       cnts[(m.group("name"), strip_le(m.group("labels") or ""))] = float(m.group("val"))
+          assert len(infs) > 0, (
+              "Expected at least one Prometheus histogram with le='+Inf' bucket in /metrics "
+              "(histogram check must not be vacuous)"
+          )
           for k, v in infs.items():
               assert k in cnts, f"Missing _count for histogram {k}"
               assert abs(v - cnts[k]) < 1e-9, f"Histogram invariant mismatch for {k}: +Inf={v} != _count={cnts[k]}"
 
-          mcp_text = os.environ["MCP_BODY"]
-          assert "serverInfo" in mcp_text and "archivist" in mcp_text, f"Unexpected MCP initialize body: {mcp_text}"
-          print("Docker /health, /metrics, and /mcp smoke assertions PASSED")
+          def mcp_post(payload: dict, session_id: str | None = None) -> tuple[int, dict, str]:
+              headers = {
+                  "Accept": "application/json, text/event-stream",
+                  "Content-Type": "application/json",
+              }
+              if session_id:
+                  headers["Mcp-Session-Id"] = session_id
+              req = urllib.request.Request(
+                  "http://127.0.0.1:3100/mcp",
+                  data=json.dumps(payload).encode("utf-8"),
+                  headers=headers,
+                  method="POST",
+              )
+              with urllib.request.urlopen(req, timeout=10) as resp:
+                  return resp.status, dict(resp.headers.items()), resp.read().decode("utf-8")
+
+          status, hdrs, init_body = mcp_post(
+              {
+                  "jsonrpc": "2.0",
+                  "id": 1,
+                  "method": "initialize",
+                  "params": {
+                      "protocolVersion": "2025-03-26",
+                      "capabilities": {},
+                      "clientInfo": {"name": "ci-docker-smoke", "version": "1.0"},
+                  },
+              }
+          )
+          assert status == 200, f"MCP initialize returned {status}: {init_body}"
+          assert "serverInfo" in init_body and "archivist" in init_body, f"Unexpected MCP initialize body: {init_body}"
+
+          sid = next((v for k, v in hdrs.items() if k.lower() == "mcp-session-id"), None)
+          assert sid, f"MCP initialize did not return Mcp-Session-Id header: {hdrs}"
+
+          status_notif, _, _ = mcp_post(
+              {"jsonrpc": "2.0", "method": "notifications/initialized"},
+              session_id=sid,
+          )
+          assert status_notif in (200, 202, 204), f"MCP initialized notification returned {status_notif}"
+
+          status_tools, _, tools_body = mcp_post(
+              {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+              session_id=sid,
+          )
+          assert status_tools == 200, f"MCP tools/list returned {status_tools}: {tools_body}"
+          assert "tools" in tools_body and ("memory_" in tools_body or "archivist_" in tools_body), (
+              f"Unexpected MCP tools/list response: {tools_body}"
+          )
+          print(f"Docker /health, write->read backup ({snap_id}), /metrics ({len(infs)} histograms), and /mcp session PASSED")
           PY
 
+# ─── Docker Edge Push (main/master only — isolates packages: write off PRs) ──
+  docker-push:
+    name: Push Edge Image to ghcr.io
+    runs-on: ubuntu-24.04
+    needs: [docker]
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Derive lowercase image name
-        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
-        run: echo "IMAGE_REPO=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
+        env:
+          GITHUB_REPO: ${{ github.repository }}
+        run: echo "IMAGE_REPO=ghcr.io/$(printf '%s' "$GITHUB_REPO" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
 
       - name: Push edge image to ghcr.io
-        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
         uses: docker/build-push-action@v6
         with:
           context: .
