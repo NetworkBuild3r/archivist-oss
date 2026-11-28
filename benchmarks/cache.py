@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import tempfile
+import threading
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -67,12 +68,18 @@ def estimate_call_usd(model: str, input_tokens: int, output_tokens: int = 0) -> 
 
 @dataclass
 class SpendTracker:
-    """Tracks cumulative benchmark API spend and enforces a hard USD cap."""
+    """Tracks cumulative benchmark API spend and enforces a hard USD cap.
 
-    max_budget_usd: float = 5.0
+    Pass ``max_budget_usd=None`` for uncapped runs; ``max_budget_usd=0.0``
+    enforces a strict ``$0.00`` ceiling (rejecting any positive-cost call).
+    Thread-safe via an internal :class:`threading.Lock`.
+    """
+
+    max_budget_usd: float | None = 5.0
     spent_usd: float = 0.0
     calls_by_stage: dict[str, int] = field(default_factory=dict)
     usd_by_stage: dict[str, float] = field(default_factory=dict)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
     def check_and_reserve(
         self,
@@ -88,21 +95,25 @@ class SpendTracker:
         sequential callers cannot overshoot ``max_budget_usd``.
         """
         cost = estimate_call_usd(model, input_tokens, output_tokens)
-        projected = self.spent_usd + cost
-        if self.max_budget_usd > 0 and projected > self.max_budget_usd + 1e-9:
-            raise BudgetExceededError(self.spent_usd, projected, self.max_budget_usd)
-        self.spent_usd = projected
-        self.calls_by_stage[stage] = self.calls_by_stage.get(stage, 0) + 1
-        self.usd_by_stage[stage] = round(self.usd_by_stage.get(stage, 0.0) + cost, 6)
-        return cost
+        with self._lock:
+            projected = self.spent_usd + cost
+            if self.max_budget_usd is not None and projected > self.max_budget_usd + 1e-9:
+                raise BudgetExceededError(self.spent_usd, projected, self.max_budget_usd)
+            self.spent_usd = projected
+            self.calls_by_stage[stage] = self.calls_by_stage.get(stage, 0) + 1
+            self.usd_by_stage[stage] = round(self.usd_by_stage.get(stage, 0.0) + cost, 6)
+            return cost
 
     def summary(self) -> dict[str, Any]:
-        return {
-            "max_budget_usd": round(self.max_budget_usd, 4),
-            "estimated_usd": round(self.spent_usd, 6),
-            "calls_by_stage": dict(self.calls_by_stage),
-            "usd_by_stage": {k: round(v, 6) for k, v in self.usd_by_stage.items()},
-        }
+        with self._lock:
+            return {
+                "max_budget_usd": (
+                    round(self.max_budget_usd, 4) if self.max_budget_usd is not None else None
+                ),
+                "estimated_usd": round(self.spent_usd, 6),
+                "calls_by_stage": dict(self.calls_by_stage),
+                "usd_by_stage": {k: round(v, 6) for k, v in self.usd_by_stage.items()},
+            }
 
 
 def sha256_key(namespace: str, payload: Any) -> str:

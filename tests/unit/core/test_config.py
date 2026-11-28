@@ -140,6 +140,20 @@ class TestConfigDefaults:
         assert s.rerank_enabled is False
         assert s.rerank_top_k == 8
 
+    def test_rerank_uppercase_kwargs_legacy_merging(self, monkeypatch, tmp_path):
+        """AUDIT-MIN-6: _merge_legacy_reranker_knobs handles uppercase kwargs case-insensitively."""
+        monkeypatch.delenv("RERANK_ENABLED", raising=False)
+        monkeypatch.delenv("RERANK_TOP_K", raising=False)
+        monkeypatch.delenv("RERANKER_ENABLED", raising=False)
+        monkeypatch.delenv("RERANKER_TOP_K", raising=False)
+        s = ArchivistSettings(
+            SQLITE_PATH=str(tmp_path / "graph.db"),
+            RERANKER_ENABLED=True,  # type: ignore[call-arg]
+            RERANKER_TOP_K=15,  # type: ignore[call-arg]
+        )
+        assert s.rerank_enabled is True
+        assert s.rerank_top_k == 15
+
     def test_reranker_disabled_by_default(self):
         import archivist.core.config as cfg
 

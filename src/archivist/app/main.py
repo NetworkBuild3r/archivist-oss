@@ -298,22 +298,30 @@ def _log_task_exception(task: asyncio.Task):
 def _warn_if_no_access_control() -> None:
     """Log a loud, operator-visible warning if the server has zero access control.
 
-    Fires only when BOTH ``ARCHIVIST_API_KEY`` and ``NAMESPACES_CONFIG_PATH`` are
-    unset — i.e. the server is about to serve every MCP tool call and every
-    ``/admin/*`` route to any caller that can reach it. Permissive-by-default is a
-    supported, documented single-operator/local-dev configuration; this only makes
-    that choice visible, it never blocks startup and never logs a credential value
-    (INIT-014/SPEC-001).
+    Fires when BOTH ``ARCHIVIST_API_KEY`` and ``NAMESPACES_CONFIG_PATH`` are
+    unset — i.e. every MCP tool call is open to any caller that can reach this
+    port. If ``ARCHIVIST_ADMIN_API_KEY`` is set alone, still warns loudly that
+    ``/mcp`` has no access control (INIT-014/SPEC-001, INIT-023/SPEC-003).
     """
-    if not ARCHIVIST_API_KEY and not ARCHIVIST_ADMIN_API_KEY and not NAMESPACES_CONFIG_PATH:
-        logger.critical(
-            "SECURITY: starting with NO ACCESS CONTROL — both ARCHIVIST_API_KEY and "
-            "NAMESPACES_CONFIG_PATH are unset. Every MCP tool call and every "
-            "/admin/* route is open to any caller that can reach this port. This is "
-            "expected for local/single-operator use; set ARCHIVIST_API_KEY and/or "
-            "NAMESPACES_CONFIG_PATH before exposing this server to any shared or "
-            "untrusted network."
-        )
+    if not ARCHIVIST_API_KEY and not NAMESPACES_CONFIG_PATH:
+        if not ARCHIVIST_ADMIN_API_KEY:
+            logger.critical(
+                "SECURITY: starting with NO ACCESS CONTROL — both ARCHIVIST_API_KEY and "
+                "NAMESPACES_CONFIG_PATH are unset. Every MCP tool call and every "
+                "/admin/* route is open to any caller that can reach this port. This is "
+                "expected for local/single-operator use; set ARCHIVIST_API_KEY and/or "
+                "NAMESPACES_CONFIG_PATH before exposing this server to any shared or "
+                "untrusted network."
+            )
+        else:
+            logger.critical(
+                "SECURITY: starting with NO MCP ACCESS CONTROL — ARCHIVIST_ADMIN_API_KEY "
+                "protects /admin/* and /debug/config, but both ARCHIVIST_API_KEY and "
+                "NAMESPACES_CONFIG_PATH are unset so every /mcp tool call is open to any "
+                "caller that can reach this port. Set ARCHIVIST_API_KEY and/or "
+                "NAMESPACES_CONFIG_PATH before exposing this server to any shared or "
+                "untrusted network."
+            )
 
 
 async def _startup():
@@ -511,14 +519,19 @@ class ArchivistAuthMiddleware(BaseHTTPMiddleware):
 
     @staticmethod
     def _is_admin_path(path: str) -> bool:
-        return path == "/debug/config" or path == "/admin" or path.startswith("/admin/")
+        norm = path.rstrip("/") or "/"
+        return norm == "/debug/config" or norm == "/admin" or norm.startswith("/admin/")
 
     @staticmethod
     def _matches_key(auth: str, xkey: str, expected: str) -> bool:
         if not expected:
             return False
-        return hmac.compare_digest(auth, f"Bearer {expected}") or hmac.compare_digest(
-            xkey, expected
+        # Encode to UTF-8 bytes before hmac.compare_digest so non-ASCII latin-1
+        # HTTP header bytes cleanly evaluate to False (401) instead of TypeError (500).
+        expected_bearer = f"Bearer {expected}".encode()
+        expected_bytes = expected.encode()
+        return hmac.compare_digest(auth.encode(), expected_bearer) or hmac.compare_digest(
+            xkey.encode(), expected_bytes
         )
 
     async def dispatch(self, request, call_next):

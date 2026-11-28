@@ -101,6 +101,7 @@ async def llm_query(
     stage: str = "",
     url: str = "",
     api_key: str | None = None,
+    temperature: float | None = None,
 ) -> str:
     """Send a prompt to the configured LLM and return the response text.
 
@@ -123,6 +124,8 @@ async def llm_query(
         "messages": messages,
         "max_tokens": max_tokens,
     }
+    if temperature is not None:
+        body["temperature"] = temperature
     if json_mode:
         body["response_format"] = {"type": "json_object"}
 
@@ -181,3 +184,4 @@ async def llm_query(
                 health.register("llm", healthy=False, detail=str(e))
                 logger.error("LLM failed after %d attempts: %s", _MAX_RETRIES, e)
                 raise
+    raise RuntimeError("LLM query loop exhausted without returning")

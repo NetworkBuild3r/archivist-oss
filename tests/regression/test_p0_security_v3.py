@@ -108,6 +108,82 @@ class TestAdminRouteScopeSplit:
                 == 200
             )
 
+    def test_trailing_slash_debug_config_enforces_admin_scope(self):
+        """AUDIT-MIN-1: /debug/config/ must be treated as an admin path (no 307 bypass)."""
+        client = self._build_client()
+        with (
+            patch("archivist.app.main.ARCHIVIST_API_KEY", "std-secret-key"),
+            patch("archivist.app.main.ARCHIVIST_ADMIN_API_KEY", "admin-secret-key"),
+        ):
+            r_unauth = client.get("/debug/config/", follow_redirects=False)
+            assert r_unauth.status_code == 401
+            r_std = client.get(
+                "/debug/config/",
+                headers={"Authorization": "Bearer std-secret-key"},
+                follow_redirects=False,
+            )
+            assert r_std.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_non_ascii_header_bytes_return_401_not_500(self):
+        """AUDIT-MAJ-4: raw non-ASCII latin-1 header bytes must return 401 cleanly, never TypeError 500."""
+
+        async def _ok(request):
+            return JSONResponse({"ok": True})
+
+        app = Starlette(routes=[Route("/mcp", _ok), Route("/admin/stats", _ok)])
+        app.add_middleware(ArchivistAuthMiddleware)
+
+        async def _send_raw(path: str, headers: list[tuple[bytes, bytes]]) -> int:
+            status_code = 0
+
+            async def receive():
+                return {"type": "http.request", "body": b"", "more_body": False}
+
+            async def send(message):
+                nonlocal status_code
+                if message["type"] == "http.response.start":
+                    status_code = int(message["status"])
+
+            scope = {
+                "type": "http",
+                "asgi": {"version": "3.0"},
+                "http_version": "1.1",
+                "method": "GET",
+                "scheme": "http",
+                "path": path,
+                "raw_path": path.encode("ascii"),
+                "query_string": b"",
+                "headers": headers,
+                "client": ("127.0.0.1", 12345),
+                "server": ("127.0.0.1", 8100),
+            }
+            await app(scope, receive, send)
+            return status_code
+
+        with (
+            patch("archivist.app.main.ARCHIVIST_API_KEY", "std-secret-key"),
+            patch("archivist.app.main.ARCHIVIST_ADMIN_API_KEY", "admin-secret-key"),
+        ):
+            assert await _send_raw("/mcp", [(b"x-api-key", b"caf\xe9")]) == 401
+            assert await _send_raw("/mcp", [(b"authorization", b"Bearer caf\xe9")]) == 401
+            assert await _send_raw("/admin/stats", [(b"x-api-key", b"caf\xe9")]) == 401
+
+    def test_startup_warns_when_admin_key_set_but_mcp_unprotected(self, caplog):
+        """AUDIT-MIN-1: setting only ARCHIVIST_ADMIN_API_KEY must still warn that /mcp is open."""
+        import logging
+
+        from archivist.app.main import _warn_if_no_access_control
+
+        with (
+            patch("archivist.app.main.ARCHIVIST_API_KEY", ""),
+            patch("archivist.app.main.ARCHIVIST_ADMIN_API_KEY", "admin-only-key"),
+            patch("archivist.app.main.NAMESPACES_CONFIG_PATH", ""),
+            caplog.at_level(logging.CRITICAL, logger="archivist.server"),
+        ):
+            _warn_if_no_access_control()
+        assert any("NO MCP ACCESS CONTROL" in rec.message for rec in caplog.records)
+
 
 class TestRBACSecurityFixes:
     """P0-5 & P0-6: similar_namespaces enumeration oracle and empty target_agent_id bypass."""

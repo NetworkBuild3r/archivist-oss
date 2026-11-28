@@ -489,17 +489,17 @@ class ArchivistSettings(BaseSettings):
         if not isinstance(data, dict):
             return data
         out = dict(data)
-        lower_keys = {k.lower() for k in out}
+        out_lower_map = {k.lower(): k for k in out}
         env_lower = {k.lower(): v for k, v in os.environ.items()}
         for legacy, canonical in (
             ("reranker_enabled", "rerank_enabled"),
             ("reranker_model", "rerank_model"),
             ("reranker_top_k", "rerank_top_k"),
         ):
-            if canonical in lower_keys or canonical in env_lower:
+            if canonical in out_lower_map or canonical in env_lower:
                 continue
-            if legacy in out:
-                out[canonical] = out[legacy]
+            if legacy in out_lower_map:
+                out[canonical] = out[out_lower_map[legacy]]
             elif legacy in env_lower:
                 out[canonical] = env_lower[legacy]
         return out

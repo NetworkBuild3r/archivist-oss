@@ -209,23 +209,8 @@ def _pack_adaptive(
 
     remaining_cap = max_tokens - budget
 
-    # Pass 2: upgrade to L1 in score order while budget allows.
-    for slot in slots:
-        if remaining_cap <= 0:
-            break
-        if slot["tier"] != "l0":
-            continue
-        l1_text = _best_tier_text(slot["result"], "l1", query=query)
-        l1_toks = count_tokens(l1_text)
-        delta = l1_toks - slot["tokens"]
-        if delta <= remaining_cap:
-            slot["tier"] = "l1"
-            slot["text"] = l1_text
-            slot["tokens"] = l1_toks
-            budget += delta
-            remaining_cap -= delta
-
-    # Pass 3: upgrade to L2 for top-min_full results in score order.
+    # Pass 2: upgrade top-min_full results to L2 FIRST so tail L1 upgrades
+    # cannot starve the SPEC-001 top-K full-context contract.
     upgraded = 0
     for slot in slots:
         if upgraded >= min_full:
@@ -242,6 +227,22 @@ def _pack_adaptive(
             budget += delta
             remaining_cap -= delta
             upgraded += 1
+
+    # Pass 3: upgrade remaining L0 slots to L1 in score order while budget allows.
+    for slot in slots:
+        if remaining_cap <= 0:
+            break
+        if slot["tier"] != "l0":
+            continue
+        l1_text = _best_tier_text(slot["result"], "l1", query=query)
+        l1_toks = count_tokens(l1_text)
+        delta = l1_toks - slot["tokens"]
+        if delta <= remaining_cap:
+            slot["tier"] = "l1"
+            slot["text"] = l1_text
+            slot["tokens"] = l1_toks
+            budget += delta
+            remaining_cap -= delta
 
     # Assemble output — drop slots that have no text (budget entirely exhausted)
     packed: list[dict] = []

@@ -30,7 +30,7 @@ _L1_SYSTEM = (
 )
 
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n+")
-_TOKEN_RE = re.compile(r"[A-Za-z0-9_./:-]{2,}")
+_TOKEN_RE = re.compile(r"[\w./:-]{2,}")
 _HEADING_PREFIX_RE = re.compile(r"^#{1,6}\s+")
 
 _STOPWORDS = frozenset(
@@ -74,6 +74,24 @@ _STOPWORDS = frozenset(
 )
 
 
+def _truncate_chars_to_tokens(text: str, max_tokens: int) -> str:
+    """Binary-search a character prefix whose token count is ``<= max_tokens``."""
+    if not text or max_tokens <= 0:
+        return ""
+    lo, hi = 1, len(text)
+    best = ""
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        candidate = text[:mid].strip()
+        if not candidate or count_tokens(candidate) <= max_tokens:
+            if candidate:
+                best = candidate
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    return best
+
+
 def _truncate_to_tokens(text: str, max_tokens: int) -> str:
     """Truncate *text* on a word boundary so ``count_tokens(result) <= max_tokens``."""
     cleaned = text.strip()
@@ -84,7 +102,7 @@ def _truncate_to_tokens(text: str, max_tokens: int) -> str:
 
     words = cleaned.split()
     if not words:
-        return cleaned[: max_tokens * 4].strip()
+        return _truncate_chars_to_tokens(cleaned, max_tokens)
 
     lo, hi = 1, len(words)
     best = ""
@@ -98,8 +116,8 @@ def _truncate_to_tokens(text: str, max_tokens: int) -> str:
             hi = mid - 1
     if best:
         return best
-    # Single word longer than max_tokens — fall back to character slice.
-    return cleaned[: max(1, max_tokens * 4)].strip()
+    # Single word/run (e.g., CJK or emoji) exceeds max_tokens — binary-search characters.
+    return _truncate_chars_to_tokens(cleaned, max_tokens)
 
 
 def extract_l0_deterministic(text: str, max_tokens: int = 100) -> str:
@@ -140,9 +158,9 @@ def _extract_query_terms(query: str) -> list[str]:
 
 
 def _window_around_single_segment(segment: str, terms: set[str], max_tokens: int) -> str:
-    """Slice a single long segment around the first matching query term."""
+    """Slice a single long segment around the first matching query term, keeping the anchor."""
     words = segment.split()
-    if not words:
+    if not words or max_tokens <= 0:
         return ""
     anchor = 0
     if terms:
@@ -151,12 +169,28 @@ def _window_around_single_segment(segment: str, terms: set[str], max_tokens: int
             if any(t in low for t in terms):
                 anchor = idx
                 break
-    # Estimate word budget conservatively (approx 1.3 words per token).
-    half_win = max(8, int(max_tokens * 0.45))
-    start = max(0, anchor - half_win)
-    end = min(len(words), start + max(16, int(max_tokens * 0.9)))
-    snippet = " ".join(words[start:end])
-    return _truncate_to_tokens(snippet, max_tokens)
+
+    if count_tokens(words[anchor]) > max_tokens:
+        return _truncate_to_tokens(words[anchor], max_tokens)
+
+    # Expand outward symmetrically around *anchor* while staying strictly within max_tokens.
+    left = anchor
+    right = anchor
+    while True:
+        expanded = False
+        if right + 1 < len(words):
+            cand = " ".join(words[left : right + 2])
+            if count_tokens(cand) <= max_tokens:
+                right += 1
+                expanded = True
+        if left - 1 >= 0:
+            cand = " ".join(words[left - 1 : right + 1])
+            if count_tokens(cand) <= max_tokens:
+                left -= 1
+                expanded = True
+        if not expanded:
+            break
+    return " ".join(words[left : right + 1])
 
 
 def extract_l1_query_window(text: str, query: str, max_tokens: int = 300) -> str:

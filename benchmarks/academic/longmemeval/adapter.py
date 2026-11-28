@@ -44,7 +44,7 @@ from typing import Any
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
-from benchmarks.cache import DiskCache, SpendTracker
+from benchmarks.cache import BudgetExceededError, DiskCache, SpendTracker
 from benchmarks.env_loader import load_repo_env
 from benchmarks.stats import (
     MIN_N_FOR_CI,
@@ -125,7 +125,7 @@ VARIANTS: dict[str, dict[str, str]] = {
 
 
 def _apply_variant(variant_name: str) -> None:
-    """Apply explicit config overrides for a named variant."""
+    """Apply explicit config overrides for a named variant and refresh bound modules."""
     import importlib
 
     env_overrides = VARIANTS[variant_name]
@@ -134,6 +134,17 @@ def _apply_variant(variant_name: str) -> None:
     import archivist.core.config as config
 
     importlib.reload(config)
+
+    # Refresh dependent modules that bind config flags by value at import time
+    # so sequential --ablation runs actually observe the new variant's settings.
+    for mod_name in (
+        "archivist.storage.graph_retrieval",
+        "archivist.retrieval.rlm_retriever",
+        "archivist.write.indexer",
+    ):
+        mod = sys.modules.get(mod_name)
+        if mod is not None:
+            importlib.reload(mod)
 
 
 # ── Official LLM-as-judge prompts (from xiaowu0162/LongMemEval) ──────────────
@@ -259,15 +270,34 @@ def _recall_at_k(retrieved_session_ids: list[str], evidence_ids: set[str], k: in
     return len(top_k & evidence_ids) / len(evidence_ids)
 
 
+def _normalize_source(src: Any) -> dict[str, Any]:
+    """Normalize a retrieval source (dict or ``ContextChunk`` dataclass) into a plain dict."""
+    if isinstance(src, dict):
+        return src
+    return {
+        "id": getattr(src, "memory_id", getattr(src, "id", "")),
+        "text": getattr(src, "text", ""),
+        "tier_text": getattr(src, "tier_text", getattr(src, "text", "")),
+        "tier": getattr(src, "tier", ""),
+        "file_path": getattr(src, "file_path", ""),
+        "date": getattr(src, "date", ""),
+        "content_date": getattr(src, "content_date", getattr(src, "date", "")),
+        "score": getattr(src, "score", 0.0),
+        "agent_id": getattr(src, "agent_id", ""),
+        "session_id": getattr(src, "session_id", ""),
+    }
+
+
 def map_sources_to_session_ids(
-    sources: list[dict[str, Any]],
+    sources: list[Any],
     session_ids: list[str],
     filename_to_session_id: dict[str, str],
 ) -> list[str]:
-    """Map retrieved source dicts to deduplicated rank-ordered string session IDs (B3)."""
+    """Map retrieved source dicts or ``ContextChunk`` objects to string session IDs (B3)."""
     mapped: list[str] = []
     seen: set[str] = set()
-    for src in sources:
+    for raw_src in sources:
+        src = _normalize_source(raw_src)
         sid = str(src.get("session_id") or "").strip()
         if not sid:
             rf = str(src.get("file_path") or "")
@@ -391,10 +421,11 @@ async def _run_curator_on_files(mem_root: str) -> int:
 # ── Answer generation & pinned LLM-as-judge (B1, B4, B6) ─────────────────────
 
 
-def _format_packed_context(sources: list[dict[str, Any]]) -> str:
-    """Format packed retrieval sources into a concise context block for the Answer LLM."""
+def _format_packed_context(sources: list[Any]) -> str:
+    """Format packed retrieval sources (dicts or ``ContextChunk``s) for the Answer LLM."""
     parts: list[str] = []
-    for idx, src in enumerate(sources, 1):
+    for idx, raw_src in enumerate(sources, 1):
+        src = _normalize_source(raw_src)
         body = (src.get("tier_text") or src.get("text") or "").strip()
         if not body:
             continue
@@ -451,6 +482,7 @@ async def _generate_answer(
         max_tokens=256,
         model=answer_model,
         stage="longmemeval_answer",
+        temperature=0.0,
     )
     ans = (response or "").strip()
     if cache is not None:
@@ -524,11 +556,15 @@ async def _llm_judge(
                 url=judge_url,
                 api_key=j_key,
                 stage="longmemeval_judge",
+                temperature=0.0,
             )
             verdict = "yes" in (response or "").strip().lower()
             if cache is not None:
                 cache.set("longmemeval_judge", cache_payload, verdict)
             return verdict
+        except BudgetExceededError:
+            # Never retry or wrap hard spend-cap aborts into JudgeEvaluationError.
+            raise
         except Exception as exc:
             last_err = exc
             if attempt < max_retries:
@@ -551,11 +587,12 @@ async def _llm_judge(
 
 
 async def _reset_question_storage(sqlite_path: str, mem_root: str) -> None:
-    """Re-bind SQLite pool, config paths, and clear hot_cache for a fresh question (B2)."""
+    """Re-bind SQLite pool, config/indexer paths, and clear hot_cache for a fresh question (B2)."""
     import archivist.core.config as config
     import archivist.retrieval.hot_cache as hot_cache
     import archivist.storage.graph as graph_mod
     import archivist.storage.sqlite_pool as pool_mod
+    import archivist.write.indexer as indexer_mod
     from archivist.storage.sqlite_pool import SQLiteGraphBackend
 
     # Clear hot cache completely so no cached answers leak across questions.
@@ -574,6 +611,7 @@ async def _reset_question_storage(sqlite_path: str, mem_root: str) -> None:
     os.environ["MEMORY_ROOT"] = mem_root
     os.environ["SQLITE_PATH"] = sqlite_path
     graph_mod.SQLITE_PATH = sqlite_path
+    indexer_mod.MEMORY_ROOT = mem_root
 
     fresh_backend = SQLiteGraphBackend()
     await fresh_backend.initialize(sqlite_path, wal_autocheckpoint=config.SQLITE_WAL_AUTOCHECKPOINT)
@@ -599,7 +637,7 @@ async def run_longmemeval_benchmark(
     answer_model: str = "",
     cache_dir: str | Path | None = DEFAULT_CACHE_DIR,
     checkpoint_path: str | Path | None = None,
-    max_budget_usd: float = 0.0,
+    max_budget_usd: float | None = None,
     question_ids: set[str] | None = None,
     # Injectable hooks for deterministic offline unit tests (zero network calls)
     index_fn: Callable[[str, str, list[tuple[str, str]]], Awaitable[int]] | None = None,
@@ -649,11 +687,13 @@ async def run_longmemeval_benchmark(
     import archivist.core.config as config
     import archivist.storage.graph as graph_mod
     import archivist.storage.sqlite_pool as pool_mod
+    import archivist.write.indexer as indexer_mod
 
     original_memory_root = config.MEMORY_ROOT
+    original_indexer_memory_root = indexer_mod.MEMORY_ROOT
     original_sqlite = config.SQLITE_PATH
     original_graph_sqlite = graph_mod.SQLITE_PATH
-    original_pool = getattr(pool_mod, "pool", None)
+    original_pool = pool_mod.pool
 
     try:
         from archivist.retrieval.context_api import get_relevant_context
@@ -691,9 +731,9 @@ async def run_longmemeval_benchmark(
                 continue
 
             if qid in completed_by_qid:
-                entry = completed_by_qid[qid]
-                all_results.append(entry)
-                results_by_qtype[question_type].append(entry)
+                cached_entry = completed_by_qid[qid]
+                all_results.append(cached_entry)
+                results_by_qtype[question_type].append(cached_entry)
                 continue
 
             # B2: Fresh per-question directory, SQLite DB, graph pool, and hot cache.
@@ -771,7 +811,7 @@ async def run_longmemeval_benchmark(
                         as_of=question_date,
                         limit=search_limit,
                     )
-                    sources = list(ctx.sources)
+                    sources = [_normalize_source(s) for s in ctx.sources]
                     context_tokens = int(ctx.total_tokens)
                 elapsed_ms = round((time.monotonic() - t_ret) * 1000, 1)
 
@@ -1025,6 +1065,7 @@ async def run_longmemeval_benchmark(
                 pass
         pool_mod.pool = original_pool
         config.MEMORY_ROOT = original_memory_root
+        indexer_mod.MEMORY_ROOT = original_indexer_memory_root
         config.SQLITE_PATH = original_sqlite
         graph_mod.SQLITE_PATH = original_graph_sqlite
         os.environ["MEMORY_ROOT"] = original_memory_root
@@ -1184,8 +1225,8 @@ async def main() -> None:
     parser.add_argument(
         "--max-budget-usd",
         type=float,
-        default=0.0,
-        help="Optional hard USD spend ceiling (0 = unlimited)",
+        default=None,
+        help="Optional hard USD spend ceiling (omit for unlimited; 0.0 rejects paid calls)",
     )
     parser.add_argument(
         "--variant",

@@ -77,6 +77,7 @@ class EmbedderSpec:
     fastembed_name: str = ""
     approx_download_mb: float = 0.0
     matryoshka_dim: int | None = None
+    model_note: str = ""
 
 
 @dataclass(frozen=True)
@@ -109,6 +110,7 @@ LOCAL_ONNX_EMBEDDERS: tuple[EmbedderSpec, ...] = (
         backend="onnx",
         fastembed_name="snowflake/snowflake-arctic-embed-m",
         approx_download_mb=110.0,
+        model_note="fastembed packages v1.0 (snowflake/snowflake-arctic-embed-m); v2.0 not yet bundled",
     ),
 )
 
@@ -325,25 +327,36 @@ class _EmbedderRuntime:
         return self._onnx_model
 
     async def embed_texts(self, texts: Sequence[str]) -> tuple[list[list[float]], float]:
-        """Embed *texts* using SHA-256 disk cache; return ``(vectors, elapsed_ms)``."""
-        t0 = time.monotonic()
+        """Embed *texts* using SHA-256 disk cache; return ``(vectors, compute_ms)``.
+
+        Stores the uncached compute latency alongside cached vectors so shared
+        reranker pairs and warm-cache reruns report true embedding latency rather
+        than disk-cache read latency (``~0.05ms``).
+        """
         results: list[list[float] | None] = [None] * len(texts)
+        cached_compute_ms = 0.0
         uncached_indices: list[int] = []
         uncached_texts: list[str] = []
 
         for idx, txt in enumerate(texts):
             if self.cache is not None:
-                found, vec = self.cache.get(
+                found, entry = self.cache.get(
                     "ablation_embed",
                     {"mode": self.mode, "model": self.spec.id, "dim": self.spec.dim, "text": txt},
                 )
                 if found:
-                    results[idx] = vec
+                    if isinstance(entry, dict) and "vec" in entry:
+                        results[idx] = entry["vec"]
+                        cached_compute_ms += float(entry.get("compute_ms", 0.0))
+                    else:
+                        results[idx] = entry
                     continue
             uncached_indices.append(idx)
             uncached_texts.append(txt)
 
+        uncached_compute_ms = 0.0
         if uncached_texts:
+            t_compute = time.monotonic()
             if self.mode == "dry-run":
                 computed = _dry_run_embed(uncached_texts, model_id=self.spec.id, dim=self.spec.dim)
             elif self.spec.backend == "onnx":
@@ -359,6 +372,8 @@ class _EmbedderRuntime:
                     computed.append(arr)
             else:
                 computed = await self._embed_cloud_openai(uncached_texts)
+            uncached_compute_ms = (time.monotonic() - t_compute) * 1000.0
+            per_item_ms = uncached_compute_ms / max(len(uncached_texts), 1)
 
             for idx, txt, vec in zip(uncached_indices, uncached_texts, computed):
                 results[idx] = vec
@@ -371,11 +386,10 @@ class _EmbedderRuntime:
                             "dim": self.spec.dim,
                             "text": txt,
                         },
-                        vec,
+                        {"vec": vec, "compute_ms": round(per_item_ms, 4)},
                     )
 
-        elapsed_ms = (time.monotonic() - t0) * 1000.0
-        return [r or [] for r in results], elapsed_ms
+        return [r or [] for r in results], cached_compute_ms + uncached_compute_ms
 
     async def _embed_cloud_openai(self, texts: Sequence[str]) -> list[list[float]]:
         import httpx
@@ -660,9 +674,12 @@ async def _evaluate_pair(
     return {
         "pair_key": f"{embedder.id} + {reranker.id}",
         "embedder": embedder.id,
+        "embedder_fastembed_model": embedder.fastembed_name or embedder.id,
+        "embedder_note": embedder.model_note,
         "embedder_dim": embedder.dim,
         "embedder_backend": embedder.backend,
         "reranker": reranker.id,
+        "reranker_fastembed_model": reranker.fastembed_name or reranker.id,
         "reranker_backend": reranker.backend,
         "evaluated_questions": len(items),
         "recall@5": metrics.get("recall@5", 0.0),
@@ -828,6 +845,15 @@ def _print_table(report: dict[str, Any]) -> None:
     print(
         f"  Gate status: {gate.get('status')} | Winner: {(gate.get('winner') or {}).get('pair_key')}"
     )
+    notes = sorted(
+        {
+            f"{p['embedder']} -> {p['embedder_fastembed_model']} ({p['embedder_note']})"
+            for p in report.get("pairs", [])
+            if p.get("embedder_note")
+        }
+    )
+    for note in notes:
+        print(f"  Note: {note}")
     print(f"{'=' * 96}\n")
 
 

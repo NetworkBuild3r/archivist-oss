@@ -233,3 +233,49 @@ class TestDeterministicTierExtraction:
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
         # Target < 2ms on standard hardware; generous 25ms ceiling avoids CI flake
         assert elapsed_ms < 25.0, f"Deterministic tiering too slow: {elapsed_ms:.2f}ms"
+
+    def test_single_segment_small_budget_retains_anchor_token(self):
+        """AUDIT-MIN-3: small max_tokens must not slice off the matching anchor token."""
+        from archivist.utils.tokenizer import count_tokens
+        from archivist.write.tiering import extract_l1_query_window
+
+        text = ("alpha beta gamma delta " * 25) + "NEEDLE_TOKEN " + ("epsilon zeta eta " * 25)
+        out = extract_l1_query_window(text, query="NEEDLE_TOKEN", max_tokens=10)
+        assert "NEEDLE_TOKEN" in out
+        assert count_tokens(out) <= 10
+
+    def test_truncate_to_tokens_respects_budget_for_cjk_and_emoji(self):
+        """AUDIT-MIN-3: single non-spaced CJK/emoji runs must strictly obey count_tokens <= max_tokens."""
+        from archivist.utils.tokenizer import count_tokens
+        from archivist.write.tiering import _truncate_to_tokens
+
+        for text in ("東京都渋谷区神南一丁目" * 20, "🚀🔥🎯✅🧠" * 30):
+            out = _truncate_to_tokens(text, max_tokens=12)
+            assert out
+            assert count_tokens(out) <= 12
+
+    def test_unicode_query_terms_match_segments(self):
+        """AUDIT-MIN-3: non-ASCII query tokens match target segments."""
+        from archivist.write.tiering import extract_l1_query_window
+
+        filler = "Generic meeting notes without relevant details about anything. "
+        target = "Le café résumé à Montréal ouvre à 08:00 demain matin."
+        text = (filler * 25) + target + " " + (filler * 25)
+        out = extract_l1_query_window(text, query="café Montréal", max_tokens=60)
+        assert "Montréal" in out
+
+    def test_adaptive_upgrades_top_min_full_to_l2_before_tail_l1_starvation(self):
+        """AUDIT-MIN-4: top min_full_results must get L2 before lower-ranked L1 upgrades consume budget."""
+        results = [
+            _make_result(
+                score=1.0 - (i * 0.05),
+                l0=f"Headline {i}",
+                l1=f"Medium summary {i} " + ("detail " * 35),
+                text=f"Full L2 content {i} " + ("body " * 60),
+            )
+            for i in range(10)
+        ]
+        pc = pack_context(results, max_tokens=450, tier_policy="adaptive", min_full_results=3)
+        top3_tiers = [s["_packed_tier"] for s in pc.sources[:3]]
+        assert top3_tiers.count("l2") >= 2, f"Expected top-3 L2 upgrades, got {top3_tiers}"
+        assert pc.total_tokens <= 450

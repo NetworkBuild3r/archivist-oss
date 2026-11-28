@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import os
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -258,6 +259,249 @@ class TestCacheAndBudgetGuard:
                 stage="judge", model="gpt-4o-2024-08-06", input_tokens=500_000, output_tokens=0
             )
 
+    def test_spend_tracker_zero_cap_and_none_unlimited_and_thread_safety(self):
+        """AUDIT-MIN-7: max_budget_usd=0.0 rejects paid calls; None is uncapped; lock prevents races."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        zero_cap = SpendTracker(max_budget_usd=0.0)
+        with pytest.raises(BudgetExceededError):
+            zero_cap.check_and_reserve(
+                stage="judge", model="gpt-4o-2024-08-06", input_tokens=1000, output_tokens=10
+            )
+        # Local/ONNX zero-cost calls are still permitted under $0.00 cap
+        assert (
+            zero_cap.check_and_reserve(
+                stage="embed", model="BAAI/bge-small-en-v1.5", input_tokens=1000
+            )
+            == 0.0
+        )
+
+        unlimited = SpendTracker(max_budget_usd=None)
+        unlimited.check_and_reserve(
+            stage="judge", model="gpt-4o-2024-08-06", input_tokens=2_000_000, output_tokens=0
+        )
+        assert unlimited.summary()["max_budget_usd"] is None
+
+        # Concurrent calls must never overshoot max_budget_usd
+        capped = SpendTracker(max_budget_usd=0.50)
+
+        def _worker(_i: int) -> bool:
+            try:
+                capped.check_and_reserve(
+                    stage="judge",
+                    model="gpt-4o-2024-08-06",
+                    input_tokens=40_000,  # $0.10 each -> max 5 succeed
+                )
+                return True
+            except BudgetExceededError:
+                return False
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            outcomes = list(pool.map(_worker, range(20)))
+        assert sum(outcomes) == 5
+        assert capped.spent_usd <= 0.50 + 1e-9
+
+    @pytest.mark.asyncio
+    async def test_audit_maj1_adapter_handles_real_context_chunk_objects(self, tmp_path):
+        """AUDIT-MAJ-1: adapter handles real ContextChunk instances from get_relevant_context."""
+        from archivist.retrieval.context_api import ContextChunk, RelevantContext
+
+        data = _synthetic_longmemeval_dataset(2)
+        data_file = tmp_path / "lme_chunks.json"
+        data_file.write_text(json.dumps(data))
+
+        async def fake_index(q_mem_dir: str, sqlite_path: str, md_files: list[str]) -> int:
+            return len(md_files)
+
+        async def fake_get_relevant_context(**kwargs) -> RelevantContext:
+            idx = kwargs["task_description"].rstrip("?").split()[-1]
+            return RelevantContext(
+                answer="",
+                sources=[
+                    ContextChunk(
+                        memory_id=f"mem-{idx}",
+                        text=f"Alice chose emerald green for project {idx}.",
+                        score=0.92,
+                        tier="l2",
+                        file_path=f"longmemeval-q_{idx}/session-0002-2023-05-15.md",
+                        date="2023-05-15",
+                        agent_id="longmemeval",
+                    )
+                ],
+                graph_facts=[],
+                tips=[],
+                total_tokens=18,
+                budget_tokens=4000,
+                over_budget=False,
+                tier_distribution={"l2": 1},
+                token_savings_pct=0.0,
+                provenance=[f"mem-{idx}"],
+                pack_policy="adaptive",
+            )
+
+        async def fake_llm(prompt: str, system: str = "", **kwargs) -> str:
+            if "yes or no" in prompt.lower() or "model response:" in prompt.lower():
+                return "yes"
+            return "emerald green"
+
+        with (
+            patch(
+                "archivist.retrieval.context_api.get_relevant_context",
+                new=fake_get_relevant_context,
+            ),
+            patch("archivist.features.llm.llm_query", new=fake_llm),
+        ):
+            ret_only = await run_longmemeval_benchmark(
+                data_file=str(data_file),
+                limit=2,
+                mode="retrieval-only",
+                cache_dir=str(tmp_path / "c1"),
+                index_fn=fake_index,
+            )
+            assert ret_only["summary"]["retrieval"]["recall@5"] == pytest.approx(1.0)
+            assert ret_only["summary"]["overall_accuracy"] is None
+
+            full = await run_longmemeval_benchmark(
+                data_file=str(data_file),
+                limit=2,
+                mode="full",
+                cache_dir=str(tmp_path / "c2"),
+                index_fn=fake_index,
+            )
+            assert full["summary"]["overall_accuracy"] == pytest.approx(1.0)
+
+    @pytest.mark.asyncio
+    async def test_audit_maj2_indexer_memory_root_isolated_and_variant_reloads(
+        self, tmp_path, monkeypatch
+    ):
+        """AUDIT-MAJ-2: indexer.MEMORY_ROOT tracks per-question dirs and _apply_variant reloads rlm_retriever."""
+        from benchmarks.academic.longmemeval.adapter import _apply_variant
+
+        import archivist.retrieval.rlm_retriever as rlm
+        import archivist.write.indexer as indexer_mod
+
+        orig_indexer_root = indexer_mod.MEMORY_ROOT
+        seen_indexer_roots: list[str] = []
+
+        data = _synthetic_longmemeval_dataset(2)
+        data_file = tmp_path / "lme_iso.json"
+        data_file.write_text(json.dumps(data))
+
+        async def fake_index(q_mem_dir: str, sqlite_path: str, md_files: list[str]) -> int:
+            assert q_mem_dir == indexer_mod.MEMORY_ROOT
+            seen_indexer_roots.append(indexer_mod.MEMORY_ROOT)
+            return len(md_files)
+
+        async def fake_retrieve(**kwargs) -> dict:
+            return {"sources": [], "total_tokens": 0}
+
+        await run_longmemeval_benchmark(
+            data_file=str(data_file),
+            limit=2,
+            mode="retrieval-only",
+            cache_dir=str(tmp_path / "c_iso"),
+            index_fn=fake_index,
+            retrieve_fn=fake_retrieve,
+        )
+        assert len(seen_indexer_roots) == 2
+        assert len(set(seen_indexer_roots)) == 2
+        assert orig_indexer_root == indexer_mod.MEMORY_ROOT
+
+        # Variant switching must propagate to rlm_retriever module-level flags
+        saved_env = {
+            k: os.environ.get(k)
+            for k in (
+                "BM25_ENABLED",
+                "GRAPH_RETRIEVAL_ENABLED",
+                "RERANK_ENABLED",
+                "HOTNESS_WEIGHT",
+                "TEMPORAL_DECAY_HALFLIFE_DAYS",
+                "TEMPORAL_INTENT_ENABLED",
+                "BM25_RESCUE_ENABLED",
+                "ADAPTIVE_VECTOR_LIMIT_ENABLED",
+                "TOPIC_ROUTING_ENABLED",
+                "RETRIEVAL_THRESHOLD",
+            )
+        }
+        try:
+            _apply_variant("vector_only")
+            assert rlm.BM25_ENABLED is False
+            assert rlm.GRAPH_RETRIEVAL_ENABLED is False
+
+            _apply_variant("full_pipeline")
+            assert rlm.BM25_ENABLED is True
+            assert rlm.GRAPH_RETRIEVAL_ENABLED is True
+        finally:
+            import importlib
+
+            import archivist.core.config as cfg_mod
+            import archivist.storage.graph_retrieval as gr_mod
+
+            for k, v in saved_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+            importlib.reload(cfg_mod)
+            importlib.reload(gr_mod)
+            importlib.reload(rlm)
+            importlib.reload(indexer_mod)
+
+    @pytest.mark.asyncio
+    async def test_audit_maj3_judge_sends_temperature_zero_and_propagates_budget_error(self):
+        """AUDIT-MAJ-3: llm_query sends temperature=0.0 and _llm_judge never swallows BudgetExceededError."""
+        from unittest.mock import MagicMock
+
+        from archivist.features import llm as llm_mod
+
+        captured_bodies: list[dict] = []
+
+        class _FakeResp:
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict:
+                return {"choices": [{"message": {"content": "yes"}}]}
+
+        fake_client = MagicMock()
+
+        async def _fake_post(url, json=None, headers=None):
+            captured_bodies.append(dict(json or {}))
+            return _FakeResp()
+
+        fake_client.post = _fake_post
+        fake_client.is_closed = False
+
+        with patch.object(llm_mod, "_get_llm_client", return_value=fake_client):
+            verdict = await _llm_judge(
+                question="What color?",
+                ground_truth="emerald green",
+                hypothesis="emerald green",
+                question_type="single-session-user",
+                is_abstention=False,
+                judge_model=DEFAULT_JUDGE_MODEL,
+            )
+            assert verdict is True
+            assert captured_bodies
+            assert captured_bodies[0].get("temperature") == 0.0
+
+        # Tight spend cap must raise BudgetExceededError directly with 0 llm calls / 0 retries
+        tight_tracker = SpendTracker(max_budget_usd=0.0)
+        with patch("archivist.features.llm.llm_query", new=AsyncMock()) as mock_llm:
+            with pytest.raises(BudgetExceededError):
+                await _llm_judge(
+                    question="What color?",
+                    ground_truth="emerald green",
+                    hypothesis="emerald green",
+                    question_type="single-session-user",
+                    is_abstention=False,
+                    judge_model=DEFAULT_JUDGE_MODEL,
+                    spend_tracker=tight_tracker,
+                    max_retries=3,
+                    retry_base_delay_s=0.001,
+                )
+            mock_llm.assert_not_called()
+
 
 class TestOnnxAblationHarness:
     """Covers INIT-023/SPEC-004 stratification, dry-run harness, and selection gate."""
@@ -299,6 +543,13 @@ class TestOnnxAblationHarness:
         )
         assert r2["cache"]["misses"] == 0
         assert r2["cache"]["hits"] > 0
+        # AUDIT-MIN-5: cached reruns preserve original compute latency & surface fastembed model notes
+        for p1, p2 in zip(r1["pairs"], r2["pairs"]):
+            assert p2["embed_cpu_p50_ms"] == pytest.approx(p1["embed_cpu_p50_ms"], abs=0.05)
+            assert "embedder_fastembed_model" in p2
+        snow = next(p for p in r2["pairs"] if p["embedder"] == "snowflake-arctic-embed-m-v2.0")
+        assert snow["embedder_fastembed_model"] == "snowflake/snowflake-arctic-embed-m"
+        assert "v1.0" in snow["embedder_note"]
 
     def test_selection_gate_applies_plan_decision_rule(self):
         rows = [
@@ -347,12 +598,19 @@ class TestBenchmarkHygiene:
     """SPEC-003 hygiene: no fabricated competitor rows and no BENCHMARK_FAST=1 overrides."""
 
     def test_token_efficiency_has_no_fabricated_competitor_rows(self):
+        """AUDIT-MIN-8: assert none of the actual removed fabricated competitor rows remain."""
         import benchmarks.token_efficiency as te
 
         src = inspect.getsource(te)
-        assert "estimated from paper" not in src
-        assert "Mem0 (default)" not in src
-        assert "Zep / Graphiti" not in src
+        for forbidden in (
+            "Competitor Reference",
+            "Mem0 (flat list)",
+            "Letta/MemGPT (paging)",
+            "Zep (entity graph)",
+            "Graphiti (graph only)",
+            "estimated from paper",
+        ):
+            assert forbidden not in src, f"Fabricated competitor marker found: {forbidden!r}"
 
     def test_benchmark_scripts_do_not_export_benchmark_fast(self):
         root = Path(__file__).resolve().parents[3]
