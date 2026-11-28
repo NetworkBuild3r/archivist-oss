@@ -101,12 +101,20 @@ def _cache_put(query: str, doc: str) -> None:
 async def generate_hypothetical_document(
     query: str,
     model: str = "",
+    *,
+    force: bool = False,
 ) -> str | None:
-    """Generate a short hypothetical answer to ``query``.
+    """Generate a short hypothetical answer to ``query`` (deprecated opt-in path).
 
-    Returns the hypothetical document text, or None on failure.
-    Cached in-process to avoid repeated LLM calls for the same query.
+    Gated behind ``HYDE_READ_ENABLED`` (default ``False`` in v3) so read-time
+    retrieval performs zero LLM calls unless explicitly opted in.
+    Returns the hypothetical document text, or None when disabled or on failure.
     """
+    import archivist.core.config as _cfg
+
+    if not force and not _cfg.HYDE_READ_ENABLED:
+        return None
+
     cached = _cache_get(query)
     if cached is not None:
         return cached

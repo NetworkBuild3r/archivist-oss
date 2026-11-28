@@ -301,14 +301,37 @@ async def graph_context_for_entities(
     return _apply_cross_agent_cap(context_items)
 
 
+def _parse_reference_date(reference_time: datetime | str | None) -> datetime:
+    """Parse an optional reference timestamp/date into a UTC datetime."""
+    if reference_time is None or reference_time == "":
+        return datetime.now(UTC)
+    if isinstance(reference_time, datetime):
+        return reference_time if reference_time.tzinfo else reference_time.replace(tzinfo=UTC)
+    raw = str(reference_time).strip()
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(raw[:10], fmt).replace(tzinfo=UTC)
+        except ValueError:
+            continue
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+    except ValueError:
+        return datetime.now(UTC)
+
+
 def apply_temporal_decay(
     results: list[dict],
     halflife_days: int | None = None,
     temporal_intent: str = "neutral",
+    reference_time: datetime | str | None = None,
 ) -> list[dict]:
     """Multiply each result's score by an exponential decay factor based on its date.
 
     Newer memories score higher; very old memories are down-weighted but never zeroed.
+
+    When ``halflife_days`` (or ``TEMPORAL_DECAY_HALFLIFE_DAYS``) is ``<= 0``,
+    temporal decay is bypassed completely and *results* is returned unchanged.
 
     When ``temporal_intent`` is ``"historical"``, the halflife is multiplied by
     TEMPORAL_HISTORICAL_HALFLIFE_MULTIPLIER (default 10×) so dated documents
@@ -322,14 +345,14 @@ def apply_temporal_decay(
         TEMPORAL_INTENT_ENABLED,
     )
 
-    hl = halflife_days or TEMPORAL_DECAY_HALFLIFE_DAYS
+    hl = TEMPORAL_DECAY_HALFLIFE_DAYS if halflife_days is None else halflife_days
     if hl <= 0:
         return results
 
     if TEMPORAL_INTENT_ENABLED and temporal_intent == "historical":
         hl = int(hl * TEMPORAL_HISTORICAL_HALFLIFE_MULTIPLIER)
 
-    now = datetime.now(UTC).date()
+    now = _parse_reference_date(reference_time).date()
     ln2 = math.log(2)
 
     for r in results:

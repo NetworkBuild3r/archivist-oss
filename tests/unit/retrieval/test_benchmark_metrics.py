@@ -222,8 +222,6 @@ class TestPhase1QueryExpansionKill:
         evaluate = self._import_evaluate()
         expected_names = {
             "vector_only",
-            "vector_plus_synth",
-            "vector_plus_synth_plus_reranker",
             "clean_reranker",
             "expansion_off",
             "expansion_on",
@@ -236,3 +234,5 @@ class TestPhase1QueryExpansionKill:
             "full_pipeline_rerank",
         }
         assert set(evaluate.VARIANTS.keys()) == expected_names
+        assert "vector_plus_synth" not in evaluate.VARIANTS
+        assert "vector_plus_synth_plus_reranker" not in evaluate.VARIANTS

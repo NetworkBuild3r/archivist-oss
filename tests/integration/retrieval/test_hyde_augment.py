@@ -57,61 +57,6 @@ class TestHyDE:
         assert _cache_get("hyde_ttl_test") is None
 
 
-# ── LTR Feature Extraction Tests ────────────────────────────────────────────
-
-
-class TestLTRFeatures:
-    def test_extract_features_basic(self):
-        from archivist.retrieval.ranker import FEATURE_NAMES, extract_features
-
-        result = {
-            "score": 0.85,
-            "vector_score": 0.85,
-            "bm25_score": 3.2,
-            "rrf_score": 0.03,
-            "hotness": 0.7,
-            "importance_score": 0.9,
-            "temporal_decay": 0.95,
-            "outcome_adjustment": 0.1,
-            "graph_hop": 1,
-            "mention_count": 5,
-            "rerank_score": 0.88,
-            "text": "Some chunk text here",
-            "date": "2026-01-15",
-        }
-        features = extract_features(result)
-        assert len(features) == len(FEATURE_NAMES)
-        assert features[0] == 0.85  # vector_score
-        assert features[1] == 3.2  # bm25_score
-        assert features[10] > 0  # chunk_length
-
-    def test_extract_features_missing_fields(self):
-        from archivist.retrieval.ranker import FEATURE_NAMES, extract_features
-
-        result = {"score": 0.5, "text": "hello"}
-        features = extract_features(result)
-        assert len(features) == len(FEATURE_NAMES)
-        assert features[0] == 0.5
-        assert all(isinstance(f, float) for f in features)
-
-    def test_ltr_not_available_without_model(self):
-        from archivist.retrieval.ranker import ltr_available
-
-        assert not ltr_available()
-
-    def test_rank_results_passthrough_without_model(self):
-        from archivist.retrieval.ranker import rank_results
-
-        results = [{"score": 0.9, "text": "a"}, {"score": 0.5, "text": "b"}]
-        ranked = rank_results(results)
-        assert ranked == results  # unchanged — no model loaded
-
-    def test_feature_names_count(self):
-        from archivist.retrieval.ranker import FEATURE_NAMES
-
-        assert len(FEATURE_NAMES) == 12
-
-
 # ── Contextual Augmentation Tests ────────────────────────────────────────────
 
 
@@ -186,28 +131,3 @@ class TestIterativeRetrieval:
 
         sig = inspect.signature(recursive_retrieve)
         assert sig.parameters["_is_retry"].default is False
-
-
-# ── Ranker Training Data Builder Tests ───────────────────────────────────────
-
-
-class TestRankerTrainData:
-    def test_feature_names_match(self):
-        from archivist.retrieval.ranker import FEATURE_NAMES as inference_names
-        from archivist.retrieval.ranker_train import FEATURE_NAMES as train_names
-
-        assert inference_names == train_names
-
-    def test_load_training_data_empty_db(self, tmp_path):
-        """Training on an empty DB should return empty lists."""
-        import sqlite3
-
-        db_path = str(tmp_path / "empty.db")
-        conn = sqlite3.connect(db_path)
-        conn.close()
-        from archivist.retrieval.ranker_train import _load_training_data
-
-        features, labels, groups = _load_training_data(db_path)
-        assert features == []
-        assert labels == []
-        assert groups == []

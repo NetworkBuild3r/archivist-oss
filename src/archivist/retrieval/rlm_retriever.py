@@ -11,6 +11,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
+from typing import Any
 
 from qdrant_client.models import (
     FieldCondition,
@@ -41,6 +42,7 @@ from archivist.core.config import (
     CROSS_AGENT_MAX_SHARE,
     DYNAMIC_THRESHOLD_ENABLED,
     GRAPH_RETRIEVAL_ENABLED,
+    HYDE_READ_ENABLED,
     IMPORTANCE_WEIGHT,
     LLM_MODEL,
     LLM_REFINE_CONCURRENCY,
@@ -79,8 +81,6 @@ from archivist.retrieval.query_classifier import SUBCATEGORY_TO_TOPIC, classify_
 from archivist.retrieval.query_expansion import expand_query
 from archivist.retrieval.query_intent import classify_temporal_intent
 from archivist.retrieval.rank_fusion import rrf_merge
-from archivist.retrieval.ranker import ltr_available
-from archivist.retrieval.ranker import rank_results as ltr_rank_results
 from archivist.retrieval.retrieval_filters import (
     apply_dynamic_threshold,
     apply_prerank_filters,
@@ -141,7 +141,7 @@ def _literal_search_sync(
     seen_ids: set[str] = set()
 
     for token in tokens[:3]:
-        must_filters = [FieldCondition(key="text", match=MatchText(text=token))]
+        must_filters: list[Any] = [FieldCondition(key="text", match=MatchText(text=token))]
         if agent_ids:
             ids = [a for a in agent_ids if a]
             if ids:
@@ -155,7 +155,7 @@ def _literal_search_sync(
                 FieldCondition(key="memory_type", match=MatchValue(value=memory_type))
             )
 
-        literal_must_not = [
+        literal_must_not: list[Any] = [
             FieldCondition(key="archived", match=MatchValue(value=True)),
             FieldCondition(key="deleted", match=MatchValue(value=True)),
             FieldCondition(key="is_suppressed", match=MatchValue(value=True)),
@@ -243,7 +243,7 @@ def _retrieval_trace(
     through **extra so callers can add new trace keys without modifying
     this signature.
     """
-    trace = {
+    trace: dict[str, Any] = {
         "vector_search_limit": vector_limit,
         "coarse_hits": coarse_count,
         "bm25_enabled": BM25_ENABLED,
@@ -511,7 +511,7 @@ async def search_vectors(
             return []
     client = qdrant_client()
 
-    must_filters = []
+    must_filters: list[Any] = []
     if agent_ids:
         ids = [a for a in agent_ids if a]
         if ids:
@@ -544,7 +544,7 @@ async def search_vectors(
         must_filters.append(FieldCondition(key="sensitivity", match=MatchValue(value=sensitivity)))
 
     _date_range_active = bool(date_from or date_to) and date_from != date_to
-    must_not_filters = [
+    must_not_filters: list[Any] = [
         FieldCondition(key="archived", match=MatchValue(value=True)),
         FieldCondition(key="deleted", match=MatchValue(value=True)),
         # INIT-003/SPEC-005 — suppressed never enter the nomination pool
@@ -589,47 +589,49 @@ async def search_vectors(
     if not health.is_healthy("qdrant"):
         health.register("qdrant", healthy=True)
 
-    rows = [
-        {
-            "id": getattr(hit, "id", ""),
-            "score": hit.score,
-            "text": hit.payload.get("text", ""),
-            "l0": hit.payload.get("l0", ""),
-            "l1": hit.payload.get("l1", ""),
-            "agent_id": hit.payload.get("agent_id", ""),
-            "file_path": hit.payload.get("file_path", ""),
-            "file_type": hit.payload.get("file_type", ""),
-            "date": hit.payload.get("date", ""),
-            "content_date": hit.payload.get("content_date", ""),
-            "indexed_at": hit.payload.get("indexed_at", ""),
-            "team": hit.payload.get("team", ""),
-            "namespace": hit.payload.get("namespace", ""),
-            "chunk_index": hit.payload.get("chunk_index", 0),
-            "parent_id": hit.payload.get("parent_id"),
-            "is_parent": hit.payload.get("is_parent", False),
-            "parent_text": hit.payload.get("parent_text", ""),
-            "importance_score": hit.payload.get("importance_score", 0.5),
-            "retention_class": hit.payload.get("retention_class", "standard"),
-            "topic": hit.payload.get("topic", ""),
-            "thought_type": hit.payload.get("thought_type", ""),
-            "representation_type": hit.payload.get("representation_type", "chunk"),
-            "synthetic_question": hit.payload.get("synthetic_question", ""),
-            "source_memory_id": hit.payload.get("source_memory_id", ""),
-            # INIT-003/SPEC-005 coach provenance / lifecycle payload fields
-            "subject": hit.payload.get("subject", ""),
-            "purpose": hit.payload.get("purpose", ""),
-            "sensitivity": hit.payload.get("sensitivity", "standard"),
-            "source": hit.payload.get("source", ""),
-            "confidence": hit.payload.get("confidence"),
-            "statement_kind": hit.payload.get("statement_kind", ""),
-            "actor_type": hit.payload.get("actor_type", ""),
-            "is_suppressed": hit.payload.get("is_suppressed", False),
-            "is_superseded": hit.payload.get("is_superseded", False),
-            "supersedes_id": hit.payload.get("supersedes_id", ""),
-            "superseded_by": hit.payload.get("superseded_by"),
-        }
-        for hit in results
-    ]
+    rows = []
+    for hit in results:
+        p = hit.payload or {}
+        rows.append(
+            {
+                "id": getattr(hit, "id", ""),
+                "score": hit.score,
+                "text": p.get("text", ""),
+                "l0": p.get("l0", ""),
+                "l1": p.get("l1", ""),
+                "agent_id": p.get("agent_id", ""),
+                "file_path": p.get("file_path", ""),
+                "file_type": p.get("file_type", ""),
+                "date": p.get("date", ""),
+                "content_date": p.get("content_date", ""),
+                "indexed_at": p.get("indexed_at", ""),
+                "team": p.get("team", ""),
+                "namespace": p.get("namespace", ""),
+                "chunk_index": p.get("chunk_index", 0),
+                "parent_id": p.get("parent_id"),
+                "is_parent": p.get("is_parent", False),
+                "parent_text": p.get("parent_text", ""),
+                "importance_score": p.get("importance_score", 0.5),
+                "retention_class": p.get("retention_class", "standard"),
+                "topic": p.get("topic", ""),
+                "thought_type": p.get("thought_type", ""),
+                "representation_type": p.get("representation_type", "chunk"),
+                "synthetic_question": p.get("synthetic_question", ""),
+                "source_memory_id": p.get("source_memory_id", ""),
+                # INIT-003/SPEC-005 coach provenance / lifecycle payload fields
+                "subject": p.get("subject", ""),
+                "purpose": p.get("purpose", ""),
+                "sensitivity": p.get("sensitivity", "standard"),
+                "source": p.get("source", ""),
+                "confidence": p.get("confidence"),
+                "statement_kind": p.get("statement_kind", ""),
+                "actor_type": p.get("actor_type", ""),
+                "is_suppressed": p.get("is_suppressed", False),
+                "is_superseded": p.get("is_superseded", False),
+                "supersedes_id": p.get("supersedes_id", ""),
+                "superseded_by": p.get("superseded_by"),
+            }
+        )
 
     if _date_range_active:
         if date_from:
@@ -870,6 +872,7 @@ async def _run_reranker_pipeline(
     trace_static: dict,
     budget: LatencyBudget,
     prerank_fn=None,
+    as_of: str = "",
 ) -> BranchOutcome:
     """v2 CLEAN PATH: nominate -> ID-dedupe -> parent enrich -> rerank -> top-K.
 
@@ -914,7 +917,9 @@ async def _run_reranker_pipeline(
 
     # Graph entity facts: inject as additional candidates (not score modifiers)
     if GRAPH_RETRIEVAL_ENABLED and detected_entities:
-        entity_facts = await build_entity_fact_results(detected_entities, min_score=0.0)
+        entity_facts = await build_entity_fact_results(
+            detected_entities, min_score=0.0, as_of=as_of
+        )
         if prerank_fn is not None:
             entity_facts = prerank_fn(entity_facts)
         for ef in entity_facts:
@@ -1054,9 +1059,11 @@ async def _run_legacy_pipeline(
     pack_policy: str | None = None,
     include_hotness: bool = True,
     prerank_fn=None,
+    reference_time: str = "",
+    as_of: str = "",
 ) -> BranchOutcome:
     """LEGACY PATH (``RERANKER_ENABLED=False``): RRF/BM25 merge (already applied
-    by the caller) -> temporal decay -> LTR/hotness/importance scoring ->
+    by the caller) -> temporal decay -> hotness/importance scoring ->
     threshold -> adaptive widen -> BM25 rescue -> cross-agent guard -> entity
     fact injection -> outcome-aware scoring -> rerank -> iterative retry.
 
@@ -1070,25 +1077,22 @@ async def _run_legacy_pipeline(
     n_dedupe = len(coarse)
     n_synthetic_hits = sum(1 for r in coarse if r.get("synthetic_match"))
 
-    # Stage 1c: Temporal decay (v0.5, intent-aware v1.9)
+    # Stage 1c: Temporal decay (v0.5, intent-aware v1.9; bypassed when halflife <= 0)
     temporal_applied = False
     if TEMPORAL_DECAY_HALFLIFE_DAYS > 0:
         coarse = apply_temporal_decay(
             coarse,
             TEMPORAL_DECAY_HALFLIFE_DAYS,
             temporal_intent=temporal_intent,
+            reference_time=reference_time or as_of or None,
         )
         temporal_applied = True
 
-    # Stage 1d-1e: Scoring — LTR model (v1.10) or hand-tuned pipeline
+    # Stage 1d-1e: Hand-tuned hotness + importance scoring (dead XGBoost LTR deleted in INIT-023/SPEC-002)
     ltr_used = False
-    if ltr_available():
-        coarse = ltr_rank_results(coarse)
-        ltr_used = True
-    else:
-        if include_hotness:
-            coarse = await apply_hotness_to_results(coarse)
-        coarse = apply_importance_to_results(coarse)
+    if include_hotness:
+        coarse = await apply_hotness_to_results(coarse)
+    coarse = apply_importance_to_results(coarse)
 
     # Stage 2: Threshold filter (Phase 1, dynamic v1.10)
     if DYNAMIC_THRESHOLD_ENABLED:
@@ -1130,6 +1134,7 @@ async def _run_legacy_pipeline(
                     wider_coarse,
                     TEMPORAL_DECAY_HALFLIFE_DAYS,
                     temporal_intent=temporal_intent,
+                    reference_time=reference_time or as_of or None,
                 )
             if include_hotness:
                 wider_coarse = await apply_hotness_to_results(wider_coarse)
@@ -1179,7 +1184,7 @@ async def _run_legacy_pipeline(
         entity_facts = await build_entity_fact_results(
             detected_entities,
             min_score=effective_threshold + 0.05,
-            as_of=date_from,
+            as_of=as_of or reference_time or date_from,
         )
         if prerank_fn is not None:
             entity_facts = prerank_fn(entity_facts)
@@ -1275,6 +1280,8 @@ async def _run_legacy_pipeline(
         sensitivity=sensitivity,
         pack_policy=pack_policy,
         include_hotness=include_hotness,
+        reference_time=reference_time,
+        as_of=as_of,
     )
     retry_result = await _maybe_iterative_retry(
         query, reranked, is_retry=is_retry, budget=budget, retry_kwargs=retry_kwargs
@@ -1346,6 +1353,8 @@ async def recursive_retrieve(
     sensitivity: str = "",
     pack_policy: str | None = None,
     include_hotness: bool = True,
+    reference_time: str = "",
+    as_of: str = "",
 ) -> dict:
     """Full RLM pipeline: coarse → dedupe → graph augment → temporal decay → threshold → rerank → parent → refine → synthesize.
 
@@ -1410,7 +1419,8 @@ async def recursive_retrieve(
     cache_extra = (
         f"{agent_id}|{','.join(agent_ids or [])}|{team}|{date_from}|{date_to}|"
         f"{limit}|{refine}|{actor_type}|{max_tokens}|{threshold}|"
-        f"{effective_pack_policy}|{include_hotness}|{subject}|{purpose}|{sensitivity}"
+        f"{effective_pack_policy}|{include_hotness}|{subject}|{purpose}|{sensitivity}|"
+        f"{reference_time}|{as_of}"
     )
     cached = hot_cache.get(
         agent_id or "fleet",
@@ -1545,10 +1555,11 @@ async def recursive_retrieve(
         except Exception as e:
             logger.warning("Query expansion failed: %s — using original query", e)
 
-    # ── HyDE: hypothetical document embedding for needle queries (v1.10) ──
-    # Budget-gated: HyDE requires ~100ms LLM call
+    # ── HyDE: hypothetical document embedding for needle queries (opt-in only in v3) ──
+    # Strictly gated behind HYDE_READ_ENABLED (default False) so default read path
+    # executes zero LLM calls (INIT-023/SPEC-002).
     hyde_doc: str | None = None
-    if not _is_retry and is_needle_query(query) and _budget.can_afford(100):
+    if HYDE_READ_ENABLED and not _is_retry and is_needle_query(query) and _budget.can_afford(100):
         try:
             hyde_doc = await generate_hypothetical_document(query)
             if hyde_doc:
@@ -1560,7 +1571,7 @@ async def recursive_retrieve(
     # Embed all query variants in parallel (cache deduplicates repeat embeds)
     query_vecs: list[list[float] | None] = []
     try:
-        query_vecs = await embed_batch(query_variants)
+        query_vecs = list(await embed_batch(query_variants))
     except Exception as e:
         logger.warning("Embedding failed: %s — skipping vector search", e)
         query_vecs = [None] * len(query_variants)
@@ -1569,7 +1580,7 @@ async def recursive_retrieve(
 
     # Stage 1: Parallel retrieval — vector + BM25 run concurrently (v1.10 12c)
     _t_vec = time.monotonic()
-    _vec_common = dict(
+    _vec_common: dict[str, Any] = dict(
         agent_id=agent_id,
         agent_ids=agent_ids,
         team=team,
@@ -1693,9 +1704,10 @@ async def recursive_retrieve(
                 coarse = merge_graph_context_into_results(coarse, graph_items)
     _stage_timings["graph_ms"] = round((time.monotonic() - _t_graph) * 1000, 1)
 
-    # Late HyDE pass — legacy path only; v2 path relies on the nomination pool
+    # Late HyDE pass — strictly opt-in behind HYDE_READ_ENABLED (default False in v3)
     if (
-        not RERANKER_ENABLED
+        HYDE_READ_ENABLED
+        and not RERANKER_ENABLED
         and not _is_retry
         and not _hyde_used
         and is_needle_query(query, entity_count=n_graph_entities)
@@ -1819,6 +1831,7 @@ async def recursive_retrieve(
             trace_static=trace_static,
             budget=_budget,
             prerank_fn=_prerank,
+            as_of=as_of or reference_time or date_from,
         )
     else:
         outcome = await _run_legacy_pipeline(
@@ -1859,6 +1872,8 @@ async def recursive_retrieve(
             pack_policy=pack_policy,
             include_hotness=include_hotness,
             prerank_fn=_prerank,
+            reference_time=reference_time,
+            as_of=as_of,
         )
 
     if outcome.early_response is not None:
@@ -1890,6 +1905,7 @@ async def recursive_retrieve(
             tier_policy=effective_pack_policy,
             l0_budget_share=CONTEXT_L0_BUDGET_SHARE,
             min_full_results=CONTEXT_MIN_FULL_RESULTS,
+            query=query,
         )
         enriched = _packed_ctx.sources
 
@@ -2021,7 +2037,7 @@ async def recursive_retrieve(
         for r in enriched:
             if "tier_text" not in r:
                 r["tier_text"] = select_tier(r, tier)
-        no_refine = {
+        no_refine: dict[str, Any] = {
             "answer": "",
             "over_budget": _over_budget,
             "sources": enriched[: min(10, limit)],
@@ -2131,7 +2147,7 @@ async def recursive_retrieve(
         _common_trace["synth_wall_ms"] = int((time.monotonic() - t_synth0) * 1000)
         _common_trace["synth_model"] = synth_model
 
-    final_result = {
+    final_result: dict[str, Any] = {
         "answer": answer,
         "over_budget": _over_budget,
         "sources": [

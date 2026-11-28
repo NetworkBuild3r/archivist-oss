@@ -27,7 +27,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import Field, field_validator, model_validator
@@ -105,14 +105,15 @@ class ArchivistSettings(BaseSettings):
     chunking_strategy: str = "semantic"
 
     # ── Retrieval ─────────────────────────────────────────────────────────────
-    retrieval_threshold: float = Field(default=0.65, ge=0.0, le=1.0)
+    retrieval_threshold: float = Field(default=0.25, ge=0.0, le=1.0)
+    # Canonical reranker group (merges legacy RERANK_* and RERANKER_* — INIT-023/SPEC-002)
     rerank_enabled: bool = False
-    rerank_model: str = "BAAI/bge-reranker-v2-m3"
-    rerank_top_k: int = Field(default=10, ge=1)
+    rerank_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    rerank_top_k: int = Field(default=20, ge=1)
     vector_search_limit: int = Field(default=64, ge=1)
 
-    # ── Tiered context (v0.5) ─────────────────────────────────────────────────
-    tiered_context_enabled: bool = True
+    # ── Tiered context (v0.5; sync LLM tiering off by default in v3) ──────────
+    tiered_context_enabled: bool = False
     l0_max_tokens: int = Field(default=100, ge=1)
     l1_max_tokens: int = Field(default=500, ge=1)
 
@@ -120,7 +121,8 @@ class ArchivistSettings(BaseSettings):
     graph_retrieval_enabled: bool = True
     graph_retrieval_weight: float = 0.3
     multi_hop_depth: int = Field(default=2, ge=1)
-    temporal_decay_halflife_days: int = Field(default=30, ge=1)
+    # 0 = disabled by default (v3 — avoids penalizing durable historical facts)
+    temporal_decay_halflife_days: int = Field(default=0, ge=0)
 
     # ── Trajectory & feedback (v0.6) ─────────────────────────────────────────
     outcome_retrieval_boost: float = 0.15
@@ -221,8 +223,8 @@ class ArchivistSettings(BaseSettings):
     # ── Memory awareness — Stage 0 query classification (v1.6) ───────────────
     query_classification_enabled: bool = True
 
-    # ── BM25 / FTS5 hybrid search (v1.2) ─────────────────────────────────────
-    bm25_enabled: bool = False
+    # ── BM25 / FTS5 hybrid search (v1.2; enabled by default in v3) ───────────
+    bm25_enabled: bool = True
     bm25_weight: float = 0.3
     vector_weight: float = 0.7
 
@@ -231,15 +233,17 @@ class ArchivistSettings(BaseSettings):
     query_expansion_count: int = Field(default=3, ge=1)
     query_expansion_model: str = ""
     dynamic_threshold_enabled: bool = True
+    # Read-time HyDE is strictly opt-in (default False — zero LLM calls on read).
+    hyde_read_enabled: bool = False
 
-    # ── Contextual chunk augmentation (v1.10) ────────────────────────────────
+    # ── Contextual chunk augmentation (v1.10; deterministic zero-LLM prefix) ─
     contextual_augmentation_enabled: bool = True
 
-    # ── Reverse HyDE: write-time question generation (v2.0) ──────────────────
-    reverse_hyde_enabled: bool = True
+    # ── Reverse HyDE: write-time question generation (deprecated in v3; off) ─
+    reverse_hyde_enabled: bool = False
     reverse_hyde_questions_per_chunk: int = Field(default=3, ge=1)
 
-    # ── Synthetic question generation: index-time multi-representation (v2.1) ─
+    # ── Synthetic question generation: index-time multi-representation (off) ──
     synthetic_questions_enabled: bool = False
     synthetic_questions_count: int = Field(default=4, ge=1)
 
@@ -252,10 +256,7 @@ class ArchivistSettings(BaseSettings):
     default_confidence_extracted: float = Field(default=0.5, ge=0.0, le=1.0)
     min_fact_confidence: float = Field(default=0.3, ge=0.0, le=1.0)
 
-    # ── Cross-encoder reranker (v2.2) ─────────────────────────────────────────
-    reranker_enabled: bool = False
-    reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
-    reranker_top_k: int = Field(default=20, ge=1)
+    # Legacy RERANKER_* fields merged into canonical rerank_* above (INIT-023/SPEC-002).
 
     # ── Micro-chunk limits (v1.10) ────────────────────────────────────────────
     max_micro_chunks_per_memory: int = Field(default=5, ge=1)
@@ -339,9 +340,13 @@ class ArchivistSettings(BaseSettings):
     journal_dir: str = "/data/archivist/journal"
 
     # ── Server ────────────────────────────────────────────────────────────────
+    archivist_profile: Literal["local", "production"] = "local"
+    archivist_host: str = "127.0.0.1"
     mcp_port: int = Field(default=3100, ge=1, le=65535)
     mcp_sse_enabled: bool = True
     archivist_api_key: str = ""
+    # Optional dedicated admin key for /admin/* and /debug/config scope split (INIT-023/SPEC-003).
+    archivist_admin_api_key: str = ""
     # MCP tool surface profile (INIT-003/SPEC-003). Default ``core`` exposes the
     # coach-path tools only; ``ops`` adds operator tools (still hides share /
     # checkpoint wedges); ``full`` restores the entire registry.
@@ -408,12 +413,29 @@ class ArchivistSettings(BaseSettings):
         "topic_map_path",
         "team_map_path",
         "archivist_api_key",
+        "archivist_admin_api_key",
         mode="before",
     )
     @classmethod
     def _strip_str(cls, v: Any) -> str:
         """Strip whitespace from optional string fields."""
         return str(v).strip() if v else ""
+
+    @field_validator("archivist_profile", mode="before")
+    @classmethod
+    def _normalize_archivist_profile(cls, v: Any) -> str:
+        """Normalize ARCHIVIST_PROFILE to local|production."""
+        val = str(v).strip().lower() if v else "local"
+        if val not in ("local", "production"):
+            raise ValueError(f"ARCHIVIST_PROFILE must be one of: local, production; got {val!r}")
+        return val
+
+    @field_validator("archivist_host", mode="before")
+    @classmethod
+    def _normalize_archivist_host(cls, v: Any) -> str:
+        """Strip whitespace and default empty ARCHIVIST_HOST to loopback 127.0.0.1."""
+        val = str(v).strip() if v else ""
+        return val or "127.0.0.1"
 
     @field_validator("webhook_events", mode="before")
     @classmethod
@@ -460,6 +482,28 @@ class ArchivistSettings(BaseSettings):
 
     # ── Cross-field validators ────────────────────────────────────────────────
 
+    @model_validator(mode="before")
+    @classmethod
+    def _merge_legacy_reranker_knobs(cls, data: Any) -> Any:
+        """Merge deprecated RERANKER_* env vars / kwargs into canonical rerank_*."""
+        if not isinstance(data, dict):
+            return data
+        out = dict(data)
+        out_lower_map = {k.lower(): k for k in out}
+        env_lower = {k.lower(): v for k, v in os.environ.items()}
+        for legacy, canonical in (
+            ("reranker_enabled", "rerank_enabled"),
+            ("reranker_model", "rerank_model"),
+            ("reranker_top_k", "rerank_top_k"),
+        ):
+            if canonical in out_lower_map or canonical in env_lower:
+                continue
+            if legacy in out_lower_map:
+                out[canonical] = out[out_lower_map[legacy]]
+            elif legacy in env_lower:
+                out[canonical] = env_lower[legacy]
+        return out
+
     @model_validator(mode="after")
     def _validate_cross_field(self) -> ArchivistSettings:
         """Enforce cross-field constraints that require multiple field values."""
@@ -485,6 +529,21 @@ class ArchivistSettings(BaseSettings):
         return self
 
     # ── Computed properties ───────────────────────────────────────────────────
+
+    @property
+    def reranker_enabled(self) -> bool:
+        """Deprecated read-compat alias for ``rerank_enabled`` (INIT-023/SPEC-002)."""
+        return self.rerank_enabled
+
+    @property
+    def reranker_model(self) -> str:
+        """Deprecated read-compat alias for ``rerank_model`` (INIT-023/SPEC-002)."""
+        return self.rerank_model
+
+    @property
+    def reranker_top_k(self) -> int:
+        """Deprecated read-compat alias for ``rerank_top_k`` (INIT-023/SPEC-002)."""
+        return self.rerank_top_k
 
     @property
     def default_confidence_by_actor_type(self) -> dict[str, float]:
@@ -521,6 +580,7 @@ class ArchivistSettings(BaseSettings):
             "DYNAMIC_THRESHOLD_ENABLED": self.dynamic_threshold_enabled,
             "CONTEXTUAL_AUGMENTATION_ENABLED": self.contextual_augmentation_enabled,
             "REVERSE_HYDE_ENABLED": self.reverse_hyde_enabled,
+            "HYDE_READ_ENABLED": self.hyde_read_enabled,
             "GRAPH_RETRIEVAL_ENABLED": self.graph_retrieval_enabled,
             "TIERED_CONTEXT_ENABLED": self.tiered_context_enabled,
             "HOT_CACHE_ENABLED": self.hot_cache_enabled,
@@ -657,6 +717,27 @@ _settings._log_startup()
 # ---------------------------------------------------------------------------
 # Static constants (not env-configurable)
 # ---------------------------------------------------------------------------
+
+# Canonical ≤15 user-facing v3 settings (INIT-023/SPEC-002).
+# Legacy v2 tuning knobs remain readable for backward compatibility during
+# Stage 1A and are scheduled for deletion once INIT-026 completes.
+CANONICAL_V3_SETTINGS: tuple[str, ...] = (
+    "archivist_profile",
+    "archivist_host",
+    "mcp_port",
+    "archivist_api_key",
+    "archivist_admin_api_key",
+    "memory_root",
+    "sqlite_path",
+    "graph_backend",
+    "database_url",
+    "embed_model",
+    "embed_url",
+    "embed_api_key",
+    "llm_model",
+    "llm_url",
+    "llm_api_key",
+)
 
 VALID_RETENTION_CLASSES = ("ephemeral", "standard", "durable", "permanent")
 DURABLE_ENTITY_TYPES = frozenset(
@@ -818,6 +899,7 @@ QUERY_EXPANSION_ENABLED = _settings.query_expansion_enabled
 QUERY_EXPANSION_COUNT = _settings.query_expansion_count
 QUERY_EXPANSION_MODEL = _settings.query_expansion_model
 DYNAMIC_THRESHOLD_ENABLED = _settings.dynamic_threshold_enabled
+HYDE_READ_ENABLED = _settings.hyde_read_enabled
 
 CONTEXTUAL_AUGMENTATION_ENABLED = _settings.contextual_augmentation_enabled
 
@@ -884,9 +966,12 @@ SESSION_STORE_TTL_SECONDS = _settings.session_store_ttl_seconds
 JOURNAL_ENABLED = _settings.journal_enabled
 JOURNAL_DIR = _settings.journal_dir
 
+ARCHIVIST_PROFILE = _settings.archivist_profile
+ARCHIVIST_HOST = _settings.archivist_host
 MCP_PORT = _settings.mcp_port
 MCP_SSE_ENABLED = _settings.mcp_sse_enabled
 ARCHIVIST_API_KEY = _settings.archivist_api_key
+ARCHIVIST_ADMIN_API_KEY = _settings.archivist_admin_api_key
 TOOL_PROFILE = _settings.archivist_tool_profile
 
 CONFLICT_CHECK_ON_STORE = _settings.conflict_check_on_store

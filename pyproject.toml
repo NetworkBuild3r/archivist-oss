@@ -116,10 +116,6 @@ explicit_package_bases = true
 
 # Suppress errors for third-party packages with no stubs
 [[tool.mypy.overrides]]
-module = ["xgboost", "xgboost.*"]
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
 module = ["yaml"]
 ignore_missing_imports = true
 

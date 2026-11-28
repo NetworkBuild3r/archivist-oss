@@ -26,7 +26,9 @@ from archivist import __version__
 from archivist.app.admin_observability import handle_audit, handle_lineage
 from archivist.app.mcp_server import server
 from archivist.core.config import (
+    ARCHIVIST_ADMIN_API_KEY,
     ARCHIVIST_API_KEY,
+    ARCHIVIST_HOST,
     ARCHIVIST_INVALIDATION_EXPORT_PATH,
     CURATOR_QUEUE_DRAIN_INTERVAL,
     MCP_PORT,
@@ -296,22 +298,30 @@ def _log_task_exception(task: asyncio.Task):
 def _warn_if_no_access_control() -> None:
     """Log a loud, operator-visible warning if the server has zero access control.
 
-    Fires only when BOTH ``ARCHIVIST_API_KEY`` and ``NAMESPACES_CONFIG_PATH`` are
-    unset — i.e. the server is about to serve every MCP tool call and every
-    ``/admin/*`` route to any caller that can reach it. Permissive-by-default is a
-    supported, documented single-operator/local-dev configuration; this only makes
-    that choice visible, it never blocks startup and never logs a credential value
-    (INIT-014/SPEC-001).
+    Fires when BOTH ``ARCHIVIST_API_KEY`` and ``NAMESPACES_CONFIG_PATH`` are
+    unset — i.e. every MCP tool call is open to any caller that can reach this
+    port. If ``ARCHIVIST_ADMIN_API_KEY`` is set alone, still warns loudly that
+    ``/mcp`` has no access control (INIT-014/SPEC-001, INIT-023/SPEC-003).
     """
     if not ARCHIVIST_API_KEY and not NAMESPACES_CONFIG_PATH:
-        logger.critical(
-            "SECURITY: starting with NO ACCESS CONTROL — both ARCHIVIST_API_KEY and "
-            "NAMESPACES_CONFIG_PATH are unset. Every MCP tool call and every "
-            "/admin/* route is open to any caller that can reach this port. This is "
-            "expected for local/single-operator use; set ARCHIVIST_API_KEY and/or "
-            "NAMESPACES_CONFIG_PATH before exposing this server to any shared or "
-            "untrusted network."
-        )
+        if not ARCHIVIST_ADMIN_API_KEY:
+            logger.critical(
+                "SECURITY: starting with NO ACCESS CONTROL — both ARCHIVIST_API_KEY and "
+                "NAMESPACES_CONFIG_PATH are unset. Every MCP tool call and every "
+                "/admin/* route is open to any caller that can reach this port. This is "
+                "expected for local/single-operator use; set ARCHIVIST_API_KEY and/or "
+                "NAMESPACES_CONFIG_PATH before exposing this server to any shared or "
+                "untrusted network."
+            )
+        else:
+            logger.critical(
+                "SECURITY: starting with NO MCP ACCESS CONTROL — ARCHIVIST_ADMIN_API_KEY "
+                "protects /admin/* and /debug/config, but both ARCHIVIST_API_KEY and "
+                "NAMESPACES_CONFIG_PATH are unset so every /mcp tool call is open to any "
+                "caller that can reach this port. Set ARCHIVIST_API_KEY and/or "
+                "NAMESPACES_CONFIG_PATH before exposing this server to any shared or "
+                "untrusted network."
+            )
 
 
 async def _startup():
@@ -507,18 +517,57 @@ class ArchivistAuthMiddleware(BaseHTTPMiddleware):
     # can log a helpful diagnostic — it is never accepted as a credential.
     _OPENCLAW_PLACEHOLDER = "Bearer ${ARCHIVIST_API_KEY}"
 
+    @staticmethod
+    def _is_admin_path(path: str) -> bool:
+        norm = path.rstrip("/") or "/"
+        return norm == "/debug/config" or norm == "/admin" or norm.startswith("/admin/")
+
+    @staticmethod
+    def _matches_key(auth: str, xkey: str, expected: str) -> bool:
+        if not expected:
+            return False
+        # Encode to UTF-8 bytes before hmac.compare_digest so non-ASCII latin-1
+        # HTTP header bytes cleanly evaluate to False (401) instead of TypeError (500).
+        expected_bearer = f"Bearer {expected}".encode()
+        expected_bytes = expected.encode()
+        return hmac.compare_digest(auth.encode(), expected_bearer) or hmac.compare_digest(
+            xkey.encode(), expected_bytes
+        )
+
     async def dispatch(self, request, call_next):
-        if request.url.path == "/health":
+        path = request.url.path
+        if path == "/health":
             return await call_next(request)
-        if METRICS_AUTH_EXEMPT and request.url.path == "/metrics":
+        if METRICS_AUTH_EXEMPT and path == "/metrics":
             return await call_next(request)
-        if not ARCHIVIST_API_KEY:
-            return await call_next(request)
+
         auth = request.headers.get("authorization", "")
         xkey = request.headers.get("x-api-key", "")
-        ok = hmac.compare_digest(auth, f"Bearer {ARCHIVIST_API_KEY}") or hmac.compare_digest(
-            xkey, ARCHIVIST_API_KEY
-        )
+
+        # Scope split for /admin/* and /debug/config (INIT-023/SPEC-003):
+        # When ARCHIVIST_ADMIN_API_KEY is configured, admin endpoints strictly
+        # require that key and reject standard MCP client keys with 403.
+        if self._is_admin_path(path) and ARCHIVIST_ADMIN_API_KEY:
+            if self._matches_key(auth, xkey, ARCHIVIST_ADMIN_API_KEY):
+                return await call_next(request)
+            if ARCHIVIST_API_KEY and self._matches_key(auth, xkey, ARCHIVIST_API_KEY):
+                return JSONResponse(
+                    {"error": "forbidden", "detail": "admin scope required"},
+                    status_code=403,
+                )
+            if auth == self._OPENCLAW_PLACEHOLDER:
+                logger.warning(
+                    "auth.uninterpolated_placeholder: client sent literal "
+                    "'Bearer ${ARCHIVIST_API_KEY}' instead of the resolved key — "
+                    "request rejected; fix client env-var interpolation or switch to "
+                    "X-API-Key header",
+                    extra={"client": str(getattr(request.client, "host", "unknown"))},
+                )
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+        if not ARCHIVIST_API_KEY:
+            return await call_next(request)
+        ok = self._matches_key(auth, xkey, ARCHIVIST_API_KEY)
         if not ok and auth == self._OPENCLAW_PLACEHOLDER:
             logger.warning(
                 "auth.uninterpolated_placeholder: client sent literal "
@@ -799,4 +848,4 @@ app = Starlette(
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=MCP_PORT)
+    uvicorn.run(app, host=ARCHIVIST_HOST, port=MCP_PORT)

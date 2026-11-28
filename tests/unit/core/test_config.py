@@ -75,15 +75,90 @@ class TestConfigDefaults:
         assert s.outbox_retention_days == 7
         assert ArchivistSettings.model_fields["outbox_enabled"].default is True
 
-    def test_bm25_disabled_by_default(self):
+    def test_bm25_enabled_by_default(self):
+        # INIT-023/SPEC-002 flipped BM25_ENABLED default to True.
+        assert ArchivistSettings.model_fields["bm25_enabled"].default is True
+        s = ArchivistSettings.model_construct()
+        assert s.bm25_enabled is True
+
+    def test_v3_flipped_defaults(self):
+        """INIT-023/SPEC-002 canonical v3 defaults on ArchivistSettings."""
+        fields = ArchivistSettings.model_fields
+        assert fields["bm25_enabled"].default is True
+        assert fields["reverse_hyde_enabled"].default is False
+        assert fields["tiered_context_enabled"].default is False
+        assert fields["conflict_check_on_store"].default is False
+        assert fields["temporal_decay_halflife_days"].default == 0
+        assert fields["retrieval_threshold"].default == 0.25
+        assert fields["contextual_augmentation_enabled"].default is True
+        assert fields["hyde_read_enabled"].default is False
+        assert fields["archivist_host"].default == "127.0.0.1"
+        assert fields["archivist_profile"].default == "local"
+        assert fields["archivist_admin_api_key"].default == ""
+
+    def test_canonical_v3_settings_surface(self):
         import archivist.core.config as cfg
 
-        assert cfg.BM25_ENABLED is False
+        assert len(cfg.CANONICAL_V3_SETTINGS) == 15
+        assert "archivist_profile" in cfg.CANONICAL_V3_SETTINGS
+        assert "archivist_host" in cfg.CANONICAL_V3_SETTINGS
+        assert "archivist_admin_api_key" in cfg.CANONICAL_V3_SETTINGS
+        assert "embed_model" in cfg.CANONICAL_V3_SETTINGS
+
+    def test_rerank_legacy_alias_merging(self, monkeypatch, tmp_path):
+        """RERANKER_* legacy env vars map cleanly into canonical RERANK_* fields."""
+        monkeypatch.delenv("RERANK_ENABLED", raising=False)
+        monkeypatch.delenv("RERANK_MODEL", raising=False)
+        monkeypatch.delenv("RERANK_TOP_K", raising=False)
+        s = _fresh(
+            monkeypatch,
+            {
+                "SQLITE_PATH": str(tmp_path / "graph.db"),
+                "RERANKER_ENABLED": "true",
+                "RERANKER_MODEL": "BAAI/bge-reranker-base",
+                "RERANKER_TOP_K": "12",
+            },
+        )
+        assert s.rerank_enabled is True
+        assert s.reranker_enabled is True
+        assert s.rerank_model == "BAAI/bge-reranker-base"
+        assert s.reranker_model == "BAAI/bge-reranker-base"
+        assert s.rerank_top_k == 12
+        assert s.reranker_top_k == 12
+
+    def test_rerank_canonical_takes_precedence_over_legacy(self, monkeypatch, tmp_path):
+        s = _fresh(
+            monkeypatch,
+            {
+                "SQLITE_PATH": str(tmp_path / "graph.db"),
+                "RERANK_ENABLED": "false",
+                "RERANKER_ENABLED": "true",
+                "RERANK_TOP_K": "8",
+                "RERANKER_TOP_K": "20",
+            },
+        )
+        assert s.rerank_enabled is False
+        assert s.rerank_top_k == 8
+
+    def test_rerank_uppercase_kwargs_legacy_merging(self, monkeypatch, tmp_path):
+        """AUDIT-MIN-6: _merge_legacy_reranker_knobs handles uppercase kwargs case-insensitively."""
+        monkeypatch.delenv("RERANK_ENABLED", raising=False)
+        monkeypatch.delenv("RERANK_TOP_K", raising=False)
+        monkeypatch.delenv("RERANKER_ENABLED", raising=False)
+        monkeypatch.delenv("RERANKER_TOP_K", raising=False)
+        s = ArchivistSettings(
+            SQLITE_PATH=str(tmp_path / "graph.db"),
+            RERANKER_ENABLED=True,  # type: ignore[call-arg]
+            RERANKER_TOP_K=15,  # type: ignore[call-arg]
+        )
+        assert s.rerank_enabled is True
+        assert s.rerank_top_k == 15
 
     def test_reranker_disabled_by_default(self):
         import archivist.core.config as cfg
 
         assert cfg.RERANKER_ENABLED is False
+        assert cfg.RERANK_ENABLED is False
 
     def test_webhook_events_empty_set(self):
         import archivist.core.config as cfg

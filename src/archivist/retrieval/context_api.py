@@ -237,6 +237,9 @@ async def get_relevant_context(
     purpose: str = "",
     sensitivity: str = "",
     mode: str = "normal",
+    reference_time: str = "",
+    as_of: str = "",
+    limit: int | None = None,
 ) -> RelevantContext:
     """Assemble minimal, token-budgeted context for *agent_id* and *task_description*.
 
@@ -288,7 +291,7 @@ async def get_relevant_context(
         )
 
     # --- Step 1: run the full retrieval pipeline ---
-    retrieval_result = await recursive_retrieve(
+    retrieve_kwargs: dict = dict(
         query=task_description,
         agent_id=agent_id,
         namespace=namespace,
@@ -301,6 +304,14 @@ async def get_relevant_context(
         purpose=purpose or "",
         sensitivity=sensitivity or "",
     )
+    if reference_time:
+        retrieve_kwargs["reference_time"] = reference_time
+    if as_of:
+        retrieve_kwargs["as_of"] = as_of
+    if limit is not None:
+        retrieve_kwargs["limit"] = limit
+
+    retrieval_result = await recursive_retrieve(**retrieve_kwargs)
 
     raw_sources = retrieval_result.get("sources", [])
     answer = retrieval_result.get("answer", "")
@@ -336,6 +347,7 @@ async def get_relevant_context(
             tier_policy=tier_policy,
             l0_budget_share=CONTEXT_L0_BUDGET_SHARE,
             min_full_results=CONTEXT_MIN_FULL_RESULTS,
+            query=task_description,
         )
         packed_sources = packed.sources
         total_tokens = packed.total_tokens

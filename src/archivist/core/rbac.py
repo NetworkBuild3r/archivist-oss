@@ -202,10 +202,12 @@ def check_access(agent_id: str, action: str, namespace: str) -> AccessPolicy:
 
     ns = cfg.namespaces.get(namespace)
     if ns is None:
-        all_ns = list(cfg.namespaces.keys())
-        similar = _similar_namespaces(namespace, all_ns)
         accessible = list_accessible_namespaces(agent_id)
         accessible_names = [entry["namespace"] for entry in accessible]
+        # Compute fuzzy suggestions strictly over the caller's own accessible
+        # namespaces so unknown-namespace errors never leak foreign tenant names
+        # (INIT-023/SPEC-003).
+        similar = _similar_namespaces(namespace, accessible_names)
 
         _MAX_HINT_NS = 6
         if len(accessible_names) > _MAX_HINT_NS:
@@ -283,11 +285,17 @@ def is_permissive_mode() -> bool:
 
 def can_read_agent_memory(caller_agent_id: str, target_agent_id: str) -> bool:
     """True if caller may read memories/facts attributed to target_agent_id."""
-    get_config()
+    cfg = get_config()
     if _permissive_fallback:
         return True
-    if not target_agent_id:
-        return True
+    if not (target_agent_id or "").strip():
+        # Fail closed on empty/unattributed target_agent_id under active RBAC
+        # unless the caller explicitly holds wildcard ("*") admin read.
+        wildcard_ns = cfg.namespaces.get("*")
+        return bool(
+            wildcard_ns is not None
+            and ("all" in wildcard_ns.read or caller_agent_id in wildcard_ns.read)
+        )
     ns = get_namespace_for_agent(target_agent_id)
     return check_access(caller_agent_id, "read", ns).allowed
 
