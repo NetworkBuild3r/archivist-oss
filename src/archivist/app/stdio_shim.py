@@ -14,29 +14,39 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import BinaryIO
 
-
-def default_socket_path() -> Path:
-    """Return default Unix domain socket path without importing heavy modules."""
-    override = os.environ.get("ARCHIVIST_SOCKET_PATH", "").strip()
-    if override:
-        return Path(override)
-    xdg_runtime = os.environ.get("XDG_RUNTIME_DIR", "").strip()
-    if xdg_runtime:
-        base = Path(xdg_runtime)
-        if base.exists() and os.access(base, os.W_OK):
-            return base / "archivist" / "archivistd.sock"
-    xdg_data = os.environ.get("XDG_DATA_HOME", "").strip()
-    data_base = Path(xdg_data) if xdg_data else (Path.home() / ".local" / "share")
-    return data_base / "archivist" / "archivistd.sock"
+from archivist.app.socket_security import (
+    MAX_FRAME_BYTES,
+    default_socket_path,
+    open_private_log_fd,
+    validate_socket_parent,
+    verify_peer_uid,
+)
 
 
 def _connect_unix(sock_path: Path, timeout_s: float = 1.0) -> socket.socket:
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    sock.settimeout(timeout_s)
-    sock.connect(str(sock_path))
-    sock.settimeout(None)
-    return sock
+    try:
+        sock.settimeout(timeout_s)
+        sock.connect(str(sock_path))
+        # Verify the remote daemon's kernel peer UID matches our own UID (prevents local MITM).
+        verify_peer_uid(sock)
+        sock.settimeout(None)
+        return sock
+    except Exception:
+        sock.close()
+        raise
+
+
+def _read_bounded_line(stream: BinaryIO, max_bytes: int = MAX_FRAME_BYTES) -> bytes:
+    """Read one newline-delimited frame capped at *max_bytes* (prevents OOM)."""
+    line = stream.readline(max_bytes + 1)
+    if len(line) > max_bytes and not line.endswith(b"\n"):
+        raise ValueError(f"Incoming stdio JSON-RPC frame exceeds {max_bytes} bytes")
+    if len(line) > max_bytes:
+        raise ValueError(f"Incoming stdio JSON-RPC frame exceeds {max_bytes} bytes")
+    return line
 
 
 def ensure_daemon_connected(
@@ -57,7 +67,7 @@ def ensure_daemon_connected(
         pass
 
     # Auto-spawn archivistd detached with stdin/stdout decoupled so shim stdout stays 100% pure.
-    sock_path.parent.mkdir(parents=True, exist_ok=True)
+    validate_socket_parent(sock_path.parent)
     log_path = sock_path.parent / "archivistd.log"
     cmd = [
         sys.executable,
@@ -73,22 +83,27 @@ def ensure_daemon_connected(
     if offline_embed:
         cmd.append("--offline-embed")
 
-    with log_path.open("ab") as log_file:
+    log_fd = open_private_log_fd(log_path)
+    try:
         subprocess.Popen(
             cmd,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
-            stderr=log_file,
+            stderr=log_fd,
             start_new_session=True,
             close_fds=True,
         )
+    finally:
+        os.close(log_fd)
 
     deadline = time.monotonic() + startup_timeout_s
     delay = 0.01
-    last_err: OSError | None = None
+    last_err: Exception | None = None
     while time.monotonic() < deadline:
         try:
             return _connect_unix(sock_path, timeout_s=0.5)
+        except PermissionError:
+            raise
         except OSError as exc:
             last_err = exc
             time.sleep(delay)
@@ -116,14 +131,19 @@ def run_stdio_bridge(
     stdin_buf = sys.stdin.buffer
     stdout_buf = sys.stdout.buffer
     done = threading.Event()
+    frame_error: list[BaseException] = []
 
     def _stdin_to_sock() -> None:
         try:
             while not done.is_set():
-                line = stdin_buf.readline()
+                line = _read_bounded_line(stdin_buf, MAX_FRAME_BYTES)
                 if not line:
                     break
                 sock.sendall(line)
+        except ValueError as exc:
+            frame_error.append(exc)
+            sys.stderr.write(f"[archivist.stdio] {exc}\n")
+            sys.stderr.flush()
         except OSError:
             pass
         finally:
@@ -157,7 +177,7 @@ def run_stdio_bridge(
         sock.close()
     except OSError:
         pass
-    return 0
+    return 1 if frame_error else 0
 
 
 def main(argv: list[str] | None = None) -> int:

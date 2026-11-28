@@ -8,6 +8,8 @@ so developers can inspect, audit, and version-control memories as cleanly as
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -77,16 +79,31 @@ def export_shared_jsonl(
     for item in sorted(memories, key=lambda m: str(m.get("id", ""))):
         if str(item.get("trust_tier", "")) == TrustTier.T3_QUARANTINED.value:
             continue
-        # Defensive re-scan before writing to a potentially git-tracked file.
+        # Defensive re-scan of content, kind, and tags before writing to a git-tracked file.
         res = fw.scan(str(item.get("text", "")))
         if res.quarantined:
+            continue
+        kind_res = fw.scan(str(item.get("kind", "fact")))
+        if kind_res.quarantined:
+            continue
+        safe_tags: list[str] = []
+        tag_quarantined = False
+        for raw_tag in item.get("tags") or []:
+            tag_res = fw.scan(str(raw_tag))
+            if tag_res.quarantined:
+                tag_quarantined = True
+                break
+            cleaned = tag_res.text.strip()
+            if cleaned:
+                safe_tags.append(cleaned)
+        if tag_quarantined:
             continue
         export_rows.append(
             {
                 "id": item["id"],
                 "scope": item["scope"],
-                "kind": item["kind"],
-                "tags": item.get("tags", []),
+                "kind": kind_res.text.strip() or "fact",
+                "tags": safe_tags,
                 "trust_tier": item["trust_tier"],
                 "created_at": item["created_at"],
                 "content": res.text,
@@ -94,11 +111,26 @@ def export_shared_jsonl(
         )
 
     export_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = export_path.with_suffix(export_path.suffix + ".tmp")
-    with tmp_path.open("w", encoding="utf-8") as fh:
-        for row in export_rows:
-            fh.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
-    tmp_path.replace(export_path)
+    tmp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=str(export_path.parent),
+            prefix=f".{export_path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as fh:
+            tmp_path = Path(fh.name)
+            for row in export_rows:
+                fh.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_path, export_path)
+        tmp_path = None
+    finally:
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
 
     return {
         "export_path": str(export_path),

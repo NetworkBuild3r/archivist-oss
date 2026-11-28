@@ -44,6 +44,7 @@ from archivist.security.firewall import (
 from archivist.security.trust_tiers import (
     RequestContext,
     TrustTier,
+    assert_monotonic_supersession,
     is_retrievable_by_default,
 )
 from archivist.storage.local_vector import (
@@ -53,6 +54,7 @@ from archivist.storage.local_vector import (
 )
 from archivist.storage.metadata import (
     EmbeddingMetadata,
+    EmbeddingModelMismatchError,
     verify_or_record_embedding_metadata_sync,
 )
 from archivist.utils.tokenizer import count_tokens
@@ -212,9 +214,12 @@ class LocalMemoryStore:
         offline_deterministic: bool = False,
     ) -> None:
         self.db_path = Path(db_path) if db_path is not None else default_local_db_path()
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        if os.name == "posix":
-            os.chmod(self.db_path.parent, 0o700)
+        parent = self.db_path.parent
+        parent_existed = parent.exists()
+        if not parent_existed:
+            parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            if os.name == "posix":
+                os.chmod(parent, 0o700)
 
         if onnx_runtime is not None:
             self.onnx = onnx_runtime
@@ -227,67 +232,162 @@ class LocalMemoryStore:
                 )
             )
 
-        self.embed_model = embed_model or self.onnx.embed_model
+        # Always record the honest active model identifier (CRIT-3: never mislabel
+        # deterministic hash vectors as BAAI/bge-small-en-v1.5).
+        self.embed_model = self.onnx.active_embed_model_id
         self.vector_dim = vector_dim or self.onnx.vector_dim
         self.firewall = firewall or MemoryFirewall(policy=firewall_policy)
         self._write_lock = threading.Lock()
+        self._read_lock = threading.RLock()
+        self._write_conn: sqlite3.Connection | None = None
+        self._read_conn: sqlite3.Connection | None = None
+        self._vector_backend = (vector_backend or "sqlite-vec").strip().lower()
+        self._quantization = (quantization or "int8").strip().lower()
 
-        sidecar_path = self.db_path.with_suffix(".usearch") if vector_backend == "usearch" else None
+        sidecar_path = (
+            self.db_path.with_suffix(".usearch") if self._vector_backend == "usearch" else None
+        )
         self.vector_index: LocalVectorIndex = create_local_vector_index(
             dim=self.vector_dim,
-            backend=vector_backend,
+            backend=self._vector_backend,
             index_path=sidecar_path,
-            quantization=quantization,
+            quantization=self._quantization,
         )
 
-        # Open dedicated write connection (WAL + synchronous=NORMAL + busy_timeout=5000).
-        self._write_conn = sqlite3.connect(
-            str(self.db_path),
-            timeout=5.0,
-            check_same_thread=False,
-        )
-        self._write_conn.row_factory = sqlite3.Row
-        self._write_conn.execute("PRAGMA journal_mode=WAL")
-        self._write_conn.execute("PRAGMA synchronous=NORMAL")
-        self._write_conn.execute("PRAGMA busy_timeout=5000")
-        self._write_conn.execute("PRAGMA foreign_keys=ON")
+        try:
+            # Open dedicated write connection (WAL + synchronous=NORMAL + busy_timeout=5000).
+            self._write_conn = sqlite3.connect(
+                str(self.db_path),
+                timeout=5.0,
+                check_same_thread=False,
+            )
+            self._write_conn.row_factory = sqlite3.Row
+            self._write_conn.execute("PRAGMA journal_mode=WAL")
+            self._write_conn.execute("PRAGMA synchronous=NORMAL")
+            self._write_conn.execute("PRAGMA busy_timeout=5000")
+            self._write_conn.execute("PRAGMA foreign_keys=ON")
 
-        # Enforce 0600 permissions immediately on DB file creation (POSIX).
-        _set_owner_only_permissions(self.db_path)
+            # Enforce 0600 permissions immediately on DB file creation (POSIX).
+            _set_owner_only_permissions(self.db_path)
 
-        # Initialize core tables + vector index tables.
-        self._write_conn.executescript(_LOCAL_SCHEMA_SQL)
-        self.vector_index.init_schema(self._write_conn)
-        self._write_conn.commit()
+            # Initialize core tables BEFORE metadata check (does NOT touch vector index yet).
+            self._write_conn.executescript(_LOCAL_SCHEMA_SQL)
+            self._write_conn.commit()
 
-        # AUDIT-MIN-9: Wire archivist_meta embedding model/dim mismatch guard into local startup.
-        self.metadata: EmbeddingMetadata = verify_or_record_embedding_metadata_sync(
-            self._write_conn,
-            embed_model=self.embed_model,
-            vector_dim=self.vector_dim,
-            schema_version="3.0",
-        )
+            # Check legacy chunk_vectors_f32 dimension if archivist_meta is absent.
+            self._verify_legacy_vector_dim(self._write_conn)
 
-        # Dedicated read-only connection (query_only=ON) for concurrent WAL reads.
-        self._read_conn = sqlite3.connect(
-            str(self.db_path),
-            timeout=5.0,
-            check_same_thread=False,
-        )
-        self._read_conn.row_factory = sqlite3.Row
-        load_sqlite_vec(self._read_conn)
-        self._read_conn.execute("PRAGMA query_only=ON")
-        self._read_conn.execute("PRAGMA busy_timeout=5000")
+            # AUDIT-MIN-9 + HIGH-3: Verify archivist_meta (model, dim, quantization)
+            # strictly BEFORE vector_index.init_schema() / index load.
+            self.metadata: EmbeddingMetadata = verify_or_record_embedding_metadata_sync(
+                self._write_conn,
+                embed_model=self.embed_model,
+                vector_dim=self.vector_dim,
+                schema_version="3.0",
+            )
+            self._verify_or_record_quantization(self._write_conn)
 
-        # Ensure WAL/SHM sidecars if already present are also 0600.
-        _set_owner_only_permissions(self.db_path)
+            # Only initialize/load vector index after metadata compatibility is verified.
+            self.vector_index.init_schema(self._write_conn)
+            self._write_conn.commit()
+
+            # Dedicated read-only connection (query_only=ON) for concurrent WAL reads.
+            self._read_conn = sqlite3.connect(
+                str(self.db_path),
+                timeout=5.0,
+                check_same_thread=False,
+            )
+            self._read_conn.row_factory = sqlite3.Row
+            load_sqlite_vec(self._read_conn)
+            self._read_conn.execute("PRAGMA query_only=ON")
+            self._read_conn.execute("PRAGMA busy_timeout=5000")
+
+            # Ensure WAL/SHM sidecars if already present are also 0600.
+            _set_owner_only_permissions(self.db_path)
+        except Exception:
+            self.close()
+            raise
+
+    def _verify_legacy_vector_dim(self, conn: sqlite3.Connection) -> None:
+        """Fail with EmbeddingModelMismatchError if legacy f32 vectors mismatch dim."""
+        tbl = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='chunk_vectors_f32'"
+        ).fetchone()
+        if tbl is None:
+            return
+        meta_tbl = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='archivist_meta'"
+        ).fetchone()
+        has_meta = False
+        if meta_tbl is not None:
+            row = conn.execute(
+                "SELECT value FROM archivist_meta WHERE key = 'vector_dim'"
+            ).fetchone()
+            has_meta = row is not None
+        if has_meta:
+            return
+        sample = conn.execute("SELECT length(embedding) FROM chunk_vectors_f32 LIMIT 1").fetchone()
+        if sample is not None and sample[0]:
+            stored_dim = int(sample[0]) // 4
+            if stored_dim != self.vector_dim:
+                raise EmbeddingModelMismatchError(
+                    stored_model="unknown-legacy",
+                    stored_dim=stored_dim,
+                    requested_model=self.embed_model,
+                    requested_dim=self.vector_dim,
+                )
+
+    def _verify_or_record_quantization(self, conn: sqlite3.Connection) -> None:
+        """Guard against reopening a sqlite-vec DB with incompatible quantization."""
+        if not self.vector_index.backend_name.startswith("sqlite-vec:"):
+            return
+        row = conn.execute(
+            "SELECT value FROM archivist_meta WHERE key = 'local_vector_quantization'"
+        ).fetchone()
+        if row is not None:
+            stored_quant = str(row[0]).strip().lower()
+            if stored_quant and stored_quant != self._quantization:
+                raise EmbeddingModelMismatchError(
+                    stored_model=f"{self.embed_model}[{stored_quant}]",
+                    stored_dim=self.vector_dim,
+                    requested_model=f"{self.embed_model}[{self._quantization}]",
+                    requested_dim=self.vector_dim,
+                )
+            return
+        now = datetime.now(UTC).isoformat()
+        with conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO archivist_meta (key, value, updated_at) VALUES (?, ?, ?)",
+                ("local_vector_quantization", self._quantization, now),
+            )
+
+    def _require_write_conn(self) -> sqlite3.Connection:
+        if self._write_conn is None:
+            raise RuntimeError("LocalMemoryStore write connection is closed")
+        return self._write_conn
+
+    def _require_read_conn(self) -> sqlite3.Connection:
+        if self._read_conn is None:
+            raise RuntimeError("LocalMemoryStore read connection is closed")
+        return self._read_conn
 
     def close(self) -> None:
         """Close read/write connections cleanly and persist optional sidecar."""
-        if hasattr(self.vector_index, "save"):
-            self.vector_index.save()  # type: ignore[attr-defined]
-        self._read_conn.close()
-        self._write_conn.close()
+        if self._read_conn is not None:
+            if hasattr(self.vector_index, "save"):
+                try:
+                    self.vector_index.save()  # type: ignore[attr-defined]
+                except Exception:
+                    logger.debug("Failed saving vector index sidecar on close", exc_info=True)
+            try:
+                self._read_conn.close()
+            finally:
+                self._read_conn = None
+        if self._write_conn is not None:
+            try:
+                self._write_conn.close()
+            finally:
+                self._write_conn = None
 
     def _screen_content(
         self,
@@ -324,8 +424,38 @@ class LocalMemoryStore:
         fw_result = self._screen_content(content, ctx=ctx, trust_tier=trust_tier)
         sanitized = fw_result.text
         effective_tier = fw_result.trust_tier
+        total_redacted = fw_result.redacted_count
+        quarantine_reasons: list[str] = list(fw_result.quarantine_reasons)
 
-        tag_list = [str(t).strip() for t in (tags or ()) if str(t).strip()]
+        # HIGH-1: Screen kind and every tag through the Memory Firewall before
+        # SQLite/FTS5 persistence so raw secrets or injections cannot bypass via metadata.
+        kind_fw = self._screen_content(
+            str(kind or "fact").strip() or "fact", ctx=ctx, trust_tier=trust_tier
+        )
+        safe_kind = kind_fw.text.strip() or "fact"
+        total_redacted += kind_fw.redacted_count
+        if kind_fw.quarantined:
+            effective_tier = TrustTier.T3_QUARANTINED
+            for reason in kind_fw.quarantine_reasons:
+                if reason not in quarantine_reasons:
+                    quarantine_reasons.append(reason)
+
+        tag_list: list[str] = []
+        for raw_tag in tags or ():
+            tag_text = str(raw_tag).strip()
+            if not tag_text:
+                continue
+            tag_fw = self._screen_content(tag_text, ctx=ctx, trust_tier=trust_tier)
+            total_redacted += tag_fw.redacted_count
+            if tag_fw.quarantined:
+                effective_tier = TrustTier.T3_QUARANTINED
+                for reason in tag_fw.quarantine_reasons:
+                    if reason not in quarantine_reasons:
+                        quarantine_reasons.append(reason)
+            cleaned_tag = tag_fw.text.strip()
+            if cleaned_tag:
+                tag_list.append(cleaned_tag)
+
         tags_str = " ".join(tag_list)
         content_hash = hashlib.sha256(f"{scope}\x00{sanitized}".encode()).hexdigest()
 
@@ -343,8 +473,22 @@ class LocalMemoryStore:
         mid = memory_id or f"mem_{uuid.uuid4().hex[:12]}"
 
         with self._write_lock:
+            wconn = self._require_write_conn()
+
+            # HIGH-5: Enforce trust-tier monotonicity on explicit memory_id overwrites.
+            if memory_id is not None:
+                existing_row = wconn.execute(
+                    "SELECT trust_tier FROM memory_chunks WHERE id = ?",
+                    (mid,),
+                ).fetchone()
+                if existing_row is not None:
+                    assert_monotonic_supersession(
+                        effective_tier,
+                        TrustTier(str(existing_row["trust_tier"])),
+                    )
+
             if deduplicate and memory_id is None:
-                dup = self._write_conn.execute(
+                dup = wconn.execute(
                     "SELECT id, trust_tier FROM memory_chunks "
                     "WHERE scope_id = ? AND content_hash = ? AND suppressed = 0 "
                     "LIMIT 1",
@@ -354,67 +498,72 @@ class LocalMemoryStore:
                     return SavedMemory(
                         memory_id=str(dup["id"]),
                         scope=scope,
-                        kind=kind,
+                        kind=safe_kind,
                         trust_tier=str(dup["trust_tier"]),
                         quarantined=str(dup["trust_tier"]) == TrustTier.T3_QUARANTINED.value,
-                        redacted_count=fw_result.redacted_count,
+                        redacted_count=total_redacted,
                         enrichment_status="synced",
                         deduplicated=True,
-                        quarantine_reasons=fw_result.quarantine_reasons,
+                        quarantine_reasons=tuple(quarantine_reasons),
                     )
 
-            with self._write_conn:
-                self._write_conn.execute(
-                    """
-                    INSERT OR REPLACE INTO memory_chunks (
-                        id, scope_id, content, l0, l1, kind, tags_json,
-                        trust_tier, actor_id, source_client, created_at, updated_at,
-                        valid_at, suppressed, suppress_reason, quarantine_reasons_json,
-                        content_hash, token_count
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '', ?, ?, ?)
-                    """,
-                    (
-                        mid,
-                        scope,
-                        sanitized,
-                        l0,
-                        l1,
-                        kind,
-                        json.dumps(tag_list),
-                        effective_tier.value,
-                        actor_id,
-                        source_client,
-                        now_iso,
-                        now_iso,
-                        valid_at or now_iso,
-                        json.dumps(list(fw_result.quarantine_reasons)),
-                        content_hash,
-                        tok_count,
-                    ),
-                )
-                self._write_conn.execute(
-                    "DELETE FROM memory_chunks_fts WHERE chunk_id = ?",
-                    (mid,),
-                )
-                self._write_conn.execute(
-                    "INSERT INTO memory_chunks_fts (chunk_id, scope_id, content, l0, tags) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (mid, scope, sanitized, l0, tags_str),
-                )
-                self.vector_index.upsert(self._write_conn, mid, vec, scope_id=scope)
-                if pre_commit_hook is not None:
-                    pre_commit_hook()
+            try:
+                with wconn:
+                    wconn.execute(
+                        """
+                        INSERT OR REPLACE INTO memory_chunks (
+                            id, scope_id, content, l0, l1, kind, tags_json,
+                            trust_tier, actor_id, source_client, created_at, updated_at,
+                            valid_at, suppressed, suppress_reason, quarantine_reasons_json,
+                            content_hash, token_count
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '', ?, ?, ?)
+                        """,
+                        (
+                            mid,
+                            scope,
+                            sanitized,
+                            l0,
+                            l1,
+                            safe_kind,
+                            json.dumps(tag_list),
+                            effective_tier.value,
+                            actor_id,
+                            source_client,
+                            now_iso,
+                            now_iso,
+                            valid_at or now_iso,
+                            json.dumps(quarantine_reasons),
+                            content_hash,
+                            tok_count,
+                        ),
+                    )
+                    wconn.execute(
+                        "DELETE FROM memory_chunks_fts WHERE chunk_id = ?",
+                        (mid,),
+                    )
+                    wconn.execute(
+                        "INSERT INTO memory_chunks_fts (chunk_id, scope_id, content, l0, tags) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (mid, scope, sanitized, l0, tags_str),
+                    )
+                    self.vector_index.upsert(wconn, mid, vec, scope_id=scope)
+                    if pre_commit_hook is not None:
+                        pre_commit_hook()
+                self.vector_index.on_commit()
+            except Exception:
+                self.vector_index.on_rollback()
+                raise
 
         return SavedMemory(
             memory_id=mid,
             scope=scope,
-            kind=kind,
+            kind=safe_kind,
             trust_tier=effective_tier.value,
-            quarantined=fw_result.quarantined,
-            redacted_count=fw_result.redacted_count,
+            quarantined=effective_tier is TrustTier.T3_QUARANTINED,
+            redacted_count=total_redacted,
             enrichment_status="synced",
             deduplicated=False,
-            quarantine_reasons=fw_result.quarantine_reasons,
+            quarantine_reasons=tuple(quarantine_reasons),
         )
 
     def forget_memory(
@@ -430,7 +579,8 @@ class LocalMemoryStore:
             raise ValueError(f"mode must be 'suppress' or 'delete', got {mode!r}")
 
         with self._write_lock:
-            existing = self._write_conn.execute(
+            wconn = self._require_write_conn()
+            existing = wconn.execute(
                 "SELECT id, scope_id FROM memory_chunks WHERE id = ?",
                 (memory_id,),
             ).fetchone()
@@ -438,28 +588,33 @@ class LocalMemoryStore:
                 return {"memory_id": memory_id, "mode": norm_mode, "affected": 0, "found": False}
 
             now_iso = datetime.now(UTC).isoformat()
-            with self._write_conn:
-                self._write_conn.execute(
-                    "DELETE FROM memory_chunks_fts WHERE chunk_id = ?",
-                    (memory_id,),
-                )
-                self.vector_index.delete(self._write_conn, memory_id)
-                self._write_conn.execute(
-                    "DELETE FROM needle_registry WHERE chunk_id = ?",
-                    (memory_id,),
-                )
-                if norm_mode == "delete":
-                    self._write_conn.execute(
-                        "DELETE FROM memory_chunks WHERE id = ?",
+            try:
+                with wconn:
+                    wconn.execute(
+                        "DELETE FROM memory_chunks_fts WHERE chunk_id = ?",
                         (memory_id,),
                     )
-                else:
-                    self._write_conn.execute(
-                        "UPDATE memory_chunks "
-                        "SET suppressed = 1, suppress_reason = ?, updated_at = ? "
-                        "WHERE id = ?",
-                        (reason or "user_suppressed", now_iso, memory_id),
+                    self.vector_index.delete(wconn, memory_id)
+                    wconn.execute(
+                        "DELETE FROM needle_registry WHERE chunk_id = ?",
+                        (memory_id,),
                     )
+                    if norm_mode == "delete":
+                        wconn.execute(
+                            "DELETE FROM memory_chunks WHERE id = ?",
+                            (memory_id,),
+                        )
+                    else:
+                        wconn.execute(
+                            "UPDATE memory_chunks "
+                            "SET suppressed = 1, suppress_reason = ?, updated_at = ? "
+                            "WHERE id = ?",
+                            (reason or "user_suppressed", now_iso, memory_id),
+                        )
+                self.vector_index.on_commit()
+            except Exception:
+                self.vector_index.on_rollback()
+                raise
 
         return {
             "memory_id": memory_id,
@@ -471,10 +626,12 @@ class LocalMemoryStore:
 
     def get_memory(self, memory_id: str) -> dict[str, Any] | None:
         """Fetch a single memory record (including provenance & quarantine metadata)."""
-        row = self._read_conn.execute(
-            "SELECT * FROM memory_chunks WHERE id = ?",
-            (memory_id,),
-        ).fetchone()
+        with self._read_lock:
+            rconn = self._require_read_conn()
+            row = rconn.execute(
+                "SELECT * FROM memory_chunks WHERE id = ?",
+                (memory_id,),
+            ).fetchone()
         if row is None:
             return None
         return self._row_to_dict(row)
@@ -521,53 +678,58 @@ class LocalMemoryStore:
         rrf_k = 60.0
         rrf_scores: dict[str, float] = {}
 
-        # 1. Dense vector recall per scope.
+        # Deduplicate search scopes so repeated entries cannot double vector RRF scores.
+        dedup_scopes = list(dict.fromkeys(search_scopes))
+
         vec_limit = max(limit * 3, 24)
-        for sc in search_scopes:
-            vec_hits = self.vector_index.search(
-                self._read_conn, q_vec, scope_id=sc, limit=vec_limit
-            )
-            for rank, (cid, _sim) in enumerate(vec_hits, start=1):
-                rrf_scores[cid] = rrf_scores.get(cid, 0.0) + (1.0 / (rrf_k + rank))
-
-        # 2. FTS5 BM25 recall.
         fts_query = _make_fts_query(query)
-        if fts_query:
-            if search_scopes == ["*"]:
-                fts_rows = self._read_conn.execute(
-                    "SELECT chunk_id, bm25(memory_chunks_fts) AS rank_score "
-                    "FROM memory_chunks_fts "
-                    "WHERE memory_chunks_fts MATCH ? "
-                    "ORDER BY rank_score LIMIT ?",
-                    (fts_query, vec_limit),
-                ).fetchall()
-            else:
-                ph = ",".join("?" for _ in search_scopes)
-                fts_rows = self._read_conn.execute(
-                    f"SELECT chunk_id, bm25(memory_chunks_fts) AS rank_score "
-                    f"FROM memory_chunks_fts "
-                    f"WHERE memory_chunks_fts MATCH ? AND scope_id IN ({ph}) "
-                    f"ORDER BY rank_score LIMIT ?",
-                    (fts_query, *search_scopes, vec_limit),
-                ).fetchall()
-            for rank, row in enumerate(fts_rows, start=1):
-                cid = str(row["chunk_id"])
-                rrf_scores[cid] = rrf_scores.get(cid, 0.0) + (1.0 / (rrf_k + rank))
 
-        if not rrf_scores:
-            return []
+        with self._read_lock:
+            rconn = self._require_read_conn()
 
-        cand_ids = [
-            cid
-            for cid, _ in sorted(rrf_scores.items(), key=lambda kv: kv[1], reverse=True)[
-                : max(limit * 3, 25)
+            # 1. Dense vector recall per scope.
+            for sc in dedup_scopes:
+                vec_hits = self.vector_index.search(rconn, q_vec, scope_id=sc, limit=vec_limit)
+                for rank, (cid, _sim) in enumerate(vec_hits, start=1):
+                    rrf_scores[cid] = rrf_scores.get(cid, 0.0) + (1.0 / (rrf_k + rank))
+
+            # 2. FTS5 BM25 recall.
+            if fts_query:
+                if dedup_scopes == ["*"]:
+                    fts_rows = rconn.execute(
+                        "SELECT chunk_id, bm25(memory_chunks_fts) AS rank_score "
+                        "FROM memory_chunks_fts "
+                        "WHERE memory_chunks_fts MATCH ? "
+                        "ORDER BY rank_score LIMIT ?",
+                        (fts_query, vec_limit),
+                    ).fetchall()
+                else:
+                    ph = ",".join("?" for _ in dedup_scopes)
+                    fts_rows = rconn.execute(
+                        f"SELECT chunk_id, bm25(memory_chunks_fts) AS rank_score "
+                        f"FROM memory_chunks_fts "
+                        f"WHERE memory_chunks_fts MATCH ? AND scope_id IN ({ph}) "
+                        f"ORDER BY rank_score LIMIT ?",
+                        (fts_query, *dedup_scopes, vec_limit),
+                    ).fetchall()
+                for rank, row in enumerate(fts_rows, start=1):
+                    cid = str(row["chunk_id"])
+                    rrf_scores[cid] = rrf_scores.get(cid, 0.0) + (1.0 / (rrf_k + rank))
+
+            if not rrf_scores:
+                return []
+
+            cand_ids = [
+                cid
+                for cid, _ in sorted(rrf_scores.items(), key=lambda kv: kv[1], reverse=True)[
+                    : max(limit * 3, 25)
+                ]
             ]
-        ]
-        ph = ",".join("?" for _ in cand_ids)
-        rows = self._read_conn.execute(
-            f"SELECT * FROM memory_chunks WHERE id IN ({ph}) AND suppressed = 0",
-            cand_ids,
-        ).fetchall()
+            ph = ",".join("?" for _ in cand_ids)
+            rows = rconn.execute(
+                f"SELECT * FROM memory_chunks WHERE id IN ({ph}) AND suppressed = 0",
+                cand_ids,
+            ).fetchall()
         by_id = {str(r["id"]): self._row_to_dict(r) for r in rows}
 
         filtered: list[dict[str, Any]] = []
@@ -674,17 +836,18 @@ class LocalMemoryStore:
         where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
         params.append(max(1, int(limit)))
 
-        rows = self._read_conn.execute(
-            f"SELECT * FROM memory_chunks {where_sql} ORDER BY created_at DESC LIMIT ?",
-            params,
-        ).fetchall()
+        with self._read_lock:
+            rconn = self._require_read_conn()
+            rows = rconn.execute(
+                f"SELECT * FROM memory_chunks {where_sql} ORDER BY created_at DESC LIMIT ?",
+                params,
+            ).fetchall()
+            counts_rows = rconn.execute(
+                f"SELECT trust_tier, COUNT(*) AS cnt FROM memory_chunks {where_sql} "
+                "GROUP BY trust_tier",
+                params[:-1],
+            ).fetchall()
         items = [self._row_to_dict(r) for r in rows]
-
-        counts_rows = self._read_conn.execute(
-            f"SELECT trust_tier, COUNT(*) AS cnt FROM memory_chunks {where_sql} "
-            "GROUP BY trust_tier",
-            params[:-1],
-        ).fetchall()
         tier_counts = {str(r["trust_tier"]): int(r["cnt"]) for r in counts_rows}
 
         return {
@@ -700,26 +863,28 @@ class LocalMemoryStore:
 
     def stats(self) -> dict[str, Any]:
         """Return compact storage & token savings summary for ``archivist://health`` & stats."""
-        total = int(
-            self._read_conn.execute(
-                "SELECT COUNT(*) FROM memory_chunks WHERE suppressed = 0"
-            ).fetchone()[0]
-        )
-        quarantined = int(
-            self._read_conn.execute(
-                "SELECT COUNT(*) FROM memory_chunks WHERE suppressed = 0 AND trust_tier = ?",
-                (TrustTier.T3_QUARANTINED.value,),
-            ).fetchone()[0]
-        )
-        total_tokens = int(
-            self._read_conn.execute(
-                "SELECT COALESCE(SUM(token_count), 0) FROM memory_chunks WHERE suppressed = 0"
-            ).fetchone()[0]
-        )
-        scopes_rows = self._read_conn.execute(
-            "SELECT scope_id, COUNT(*) AS cnt FROM memory_chunks "
-            "WHERE suppressed = 0 GROUP BY scope_id ORDER BY cnt DESC"
-        ).fetchall()
+        with self._read_lock:
+            rconn = self._require_read_conn()
+            total = int(
+                rconn.execute("SELECT COUNT(*) FROM memory_chunks WHERE suppressed = 0").fetchone()[
+                    0
+                ]
+            )
+            quarantined = int(
+                rconn.execute(
+                    "SELECT COUNT(*) FROM memory_chunks WHERE suppressed = 0 AND trust_tier = ?",
+                    (TrustTier.T3_QUARANTINED.value,),
+                ).fetchone()[0]
+            )
+            total_tokens = int(
+                rconn.execute(
+                    "SELECT COALESCE(SUM(token_count), 0) FROM memory_chunks WHERE suppressed = 0"
+                ).fetchone()[0]
+            )
+            scopes_rows = rconn.execute(
+                "SELECT scope_id, COUNT(*) AS cnt FROM memory_chunks "
+                "WHERE suppressed = 0 GROUP BY scope_id ORDER BY cnt DESC"
+            ).fetchall()
         return {
             "status": "ok",
             "db_path": str(self.db_path),

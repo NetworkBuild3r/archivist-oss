@@ -14,12 +14,12 @@ pytestmark = [pytest.mark.performance, pytest.mark.slow]
 
 
 def test_50k_local_hybrid_retrieval_p50_and_sync_write_latency(tmp_path: Path, capsys):
-    """50K chunks: local hybrid p50 <75ms, sync write <30ms, 0 stdout bytes."""
+    """50K chunks (default int8 + populated FTS5): hybrid p50 <75ms, write <30ms, 0 stdout."""
     db = tmp_path / "scale_50k.db"
     store = LocalMemoryStore(
         db_path=db,
         vector_backend="sqlite-vec",
-        quantization="bit",
+        quantization="int8",
         offline_deterministic=True,
     )
     try:
@@ -28,14 +28,15 @@ def test_50k_local_hybrid_retrieval_p50_and_sync_write_latency(tmp_path: Path, c
         dim = store.vector_dim
         vecs = rng.standard_normal((n, dim)).astype(np.float32)
         vecs /= np.linalg.norm(vecs, axis=1, keepdims=True)
-        vecs_bit = np.packbits((vecs > 0).astype(np.uint8), axis=-1, bitorder="little")
+        vecs_int8 = np.clip(np.round(vecs * 127.0), -127, 127).astype(np.int8)
 
-        # Fast bulk seed 50K chunks + vectors
+        # Fast bulk seed 50K chunks + FTS5 + int8 coarse vectors + exact float32 vectors
+        wconn = store._require_write_conn()
         batch = 5000
-        with store._write_conn:
+        with wconn:
             for start in range(0, n, batch):
                 end = min(start + batch, n)
-                store._write_conn.executemany(
+                wconn.executemany(
                     "INSERT INTO memory_chunks "
                     "(id, scope_id, content, l0, l1, kind, tags_json, trust_tier, "
                     "actor_id, source_client, created_at, updated_at, content_hash, token_count) "
@@ -52,18 +53,30 @@ def test_50k_local_hybrid_retrieval_p50_and_sync_write_latency(tmp_path: Path, c
                         for i in range(start, end)
                     ],
                 )
-                store._write_conn.executemany(
+                wconn.executemany(
+                    "INSERT INTO memory_chunks_fts (chunk_id, scope_id, content, l0, tags) "
+                    "VALUES (?, 'repo:scale', ?, ?, '')",
+                    [
+                        (
+                            f"m_{i}",
+                            f"Document chunk {i} covering subsystem_{i % 200} metric_{i % 50}",
+                            f"Chunk {i}",
+                        )
+                        for i in range(start, end)
+                    ],
+                )
+                wconn.executemany(
                     "INSERT INTO vec_id_map (vec_rowid, chunk_id, scope_id) VALUES (?, ?, 'repo:scale')",
                     [(i + 1, f"m_{i}") for i in range(start, end)],
                 )
-                store._write_conn.executemany(
+                wconn.executemany(
                     "INSERT INTO chunk_vectors_f32 (vec_rowid, embedding) VALUES (?, ?)",
                     [(i + 1, vecs[i].tobytes()) for i in range(start, end)],
                 )
-                store._write_conn.executemany(
+                wconn.executemany(
                     "INSERT INTO chunk_vectors_coarse (vec_rowid, scope_id, embedding) "
-                    "VALUES (?, 'repo:scale', vec_bit(?))",
-                    [(i + 1, vecs_bit[i].tobytes()) for i in range(start, end)],
+                    "VALUES (?, 'repo:scale', vec_int8(?))",
+                    [(i + 1, vecs_int8[i].tobytes()) for i in range(start, end)],
                 )
 
         # Measure sync write latency on top of 50K DB
@@ -76,7 +89,7 @@ def test_50k_local_hybrid_retrieval_p50_and_sync_write_latency(tmp_path: Path, c
             )
             write_lats.append((time.perf_counter() - t0) * 1000.0)
 
-        # Measure hybrid retrieval latency across 20 queries
+        # Measure realistic hybrid (int8 vector + FTS5 BM25) retrieval latency across 20 queries
         query_lats: list[float] = []
         for i in range(20):
             t0 = time.perf_counter()

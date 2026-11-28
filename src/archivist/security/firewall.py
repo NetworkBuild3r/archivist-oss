@@ -289,7 +289,7 @@ _INJECTION_RULES: tuple[tuple[str, Any], ...] = (
     (
         "prompt_delimiter_breakout",
         re2.compile(
-            r"(?i)(?:</\s*archivist_memory\s*>|<\|im_start\|>\s*system|<\|system\|>|\[SYSTEM\s+OVERRIDE\])"
+            r"(?i)(?:<\s*/\s*archivist_memory\s*>|<\|im_start\|>\s*system|<\|system\|>|\[SYSTEM\s+OVERRIDE\])"
         ),
     ),
     (
@@ -313,10 +313,35 @@ _INJECTION_RULES: tuple[tuple[str, Any], ...] = (
 _BIDI_RE = re2.compile("[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]")
 _TAG_BLOCK_RE = re2.compile("[\U000e0000-\U000e007f]")
 _ZERO_WIDTH_RE = re2.compile("[\u200b-\u200d\u2060\ufeff]")
+_INVISIBLE_STRIP_RE = re2.compile(
+    "[\u061c\u200b-\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff\U000e0000-\U000e007f]+"
+)
 _ZERO_WIDTH_BURST_THRESHOLD = 4
 
-# Structural framing escape detector (linear-time RE2).
-_MEMORY_TAG_ESCAPE_RE = re2.compile(r"(?i)(</?\s*archivist_memory\b)")
+_INVISIBLE_TRANSLATION_TABLE: dict[int, None] = {
+    0x061C: None,
+    0x200B: None,
+    0x200C: None,
+    0x200D: None,
+    0x200E: None,
+    0x200F: None,
+    0x2060: None,
+    0xFEFF: None,
+    **dict.fromkeys(range(0x202A, 0x202F)),
+    **dict.fromkeys(range(0x2066, 0x206A)),
+    **dict.fromkeys(range(0xE0000, 0xE0080)),
+}
+
+
+def _strip_invisible_chars(text: str) -> str:
+    """Fast C-speed strip of bidi, zero-width, and tag-block characters."""
+    if not text or _INVISIBLE_STRIP_RE.search(text) is None:
+        return text
+    return text.translate(_INVISIBLE_TRANSLATION_TABLE)
+
+
+# Structural framing escape detector (linear-time RE2); catches `< /archivist_memory>` too.
+_MEMORY_TAG_ESCAPE_RE = re2.compile(r"(?i)(<\s*/?\s*archivist_memory\b)")
 
 
 @dataclass(frozen=True)
@@ -440,13 +465,16 @@ class MemoryFirewall:
         return findings
 
     def _detect_injections(self, text: str) -> list[FirewallFinding]:
-        matched_ids = self._injection_set.Match(text)
+        # Strip zero-width / bidi / tag-block characters in C speed before injection
+        # screening so 1-3 invisible characters cannot evade prompt-override rules.
+        normalized = _strip_invisible_chars(text)
+        matched_ids = self._injection_set.Match(normalized)
         if not matched_ids:
             return []
         findings: list[FirewallFinding] = []
         for idx in sorted(set(matched_ids)):
             rule_name, regex = _INJECTION_RULES[idx]
-            match = regex.search(text)
+            match = regex.search(normalized)
             if match is not None:
                 findings.append(
                     FirewallFinding(
@@ -458,12 +486,6 @@ class MemoryFirewall:
                     )
                 )
         return findings
-
-    def _replacement(self, rule_name: str, secret_value: str) -> tuple[str, str]:
-        if self.policy is FirewallPolicy.VAULT_TOKENIZE:
-            digest = hashlib.sha256(secret_value.encode("utf-8")).hexdigest()[:16]
-            return f"vault://memory-secrets/{digest}", "tokenized"
-        return f"[REDACTED:{rule_name}]", "redacted"
 
     def scan(
         self,
@@ -622,8 +644,9 @@ def _escape_attr(value: str) -> str:
 
 
 def _escape_memory_body(body: str) -> str:
-    """Neutralize embedded ``<archivist_memory`` or ``</archivist_memory`` tags."""
-    return str(_MEMORY_TAG_ESCAPE_RE.sub(lambda m: m.group(1).replace("<", "&lt;"), body or ""))
+    """Strip invisible stego chars and neutralize embedded ``<archivist_memory`` tags."""
+    cleaned = _strip_invisible_chars(body or "")
+    return str(_MEMORY_TAG_ESCAPE_RE.sub(lambda m: m.group(1).replace("<", "&lt;"), cleaned))
 
 
 def frame_memory(

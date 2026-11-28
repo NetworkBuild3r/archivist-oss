@@ -31,7 +31,7 @@ from mcp.types import (
 from pydantic import AnyUrl
 
 from archivist import __version__
-from archivist.app.handlers.scope_resolver import resolve_write_scope
+from archivist.app.handlers.scope_resolver import resolve_read_scopes, resolve_write_scope
 from archivist.app.handlers.tools_docs import list_bundled_doc_topics, read_bundled_doc
 from archivist.app.handlers.v3_coding import get_local_store
 
@@ -233,7 +233,8 @@ def get_prompt_by_name(name: str, arguments: dict[str, Any] | None = None) -> Ge
     if name == "bootstrap-session":
         task = str(args.get("task") or "project conventions, architecture decisions, and gotchas")
         store = get_local_store()
-        ctx = store.build_context(task, scopes=[scope, "user:global"], max_tokens=1500, limit=8)
+        read_scopes = resolve_read_scopes(scope)
+        ctx = store.build_context(task, scopes=read_scopes, max_tokens=1500, limit=8)
         body = (
             f"Session bootstrap for scope `{scope}`.\n"
             f"Call `memory_context` as needed during work.\n\n"

@@ -7,6 +7,7 @@ coding-agent tool calls require zero manual ``agent_id`` or ``namespace`` args.
 
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import os
 import re
@@ -21,6 +22,7 @@ from archivist.security.trust_tiers import RequestContext
 GLOBAL_SCOPE = "user:global"
 
 _SCP_REMOTE_RE = re.compile(r"^(?:[^@\s]+@)?([^:/\s]+):(.+)$")
+_VALID_SCOPE_RE = re.compile(r"^[a-z][a-z0-9_-]{0,23}:[A-Za-z0-9._/@+\-]{1,220}$")
 
 # Per-task session context isolated across concurrent daemon connections.
 _CURRENT_REQUEST_CONTEXT: contextvars.ContextVar[RequestContext | None] = contextvars.ContextVar(
@@ -34,6 +36,11 @@ _CURRENT_ROOTS: contextvars.ContextVar[tuple[str, ...]] = contextvars.ContextVar
 def set_request_context(ctx: RequestContext | None) -> contextvars.Token[RequestContext | None]:
     """Bind *ctx* for the current asyncio task."""
     return _CURRENT_REQUEST_CONTEXT.set(ctx)
+
+
+def reset_request_context(token: contextvars.Token[RequestContext | None]) -> None:
+    """Restore previous request context via its ``ContextVar`` token."""
+    _CURRENT_REQUEST_CONTEXT.reset(token)
 
 
 def get_request_context() -> RequestContext:
@@ -50,9 +57,30 @@ def set_session_roots(roots: Sequence[str]) -> contextvars.Token[tuple[str, ...]
     return _CURRENT_ROOTS.set(tuple(str(r) for r in roots if str(r).strip()))
 
 
+def reset_session_roots(token: contextvars.Token[tuple[str, ...]]) -> None:
+    """Restore previous session roots via its ``ContextVar`` token."""
+    _CURRENT_ROOTS.reset(token)
+
+
 def get_session_roots() -> tuple[str, ...]:
     """Return bound MCP ``roots/list`` URI strings for the current session."""
     return _CURRENT_ROOTS.get()
+
+
+def validate_scope(scope: str) -> str:
+    """Validate and normalize an explicit scope identifier (``<prefix>:<value>``)."""
+    cleaned = (scope or "").strip()
+    if not cleaned or len(cleaned) > 256:
+        raise ValueError(f"Invalid scope identifier: {scope!r}")
+    if not _VALID_SCOPE_RE.match(cleaned):
+        raise ValueError(
+            f"Invalid scope format {scope!r}: expected '<prefix>:<name>' "
+            "(e.g. 'repo:github.com/org/app' or 'user:global')."
+        )
+    _prefix, value = cleaned.split(":", 1)
+    if ".." in value.split("/"):
+        raise ValueError(f"Invalid scope traversal segment in {scope!r}")
+    return cleaned
 
 
 def canonicalize_git_remote(remote_url: str) -> str | None:
@@ -97,9 +125,16 @@ def _uri_to_local_path(uri_or_path: str) -> Path | None:
     raw = (uri_or_path or "").strip()
     if not raw:
         return None
-    if raw.startswith("file://"):
+    if "://" in raw:
         parsed = urlparse(raw)
+        if parsed.scheme.lower() != "file":
+            return None
+        host = (parsed.hostname or "").strip().lower()
+        if host not in ("", "localhost"):
+            return None
         path_str = unquote(parsed.path)
+        if not path_str:
+            return None
         if (
             os.name == "nt"
             and path_str.startswith("/")
@@ -141,8 +176,8 @@ def resolve_write_scope(
     cwd: Path | str | None = None,
 ) -> str:
     """Resolve the single canonical target scope for a write operation."""
-    if explicit_scope and explicit_scope.strip():
-        return explicit_scope.strip()
+    if explicit_scope is not None and explicit_scope.strip():
+        return validate_scope(explicit_scope)
 
     candidate_paths: list[Path] = []
     active_roots = roots if roots is not None else get_session_roots()
@@ -189,3 +224,37 @@ def resolve_read_scopes(
     if include_global and primary != GLOBAL_SCOPE:
         scopes.append(GLOBAL_SCOPE)
     return scopes
+
+
+async def resolve_write_scope_async(
+    explicit_scope: str | None = None,
+    *,
+    roots: Sequence[str] | None = None,
+    cwd: Path | str | None = None,
+) -> str:
+    """Async non-blocking wrapper offloading ``git`` subprocess calls off the event loop."""
+    active_roots = tuple(roots) if roots is not None else get_session_roots()
+    return await asyncio.to_thread(
+        resolve_write_scope,
+        explicit_scope,
+        roots=active_roots,
+        cwd=cwd,
+    )
+
+
+async def resolve_read_scopes_async(
+    explicit_scope: str | None = None,
+    *,
+    roots: Sequence[str] | None = None,
+    cwd: Path | str | None = None,
+    include_global: bool = True,
+) -> list[str]:
+    """Async non-blocking wrapper offloading ``git`` subprocess calls off the event loop."""
+    active_roots = tuple(roots) if roots is not None else get_session_roots()
+    return await asyncio.to_thread(
+        resolve_read_scopes,
+        explicit_scope,
+        roots=active_roots,
+        cwd=cwd,
+        include_global=include_global,
+    )

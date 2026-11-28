@@ -16,6 +16,8 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
+import tempfile
+import threading
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
@@ -88,6 +90,14 @@ class LocalVectorIndex(Protocol):
         limit: int,
     ) -> list[tuple[str, float]]:
         """Return up to *limit* ``(chunk_id, cosine_similarity)`` pairs for *scope_id*."""
+        ...
+
+    def on_commit(self) -> None:
+        """Apply any staged in-memory index mutations after SQLite commits."""
+        ...
+
+    def on_rollback(self) -> None:
+        """Discard staged in-memory index mutations when SQLite rolls back."""
         ...
 
 
@@ -274,13 +284,23 @@ class SqliteVecIndex:
         top_order = np.argsort(-scores)[:limit]
         return [(chunk_ids[int(i)], float(scores[int(i)])) for i in top_order]
 
+    def on_commit(self) -> None:
+        return None
+
+    def on_rollback(self) -> None:
+        return None
+
 
 class UsearchIndex:
     """Optional ``USearch`` HNSW adapter behind :class:`LocalVectorIndex` (D3 escape hatch).
 
     Maintains an HNSW graph in memory (optionally persisted to ``index_path``)
-    while storing authoritative ID/scope mappings and float32 vectors in SQLite
-    so deleted or out-of-scope IDs never leak as zombie results.
+    while storing authoritative ID/scope mappings and float32 vectors in SQLite:
+    - Mutations stage until :meth:`on_commit` so SQLite rollbacks never corrupt HNSW.
+    - Every startup reconciles HNSW keys against SQLite ``vec_id_map`` (zero crash drift).
+    - :meth:`save` writes atomically via a ``0600`` temporary file + ``fsync`` + ``os.replace``.
+    - Scoped searches avoid overfetch starvation by directly scanning small scopes and
+      expanding overfetch iteratively for larger scopes.
     """
 
     def __init__(
@@ -300,6 +320,9 @@ class UsearchIndex:
         self.dim = int(dim)
         self.index_path = index_path
         self.backend_name = f"usearch:{dtype}"
+        self._lock = threading.RLock()
+        self._pending_upserts: dict[int, np.ndarray] = {}
+        self._pending_deletes: set[int] = set()
         self._index: Any = Index(
             ndim=self.dim,
             metric="cos",
@@ -330,24 +353,61 @@ class UsearchIndex:
             )
             """
         )
-        # Rehydrate HNSW graph from SQLite if index is empty but SQLite has vectors.
-        if len(self._index) == 0:
-            rows = conn.execute("SELECT vec_rowid, embedding FROM chunk_vectors_f32").fetchall()
-            if rows:
-                keys = np.array([int(r[0]) for r in rows], dtype=np.uint64)
-                mat = np.frombuffer(b"".join(bytes(r[1]) for r in rows), dtype=np.float32).reshape(
-                    len(rows), self.dim
-                )
-                self._index.add(keys, mat)
+        # Always reconcile HNSW keys against SQLite source-of-truth on startup
+        # so crash/restart never drops committed vectors or leaves deleted ghosts.
+        rows = conn.execute(
+            "SELECT m.vec_rowid, v.embedding "
+            "FROM vec_id_map m "
+            "JOIN chunk_vectors_f32 v ON v.vec_rowid = m.vec_rowid"
+        ).fetchall()
+        sqlite_map: dict[int, bytes] = {int(r[0]): bytes(r[1]) for r in rows}
+
+        with self._lock:
+            existing_keys: set[int] = (
+                {int(k) for k in self._index.keys} if len(self._index) > 0 else set()
+            )
+            stale_keys = existing_keys - sqlite_map.keys()
+            for k in stale_keys:
+                if self._index.contains(k):
+                    self._index.remove(k)
+
+            missing_keys = sorted(sqlite_map.keys() - existing_keys)
+            if missing_keys:
+                keys_arr = np.array(missing_keys, dtype=np.uint64)
+                mat = np.frombuffer(
+                    b"".join(sqlite_map[k] for k in missing_keys),
+                    dtype=np.float32,
+                ).reshape(len(missing_keys), self.dim)
+                self._index.add(keys_arr, mat)
+
+            self._pending_upserts.clear()
+            self._pending_deletes.clear()
 
     def save(self) -> None:
-        """Persist the HNSW sidecar file with 0600 permissions (POSIX)."""
+        """Atomically persist the HNSW sidecar file with 0600 permissions (POSIX)."""
         if self.index_path is None:
             return
         self.index_path.parent.mkdir(parents=True, exist_ok=True)
-        self._index.save(str(self.index_path))
-        if os.name == "posix" and self.index_path.exists():
-            os.chmod(self.index_path, 0o600)
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=".usearch-",
+            suffix=".tmp",
+            dir=str(self.index_path.parent),
+        )
+        tmp_path = Path(tmp_name)
+        try:
+            if os.name == "posix":
+                os.fchmod(fd, 0o600)
+            os.close(fd)
+            with self._lock:
+                self._index.save(str(tmp_path))
+            if os.name == "posix":
+                os.chmod(tmp_path, 0o600)
+            with tmp_path.open("rb") as fh:
+                os.fsync(fh.fileno())
+            os.replace(tmp_path, self.index_path)
+        except Exception:
+            tmp_path.unlink(missing_ok=True)
+            raise
 
     def upsert(
         self,
@@ -363,26 +423,27 @@ class UsearchIndex:
             (chunk_id,),
         ).fetchone()
         if existing is not None:
-            vec_rowid = int(existing[0])
-            conn.execute(
-                "UPDATE vec_id_map SET scope_id = ? WHERE vec_rowid = ?",
-                (scope_id, vec_rowid),
-            )
-            if self._index.contains(vec_rowid):
-                self._index.remove(vec_rowid)
-        else:
-            cur = conn.execute(
-                "INSERT INTO vec_id_map (chunk_id, scope_id) VALUES (?, ?)",
-                (chunk_id, scope_id),
-            )
-            assert cur.lastrowid is not None
-            vec_rowid = int(cur.lastrowid)
+            old_rowid = int(existing[0])
+            conn.execute("DELETE FROM chunk_vectors_f32 WHERE vec_rowid = ?", (old_rowid,))
+            conn.execute("DELETE FROM vec_id_map WHERE vec_rowid = ?", (old_rowid,))
+            self._pending_upserts.pop(old_rowid, None)
+            self._pending_deletes.add(old_rowid)
+
+        # Always allocate a fresh AUTOINCREMENT vec_rowid so crash reconciliation
+        # detects updated embeddings via key set diff without false matches.
+        cur = conn.execute(
+            "INSERT INTO vec_id_map (chunk_id, scope_id) VALUES (?, ?)",
+            (chunk_id, scope_id),
+        )
+        assert cur.lastrowid is not None
+        vec_rowid = int(cur.lastrowid)
 
         conn.execute(
-            "INSERT OR REPLACE INTO chunk_vectors_f32 (vec_rowid, embedding) VALUES (?, ?)",
+            "INSERT INTO chunk_vectors_f32 (vec_rowid, embedding) VALUES (?, ?)",
             (vec_rowid, unit.tobytes()),
         )
-        self._index.add(vec_rowid, unit)
+        self._pending_deletes.discard(vec_rowid)
+        self._pending_upserts[vec_rowid] = unit
 
     def delete(self, conn: sqlite3.Connection, chunk_id: str) -> None:
         row = conn.execute(
@@ -394,8 +455,52 @@ class UsearchIndex:
         vec_rowid = int(row[0])
         conn.execute("DELETE FROM chunk_vectors_f32 WHERE vec_rowid = ?", (vec_rowid,))
         conn.execute("DELETE FROM vec_id_map WHERE vec_rowid = ?", (vec_rowid,))
-        if self._index.contains(vec_rowid):
-            self._index.remove(vec_rowid)
+        self._pending_upserts.pop(vec_rowid, None)
+        self._pending_deletes.add(vec_rowid)
+
+    def on_commit(self) -> None:
+        """Apply staged HNSW mutations strictly AFTER SQLite commits."""
+        with self._lock:
+            for rowid in self._pending_deletes:
+                if self._index.contains(rowid):
+                    self._index.remove(rowid)
+            for rowid, unit in self._pending_upserts.items():
+                if self._index.contains(rowid):
+                    self._index.remove(rowid)
+                self._index.add(rowid, unit)
+            self._pending_deletes.clear()
+            self._pending_upserts.clear()
+
+    def on_rollback(self) -> None:
+        """Discard staged HNSW mutations when SQLite rolls back."""
+        with self._lock:
+            self._pending_deletes.clear()
+            self._pending_upserts.clear()
+
+    def _exact_scope_scan(
+        self,
+        conn: sqlite3.Connection,
+        unit_q: np.ndarray,
+        *,
+        scope_id: str,
+        limit: int,
+    ) -> list[tuple[str, float]]:
+        rows = conn.execute(
+            "SELECT m.chunk_id, v.embedding "
+            "FROM vec_id_map m "
+            "JOIN chunk_vectors_f32 v ON v.vec_rowid = m.vec_rowid "
+            "WHERE m.scope_id = ?",
+            (scope_id,),
+        ).fetchall()
+        if not rows:
+            return []
+        chunk_ids = [str(r[0]) for r in rows]
+        mat = np.frombuffer(b"".join(bytes(r[1]) for r in rows), dtype=np.float32).reshape(
+            len(rows), self.dim
+        )
+        scores = mat @ unit_q
+        top_order = np.argsort(-scores)[:limit]
+        return [(chunk_ids[int(i)], float(scores[int(i)])) for i in top_order]
 
     def search(
         self,
@@ -405,25 +510,49 @@ class UsearchIndex:
         scope_id: str,
         limit: int,
     ) -> list[tuple[str, float]]:
-        if limit <= 0 or len(self._index) == 0:
+        if limit <= 0:
             return []
         unit_q = _normalize_f32(query_vec, self.dim)
-        overfetch = min(len(self._index), max(limit * 4, 64))
-        matches = self._index.search(unit_q, overfetch)
-        keys = [int(k) for k in matches.keys]
-        if not keys:
+
+        with self._lock:
+            total_indexed = len(self._index)
+        if total_indexed == 0:
             return []
 
-        placeholders = ",".join("?" for _ in keys)
-        if scope_id == "*":
-            rows = conn.execute(
-                f"SELECT m.vec_rowid, m.chunk_id, v.embedding "
-                f"FROM vec_id_map m "
-                f"JOIN chunk_vectors_f32 v ON v.vec_rowid = m.vec_rowid "
-                f"WHERE m.vec_rowid IN ({placeholders})",
-                keys,
-            ).fetchall()
-        else:
+        if scope_id != "*":
+            scope_count = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM vec_id_map WHERE scope_id = ?",
+                    (scope_id,),
+                ).fetchone()[0]
+            )
+            if scope_count == 0:
+                return []
+            # For small scopes inside a large multi-scope index, exact float32 scan is
+            # sub-millisecond and eliminates HNSW post-filter starvation completely.
+            if scope_count <= max(limit * 16, 512):
+                return self._exact_scope_scan(conn, unit_q, scope_id=scope_id, limit=limit)
+
+        rows: list[Any] = []
+        overfetch = min(total_indexed, max(limit * 4, 64))
+        while True:
+            with self._lock:
+                matches = self._index.search(unit_q, overfetch)
+            keys = [int(k) for k in matches.keys]
+            if not keys:
+                return []
+
+            placeholders = ",".join("?" for _ in keys)
+            if scope_id == "*":
+                rows = conn.execute(
+                    f"SELECT m.vec_rowid, m.chunk_id, v.embedding "
+                    f"FROM vec_id_map m "
+                    f"JOIN chunk_vectors_f32 v ON v.vec_rowid = m.vec_rowid "
+                    f"WHERE m.vec_rowid IN ({placeholders})",
+                    keys,
+                ).fetchall()
+                break
+
             rows = conn.execute(
                 f"SELECT m.vec_rowid, m.chunk_id, v.embedding "
                 f"FROM vec_id_map m "
@@ -431,6 +560,9 @@ class UsearchIndex:
                 f"WHERE m.scope_id = ? AND m.vec_rowid IN ({placeholders})",
                 [scope_id, *keys],
             ).fetchall()
+            if len(rows) >= limit or overfetch >= total_indexed:
+                break
+            overfetch = min(total_indexed, overfetch * 4)
 
         if not rows:
             return []

@@ -3,20 +3,24 @@
 Design highlights:
 - Uses XDG cache directory (``$XDG_CACHE_HOME/archivist/models`` or
   ``~/.cache/archivist/models``).
-- Verifies SHA-256 checksums before loading ONNX model files.
+- Verifies SHA-256 checksums before loading ONNX model files and NEVER swallows
+  :class:`ModelIntegrityError` (fail-closed on tamper).
 - Emits ALL download/load progress strictly to ``sys.stderr`` (NEVER ``stdout``)
   so MCP ``stdio`` framing is never polluted.
 - Supports idle-TTL model unloading (default 15 min) to free RAM in ``archivistd``.
 - Wave 1 ablation finding honored: cross-encoder reranking operates strictly on
   bounded L1/chunk windows (``<= max_rerank_chars`` / top-K) rather than
   unchunked full sessions so CPU p50 stays fast.
-- Supports 1-flag ``--embed-url`` cloud override and a zero-network deterministic
-  hash-projection fallback for offline/unit testing.
+- Supports 1-flag ``--embed-url`` cloud override and an honest deterministic
+  hash-projection fallback (reported under ``archivist/deterministic-hash-*`` so
+  ``archivist_meta`` never mislabels hash vectors as ``BAAI/bge-small-en-v1.5``).
 """
 
 from __future__ import annotations
 
 import hashlib
+import importlib
+import importlib.util
 import logging
 import os
 import re
@@ -35,6 +39,7 @@ logger = logging.getLogger("archivist.local_onnx")
 DEFAULT_LOCAL_EMBED_MODEL = "BAAI/bge-small-en-v1.5"
 DEFAULT_LOCAL_EMBED_DIM = 384
 DEFAULT_LOCAL_RERANK_MODEL = "Xenova/ms-marco-MiniLM-L-6-v2"
+DETERMINISTIC_FALLBACK_MODEL_PREFIX = "archivist/deterministic-hash"
 DEFAULT_IDLE_UNLOAD_SECONDS = 900.0  # 15 minutes
 
 # Wave 1 finding: cap reranker input passages to bounded L1/chunk windows so
@@ -83,6 +88,60 @@ def verify_file_sha256(path: Path, expected_sha256: str) -> None:
             f"SHA-256 mismatch for {path}: expected {expected}, got {actual}. "
             "Refusing to load potentially corrupted or tampered model artifact."
         )
+
+
+def _find_onnx_artifact(cache_dir: Path, explicit_filename: str, model_name: str) -> Path | None:
+    """Locate the concrete ``.onnx`` artifact for *model_name* under *cache_dir*."""
+    direct = cache_dir / explicit_filename
+    if direct.is_file():
+        return direct
+    if not cache_dir.exists():
+        return None
+    slug_parts = [p.lower() for p in re.split(r"[/\\]+", model_name) if p]
+    candidates = sorted(cache_dir.rglob("*.onnx"))
+    for cand in candidates:
+        lower = str(cand).lower()
+        if any(part in lower for part in slug_parts):
+            return cand
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def verify_cached_models(
+    cache_dir: Path,
+    *,
+    embed_model: str = DEFAULT_LOCAL_EMBED_MODEL,
+    rerank_model: str = DEFAULT_LOCAL_RERANK_MODEL,
+    expected_embed_sha256: str = "",
+    expected_rerank_sha256: str = "",
+) -> dict[str, Any]:
+    """Inspect cached ONNX artifacts under *cache_dir* and verify configured SHA-256 digests."""
+    embed_path = _find_onnx_artifact(cache_dir, "embed.onnx", embed_model)
+    rerank_path = _find_onnx_artifact(cache_dir, "rerank.onnx", rerank_model)
+
+    embed_sha = compute_file_sha256(embed_path) if embed_path is not None else None
+    rerank_sha = compute_file_sha256(rerank_path) if rerank_path is not None else None
+
+    errors: list[str] = []
+    if expected_embed_sha256:
+        try:
+            verify_file_sha256(embed_path or (cache_dir / "embed.onnx"), expected_embed_sha256)
+        except ModelIntegrityError as exc:
+            errors.append(str(exc))
+    if expected_rerank_sha256:
+        try:
+            verify_file_sha256(rerank_path or (cache_dir / "rerank.onnx"), expected_rerank_sha256)
+        except ModelIntegrityError as exc:
+            errors.append(str(exc))
+
+    return {
+        "ok": len(errors) == 0,
+        "cache_dir": str(cache_dir),
+        "embed_artifact": str(embed_path) if embed_path is not None else None,
+        "embed_sha256": embed_sha,
+        "rerank_artifact": str(rerank_path) if rerank_path is not None else None,
+        "rerank_sha256": rerank_sha,
+        "errors": errors,
+    }
 
 
 def _deterministic_hash_embed(text: str, dim: int = DEFAULT_LOCAL_EMBED_DIM) -> list[float]:
@@ -157,10 +216,39 @@ class LocalOnnxRuntime:
         self._embedder: Any = None
         self._reranker: Any = None
         self._last_used_monotonic: float = time.monotonic()
+        self._fell_back_to_hash: bool = False
+
+    def _is_offline_mode(self) -> bool:
+        return self.config.offline_deterministic or os.environ.get(
+            "ARCHIVIST_LOCAL_EMBED_OFFLINE", ""
+        ).strip().lower() in ("1", "true", "yes")
+
+    @property
+    def is_deterministic_fallback(self) -> bool:
+        """Return True when deterministic hash embeddings are active instead of ONNX/remote."""
+        if self.config.embed_url:
+            return False
+        if self._is_offline_mode() or self._fell_back_to_hash:
+            return True
+        return importlib.util.find_spec("fastembed") is None
+
+    @property
+    def active_embed_model_id(self) -> str:
+        """Honest model identifier persisted in ``archivist_meta``.
+
+        Never mislabels deterministic hash fallback vectors as ``BAAI/bge-small-en-v1.5``.
+        """
+        if self.config.embed_url:
+            return self.config.embed_model
+        if self.is_deterministic_fallback:
+            if self.config.embed_model == DEFAULT_LOCAL_EMBED_MODEL:
+                return f"{DETERMINISTIC_FALLBACK_MODEL_PREFIX}-{self.config.vector_dim}"
+            return f"{DETERMINISTIC_FALLBACK_MODEL_PREFIX}:{self.config.embed_model}"
+        return self.config.embed_model
 
     @property
     def embed_model(self) -> str:
-        return self.config.embed_model
+        return self.active_embed_model_id
 
     @property
     def vector_dim(self) -> int:
@@ -190,44 +278,75 @@ class LocalOnnxRuntime:
             return True
         return False
 
+    def _verify_embed_artifact(self, *, require_present: bool) -> None:
+        if not self.config.expected_embed_sha256:
+            return
+        artifact = _find_onnx_artifact(self.cache_dir, "embed.onnx", self.config.embed_model)
+        if artifact is not None:
+            verify_file_sha256(artifact, self.config.expected_embed_sha256)
+        elif require_present:
+            verify_file_sha256(self.cache_dir / "embed.onnx", self.config.expected_embed_sha256)
+
+    def _verify_rerank_artifact(self, *, require_present: bool) -> None:
+        if not self.config.expected_rerank_sha256:
+            return
+        artifact = _find_onnx_artifact(self.cache_dir, "rerank.onnx", self.config.rerank_model)
+        if artifact is not None:
+            verify_file_sha256(artifact, self.config.expected_rerank_sha256)
+        elif require_present:
+            verify_file_sha256(self.cache_dir / "rerank.onnx", self.config.expected_rerank_sha256)
+
     def _load_onnx_embedder(self) -> Any:
         if self._embedder is not None:
             return self._embedder
 
-        # Verify SHA-256 manifest if an explicit local model file digest was configured.
-        if self.config.expected_embed_sha256:
-            model_file = self.cache_dir / "embed.onnx"
-            verify_file_sha256(model_file, self.config.expected_embed_sha256)
+        # Pre-check any existing cached ONNX artifact before loading (fail-closed on tamper).
+        self._verify_embed_artifact(require_present=False)
 
         _log_stderr(
             f"Loading local ONNX embedder '{self.config.embed_model}' (cache: {self.cache_dir})"
         )
-        from fastembed import TextEmbedding  # type: ignore[import-untyped]
+        fastembed_mod = importlib.import_module("fastembed")
+        text_embedding_cls = fastembed_mod.TextEmbedding
 
         # FastEmbed writes progress bars via tqdm; ensure cache_dir stays in XDG path.
-        self._embedder = TextEmbedding(
+        embedder = text_embedding_cls(
             model_name=self.config.embed_model,
             cache_dir=str(self.cache_dir),
         )
+        # Verify the actual downloaded/resolved ONNX model file(s) before caching session.
+        try:
+            self._verify_embed_artifact(require_present=True)
+        except ModelIntegrityError:
+            self._embedder = None
+            raise
+
+        self._embedder = embedder
         return self._embedder
 
     def _load_onnx_reranker(self) -> Any:
         if self._reranker is not None:
             return self._reranker
 
-        if self.config.expected_rerank_sha256:
-            model_file = self.cache_dir / "rerank.onnx"
-            verify_file_sha256(model_file, self.config.expected_rerank_sha256)
+        self._verify_rerank_artifact(require_present=False)
 
         _log_stderr(
             f"Loading local ONNX reranker '{self.config.rerank_model}' (cache: {self.cache_dir})"
         )
-        from fastembed.rerank.cross_encoder import TextCrossEncoder  # type: ignore[import-untyped]
+        cross_enc_mod = importlib.import_module("fastembed.rerank.cross_encoder")
+        text_cross_encoder_cls = cross_enc_mod.TextCrossEncoder
 
-        self._reranker = TextCrossEncoder(
+        reranker = text_cross_encoder_cls(
             model_name=self.config.rerank_model,
             cache_dir=str(self.cache_dir),
         )
+        try:
+            self._verify_rerank_artifact(require_present=True)
+        except ModelIntegrityError:
+            self._reranker = None
+            raise
+
+        self._reranker = reranker
         return self._reranker
 
     def _embed_via_url(self, texts: Sequence[str]) -> list[list[float]]:
@@ -256,9 +375,14 @@ class LocalOnnxRuntime:
         if self.config.embed_url:
             return self._embed_via_url(texts)
 
-        if self.config.offline_deterministic or os.environ.get(
-            "ARCHIVIST_LOCAL_EMBED_OFFLINE", ""
-        ).strip().lower() in ("1", "true", "yes"):
+        if self._is_offline_mode():
+            return [_deterministic_hash_embed(t, self.config.vector_dim) for t in texts]
+
+        # Always verify expected SHA-256 even if fastembed is missing/fails later.
+        self._verify_embed_artifact(require_present=False)
+
+        if importlib.util.find_spec("fastembed") is None:
+            self._fell_back_to_hash = True
             return [_deterministic_hash_embed(t, self.config.vector_dim) for t in texts]
 
         try:
@@ -275,7 +399,11 @@ class LocalOnnxRuntime:
                         arr = arr / norm
                 out.append(arr.tolist())
             return out
+        except ModelIntegrityError:
+            # Never fall back on tampered or corrupted ONNX artifacts.
+            raise
         except Exception as exc:
+            self._fell_back_to_hash = True
             _log_stderr(
                 f"ONNX embedder unavailable ({exc}); falling back to deterministic local embedder."
             )
@@ -311,7 +439,7 @@ class LocalOnnxRuntime:
         )
         bounded = [p[:char_cap] for p in passages[:cand_cap]]
 
-        if not self.config.rerank_enabled or self.config.offline_deterministic:
+        if not self.config.rerank_enabled or self._is_offline_mode():
             # Fast lexical overlap fallback when reranker is off or offline.
             q_terms = set(_TOKEN_RE.findall((query or "").lower()))
             scores: list[float] = []
@@ -323,6 +451,8 @@ class LocalOnnxRuntime:
                 scores.append(len(q_terms & p_terms) / max(1, len(q_terms)))
             return scores
 
+        self._verify_rerank_artifact(require_present=False)
+
         try:
             reranker = self._load_onnx_reranker()
             raw_scores = [float(s) for s in reranker.rerank(query, bounded)]
@@ -330,6 +460,9 @@ class LocalOnnxRuntime:
                 tail_floor = (min(raw_scores) - 1.0) if raw_scores else 0.0
                 raw_scores.extend([tail_floor] * (len(passages) - len(raw_scores)))
             return raw_scores
+        except ModelIntegrityError:
+            # Never fall back on tampered or corrupted ONNX artifacts.
+            raise
         except Exception as exc:
             _log_stderr(f"ONNX reranker unavailable ({exc}); returning neutral scores.")
             return [0.0] * len(passages)

@@ -21,10 +21,8 @@ import logging
 import os
 import signal
 import socket
-import struct
 import sys
 import time
-from dataclasses import dataclass
 from pathlib import Path
 
 import anyio
@@ -32,9 +30,18 @@ import mcp.types as types
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 from mcp.shared.message import SessionMessage
 
-from archivist.app.handlers.scope_resolver import set_request_context
+from archivist.app.handlers.scope_resolver import reset_request_context, set_request_context
 from archivist.app.handlers.v3_coding import set_local_store
 from archivist.app.mcp_server import create_mcp_server
+from archivist.app.socket_security import (
+    MAX_FRAME_BYTES,
+    PeerCredentials,
+    default_socket_path,
+    read_peer_credentials,
+    safe_remove_stale_socket,
+    validate_socket_parent,
+    verify_peer_uid,
+)
 from archivist.features.local_onnx import (
     DEFAULT_IDLE_UNLOAD_SECONDS,
     DEFAULT_LOCAL_EMBED_DIM,
@@ -49,63 +56,14 @@ logger = logging.getLogger("archivist.daemon")
 
 DEFAULT_IDLE_DAEMON_TTL_SECONDS = 3600.0  # 60 minutes
 
-
-def default_socket_path() -> Path:
-    """Return default Unix domain socket path for ``archivistd``."""
-    override = os.environ.get("ARCHIVIST_SOCKET_PATH", "").strip()
-    if override:
-        return Path(override)
-    xdg_runtime = os.environ.get("XDG_RUNTIME_DIR", "").strip()
-    if xdg_runtime:
-        base = Path(xdg_runtime)
-        if base.exists() and os.access(base, os.W_OK):
-            return base / "archivist" / "archivistd.sock"
-    xdg_data = os.environ.get("XDG_DATA_HOME", "").strip()
-    data_base = Path(xdg_data) if xdg_data else (Path.home() / ".local" / "share")
-    return data_base / "archivist" / "archivistd.sock"
-
-
-@dataclass(frozen=True)
-class PeerCredentials:
-    """Kernel-verified peer process identity from a Unix domain socket."""
-
-    pid: int | None
-    uid: int
-    gid: int | None
-
-
-def read_peer_credentials(sock: socket.socket) -> PeerCredentials:
-    """Extract peer ``(pid, uid, gid)`` via ``SO_PEERCRED`` (Linux) or ``LOCAL_PEERCRED`` (macOS)."""
-    if sys.platform.startswith("linux"):
-        so_peercred = getattr(socket, "SO_PEERCRED", 17)
-        raw = sock.getsockopt(socket.SOL_SOCKET, so_peercred, struct.calcsize("3i"))
-        pid, uid, gid = struct.unpack("3i", raw)
-        return PeerCredentials(pid=int(pid), uid=int(uid), gid=int(gid))
-
-    if sys.platform == "darwin":
-        # macOS: LOCAL_PEERCRED returns struct xucred { u_int cr_version; uid_t cr_uid; ... }
-        sol_local = 0
-        local_peercred = 0x001
-        raw = sock.getsockopt(sol_local, local_peercred, struct.calcsize("IIh16I"))
-        _ver, uid, _ngroups = struct.unpack("IIh", raw[:10])
-        return PeerCredentials(pid=None, uid=int(uid), gid=None)
-
-    # POSIX fallback: current UID if platform lacks kernel peercred getsockopt.
-    uid = os.getuid() if hasattr(os, "getuid") else 0
-    return PeerCredentials(pid=None, uid=uid, gid=None)
-
-
-def verify_peer_uid(sock: socket.socket, *, expected_uid: int | None = None) -> PeerCredentials:
-    """Verify connecting peer UID matches *expected_uid* (default: daemon's own UID)."""
-    target_uid = (
-        expected_uid if expected_uid is not None else (os.getuid() if hasattr(os, "getuid") else 0)
-    )
-    creds = read_peer_credentials(sock)
-    if creds.uid != target_uid:
-        raise PermissionError(
-            f"Rejected Unix socket peer with uid={creds.uid} (expected uid={target_uid})"
-        )
-    return creds
+__all__ = [
+    "DEFAULT_IDLE_DAEMON_TTL_SECONDS",
+    "ArchivistDaemon",
+    "PeerCredentials",
+    "default_socket_path",
+    "read_peer_credentials",
+    "verify_peer_uid",
+]
 
 
 def _is_socket_live(sock_path: Path) -> bool:
@@ -257,8 +215,7 @@ class ArchivistDaemon:
         finally:
             self._active_connections = max(0, self._active_connections - 1)
             self._touch()
-            set_request_context(None)
-            _ = token
+            reset_request_context(token)
             try:
                 writer.close()
                 await writer.wait_closed()
@@ -295,14 +252,8 @@ class ArchivistDaemon:
 
     async def start(self) -> None:
         """Bind the ``0600`` Unix domain socket and start serving."""
-        self.socket_path.parent.mkdir(parents=True, exist_ok=True)
-        if os.name == "posix":
-            os.chmod(self.socket_path.parent, 0o700)
-
-        if self.socket_path.exists():
-            if _is_socket_live(self.socket_path):
-                raise RuntimeError(f"archivistd already listening at {self.socket_path}")
-            self.socket_path.unlink(missing_ok=True)
+        validate_socket_parent(self.socket_path.parent)
+        safe_remove_stale_socket(self.socket_path, is_live=_is_socket_live)
 
         # Restrict umask around bind() to eliminate any brief permission race window.
         prev_umask = os.umask(0o177) if os.name == "posix" else None
@@ -310,7 +261,7 @@ class ArchivistDaemon:
             self._server = await asyncio.start_unix_server(
                 self._handle_client,
                 path=str(self.socket_path),
-                limit=4 * 1024 * 1024,
+                limit=MAX_FRAME_BYTES,
             )
         finally:
             if prev_umask is not None:

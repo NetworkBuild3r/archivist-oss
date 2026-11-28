@@ -150,7 +150,8 @@ def _cmd_hook(args: argparse.Namespace) -> int:
         else:
             payload = args.input_text
             if payload is None and not sys.stdin.isatty():
-                payload = sys.stdin.read()
+                # Bound hook stdin to 256 KiB so multi-MB transcripts cannot blow the <100ms budget.
+                payload = sys.stdin.read(262_144)
             uid = os.getuid() if hasattr(os, "getuid") else 0
             ctx = RequestContext.for_local_uid(uid, source_client=f"hook-{args.event}")
             hook_label = "PreCompact" if args.event == "pre-compact" else "Stop"

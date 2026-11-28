@@ -14,6 +14,7 @@ Tools:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -23,10 +24,15 @@ from mcp.types import TextContent, Tool
 
 from archivist.app.handlers.scope_resolver import (
     get_request_context,
-    resolve_read_scopes,
-    resolve_write_scope,
+    resolve_read_scopes_async,
+    resolve_write_scope_async,
 )
 from archivist.storage.local_store import LocalMemoryStore
+
+MAX_CONTEXT_TOKENS = 32_000
+MIN_CONTEXT_TOKENS = 64
+MAX_SEARCH_LIMIT = 100
+MAX_INSPECT_LIMIT = 200
 
 logger = logging.getLogger("archivist.mcp.coding")
 
@@ -166,14 +172,16 @@ async def _handle_memory_context(arguments: dict[str, Any]) -> list[TextContent]
     query = str(arguments.get("query") or "").strip()
     if not query:
         return _json_text({"error": "query is required"})
-    max_tokens = int(arguments.get("max_tokens") or 4000)
-    if max_tokens <= 0:
+    raw_max_tokens = int(arguments.get("max_tokens") or 4000)
+    if raw_max_tokens <= 0:
         return _json_text({"error": "max_tokens must be positive"})
+    max_tokens = max(MIN_CONTEXT_TOKENS, min(raw_max_tokens, MAX_CONTEXT_TOKENS))
     explicit_scope = arguments.get("scope")
     as_of = arguments.get("as_of")
-    scopes = resolve_read_scopes(str(explicit_scope) if explicit_scope else None)
-    store = get_local_store()
-    result = store.build_context(
+    scopes = await resolve_read_scopes_async(str(explicit_scope) if explicit_scope else None)
+    store = await asyncio.to_thread(get_local_store)
+    result = await asyncio.to_thread(
+        store.build_context,
         query,
         scopes=scopes,
         max_tokens=max_tokens,
@@ -191,10 +199,11 @@ async def _handle_memory_save(arguments: dict[str, Any]) -> list[TextContent]:
     tags_raw = arguments.get("tags")
     tags = [str(t) for t in tags_raw] if isinstance(tags_raw, list) else []
 
-    scope = resolve_write_scope(str(explicit_scope) if explicit_scope else None)
+    scope = await resolve_write_scope_async(str(explicit_scope) if explicit_scope else None)
     ctx = get_request_context()
-    store = get_local_store()
-    saved = store.save_memory(
+    store = await asyncio.to_thread(get_local_store)
+    saved = await asyncio.to_thread(
+        store.save_memory,
         content,
         scope=scope,
         kind=kind,
@@ -221,12 +230,13 @@ async def _handle_memory_search(arguments: dict[str, Any]) -> list[TextContent]:
     query = str(arguments.get("query") or "").strip()
     if not query:
         return _json_text({"error": "query is required"})
-    limit = int(arguments.get("limit") or 10)
+    limit = max(1, min(int(arguments.get("limit") or 10), MAX_SEARCH_LIMIT))
     explicit_scope = arguments.get("scope")
     kind = arguments.get("kind")
-    scopes = resolve_read_scopes(str(explicit_scope) if explicit_scope else None)
-    store = get_local_store()
-    hits = store.search_memories(
+    scopes = await resolve_read_scopes_async(str(explicit_scope) if explicit_scope else None)
+    store = await asyncio.to_thread(get_local_store)
+    hits = await asyncio.to_thread(
+        store.search_memories,
         query,
         scopes=scopes,
         limit=limit,
@@ -261,8 +271,9 @@ async def _handle_memory_forget(arguments: dict[str, Any]) -> list[TextContent]:
         return _json_text({"error": "memory_id is required"})
     mode = str(arguments.get("mode") or "suppress").strip().lower()
     reason = arguments.get("reason")
-    store = get_local_store()
-    result = store.forget_memory(
+    store = await asyncio.to_thread(get_local_store)
+    result = await asyncio.to_thread(
+        store.forget_memory,
         memory_id,
         mode=mode,
         reason=str(reason) if reason else None,
@@ -273,12 +284,13 @@ async def _handle_memory_forget(arguments: dict[str, Any]) -> list[TextContent]:
 async def _handle_memory_inspect(arguments: dict[str, Any]) -> list[TextContent]:
     explicit_scope = arguments.get("scope")
     memory_id = arguments.get("memory_id")
-    limit = int(arguments.get("limit") or 20)
-    store = get_local_store()
+    limit = max(1, min(int(arguments.get("limit") or 20), MAX_INSPECT_LIMIT))
+    store = await asyncio.to_thread(get_local_store)
     scope_filter: str | None = str(explicit_scope).strip() if explicit_scope else None
     if scope_filter is None and not memory_id:
-        scope_filter = resolve_write_scope(None)
-    result = store.inspect_memories(
+        scope_filter = await resolve_write_scope_async(None)
+    result = await asyncio.to_thread(
+        store.inspect_memories,
         scope=scope_filter,
         memory_id=str(memory_id).strip() if memory_id else None,
         limit=limit,
