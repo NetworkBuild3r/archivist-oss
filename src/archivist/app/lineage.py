@@ -112,7 +112,10 @@ async def resolve_memory_namespace(memory_id: str) -> str:
                     ids=[memory_id],
                     with_payload=True,
                 )
-            except Exception:
+            except Exception as exc:
+                logger.debug(
+                    "lineage.resolve_memory_namespace qdrant miss on %s: %s", coll_name, exc
+                )
                 continue
             if points:
                 ns = (points[0].payload or {}).get("namespace") or ""
@@ -143,7 +146,8 @@ async def _provenance_edges(memory_id: str) -> list[dict[str, Any]]:
                     ids=[memory_id],
                     with_payload=True,
                 )
-            except Exception:
+            except Exception as exc:
+                logger.debug("lineage._provenance_edges qdrant miss on %s: %s", coll_name, exc)
                 continue
             if points:
                 break

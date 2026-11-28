@@ -1,8 +1,6 @@
-import pytest
-
 """Phase 6 tests — metrics, webhooks, dashboard, batch heuristic."""
 
-import sqlite3
+import pytest
 
 pytestmark = [pytest.mark.integration]
 
@@ -97,75 +95,25 @@ def test_webhook_fire_no_url():
         webhooks.WEBHOOK_URL = original
 
 
-# ── Dashboard / batch heuristic (with mock DB) ──────────────────────────────
-
-_test_conn = None
+# ── Dashboard / batch heuristic (with async_pool) ───────────────────────────
 
 
-def _patch_dbs():
-    global _test_conn
-    _test_conn = sqlite3.connect(":memory:")
-    _test_conn.row_factory = sqlite3.Row
+async def test_batch_heuristic_default(async_pool):
+    from archivist.app.dashboard import batch_heuristic
 
-    _test_conn.executescript("""
-    CREATE TABLE IF NOT EXISTS audit_log (
-        id TEXT, agent_id TEXT, action TEXT, memory_id TEXT,
-        namespace TEXT, text_hash TEXT, version INTEGER,
-        metadata TEXT, timestamp TEXT DEFAULT (datetime('now'))
-    );
-    CREATE TABLE IF NOT EXISTS retrieval_logs (
-        id TEXT, agent_id TEXT, query TEXT, namespace TEXT,
-        tier TEXT, memory_type TEXT, retrieval_trace TEXT,
-        result_count INTEGER, cache_hit INTEGER, duration_ms INTEGER,
-        created_at TEXT DEFAULT (datetime('now'))
-    );
-    """)
-    _test_conn.commit()
-
-    import archivist.app.dashboard as dash_mod
-    import archivist.storage.graph as graph
-
-    graph._original_get_db = graph.get_db
-    graph.get_db = lambda: _test_conn
-    dash_mod._original_get_db = dash_mod.get_db if hasattr(dash_mod, "get_db") else None
+    result = await batch_heuristic(window_days=7)
+    assert "suggested_batch_size" in result
+    assert 1 <= result["suggested_batch_size"] <= 10
+    assert "recommendation" in result
+    assert isinstance(result["signals"], list)
 
 
-def _unpatch_dbs():
-    import archivist.storage.graph as graph
-
-    graph.get_db = graph._original_get_db
-    if _test_conn:
-        _test_conn.close()
-
-
-def test_batch_heuristic_default():
-    _patch_dbs()
-    try:
-        from archivist.app.dashboard import batch_heuristic
-
-        result = batch_heuristic(window_days=7)
-        assert "suggested_batch_size" in result
-        assert 1 <= result["suggested_batch_size"] <= 10
-        assert "recommendation" in result
-        assert isinstance(result["signals"], list)
-    except Exception:
-        pass
-    finally:
-        _unpatch_dbs()
-
-
-def test_batch_heuristic_range():
+async def test_batch_heuristic_range(async_pool):
     """Batch size should always be between 1 and 10."""
     from archivist.app.dashboard import batch_heuristic
 
-    _patch_dbs()
-    try:
-        h = batch_heuristic(1)
-        assert 1 <= h["suggested_batch_size"] <= 10
-    except Exception:
-        pass
-    finally:
-        _unpatch_dbs()
+    h = await batch_heuristic(1)
+    assert 1 <= h["suggested_batch_size"] <= 10
 
 
 # ── Config ───────────────────────────────────────────────────────────────────

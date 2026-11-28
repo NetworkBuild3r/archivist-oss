@@ -266,8 +266,8 @@ def collect_storage_gauges_tick() -> None:
             if _pg_pool is not None:
                 try:
                     gauge_set(PG_POOL_SIZE, float(_pg_pool.get_size()))
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("metrics pg pool get_size failed: %s", exc)
     except Exception as e:
         logger.debug("metrics pg pool size: %s", e)
 

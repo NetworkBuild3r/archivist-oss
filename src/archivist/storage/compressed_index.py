@@ -343,7 +343,7 @@ async def build_wake_up_context(namespace: str, agent_id: str = "") -> dict:
                 f"JOIN entities e ON f.entity_id = e.id "
                 f"WHERE {visible}"
             )
-            rf_params: list[Any] = []
+            rf_params = []
             if namespace:
                 rf_sql += " AND e.namespace = ? AND f.namespace = ?"
                 rf_params.extend([namespace, namespace])
@@ -398,8 +398,8 @@ async def build_wake_up_context(namespace: str, agent_id: str = "") -> dict:
                 "ORDER BY usage_count DESC LIMIT 3"
             )
             fleet_tips = [r["tip_text"][:150] for r in tip_rows]
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("compressed_index: fleet tips query failed: %s", exc)
 
         top_entities = [e["name"] for e in identity_entities[:10]]
 

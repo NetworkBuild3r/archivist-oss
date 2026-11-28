@@ -314,8 +314,8 @@ async def _handle_session_end(arguments: dict) -> list[TextContent]:
         try:
             stored_data = json.loads(store_result[0].text)
             stored_id = stored_data.get("memory_id")
-        except Exception:
-            pass
+        except (json.JSONDecodeError, IndexError, AttributeError, TypeError) as exc:
+            logger.warning("session_end: failed to parse summary store response: %s", exc)
 
     # Flush ephemeral session store: persist promoted entries when store=True
     flushed_ids: list[str] = []
@@ -341,8 +341,12 @@ async def _handle_session_end(arguments: dict) -> list[TextContent]:
                     ep_id = ep_data.get("memory_id")
                     if ep_id:
                         flushed_ids.append(ep_id)
-                except Exception:
-                    pass
+                except (json.JSONDecodeError, IndexError, AttributeError, TypeError) as exc:
+                    logger.warning(
+                        "session_end: failed to parse ephemeral store response for %s: %s",
+                        entry.get("key"),
+                        exc,
+                    )
     except Exception as _se:
         logger.warning("session_store flush failed: %s", _se)
 

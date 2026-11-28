@@ -38,8 +38,12 @@ def invalidate(namespace: str) -> None:
         import archivist.retrieval.query_classifier as query_classifier
 
         query_classifier.invalidate_cache(namespace)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug(
+            "inventory.invalidate: query_classifier cache invalidation failed for %s: %s",
+            namespace,
+            exc,
+        )
 
 
 def invalidate_all() -> None:
@@ -49,8 +53,10 @@ def invalidate_all() -> None:
         import archivist.retrieval.query_classifier as query_classifier
 
         query_classifier.invalidate_all_cache()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug(
+            "inventory.invalidate_all: query_classifier cache invalidation failed: %s", exc
+        )
 
 
 async def _fetch_top_entities(conn, namespace: str, limit: int = 10) -> list[str]:
@@ -121,12 +127,12 @@ async def _fetch_inventory(namespace: str) -> NamespaceInventory:
 
         has_fleet = False
         try:
-            row = await conn.fetchone(
+            tip_row = await conn.fetchone(
                 "SELECT COUNT(*) AS c FROM tips WHERE agent_id = 'fleet' AND archived = 0"
             )
-            has_fleet = row is not None and row["c"] and row["c"] > 0
-        except Exception:
-            pass
+            has_fleet = bool(tip_row is not None and tip_row["c"] and tip_row["c"] > 0)
+        except Exception as exc:
+            logger.debug("inventory: fleet tips check failed: %s", exc)
 
     return NamespaceInventory(
         namespace=namespace,

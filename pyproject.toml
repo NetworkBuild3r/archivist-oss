@@ -26,6 +26,8 @@ markers = [
     "agentic_memory: multi-session Memory→Action CI evals (omit-store / poisoned-memory; ADR-006)",
     # Continual Recursive Self-Improvement + Self-Improvement Memory (INIT-001/SPEC-001)
     "crsi: CRSI harness loop & SIM tests (deterministic, no paid APIs)",
+    # Asyncio >50ms event-loop stall watchdog opt-out (INIT-025/SPEC-012)
+    "allow_event_loop_stall: opt out of the >50ms asyncio event-loop stall watchdog for tests that intentionally block",
 ]
 addopts = ["--strict-markers", "--tb=short", "-q"]
 
@@ -55,8 +57,6 @@ ignore = [
     "E501",   # line too long — formatter handles most; rest needs per-file review
     "E402",   # module-level import not at top — intentional mid-file imports in some modules
     "S101",   # assert used — fine in tests
-    "S110",   # try-except-pass — legacy error-swallowing; tracked separately
-    "S112",   # try-except-continue — same
     "S324",   # insecure hash (MD5/SHA1) — used for non-security checksums
     "S608",   # hardcoded SQL expressions — parameterised elsewhere, FTS5 OK
     "S104",   # hardcoded bind-all — intentional MCP server behaviour
@@ -151,13 +151,14 @@ branch = true
 source = ["src/archivist"]
 omit = ["tests/*", "benchmarks/*", "src/*/__init__.py"]
 
+[tool.coverage.paths]
+source = ["src/archivist", "*/src/archivist"]
+
 [tool.coverage.report]
 show_missing = true
 skip_covered = false
 precision = 1
-fail_under = 49  # measured 53.3% (2026-07-25, unit+regression+integration+system);
-                  # step +3 from prior 46 floor (baseline 51.4%, 2026-04-17) — INIT-001/SPEC-005.
-                  # Raise by 2-5 pts each quarter as coverage grows.
+fail_under = 65  # INIT-025/SPEC-012 floor (measured 71.3% combined unit+regression+integration+system).
 
 [tool.pytest-benchmark]
 disable_gc = true

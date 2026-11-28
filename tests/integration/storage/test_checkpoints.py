@@ -133,16 +133,21 @@ def test_postgres_sql_artifact_present_for_dual_backend():
 @pytest.mark.asyncio
 @pytest.mark.skipif(
     not os.environ.get("ARCHIVIST_TEST_DATABASE_URL")
+    and not os.environ.get("POSTGRES_TEST_DSN")
     and not (
         os.environ.get("GRAPH_BACKEND", "").lower() == "postgres" and os.environ.get("DATABASE_URL")
     ),
-    reason="Postgres unavailable — set ARCHIVIST_TEST_DATABASE_URL to exercise live DDL",
+    reason="Postgres unavailable — set POSTGRES_TEST_DSN or ARCHIVIST_TEST_DATABASE_URL to exercise live DDL",
 )
 async def test_postgres_schema_creates_agent_checkpoints_idempotently():
     """ac-1 (Postgres live): apply schema_postgres.sql twice when a DSN is configured."""
     import asyncpg
 
-    dsn = os.environ.get("ARCHIVIST_TEST_DATABASE_URL") or os.environ["DATABASE_URL"]
+    dsn = (
+        os.environ.get("ARCHIVIST_TEST_DATABASE_URL")
+        or os.environ.get("POSTGRES_TEST_DSN")
+        or os.environ["DATABASE_URL"]
+    )
     ddl = _POSTGRES_SQL.read_text(encoding="utf-8")
     conn = await asyncpg.connect(dsn)
     try:

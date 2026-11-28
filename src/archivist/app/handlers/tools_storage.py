@@ -6,7 +6,7 @@ import logging
 import time
 import uuid
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 from mcp.types import TextContent, Tool
 from qdrant_client.models import PointStruct
@@ -945,7 +945,7 @@ async def _handle_store_inner(
 
     pid = str(uuid.uuid4())
 
-    _fact_kw = dict(
+    _fact_kw: dict[str, Any] = dict(
         retention_class=retention,
         namespace=namespace or "global",
         memory_id=pid,
@@ -1681,8 +1681,8 @@ async def _handle_compress(arguments: dict) -> list[TextContent]:
     stored_data = {}
     try:
         stored_data = json.loads(store_result[0].text)
-    except Exception:
-        pass
+    except (json.JSONDecodeError, IndexError, AttributeError, TypeError) as exc:
+        logger.warning("compress_memories: failed to parse store response: %s", exc)
 
     if not stored_data.get("stored"):
         return error_response(
@@ -1792,7 +1792,7 @@ async def _handle_pin(arguments: dict) -> list[TextContent]:
                     entity_name,
                     retention_class="permanent",
                     namespace=namespace or "global",
-                    conn=conn,
+                    conn=cast(Any, conn),
                 )
                 pinned.append({"type": "entity", "name": entity_name, "id": eid, "created": True})
 

@@ -15,11 +15,14 @@ Covers:
 - Orphan sweeper reconciles SQLite vs Qdrant
 """
 
+import logging
 import sqlite3
 from datetime import UTC
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+logger = logging.getLogger(__name__)
 
 pytestmark = [pytest.mark.integration, pytest.mark.lifecycle]
 
@@ -1856,8 +1859,8 @@ class TestNeedleHaystackIsolation:
                     "INSERT OR REPLACE INTO memory_fts_exact(rowid, text) VALUES (?, ?)",
                     (row_id, text),
                 )
-            except Exception:
-                pass
+            except sqlite3.OperationalError as exc:
+                logger.debug("memory_fts_exact populate skipped: %s", exc)
         conn.commit()
 
         await graph.register_needle_tokens("needle-id", self._NEEDLE_TEXT, namespace=ns)
@@ -2064,8 +2067,8 @@ class TestFTSExcludedFilter:
                 conn.execute(
                     "INSERT INTO memory_fts_exact(rowid, text) VALUES (?, ?)", (row_id, text)
                 )
-            except Exception:
-                pass
+            except sqlite3.OperationalError as exc:
+                logger.debug("memory_fts_exact insert skipped: %s", exc)
         conn.commit()
         conn.close()
 

@@ -110,7 +110,9 @@ async def dual_pool(request, tmp_path, monkeypatch):
         yield backend, "postgres"
 
         async with backend.write() as conn:
+            await conn.execute("DELETE FROM relationships WHERE namespace = 'dual_test'")
             await conn.execute("DELETE FROM needle_registry WHERE namespace = 'dual_test'")
+            await conn.execute("DELETE FROM memory_chunks WHERE namespace = 'dual_test'")
             await conn.execute("DELETE FROM facts WHERE namespace = 'dual_test'")
             await conn.execute("DELETE FROM entities WHERE namespace = 'dual_test'")
 
@@ -430,8 +432,6 @@ async def test_dual_hotness_batch_update(dual_pool):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("dual_pool", ["sqlite"], indirect=True)
 async def test_dual_upsert_fts_chunk_tier_columns(dual_pool):
     """upsert_fts_chunk persists importance and tier_label on both backends."""
     backend, backend_name = dual_pool
@@ -444,6 +444,7 @@ async def test_dual_upsert_fts_chunk_tier_columns(dual_pool):
         text="Phase 1 tier test",
         file_path=f"test/{backend_name}",
         chunk_index=0,
+        namespace="dual_test",
         importance=0.8,
         tier_label="l1",
     )
@@ -465,8 +466,6 @@ async def test_dual_upsert_fts_chunk_tier_columns(dual_pool):
         await conn.execute("DELETE FROM memory_chunks WHERE qdrant_id = ?", (qid,))
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("dual_pool", ["sqlite"], indirect=True)
 async def test_dual_upsert_fts_chunk_defaults(dual_pool):
     """upsert_fts_chunk stores safe defaults when importance/tier_label are omitted."""
     backend, backend_name = dual_pool
@@ -479,6 +478,7 @@ async def test_dual_upsert_fts_chunk_defaults(dual_pool):
         text="default tier test",
         file_path=f"test/{backend_name}",
         chunk_index=1,
+        namespace="dual_test",
     )
 
     async with backend.read() as conn:
@@ -499,3 +499,76 @@ async def test_dual_upsert_fts_chunk_defaults(dual_pool):
     # Cleanup
     async with backend.write() as conn:
         await conn.execute("DELETE FROM memory_chunks WHERE qdrant_id = ?", (qid,))
+
+
+# ---------------------------------------------------------------------------
+# FTS search, suppression filter, relationships & delete cascade parity
+# ---------------------------------------------------------------------------
+
+
+async def test_dual_fts_search_and_suppression_filter(dual_pool):
+    """search_fts returns active rows and hides suppressed rows on both backends."""
+    backend, backend_name = dual_pool
+    from archivist.storage.graph import (
+        delete_fts_chunks_batch,
+        search_fts,
+        upsert_fts_chunk,
+    )
+
+    active_id = f"fts-dual-active-{backend_name}"
+    suppressed_id = f"fts-dual-suppressed-{backend_name}"
+
+    await upsert_fts_chunk(
+        qdrant_id=active_id,
+        text="xylophone telemetry pipeline active record",
+        file_path=f"dual/{backend_name}/active.md",
+        chunk_index=0,
+        namespace="dual_test",
+    )
+    await upsert_fts_chunk(
+        qdrant_id=suppressed_id,
+        text="xylophone telemetry pipeline suppressed record",
+        file_path=f"dual/{backend_name}/suppressed.md",
+        chunk_index=0,
+        namespace="dual_test",
+    )
+    async with backend.write() as conn:
+        await conn.execute(
+            "UPDATE memory_chunks SET is_suppressed = 1 WHERE qdrant_id = ?",
+            (suppressed_id,),
+        )
+
+    results = await search_fts("xylophone telemetry", namespace="dual_test")
+    ids = {r["qdrant_id"] for r in results}
+    assert active_id in ids, f"[{backend_name}] active chunk missing from FTS results"
+    assert suppressed_id not in ids, f"[{backend_name}] suppressed chunk leaked into FTS results"
+
+    await delete_fts_chunks_batch([active_id, suppressed_id])
+    after = await search_fts("xylophone telemetry", namespace="dual_test")
+    after_ids = {r["qdrant_id"] for r in after}
+    assert active_id not in after_ids, f"[{backend_name}] deleted chunk still present in FTS"
+
+
+async def test_dual_relationship_upsert_parity(dual_pool):
+    """add_relationship persists edges identically on SQLite and Postgres."""
+    backend, backend_name = dual_pool
+    from archivist.storage.graph import add_relationship, upsert_entity
+
+    src = await upsert_entity(f"RelSrcDual_{backend_name}", "service", namespace="dual_test")
+    tgt = await upsert_entity(f"RelTgtDual_{backend_name}", "service", namespace="dual_test")
+    await add_relationship(
+        src,
+        tgt,
+        "depends_on",
+        "service dependency",
+        namespace="dual_test",
+    )
+
+    async with backend.read() as conn:
+        rows = await conn.fetchall(
+            "SELECT relation_type FROM relationships "
+            "WHERE source_entity_id = ? AND target_entity_id = ?",
+            (src, tgt),
+        )
+    assert len(rows) >= 1, f"[{backend_name}] relationship row not found"
+    assert rows[0]["relation_type"] == "depends_on"
