@@ -259,20 +259,6 @@ def _print_summary_table(summary: dict, total_queries: int) -> None:
         )
         dur = f"{stats['avg_duration_ms']:.0f}" if stats["avg_duration_ms"] is not None else "N/A"
         print(f"  {policy:<20} {avg_s:>14} {min_s:>8} {max_s:>8} {saved:>14} {dur:>8}")
-    print(header)
-    print()
-
-    # Competitor reference (documented baselines — not live-measured)
-    print("  Competitor Reference (documented / estimated — full-history baselines)")
-    print(f"  {'-' * 64}")
-    competitors = [
-        ("Mem0 (flat list)", "~0%", "Returns all memories as flat list; no token budgeting"),
-        ("Letta/MemGPT (paging)", "~20%", "In-context paging; drops old blocks, not tier-aware"),
-        ("Zep (entity graph)", "~15%", "Entity extraction only; no L0/L1/L2 tiers"),
-        ("Graphiti (graph only)", "~30%", "Graph traversal only; no FTS rescue; no budget API"),
-    ]
-    for name, savings, note in competitors:
-        print(f"  {name:<25} {savings:>8}    {note}")
     print(header + "\n")
 
 

@@ -113,19 +113,6 @@ VARIANTS = {
         "RETRIEVAL_THRESHOLD": "0.2",
         "SYNTHETIC_QUESTIONS_ENABLED": "false",
     },
-    "vector_plus_synth": {
-        **_COMMON_DISABLED,
-        "BM25_ENABLED": "false",
-        "RETRIEVAL_THRESHOLD": "0.2",
-        "SYNTHETIC_QUESTIONS_ENABLED": "true",
-    },
-    "vector_plus_synth_plus_reranker": {
-        **_COMMON_DISABLED,
-        "BM25_ENABLED": "false",
-        "RERANKER_ENABLED": "true",
-        "RETRIEVAL_THRESHOLD": "0.0",
-        "SYNTHETIC_QUESTIONS_ENABLED": "true",
-    },
     # ── v2 clean nominate-then-rerank (Phase 3) ──────────────────────────────
     # Full nomination pool (vector + synth + BM25 + needle registry + graph)
     # → ID-dedupe → cross-encoder rerank → top-K.  No RRF, no threshold, no
@@ -999,14 +986,7 @@ async def _run_benchmark_session(
     )
 
     if not skip_index:
-        if any(
-            v in variant_names
-            for v in (
-                "vector_plus_synth",
-                "vector_plus_synth_plus_reranker",
-                "clean_reranker",
-            )
-        ):
+        if "clean_reranker" in variant_names:
             os.environ["SYNTHETIC_QUESTIONS_ENABLED"] = "true"
         await index_corpus(corpus_dir, memory_scale=memory_scale)
 

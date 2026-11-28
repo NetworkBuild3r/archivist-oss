@@ -38,16 +38,7 @@ if [[ -f .env && ! -f /.dockerenv ]]; then
   set +a
 fi
 
-# Fast profile: disable write-time LLM enrichment to keep indexing fast.
-# Set BENCHMARK_FAST=0 if you need full-fidelity indexing.
-if [[ "${BENCHMARK_FAST:-1}" != "0" ]]; then
-  export REVERSE_HYDE_ENABLED=false
-  export SYNTHETIC_QUESTIONS_ENABLED=false
-  export QUERY_EXPANSION_ENABLED=false
-  export TIERED_CONTEXT_ENABLED=false
-  export CONTEXTUAL_AUGMENTATION_ENABLED=false
-fi
-
+# Runs unmodified production ArchivistSettings per variant (no BENCHMARK_FAST drift; INIT-023/SPEC-003 B5).
 # ── Config ───────────────────────────────────────────────────────────────────
 LIMIT="${LIMIT:-0}"
 VARIANTS="${VARIANTS:-vector_only,full_pipeline,full_plus_topic,full_plus_rerank}"
@@ -83,7 +74,6 @@ echo "  Git:       ${GIT_BRANCH} @ ${GIT_SHA}"
 echo "  Variants:  $VARIANTS"
 echo "  Questions: $LIMIT_LABEL"
 echo "  Search-k:  $SEARCH_LIMIT"
-echo "  FAST:      ${BENCHMARK_FAST:-1}"
 if [[ -n "${BENCHMARK_JUDGE_LLM_URL:-}" ]]; then
   echo "  Judge:     ${BENCHMARK_JUDGE_LLM_URL}  (model: ${BENCHMARK_JUDGE_LLM_MODEL:-<unset>})"
 else

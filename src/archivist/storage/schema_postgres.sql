@@ -117,6 +117,13 @@ CREATE TABLE IF NOT EXISTS curator_state (
 );
 
 
+CREATE TABLE IF NOT EXISTS archivist_meta (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+
 CREATE TABLE IF NOT EXISTS memory_versions (
     id              SERIAL PRIMARY KEY,
     memory_id       TEXT NOT NULL,

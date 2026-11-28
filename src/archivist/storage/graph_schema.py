@@ -12,6 +12,7 @@ import os
 import sqlite3
 import threading
 from contextlib import contextmanager
+from typing import Any
 
 logger = logging.getLogger("archivist.graph")
 
@@ -114,16 +115,16 @@ def schema_guard(ddl: str):
     """
     _lock = threading.Lock()
 
-    def _ensure():
-        if _ensure.applied:
+    def _ensure() -> None:
+        if _ensure_any.applied:
             return
         with _lock:
             # Double-checked: another thread may have run DDL while we waited.
-            if _ensure.applied:
+            if _ensure_any.applied:
                 return
             # On Postgres all schema is handled by init_schema_async(); skip.
             if _is_postgres():
-                _ensure.applied = True
+                _ensure_any.applied = True
                 return
             conn = get_db()
             try:
@@ -131,14 +132,15 @@ def schema_guard(ddl: str):
                 conn.commit()
             finally:
                 conn.close()
-            _ensure.applied = True
+            _ensure_any.applied = True
 
-    def _reset():
-        _ensure.applied = False
+    def _reset() -> None:
+        _ensure_any.applied = False
 
-    _ensure.applied = False
-    _ensure.reset = _reset
-    return _ensure
+    _ensure_any: Any = _ensure
+    _ensure_any.applied = False
+    _ensure_any.reset = _reset
+    return _ensure_any
 
 
 def init_schema():
@@ -228,6 +230,12 @@ def init_schema():
         CREATE TABLE IF NOT EXISTS curator_state (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS archivist_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS memory_versions (

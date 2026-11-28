@@ -13,7 +13,6 @@
 #   bash benchmarks/scripts/run_thin_reference.sh
 #   LIMIT_LM=50 LIMIT_BEIR=100 bash benchmarks/scripts/run_thin_reference.sh
 #   SKIP_BEIR=1 bash benchmarks/scripts/run_thin_reference.sh   # LongMemEval only
-#   BENCHMARK_FAST=0 bash benchmarks/scripts/run_thin_reference.sh  # full pipeline (slow)
 #
 set -euo pipefail
 
@@ -31,16 +30,7 @@ if [[ -f .env && ! -f /.dockerenv ]]; then
   set +a
 fi
 
-# Fast profile (default): skip index-time reverse HyDE + other optional LLM paths.
-# Set BENCHMARK_FAST=0 to use whatever is in .env (full fidelity, much slower).
-if [[ "${BENCHMARK_FAST:-1}" != "0" ]]; then
-  export REVERSE_HYDE_ENABLED=false
-  export SYNTHETIC_QUESTIONS_ENABLED=false
-  export QUERY_EXPANSION_ENABLED=false
-  export TIERED_CONTEXT_ENABLED=false
-  export CONTEXTUAL_AUGMENTATION_ENABLED=false
-fi
-
+# Runs unmodified production ArchivistSettings (--profile default; INIT-023/SPEC-003 B5).
 LIMIT_LM="${LIMIT_LM:-20}"
 LIMIT_BEIR="${LIMIT_BEIR:-50}"
 OUT_LM="${OUT_LM:-.benchmarks/longmemeval_thin.json}"
@@ -52,7 +42,7 @@ echo "=============================================="
 echo "  Thin reference benchmarks  (repo: $ROOT)"
 echo "  LongMemEval limit: $LIMIT_LM  → $OUT_LM"
 echo "  BEIR queries:      $LIMIT_BEIR → $OUT_BEIR"
-echo "  BENCHMARK_FAST:    ${BENCHMARK_FAST:-1}  (0 = use .env only, no speed overrides)"
+echo "  Profile:           default (unmodified production ArchivistSettings)"
 if [[ -n "${BENCHMARK_JUDGE_LLM_URL:-}" ]]; then
   echo "  Judge LLM:         ${BENCHMARK_JUDGE_LLM_URL}  (model: ${BENCHMARK_JUDGE_LLM_MODEL:-<unset>})"
 else
@@ -72,10 +62,11 @@ if [[ ! -f "$LM" ]]; then
 fi
 
 echo ""
-echo "[1/2] LongMemEval adapter (limit=$LIMIT_LM, --no-refine for speed)..."
+echo "[1/2] LongMemEval adapter (limit=$LIMIT_LM, --profile default --no-refine)..."
 # shellcheck disable=SC2086
 python -m benchmarks.academic.longmemeval.adapter \
   --data-file "$LM" \
+  --profile default \
   --limit "$LIMIT_LM" \
   --no-refine \
   --output "$OUT_LM"

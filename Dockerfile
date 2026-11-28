@@ -17,6 +17,9 @@ RUN addgroup --system --gid $GID archivist \
 
 USER archivist
 
+# Containers explicitly opt into all-interface binding; bare-metal defaults to 127.0.0.1.
+ENV ARCHIVIST_HOST=0.0.0.0
+
 EXPOSE 3100
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \

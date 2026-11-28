@@ -69,6 +69,7 @@ def pack_context(
     tier_policy: str = "adaptive",
     l0_budget_share: float = 0.30,
     min_full_results: int = 3,
+    query: str = "",
 ) -> PackedContext:
     """Pack *results* into a token budget using the specified tier policy.
 
@@ -84,6 +85,8 @@ def pack_context(
             in adaptive mode (default 0.30).
         min_full_results: Minimum number of results that should be upgraded to
             their best available tier regardless of budget.
+        query: Optional retrieval query used for query-centered extractive L1
+            snippets when pre-computed L1 summaries are absent.
 
     Returns:
         :class:`PackedContext` with packed sources and metadata.
@@ -101,10 +104,14 @@ def pack_context(
 
     policy = tier_policy.lower()
     if policy == "l2_first":
-        return _pack_greedy(results, max_tokens, prefer_tier="l2", min_full=min_full_results)
+        return _pack_greedy(
+            results, max_tokens, prefer_tier="l2", min_full=min_full_results, query=query
+        )
     if policy == "l0_first":
-        return _pack_greedy(results, max_tokens, prefer_tier="l0", min_full=min_full_results)
-    return _pack_adaptive(results, max_tokens, l0_budget_share, min_full_results)
+        return _pack_greedy(
+            results, max_tokens, prefer_tier="l0", min_full=min_full_results, query=query
+        )
+    return _pack_adaptive(results, max_tokens, l0_budget_share, min_full_results, query=query)
 
 
 # ---------------------------------------------------------------------------
@@ -112,15 +119,20 @@ def pack_context(
 # ---------------------------------------------------------------------------
 
 
-def _best_tier_text(result: dict, tier: str) -> str:
-    """Return the best available tier text for *result* at or below *tier*."""
+def _best_tier_text(result: dict, tier: str, query: str = "") -> str:
+    """Return the richest available tier text for *result* at or below *tier*.
+
+    Iterates downward from *tier* (``l2 -> l1 -> l0``) so requesting ``"l2"``
+    returns true full content first (falling back to L1 then L0), and requesting
+    ``"l1"`` returns L1 (or a query-centered extractive L1 window) before L0.
+    """
     order = _TIER_ORDER
     idx = order.index(tier) if tier in order else len(order) - 1
-    for t in order[: idx + 1]:
-        text = select_tier(result, t)
+    for t in reversed(order[: idx + 1]):
+        text = select_tier(result, t, query=query)
         if text:
             return text
-    return select_tier(result, "l2") or ""
+    return select_tier(result, "l2", query=query) or ""
 
 
 def _naive_l2_tokens(results: list[dict]) -> int:
@@ -133,6 +145,7 @@ def _pack_greedy(
     max_tokens: int,
     prefer_tier: str,
     min_full: int,
+    query: str = "",
 ) -> PackedContext:
     """Single-pass greedy packing: include results at *prefer_tier* until budget exhausted."""
     budget = 0
@@ -144,7 +157,7 @@ def _pack_greedy(
 
     for i, r in enumerate(results):
         tier = prefer_tier
-        text = _best_tier_text(r, tier)
+        text = _best_tier_text(r, tier, query=query)
         toks = count_tokens(text)
         if budget + toks > max_tokens and i >= min_full:
             dropped += 1
@@ -176,6 +189,7 @@ def _pack_adaptive(
     max_tokens: int,
     l0_budget_share: float,
     min_full: int,
+    query: str = "",
 ) -> PackedContext:
     """3-pass adaptive packing: L0 → L1 upgrade → L2 upgrade for top-K."""
     l0_cap = int(max_tokens * l0_budget_share)
@@ -185,7 +199,7 @@ def _pack_adaptive(
     slots: list[dict] = []
     budget = 0
     for r in results:
-        text = _best_tier_text(r, "l0")
+        text = _best_tier_text(r, "l0", query=query)
         toks = count_tokens(text)
         if budget + toks <= l0_cap or len(slots) < min_full:
             slots.append({"result": r, "tier": "l0", "text": text, "tokens": toks})
@@ -201,7 +215,7 @@ def _pack_adaptive(
             break
         if slot["tier"] != "l0":
             continue
-        l1_text = _best_tier_text(slot["result"], "l1")
+        l1_text = _best_tier_text(slot["result"], "l1", query=query)
         l1_toks = count_tokens(l1_text)
         delta = l1_toks - slot["tokens"]
         if delta <= remaining_cap:
@@ -218,7 +232,7 @@ def _pack_adaptive(
             break
         if slot["tier"] not in ("l1", "l0"):
             continue
-        l2_text = _best_tier_text(slot["result"], "l2")
+        l2_text = _best_tier_text(slot["result"], "l2", query=query)
         l2_toks = count_tokens(l2_text)
         delta = l2_toks - slot["tokens"]
         if delta <= remaining_cap:
