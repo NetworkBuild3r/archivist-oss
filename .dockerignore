@@ -10,6 +10,8 @@ __pycache__
 .env.*
 !.env.example
 *.md
+!README.md
+!src/archivist/app/docs_data/*.md
 docs/
 benchmarks/
 tests/

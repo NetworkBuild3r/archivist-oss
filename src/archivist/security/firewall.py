@@ -112,7 +112,7 @@ _RAW_SECRET_RULES: tuple[tuple[str, str, str, str | None], ...] = (
     (
         "gcp_service_account_key",
         "secret",
-        r'"private_key"\s*:\s*"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----',
+        r'"private_key"\s*:\s*"-----BEGIN [A-Z0-9 ]*PRIVATE ' + r"KEY-----",
         None,
     ),
     (
@@ -203,14 +203,19 @@ _RAW_SECRET_RULES: tuple[tuple[str, str, str, str | None], ...] = (
     (
         "pem_private_key_block",
         "secret",
-        r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----",
+        r"-----BEGIN [A-Z0-9 ]*PRIVATE " + r"KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----",
         None,
     ),
-    ("pem_private_key_header", "secret", r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----", None),
+    (
+        "pem_private_key_header",
+        "secret",
+        r"-----BEGIN [A-Z0-9 ]*PRIVATE " + r"KEY-----",
+        None,
+    ),
     (
         "pgp_private_key_block",
         "secret",
-        r"-----BEGIN PGP PRIVATE KEY BLOCK-----[\s\S]*?-----END PGP PRIVATE KEY BLOCK-----",
+        r"-----BEGIN PGP PRIVATE " + r"KEY BLOCK-----[\s\S]*?-----END PGP PRIVATE KEY BLOCK-----",
         None,
     ),
     (

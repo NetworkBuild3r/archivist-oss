@@ -12,7 +12,6 @@ import sys
 import time
 from pathlib import Path
 
-import numpy as np
 import pytest
 
 from archivist.app.daemon import ArchivistDaemon, read_peer_credentials, verify_peer_uid
@@ -176,8 +175,8 @@ class TestArchivistdAndStdioShim:
                 assert "<archivist_memory " in ctx_p["context"]
                 assert f"alpha_{idx}" in ctx_p["context"]
 
-            p95_ping = float(np.percentile(ping_latencies, 95))
-            assert p95_ping < 25.0, f"Warm stdio ping p95={p95_ping:.2f}ms exceeded 25ms"
+            max_ping = max(ping_latencies)
+            assert max_ping < 25.0, f"Warm stdio ping max={max_ping:.2f}ms exceeded 25ms"
         finally:
             await daemon.stop()
             assert not sock_path.exists()

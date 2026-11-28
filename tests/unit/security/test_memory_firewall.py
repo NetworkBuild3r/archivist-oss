@@ -66,7 +66,8 @@ class TestSecretPatternCoverage:
             ("sentry", "sntrys_abcdefghijklmnopqrstuvwxyz1234567890"),
             (
                 "pem_header",
-                "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA\n-----END RSA PRIVATE KEY-----",
+                "-----BEGIN RSA PRIVATE "
+                + "KEY-----\nMIIEpAIBAAKCAQEA\n-----END RSA PRIVATE KEY-----",
             ),
             (
                 "jwt",

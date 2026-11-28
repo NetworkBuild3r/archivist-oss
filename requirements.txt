@@ -13,6 +13,10 @@ aiosqlite>=0.20.0
 # Pydantic Settings v2 (config system — replaces raw os.getenv pattern)
 pydantic-settings>=2.14.2
 
+# v3 Wave 2: linear-time RE2 Memory Firewall (SPEC-010) & local SQLite vector index (SPEC-006)
+google-re2>=1.1
+sqlite-vec>=0.1.6
+
 # Dev / test dependencies — see requirements-test.txt (used by CI)
 # pytest-benchmark>=5.1.0
 

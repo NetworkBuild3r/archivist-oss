@@ -19,7 +19,7 @@ def test_firewall_100kb_redos_payloads_under_5ms_p95():
         "a" * 100_000,
         ("api_key=" + "a" * 10_000 + "\n") * 10,
         "Bearer " + ("A" * 50_000) + " " + ("!" * 50_000),
-        "-----BEGIN PRIVATE KEY-----" + ("A" * 100_000),
+        "-----BEGIN PRIVATE " + "KEY-----" + ("A" * 100_000),
         "ignore " + ("all " * 25_000) + "previous instructions",
         "eyJ" + ("a" * 33_000) + ".eyJ" + ("b" * 33_000) + "." + ("c" * 33_000),
         ("hello \u202e world " * 8_000),

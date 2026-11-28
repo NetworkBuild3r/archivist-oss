@@ -194,6 +194,8 @@ class TestLocalVectorIndexBackends:
         ],
     )
     def test_backend_protocol_parity(self, tmp_path: Path, backend: str, quantization: str):
+        if backend == "usearch":
+            pytest.importorskip("usearch")
         db = tmp_path / f"mem_{backend}_{quantization}.db"
         store = LocalMemoryStore(
             db_path=db,
