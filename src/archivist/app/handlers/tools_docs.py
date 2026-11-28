@@ -1,27 +1,68 @@
-"""MCP tool handler — reference documentation for agents.
+"""MCP tool handler — reference documentation for agents (INIT-024/SPEC-005).
 
-Exposes archivist_get_reference_docs so any connected agent can retrieve the
-full tool skill guide (or a named section of it) without requiring out-of-band
-documentation.
+Resolves bundled reference docs from ``archivist.app.docs_data`` via
+``importlib.resources`` so installed wheels (including ``uvx``) never depend on
+repository-relative paths outside the package.
 """
+
+from __future__ import annotations
 
 import json
 import logging
+from importlib import resources
 from pathlib import Path
 
 from mcp.types import TextContent, Tool
 
 logger = logging.getLogger("archivist.mcp")
 
-# Primary reference document bundled with the repo.
-# Fall back to REFERENCE.md if the skill doc is missing (shouldn't happen in
-# normal deployments, but makes the handler robust during development).
-_SKILL_DOC = Path(__file__).parent.parent.parent / "docs" / "CURSOR_SKILL.md"
-_FALLBACK_DOC = Path(__file__).parent.parent.parent / "docs" / "REFERENCE.md"
+
+def _bundled_docs_dir() -> Path:
+    """Return filesystem path to bundled ``archivist.app.docs_data`` directory."""
+    return Path(str(resources.files("archivist.app.docs_data")))
+
+
+_BUNDLED_DIR = _bundled_docs_dir()
+_SKILL_DOC = _BUNDLED_DIR / "CURSOR_SKILL.md"
+_FALLBACK_DOC = _BUNDLED_DIR / "REFERENCE.md"
+
+_DOC_TOPICS: dict[str, str] = {
+    "skill": "CURSOR_SKILL.md",
+    "cursor": "CURSOR_SKILL.md",
+    "reference": "REFERENCE.md",
+    "tools": "CURSOR_SKILL.md",
+    "overview": "REFERENCE.md",
+}
 
 
 def _doc_path() -> Path:
     return _SKILL_DOC if _SKILL_DOC.exists() else _FALLBACK_DOC
+
+
+def list_bundled_doc_topics() -> list[str]:
+    """Return available topic slugs for ``archivist://docs/{topic}``."""
+    return sorted(_DOC_TOPICS.keys())
+
+
+def read_bundled_doc(topic: str = "skill") -> str | None:
+    """Read a bundled reference document (or heading section) via ``importlib.resources``."""
+    norm = (topic or "skill").strip().lower()
+    docs_root = resources.files("archivist.app.docs_data")
+
+    filename = _DOC_TOPICS.get(norm)
+    if filename:
+        res = docs_root.joinpath(filename)
+        if res.is_file():
+            return res.read_text(encoding="utf-8")
+
+    # Also allow matching a section heading inside the primary skill doc.
+    primary = _doc_path()
+    if primary.exists():
+        full_text = primary.read_text(encoding="utf-8")
+        for heading, block in _split_sections(full_text):
+            if norm and heading and norm in heading.lower():
+                return block
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -96,7 +137,7 @@ async def _handle_get_reference_docs(arguments: dict) -> list[TextContent]:
                     {
                         "error": "reference_docs_not_found",
                         "tried": [str(_SKILL_DOC), str(_FALLBACK_DOC)],
-                        "hint": "Neither docs/CURSOR_SKILL.md nor docs/REFERENCE.md was found in the deployment.",
+                        "hint": "Neither CURSOR_SKILL.md nor REFERENCE.md was found in archivist.app.docs_data.",
                     }
                 ),
             )

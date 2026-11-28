@@ -1,9 +1,12 @@
 """Central tool registry — aggregates tool definitions and handlers from domain modules.
 
-INIT-003/SPEC-003: ``get_all_tools`` / ``dispatch_tool`` honor
-``ARCHIVIST_TOOL_PROFILE`` (core|ops|full). Non-core tools stay registered;
-the profile only gates discovery and invocation.
+INIT-024/SPEC-008: ``get_all_tools`` / ``dispatch_tool`` honor
+``ARCHIVIST_TOOL_PROFILE`` (coding|core|legacy|ops|full). Default ``coding``
+exposes the pruned 5-tool v3 coding surface (<900 schema tokens). Non-allowed
+tools stay registered in ``TOOL_REGISTRY`` and fail closed on dispatch.
 """
+
+from __future__ import annotations
 
 import logging
 import time
@@ -37,6 +40,7 @@ from .tools_storage import HANDLERS as STORAGE_HANDLERS
 from .tools_storage import TOOLS as STORAGE_TOOLS
 from .tools_trajectory import HANDLERS as TRAJECTORY_HANDLERS
 from .tools_trajectory import TOOLS as TRAJECTORY_TOOLS
+from .v3_coding import CODING_HANDLERS, CODING_TOOL_NAMES, CODING_TOOLS
 
 logger = logging.getLogger("archivist.mcp")
 
@@ -44,6 +48,7 @@ HandlerFn = Callable[[dict], Awaitable[list[TextContent]]]
 
 TOOL_REGISTRY: dict[str, HandlerFn] = {}
 for _handlers in (
+    CODING_HANDLERS,
     SEARCH_HANDLERS,
     STORAGE_HANDLERS,
     TRAJECTORY_HANDLERS,
@@ -59,7 +64,8 @@ for _handlers in (
     TOOL_REGISTRY.update(cast(dict[str, HandlerFn], _handlers))
 
 ALL_TOOLS: list[Tool] = (
-    SEARCH_TOOLS
+    CODING_TOOLS
+    + SEARCH_TOOLS
     + STORAGE_TOOLS
     + TRAJECTORY_TOOLS
     + ADMIN_TOOLS
@@ -71,11 +77,7 @@ ALL_TOOLS: list[Tool] = (
     + MAP_TOOLS
 )
 
-# Coach-core surface (ADR-003 five-tool contract + small read helpers). ≤12.
-# Forget path: ADR names ``archivist_forget``; core tool is ``archivist_delete``
-# with ``mode=delete|suppress`` (INIT-003/SPEC-006). No separate forget tool —
-# keeps core ≤12 (GR-PROD-002).
-# INIT-003/SPEC-003
+# Legacy v2.5 coach-core surface (INIT-003/SPEC-003, retained under core/legacy).
 CORE_TOOL_NAMES: frozenset[str] = frozenset(
     {
         "archivist_store",
@@ -89,8 +91,6 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset(
     }
 )
 
-# Checkpoint tools are promoted to ops under INIT-012/SPEC-003 (ADR-012).
-# ``archivist_share_*`` / ``archivist_map_*`` remain on ops (not core).
 # Empty hide list: ops currently equals full until the next unfinished wedge.
 _OPS_HIDDEN_PREFIXES: tuple[str, ...] = ()
 
@@ -104,20 +104,22 @@ def allowed_tool_names(profile: str | None = None) -> frozenset[str]:
         return frozenset(
             t.name for t in ALL_TOOLS if not any(t.name.startswith(p) for p in _OPS_HIDDEN_PREFIXES)
         )
-    # Default / unknown → core (fail closed to smallest surface)
-    return CORE_TOOL_NAMES
+    if resolved in ("core", "legacy"):
+        return CORE_TOOL_NAMES
+    # Default / unknown → coding (fail closed to smallest 5-tool surface, <900 tok)
+    return CODING_TOOL_NAMES
 
 
-def get_all_tools() -> list[Tool]:
+def get_all_tools(profile: str | None = None) -> list[Tool]:
     """Tools exposed via MCP ``list_tools`` for the active profile."""
-    allowed = allowed_tool_names()
+    allowed = allowed_tool_names(profile)
     return [t for t in ALL_TOOLS if t.name in allowed]
 
 
 async def dispatch_tool(name: str, arguments: dict) -> list[TextContent]:
     """Look up a handler by tool name and call it, with top-level error handling.
 
-    Hidden-by-profile tools fail closed with a clear error (INIT-003/SPEC-003).
+    Hidden-by-profile tools fail closed with a clear error (INIT-024/SPEC-008).
     """
     allowed = allowed_tool_names()
     if name not in allowed:
@@ -126,8 +128,8 @@ async def dispatch_tool(name: str, arguments: dict) -> list[TextContent]:
                 {
                     "error": (
                         f"Tool '{name}' is not available in tool profile "
-                        f"'{config.TOOL_PROFILE}'. Set ARCHIVIST_TOOL_PROFILE=full "
-                        "(or ops) to enable."
+                        f"'{config.TOOL_PROFILE}'. Set ARCHIVIST_TOOL_PROFILE=core|ops|full "
+                        "to enable."
                     )
                 }
             )

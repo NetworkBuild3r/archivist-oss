@@ -43,12 +43,12 @@ class TestCoreProfileMembership:
         assert not any(n.startswith("archivist_checkpoint_") for n in names)
         assert not any(n.startswith("archivist_map_") for n in names)
 
-    def test_default_profile_is_core(self):
+    def test_default_profile_is_coding(self):
         from archivist.core.config import ArchivistSettings
 
-        assert ArchivistSettings.model_fields["archivist_tool_profile"].default == "core"
+        assert ArchivistSettings.model_fields["archivist_tool_profile"].default == "coding"
         s = ArchivistSettings.model_construct()
-        assert s.archivist_tool_profile == "core"
+        assert s.archivist_tool_profile == "coding"
 
 
 class TestOpsAndFullProfiles:

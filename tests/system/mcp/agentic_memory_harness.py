@@ -61,6 +61,7 @@ def namespace_for_agent(agent_id: str) -> str:
 
 def configure_agentic_store_flags(monkeypatch) -> None:
     """Disable optional pre-ack enrichment for deterministic CI stores."""
+    monkeypatch.setattr("archivist.core.config.TOOL_PROFILE", "core")
     monkeypatch.setattr("archivist.core.config.OUTBOX_ENABLED", True)
     monkeypatch.setattr("archivist.core.config.CONFLICT_CHECK_ON_STORE", False)
     monkeypatch.setattr("archivist.app.handlers.tools_storage.CONFLICT_CHECK_ON_STORE", False)

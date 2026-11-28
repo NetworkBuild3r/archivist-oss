@@ -44,7 +44,14 @@ pytestmark = [
 INDEX_MARKDOWN_TOKEN_CEILING = 500
 
 
+@pytest.fixture(autouse=True)
+def _use_legacy_core_tool_profile(monkeypatch) -> None:
+    """Coach-core evals target the legacy v2.5 ``core`` profile (archivist_* tools)."""
+    monkeypatch.setattr("archivist.core.config.TOOL_PROFILE", "core")
+
+
 def _configure_coach_store_flags(monkeypatch) -> None:
+    monkeypatch.setattr("archivist.core.config.TOOL_PROFILE", "core")
     monkeypatch.setattr("archivist.core.config.OUTBOX_ENABLED", True)
     monkeypatch.setattr("archivist.core.config.CONFLICT_CHECK_ON_STORE", False)
     monkeypatch.setattr("archivist.app.handlers.tools_storage.CONFLICT_CHECK_ON_STORE", False)
