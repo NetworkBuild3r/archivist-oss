@@ -124,13 +124,23 @@ async def test_store_handler_returns_text_content(qa_pool, memory_factory):
         ),
         patch(
             "archivist.write.pre_extractor.pre_extract",
-            new_callable=AsyncMock,
-            return_value=([], []),
+            return_value={
+                "entities": [],
+                "dates": [],
+                "thought_type": "general",
+                "sections": [],
+                "provenance": "deterministic",
+            },
         ),
         patch(
             "archivist.app.handlers.tools_storage.pre_extract",
-            new_callable=AsyncMock,
-            return_value=([], []),
+            return_value={
+                "entities": [],
+                "dates": [],
+                "thought_type": "general",
+                "sections": [],
+                "provenance": "deterministic",
+            },
             create=True,
         ),
         patch(
@@ -143,23 +153,18 @@ async def test_store_handler_returns_text_content(qa_pool, memory_factory):
             return_value=[],
         ),
     ):
-        try:
-            result = await _handle_store(
-                {
-                    "text": mem["text"],
-                    "agent_id": mem["agent_id"],
-                    "namespace": mem["namespace"],
-                    "actor_id": mem["actor_id"],
-                    "actor_type": mem["actor_type"],
-                }
-            )
-            assert result
-            assert result[0].type == "text"
-            assert result[0].text  # non-empty response
-        except Exception:
-            # Some deep imports may fail in isolation; verify the handler is importable
-            # and structurally sound — not a regression on the outbox path.
-            pass
+        result = await _handle_store(
+            {
+                "text": mem["text"],
+                "agent_id": mem["agent_id"],
+                "namespace": mem["namespace"],
+                "actor_id": mem["actor_id"],
+                "actor_type": mem["actor_type"],
+            }
+        )
+        assert result
+        assert result[0].type == "text"
+        assert result[0].text  # non-empty response
 
 
 # ---------------------------------------------------------------------------
@@ -321,6 +326,11 @@ async def test_store_handler_enqueues_outbox_event(qa_pool, memory_factory):
 
     with (
         patch(
+            "archivist.features.embeddings.embed_text",
+            new_callable=AsyncMock,
+            return_value=_mock_embed(),
+        ),
+        patch(
             "archivist.app.handlers.tools_storage.embed_text",
             new_callable=AsyncMock,
             return_value=_mock_embed(),
@@ -360,8 +370,13 @@ async def test_store_handler_enqueues_outbox_event(qa_pool, memory_factory):
         ),
         patch(
             "archivist.write.pre_extractor.pre_extract",
-            new_callable=AsyncMock,
-            return_value=([], []),
+            return_value={
+                "entities": [],
+                "dates": [],
+                "thought_type": "general",
+                "sections": [],
+                "provenance": "deterministic",
+            },
         ),
         patch(
             "archivist.write.contextual_augment.augment_chunk",
@@ -373,18 +388,15 @@ async def test_store_handler_enqueues_outbox_event(qa_pool, memory_factory):
             return_value=[],
         ),
     ):
-        try:
-            await _handle_store(
-                {
-                    "text": mem["text"],
-                    "agent_id": mem["agent_id"],
-                    "namespace": mem["namespace"],
-                    "actor_id": mem["actor_id"],
-                    "actor_type": mem["actor_type"],
-                }
-            )
-        except Exception:
-            pass
+        await _handle_store(
+            {
+                "text": mem["text"],
+                "agent_id": mem["agent_id"],
+                "namespace": mem["namespace"],
+                "actor_id": mem["actor_id"],
+                "actor_type": mem["actor_type"],
+            }
+        )
 
     # No failed or dead events regardless of whether the full store path ran
     assert await count_outbox(qa_pool, "dead") == 0

@@ -167,7 +167,8 @@ def _literal_search_sync(
                 limit=limit,
                 with_payload=True,
             )
-        except Exception:
+        except Exception as exc:
+            logger.debug("literal scroll skipped collection %s: %s", _coll, exc)
             continue
 
         for hit in scrolled:

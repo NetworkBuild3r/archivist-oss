@@ -233,10 +233,10 @@ async def _apply_merge(payload: dict) -> None:
     from archivist.lifecycle.merge import merge_memories
 
     decisions = payload.get("decisions", [])
-    merge_ids = [
-        d.get("existing_id")
+    merge_ids: list[str] = [
+        str(eid)
         for d in decisions
-        if isinstance(d, dict) and d.get("decision") == "merge" and d.get("existing_id")
+        if isinstance(d, dict) and d.get("decision") == "merge" and (eid := d.get("existing_id"))
     ]
     agent_id = payload.get("agent_id") or "curator"
     namespace = payload.get("namespace") or ""
@@ -398,8 +398,8 @@ def _update_depth_gauge():
         try:
             s = await stats()
             m.gauge_set(m.CURATOR_QUEUE_DEPTH, s["pending"])
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("curator_queue depth gauge update failed: %s", exc)
 
     task = loop.create_task(_gauge())
     _pending_tasks.add(task)

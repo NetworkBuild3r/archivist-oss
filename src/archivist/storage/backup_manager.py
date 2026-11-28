@@ -260,8 +260,8 @@ def _backup_qdrant_collection(collection_name: str, snap_dir: Path) -> dict:
 
     try:
         _qdrant_http("delete", dl_url)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Failed to delete temporary Qdrant snapshot %s: %s", snap_name, exc)
 
     size_bytes = out_path.stat().st_size
     logger.info(
@@ -718,12 +718,14 @@ def export_agent(
                     break
 
                 for point in results:
+                    vec = point.vector
+                    vector_val = (
+                        vec if isinstance(vec, list) else (list(vec) if vec is not None else [])
+                    )
                     record = {
                         "id": str(point.id),
                         "collection": coll,
-                        "vector": point.vector
-                        if isinstance(point.vector, list)
-                        else list(point.vector),
+                        "vector": vector_val,
                         "payload": dict(point.payload) if point.payload else {},
                     }
                     f.write(json.dumps(record, ensure_ascii=False) + "\n")

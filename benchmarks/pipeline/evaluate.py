@@ -938,7 +938,8 @@ def _seed_graph_from_fixtures(corpus_dir: str):
         try:
             with open(fpath, encoding="utf-8", errors="replace") as f:
                 text = f.read(2000).lower()
-        except Exception:
+        except OSError as exc:
+            logger.debug("Skipping unreadable corpus file %s: %s", fpath, exc)
             continue
         rel = os.path.relpath(fpath, corpus_dir)
         for name, meta in _FIXTURE_GLOSSARY.items():

@@ -764,8 +764,12 @@ async def run_longmemeval_benchmark(
                     assert qclient is not None
                     try:
                         qclient.delete_collection(config.QDRANT_COLLECTION)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.debug(
+                            "Collection %s delete before recreate skipped: %s",
+                            config.QDRANT_COLLECTION,
+                            exc,
+                        )
                     qclient.create_collection(
                         collection_name=config.QDRANT_COLLECTION,
                         vectors_config=VectorParams(
@@ -1061,8 +1065,8 @@ async def run_longmemeval_benchmark(
         if cur_pool is not None and cur_pool is not original_pool and hasattr(cur_pool, "close"):
             try:
                 await cur_pool.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Per-question pool close failed during teardown: %s", exc)
         pool_mod.pool = original_pool
         config.MEMORY_ROOT = original_memory_root
         indexer_mod.MEMORY_ROOT = original_indexer_memory_root

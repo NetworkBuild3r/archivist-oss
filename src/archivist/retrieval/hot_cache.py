@@ -154,8 +154,12 @@ def invalidate_namespace(namespace: str) -> int:
         import archivist.storage.namespace_inventory as namespace_inventory
 
         namespace_inventory.invalidate(namespace)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug(
+            "hot_cache.invalidate_namespace: inventory invalidation failed for %s: %s",
+            namespace,
+            exc,
+        )
     return evicted
 
 
@@ -180,8 +184,8 @@ def invalidate_all() -> int:
         import archivist.storage.namespace_inventory as namespace_inventory
 
         namespace_inventory.invalidate_all()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("hot_cache.invalidate_all: inventory invalidation failed: %s", exc)
     return total
 
 

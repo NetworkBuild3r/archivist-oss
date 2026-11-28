@@ -15,6 +15,11 @@ Usage::
 
 from __future__ import annotations
 
+import logging
+import sqlite3
+
+logger = logging.getLogger(__name__)
+
 _SCHEMA_SQL: str = """
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
@@ -319,6 +324,6 @@ async def build_schema(conn) -> None:
     for stmt in _FTS5_SQL:
         try:
             await conn.execute(stmt)
-        except Exception:
-            pass
+        except sqlite3.OperationalError as exc:
+            logger.debug("Skipping FTS5 table setup (%s): %s", stmt, exc)
     await conn.commit()

@@ -14,6 +14,15 @@ from tests.fixtures.mocks import make_vector_backend_mock
 from tests.fixtures.schema import build_schema
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _warmup_lazy_imports() -> None:
+    """Pre-import heavy optional modules before timed performance tests and stall checks."""
+    try:
+        import qdrant_client.models  # noqa: F401
+    except ImportError:
+        return
+
+
 @pytest.fixture
 async def qa_pool(tmp_path, monkeypatch):
     """Pool fixture matching the name from tests/qa/conftest.py.
