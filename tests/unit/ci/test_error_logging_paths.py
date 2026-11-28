@@ -282,3 +282,70 @@ async def test_compressed_index_wake_up_no_agent_filter_and_tips_error(caplog) -
 
     assert payload["total_memories"] == 0
     assert any("tips table missing" in r.getMessage() for r in caplog.records)
+
+
+async def test_graph_fts_delete_postgres_skips_rowid_query(monkeypatch) -> None:
+    """Postgres has no ``rowid`` column; deletes must go straight to DELETE."""
+    from archivist.storage import graph_fts
+
+    executed_sql: list[str] = []
+
+    class _FakeCursor:
+        def __init__(self, rowcount: int = 0) -> None:
+            self.rowcount = rowcount
+
+        async def fetchall(self):
+            return []
+
+    class _FakeConn:
+        async def execute(self, sql: str, params=None):
+            executed_sql.append(sql)
+            assert "rowid" not in sql.lower(), f"Postgres must not query rowid: {sql}"
+            return _FakeCursor(rowcount=len(params) if isinstance(params, list) else 1)
+
+    class _FakePool:
+        def write(self):
+            return self
+
+        async def __aenter__(self):
+            return _FakeConn()
+
+        async def __aexit__(self, *args):
+            return False
+
+    monkeypatch.setattr("archivist.core.config.GRAPH_BACKEND", "postgres")
+    monkeypatch.setattr("archivist.storage.sqlite_pool.pool", _FakePool())
+
+    deleted = await graph_fts.delete_fts_chunks_batch(["id-1", "id-2"])
+    assert deleted == 2
+    await graph_fts.delete_fts_chunks_by_file("agents/nova/notes.md")
+
+    assert any("DELETE FROM memory_chunks WHERE qdrant_id IN" in s for s in executed_sql)
+    assert any("DELETE FROM memory_chunks WHERE file_path = ?" in s for s in executed_sql)
+
+
+async def test_graph_fts_upsert_sqlite_missing_rowid_logs_and_raises_on_conn(
+    caplog, monkeypatch
+) -> None:
+    """If the post-insert rowid lookup unexpectedly returns None, fail cleanly."""
+    from archivist.storage import graph_fts
+
+    class _NoneCursor:
+        async def fetchone(self):
+            return None
+
+    class _FakeConn:
+        async def execute(self, sql: str, params=None):
+            return _NoneCursor()
+
+    monkeypatch.setattr("archivist.core.config.GRAPH_BACKEND", "sqlite")
+    with caplog.at_level(logging.WARNING, logger="archivist.graph"):
+        with pytest.raises(RuntimeError, match="Inserted memory_chunks row not found"):
+            await graph_fts.upsert_fts_chunk(
+                qdrant_id="missing-rowid-id",
+                text="hello",
+                file_path="a.md",
+                chunk_index=0,
+                conn=_FakeConn(),  # type: ignore[arg-type]
+            )
+    assert any("FTS upsert failed" in r.getMessage() for r in caplog.records)

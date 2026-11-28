@@ -712,7 +712,7 @@ jobs:
             qdrant/qdrant:v1.13.4
 
           echo "Waiting for Qdrant..."
-          curl -sf --retry 20 --retry-delay 1 --retry-connrefused http://127.0.0.1:16333/collections >/dev/null
+          curl -sf --retry 30 --retry-delay 1 --retry-connrefused --retry-all-errors http://127.0.0.1:16333/collections >/dev/null
 
           docker run -d --name archivist-smoke \
             --network "$NET_NAME" \
@@ -726,7 +726,7 @@ jobs:
             archivist:ci-${{ github.sha }}
 
           echo "Waiting for Archivist /health..."
-          HEALTH_BODY=$(curl -sf --retry 20 --retry-delay 2 --retry-connrefused http://127.0.0.1:3100/health)
+          HEALTH_BODY=$(curl -sf --retry 30 --retry-delay 2 --retry-connrefused --retry-all-errors http://127.0.0.1:3100/health)
           echo "Health response: $HEALTH_BODY"
 
           METRICS_BODY=$(curl -sf http://127.0.0.1:3100/metrics)

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     import aiosqlite
@@ -172,11 +172,9 @@ async def _upsert_fts_chunk_sqlite(
     conn: aiosqlite.Connection | None = None,
 ) -> None:
     """SQLite upsert: insert/replace memory_chunks row and maintain FTS5 shadow rows."""
-    import aiosqlite as _aiosqlite
-
     from archivist.storage.sqlite_pool import pool
 
-    async def _run(c: _aiosqlite.Connection) -> None:
+    async def _run(c: Any) -> None:
         old = await (
             await c.execute(
                 "SELECT rowid, text FROM memory_chunks WHERE qdrant_id = ?", (qdrant_id,)
@@ -219,6 +217,8 @@ async def _upsert_fts_chunk_sqlite(
         rowid_row = await (
             await c.execute("SELECT rowid FROM memory_chunks WHERE qdrant_id = ?", (qdrant_id,))
         ).fetchone()
+        if rowid_row is None:
+            raise RuntimeError(f"Inserted memory_chunks row not found for qdrant_id={qdrant_id}")
         rowid = rowid_row["rowid"]
         await c.execute(
             "INSERT INTO memory_fts (rowid, text) VALUES (?, ?)",
@@ -284,18 +284,23 @@ async def delete_fts_chunks_by_file(file_path: str):
     """Remove all FTS5 entries and memory_chunks rows for a given file path.
 
     FTS5 index cleanup is best-effort — memory_chunks rows are always deleted
-    even if the FTS5 extension is unavailable.
+    even if the FTS5 extension is unavailable. On Postgres, ``memory_chunks``
+    has no ``rowid`` column and its ``GENERATED ALWAYS AS ... STORED`` tsvector
+    columns are removed automatically with the row.
     """
+    from archivist.core.config import GRAPH_BACKEND
     from archivist.storage.sqlite_pool import pool
 
+    is_postgres = (GRAPH_BACKEND or "sqlite").lower() == "postgres"
     try:
         async with pool.write() as conn:
-            rows = await (
-                await conn.execute(
-                    "SELECT rowid FROM memory_chunks WHERE file_path = ?", (file_path,)
-                )
-            ).fetchall()
-            await _delete_fts_rows_async(conn, rows)
+            if not is_postgres:
+                rows = await (
+                    await conn.execute(
+                        "SELECT rowid FROM memory_chunks WHERE file_path = ?", (file_path,)
+                    )
+                ).fetchall()
+                await _delete_fts_rows_async(conn, rows)
             await conn.execute("DELETE FROM memory_chunks WHERE file_path = ?", (file_path,))
     except Exception as e:
         logging.getLogger("archivist.graph").warning("FTS delete failed for %s: %s", file_path, e)
@@ -708,20 +713,24 @@ async def delete_fts_chunks_batch(
     """
     if not qdrant_ids:
         return 0
+    from archivist.core.config import GRAPH_BACKEND
     from archivist.storage.sqlite_pool import pool
 
-    async def _run(c: aiosqlite.Connection) -> int:
+    is_postgres = (GRAPH_BACKEND or "sqlite").lower() == "postgres"
+
+    async def _run(c: Any) -> int:
         total = 0
         for i in range(0, len(qdrant_ids), _BATCH_CHUNK):
             chunk = qdrant_ids[i : i + _BATCH_CHUNK]
             placeholders = ",".join("?" * len(chunk))
-            rows = await (
-                await c.execute(
-                    f"SELECT rowid FROM memory_chunks WHERE qdrant_id IN ({placeholders})",
-                    chunk,
-                )
-            ).fetchall()
-            await _delete_fts_rows_async(c, rows)
+            if not is_postgres:
+                rows = await (
+                    await c.execute(
+                        f"SELECT rowid FROM memory_chunks WHERE qdrant_id IN ({placeholders})",
+                        chunk,
+                    )
+                ).fetchall()
+                await _delete_fts_rows_async(c, rows)
             cur = await c.execute(
                 f"DELETE FROM memory_chunks WHERE qdrant_id IN ({placeholders})",
                 chunk,
